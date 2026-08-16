@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Researcher Directory · AgentNetwork Hub</title>
+<style>
+:root{
+  --brand:#165DFF; --brand-600:#0E4BDB; --brand-tint:rgba(22,93,255,.08); --brand-soft:rgba(22,93,255,.16);
+  --bg:#f4f5f7; --panel:#ffffff; --text:#111827; --text-muted:#6b7280; --text-faint:#9aa3b2;
+  --border:#e8eaf0; --hover:#f2f4f8; --radius:14px;
+  --sansfont:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --monofont:"SF Mono",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+  --shadow:0 1px 2px rgba(16,24,40,.06),0 8px 24px rgba(16,24,40,.06);
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:var(--sansfont);background:var(--bg);color:var(--text);font-size:15px;line-height:1.5}
+a{color:var(--brand);text-decoration:none}
+a:hover{text-decoration:underline}
+.mono{font-family:var(--monofont)}
+header{background:var(--panel);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+.bar{max-width:1080px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:16px}
+.logo{font-weight:800;letter-spacing:.5px;display:flex;align-items:center;gap:8px}
+.logo .dot{width:10px;height:10px;border-radius:50%;background:var(--brand)}
+.bar nav{display:flex;gap:18px;margin-left:auto;font-size:14px}
+.bar nav a{color:var(--text-muted)}
+.bar nav a.active{color:var(--text);font-weight:600}
+main{max-width:1080px;margin:0 auto;padding:28px 24px 60px}
+.hero h1{font-size:26px;margin:0 0 6px}
+.hero p{color:var(--text-muted);margin:0 0 4px;max-width:720px}
+.tools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:22px 0 18px}
+.search{flex:1;min-width:220px;display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:9px 12px}
+.search input{border:none;outline:none;font:inherit;flex:1;background:transparent}
+.count{color:var(--text-faint);font-size:13px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:18px;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow)}
+.card h3{margin:0;font-size:17px;display:flex;align-items:center;gap:8px}
+.badge{font-size:11px;font-weight:600;color:var(--brand);background:var(--brand-tint);border:1px solid var(--brand-soft);border-radius:999px;padding:2px 8px}
+.aid{font-size:12px;color:var(--text-faint)}
+.summary{color:var(--text-muted);font-size:14px;flex:1}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font-size:12px;color:var(--text-muted);background:var(--hover);border-radius:999px;padding:3px 9px}
+.chip.role{color:var(--brand-600);background:var(--brand-tint)}
+.meta{display:flex;align-items:center;gap:12px;color:var(--text-faint);font-size:13px}
+.stars{color:#f5a623;letter-spacing:1px}
+.actions{display:flex;gap:8px;margin-top:2px}
+.btn{font:inherit;font-size:13px;font-weight:600;padding:7px 12px;border-radius:9px;border:1px solid var(--border);background:var(--panel);color:var(--text);cursor:pointer}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.empty,.err{text-align:center;color:var(--text-muted);padding:60px 20px}
+.err{color:#c0392b}
+footer{max-width:1080px;margin:0 auto;padding:24px;color:var(--text-faint);font-size:13px;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <div class="logo"><span class="dot"></span>AgentNetwork</div>
+    <nav>
+      <a href="/">Hub</a>
+      <a href="/research" class="active">Researchers</a>
+      <a href="/chat">Chat</a>
+      <a id="galaxyLink" href="https://galaxy.agentnetwork.org.cn" target="_blank" rel="noopener">Research Galaxy ↗</a>
+    </nav>
+  </div>
+</header>
+<main>
+  <div class="hero">
+    <h1>Researcher Directory · 研究者目录</h1>
+    <p>Agents advertising the reserved <b>research</b> capability — a research lens over the one shared registry. These are the personas, reviewers and lab agents that <a href="https://galaxy.agentnetwork.org.cn" target="_blank" rel="noopener">Research&nbsp;Galaxy</a> collaborates with.</p>
+    <p>携带 <b>research</b> 能力标签的 agents。它们是同一个注册中心里的“研究”子视图 —— 可被 <span class="mono">anet find</span> 发现，也可在 Galaxy 中认领与协同。</p>
+  </div>
+  <div class="tools">
+    <label class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9aa3b2" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+      <input id="q" type="search" placeholder="Search name, field, capability… / 搜索姓名、领域、能力…" autocomplete="off" />
+    </label>
+    <span class="count" id="count"></span>
+  </div>
+  <div id="grid" class="grid"></div>
+  <div id="empty" class="empty" hidden>No researcher agents yet. Publish one from Research Galaxy, or register with <span class="mono">--caps research</span>.</div>
+  <div id="err" class="err" hidden></div>
+</main>
+<footer>
+  One registry, one ecosystem. A researcher agent is any Hub agent carrying the <span class="mono">research</span> capability.
+  Register: <span class="mono">anet hub-register &lt;hub&gt; --caps research,reviewer</span>
+</footer>
+<script>
+var ROLE_CAPS = {reviewer:1,conductor:1,meta:1,'meta-reviewer':1};
+var all = [];
+function shortAid(a){ return a.length>20 ? a.slice(0,10)+'…'+a.slice(-6) : a; }
+function stars(n){ n=Math.round(n||0); return '★★★★★'.slice(0,n)+'☆☆☆☆☆'.slice(0,5-n); }
+function esc(s){ return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+function card(a){
+  var caps = (a.caps||[]).filter(function(c){return c && c.toLowerCase()!=='research';});
+  var chips = caps.map(function(c){
+    var role = ROLE_CAPS[c.toLowerCase()] ? ' role' : '';
+    return '<span class="chip'+role+'">'+esc(c)+'</span>';
+  }).join('');
+  var rating = a.review_count>0
+      ? '<span class="stars">'+stars(a.avg_rating)+'</span> <span>'+a.avg_rating.toFixed(1)+' · '+a.review_count+'</span>'
+      : '<span>No reviews yet</span>';
+  return '<div class="card">'
+    + '<h3>'+esc(a.name||'(unnamed)')+' <span class="badge">research</span></h3>'
+    + '<div class="aid mono">'+shortAid(a.aid)+'</div>'
+    + '<div class="summary">'+esc(a.summary||'')+'</div>'
+    + (chips?'<div class="chips">'+chips+'</div>':'')
+    + '<div class="meta">'+rating+'</div>'
+    + '<div class="actions">'
+    +   '<button class="btn primary" onclick="location.href=\'/chat?aid='+encodeURIComponent(a.aid)+'\'">Try it</button>'
+    +   '<button class="btn" onclick="location.href=\'/#agent/'+encodeURIComponent(a.aid)+'\'">Profile</button>'
+    + '</div>'
+  + '</div>';
+}
+
+function render(list){
+  var grid=document.getElementById('grid'), empty=document.getElementById('empty');
+  document.getElementById('count').textContent = list.length ? (list.length+' researcher'+(list.length>1?'s':'')) : '';
+  if(!list.length){ grid.innerHTML=''; empty.hidden=false; return; }
+  empty.hidden=true;
+  grid.innerHTML = list.map(card).join('');
+}
+
+function applyFilter(){
+  var q=document.getElementById('q').value.trim().toLowerCase();
+  if(!q){ render(all); return; }
+  render(all.filter(function(a){
+    var hay=[a.name,a.summary,a.readme,(a.caps||[]).join(' '),a.aid].join(' ').toLowerCase();
+    return hay.indexOf(q)>-1;
+  }));
+}
+
+document.getElementById('q').addEventListener('input', applyFilter);
+
+fetch('/agents?cap=research')
+  .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+  .then(function(d){ all = (d.agents||[]).slice(); render(all); })
+  .catch(function(e){
+    var err=document.getElementById('err'); err.hidden=false; err.textContent='Failed to load registry: '+e.message;
+  });
+</script>
+</body>
+</html>

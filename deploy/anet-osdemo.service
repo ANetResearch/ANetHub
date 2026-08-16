@@ -1,0 +1,17 @@
+[Unit]
+Description=ANetOS smart-frame demo backend (anet-osdemo) — hub.agentnetwork.org.cn/os
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Gravitex key + OSDEMO_TOKEN come from the 0600 secrets file (never in the repo/unit).
+EnvironmentFile=/data/projs/anet-osdemo/secrets.env
+ExecStart=/data/projs/anet-osdemo/bin/anet-osdemo --addr 127.0.0.1:8068 --samples /data/projs/anet-osdemo/samples
+WorkingDirectory=/data/projs/anet-osdemo
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

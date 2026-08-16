@@ -1,0 +1,1492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="robots" content="noindex,nofollow"/>
+<title>ANetHub Admin</title>
+<style>
+/* ---- design tokens: shadcn-style, #165DFF on white; light + dark aware ---- */
+:root{
+  --primary:#165DFF; --primary-hover:#0E4FE0; --primary-soft:#EEF3FF; --primary-border:#C6D8FF;
+  --bg:#FFFFFF; --bg-muted:#F5F7FA; --bg-subtle:#FCFCFD;
+  --fg:#0F172A; --fg-muted:#64748B; --fg-faint:#94A3B8;
+  --border:#E2E8F0; --border-strong:#CBD5E1;
+  --ok:#16A34A; --ok-soft:#EAF7EF; --warn:#D97706; --warn-soft:#FEF6E7; --err:#DC2626; --err-soft:#FDECEC;
+  --radius:8px; --shadow:0 1px 2px rgba(15,23,42,.04);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --primary:#4080FF; --primary-hover:#5C94FF; --primary-soft:#16233F; --primary-border:#274A80;
+    --bg:#0F1420; --bg-muted:#0A0E17; --bg-subtle:#131A28;
+    --fg:#E5E9F0; --fg-muted:#9AA7BD; --fg-faint:#6B7890;
+    --border:#232B3B; --border-strong:#33405A;
+    --ok:#3FB269; --ok-soft:#12251A; --warn:#E3922B; --warn-soft:#2A2113; --err:#E5544B; --err-soft:#2A1717;
+    --shadow:0 1px 2px rgba(0,0,0,.3);
+  }
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font:14px/1.55 -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,sans-serif;color:var(--fg);background:var(--bg-muted)}
+a{color:var(--primary);text-decoration:none}
+button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,select,textarea{font:inherit;color:var(--fg)}
+svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px}
+
+/* ---- layout ---- */
+#app{display:none;height:100%}
+#topbar{position:fixed;top:0;left:0;right:0;height:52px;background:var(--bg);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 16px;z-index:40}
+#brand{display:flex;align-items:center;gap:9px;font-weight:650;font-size:14.5px;white-space:nowrap}
+#brand .dot{width:22px;height:22px;border-radius:6px;background:var(--primary);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700}
+#topbar .sp{flex:1}
+#wsseg{display:inline-flex;background:var(--bg-muted);border:1px solid var(--border);border-radius:9px;padding:2px;gap:2px}
+#wsseg button{display:flex;align-items:center;gap:6px;padding:5px 11px;font-size:12.5px;color:var(--fg-muted);border-radius:7px;white-space:nowrap}
+#wsseg button.on{background:var(--bg);color:var(--primary);font-weight:600;box-shadow:var(--shadow)}
+#wsseg button:hover:not(.on){color:var(--fg)}
+#gsearch,.gsearch{display:flex;align-items:center;gap:6px;background:var(--bg-muted);border:1px solid var(--border);border-radius:8px;padding:0 10px;height:34px;min-width:200px;max-width:340px;flex:0 1 300px}
+#gsearch:focus-within,.gsearch:focus-within{border-color:var(--primary);box-shadow:0 0 0 3px rgba(22,93,255,.10)}
+#gsearch .gsic,.gsearch .gsic{color:var(--fg-faint);display:flex}
+#gsearch input,.gsearch input{border:none;background:none;outline:none;width:100%;font-size:13px}
+#sidebar{position:fixed;top:52px;left:0;bottom:0;width:232px;background:var(--bg);border-right:1px solid var(--border);padding:10px 12px;overflow:auto;z-index:30}
+#main{margin:52px 0 0 232px;padding:22px 26px 56px;min-height:calc(100% - 52px)}
+.nav{display:flex;align-items:center;gap:9px;width:100%;padding:7px 10px;border-radius:8px;color:var(--fg-muted);font-size:13.5px;margin-bottom:1px;text-align:left}
+.nav:hover{background:var(--bg-muted);color:var(--fg)}
+.nav.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+.nav .ph{margin-left:auto;font-size:10px;color:var(--fg-faint);font-weight:400}
+.navsec{font-size:11px;color:var(--fg-faint);letter-spacing:.05em;padding:14px 10px 4px;font-weight:600}
+
+/* ---- primitives ---- */
+.card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+.card .hd{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:9px;font-weight:600;font-size:13.5px}
+.card .bd{padding:14px 16px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:8px;font-size:13px;font-weight:500;border:1px solid var(--border);background:var(--bg);color:var(--fg);transition:.15s ease-out}
+.btn:hover{border-color:var(--border-strong);background:var(--bg-subtle)}
+.btn.pri{background:var(--primary);border-color:var(--primary);color:#fff}
+.btn.pri:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+.btn.danger{color:var(--err);border-color:var(--err-soft)}
+.btn.danger:hover{background:var(--err-soft)}
+.btn.sm{padding:4px 9px;font-size:12px;border-radius:7px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.inp{padding:7px 11px;border:1px solid var(--border);border-radius:8px;background:var(--bg);outline:none;min-width:0}
+.inp:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(22,93,255,.10)}
+.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:500;border:1px solid transparent;white-space:nowrap;height:22px}
+.badge.official{background:var(--primary-soft);color:var(--primary);border-color:var(--primary-border)}
+.badge.community{background:var(--bg-muted);color:var(--fg-muted);border-color:var(--border)}
+.badge.ok{background:var(--ok-soft);color:var(--ok)}
+.badge.warn{background:var(--warn-soft);color:var(--warn)}
+.badge.err{background:var(--err-soft);color:var(--err)}
+.badge.cap{background:var(--bg-subtle);color:var(--fg-muted);border-color:var(--border);font-weight:400}
+.dot8{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
+.dot8.g{background:var(--ok)}.dot8.r{background:var(--err)}.dot8.y{background:var(--warn)}.dot8.gr{background:var(--fg-faint)}
+table.tb{width:100%;border-collapse:collapse;font-size:13px}
+.tb th{color:var(--fg-muted);font-weight:500;text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);font-size:12px;white-space:nowrap}
+.tb td{padding:10px;border-bottom:1px solid var(--border);vertical-align:top}
+.tb tr:last-child td{border-bottom:none}
+.tb tr.click:hover td{background:var(--bg-subtle);cursor:pointer}
+.tbwrap{overflow-x:auto}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.muted{color:var(--fg-muted)}.faint{color:var(--fg-faint)}
+.grid{display:grid;gap:14px}
+.sp{flex:1}.note{font-size:11.5px;color:var(--fg-faint);margin-top:10px}
+.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+.g2b{grid-template-columns:1fr 1.4fr}.g2c{grid-template-columns:1.4fr 1fr}
+.mb16{margin-bottom:16px}.mt14{margin-top:14px}.mt12{margin-top:12px}.p0{padding:0}.tac{text-align:center}
+.tile{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow)}
+.tile .lb{font-size:12px;color:var(--fg-muted);display:flex;align-items:center;gap:6px}
+.tile .v{font-size:25px;font-weight:650;margin-top:5px;letter-spacing:-.01em}
+.tile .s{font-size:11.5px;color:var(--fg-faint);margin-top:3px}
+.row{display:flex;align-items:center;gap:10px}
+.wrap{display:flex;flex-wrap:wrap;gap:6px}
+pre.out{background:#0B1220;color:#D7E0EE;border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-all}
+pre.md{background:var(--bg-subtle);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-word;color:var(--fg)}
+
+/* ---- page shell ---- */
+.crumb{font-size:12px;color:var(--fg-faint);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.crumb a{color:var(--fg-muted)}
+.pghd{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap}
+h2.pg{font-size:19px;font-weight:650;margin-bottom:3px;letter-spacing:-.01em}
+p.pgsub{color:var(--fg-muted);font-size:12.5px;max-width:760px}
+.pgact{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pgfilter{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.sect{font-weight:600;font-size:13px;color:var(--fg-muted);margin:22px 0 10px;display:flex;align-items:center;gap:7px}
+
+/* ---- flywheel ---- */
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+.flowstep{flex:1;min-width:130px;padding:14px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);margin:0 4px 8px}
+.flowstep.flag{border-color:var(--primary-border);background:var(--primary-soft)}
+.flowname{font-size:12px;color:var(--fg-muted);font-weight:500}
+.flowbig{font-size:23px;font-weight:650;margin:4px 0 4px;letter-spacing:-.01em}
+.flowsub{font-size:11.5px;color:var(--fg-faint);line-height:1.5}
+.flowarrow{display:flex;align-items:center;color:var(--fg-faint);padding:0 2px}
+
+/* ---- horizontal bars ---- */
+.hbar{display:grid;grid-template-columns:150px 1fr auto;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid var(--border)}
+.hbar:last-child{border-bottom:none}
+.hbar-l{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hbar-track{height:8px;background:var(--bg-muted);border-radius:5px;overflow:hidden}
+.hbar-fill{height:100%;background:var(--primary);border-radius:5px}
+.hbar-v{font-size:12.5px;font-weight:600;white-space:nowrap}
+
+/* ---- agent detail ---- */
+.ahead{display:flex;gap:14px;align-items:flex-start;margin-bottom:6px}
+.ava{width:46px;height:46px;border-radius:12px;background:var(--primary-soft);color:var(--primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;flex:none}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin:16px 0 18px;overflow-x:auto}
+.tabs button{padding:9px 14px;font-size:13px;color:var(--fg-muted);border-bottom:2px solid transparent;white-space:nowrap}
+.tabs button.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.tabs button:hover:not(.on){color:var(--fg)}
+.kv{display:grid;grid-template-columns:120px 1fr;gap:8px 12px;font-size:13px}
+.kv .k{color:var(--fg-muted)}
+
+/* drawer */
+#ovl{position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:50;display:none}
+#drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,94vw);background:var(--bg);z-index:51;display:none;flex-direction:column;box-shadow:-8px 0 32px rgba(15,23,42,.14);transition:transform .2s ease-out}
+#drawer .dh{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+#drawer .dh .t{font-weight:650;font-size:15px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#drawer .db{flex:1;overflow:auto;padding:16px 18px}
+.sec{margin:18px 0 8px;font-weight:600;font-size:13px}
+
+/* login */
+#login{height:100%;display:flex;align-items:center;justify-content:center;background:
+  radial-gradient(1000px 500px at 20% -10%, rgba(22,93,255,.08), transparent),
+  radial-gradient(800px 400px at 90% 110%, rgba(22,93,255,.06), transparent), var(--bg-muted)}
+#login .panel{width:360px;background:var(--bg);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:28px}
+#login h1{font-size:17px;margin:14px 0 4px}
+#login p{color:var(--fg-muted);font-size:13px;margin-bottom:18px}
+#loginErr{color:var(--err);font-size:12.5px;margin-top:10px;min-height:16px}
+
+.toast{position:fixed;bottom:20px;right:20px;z-index:80;background:#0B1220;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.2);opacity:0;transition:.25s;pointer-events:none;max-width:420px}
+.toast.show{opacity:1}
+.spin{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.loading{padding:48px;text-align:center;color:var(--fg-faint)}
+.empty{padding:40px 24px;text-align:center}
+.empty .eic{width:44px;height:44px;border-radius:12px;background:var(--primary-soft);color:var(--primary);display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px}
+.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.seg button{padding:6px 12px;font-size:12.5px;color:var(--fg-muted);background:var(--bg)}
+.seg button.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="panel">
+    <div class="row"><div style="width:34px;height:34px;border-radius:9px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px">A</div></div>
+    <h1>ANetHub Admin</h1>
+    <p>Hub 运营与监管控制台 · 请输入管理 token</p>
+    <input id="tokIn" class="inp" type="password" placeholder="管理 token" style="width:100%" autocomplete="current-password"/>
+    <div id="loginErr"></div>
+    <button id="loginBtn" class="btn pri" style="width:100%;justify-content:center;margin-top:6px">进入控制台</button>
+  </div>
+</div>
+
+<div id="app">
+  <div id="topbar">
+    <div id="brand"><div class="dot">A</div>ANetHub</div>
+    <div id="wsseg"></div>
+    <div class="sp"></div>
+    <div id="gsearch"><span class="gsic">${ic('search')}</span><input id="gq" placeholder="搜索 Agent / 名称 / 能力…"/></div>
+    <button class="btn sm" onclick="render(true)" title="刷新">${ic('refresh')} 刷新</button>
+    <button class="btn sm" onclick="logout()" title="退出">${ic('logout')} 退出</button>
+  </div>
+  <div id="sidebar"></div>
+  <div id="main"></div>
+</div>
+
+<div id="ovl" onclick="closeDrawer()"></div>
+<div id="drawer">
+  <div class="dh"><div class="t" id="drawerTitle"></div><button class="btn sm" onclick="closeDrawer()">✕</button></div>
+  <div class="db" id="drawerBody"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+/* ---------------- icons (Lucide, inline) ---------------- */
+const IC = {
+  dash:'<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="12" rx="1"/>',
+  bot:'<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+  shield:'<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  store:'<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/>',
+  db:'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
+  scroll:'<path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
+  activity:'<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+  refresh:'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  play:'<polygon points="6 3 20 12 6 21 6 3"/>',
+  stop:'<rect width="14" height="14" x="5" y="5" rx="2"/>',
+  restart:'<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
+  search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  logout:'<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
+  term:'<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>',
+  file:'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+  trash:'<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
+  star:'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+  chev:'<path d="m9 18 6-6-6-6"/>',
+  up:'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+  wrench:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+  compass:'<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
+  layers:'<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>',
+  cpu:'<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/>',
+  coin:'<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/><path d="m16.71 13.88.7.71-2.82 2.82"/>',
+  gauge:'<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  inbox:'<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  alert:'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  share:'<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
+  chart:'<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  flag:'<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" x2="4" y1="22" y2="15"/>',
+  users:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+};
+function ic(n){return '<svg class="i" viewBox="0 0 24 24">'+ (IC[n]||'') +'</svg>'}
+
+/* ---------------- state + helpers ---------------- */
+const BASE = location.pathname.replace(/\/$/,'') || '/admin';
+let TOKEN = localStorage.getItem('anethub_admin_token') || '';
+let CURRENT_WS = 'operations';
+let CRUMB = '';
+let CUR_AGENT = '';
+const $ = s => document.querySelector(s);
+const esc = s => String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(msg, ms=2600){const t=$('#toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),ms)}
+function fmtBytes(n){if(!n)return'0 B';const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100||i===0?0:1)+' '+u[i]}
+function fmtTime(s){if(!s)return'-';const d=new Date(s);if(isNaN(d))return esc(s);const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`}
+function shortAid(a){return a? (a.length>18? a.slice(0,10)+'…'+a.slice(-6):a):'-'}
+function num(n){n=n||0;return n>=10000? (n/10000).toFixed(n>=100000?0:1)+'万' : String(n)}
+function pct(x){return x==null?'-':(x*100).toFixed(1)+'%'}
+function initial(name,aid){const s=(name||aid||'?').trim();return esc(s.slice(0,1).toUpperCase())}
+async function api(path, opts={}){
+  const r = await fetch(BASE+'/api'+path, {...opts, headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN, ...(opts.headers||{})}});
+  if(r.status===401 && path!=='/login'){logout();throw new Error('登录已失效')}
+  const j = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+const loadingHTML = (msg='加载中…')=>`<div class="loading">${ic('refresh')} ${esc(msg)}</div>`;
+const errCard = m=>`<div class="card"><div class="bd" style="color:var(--err);display:flex;gap:8px;align-items:center">${ic('alert')} 加载失败：${esc(m)}</div></div>`;
+function empty(title, note, actions){
+  return `<div class="card"><div class="bd empty"><div class="eic">${ic('inbox')}</div>
+    <div style="font-weight:600;margin-bottom:6px">${esc(title)}</div>
+    <div class="muted" style="max-width:480px;margin:0 auto 12px">${note||''}</div>
+    ${actions?`<div class="row" style="justify-content:center">${actions}</div>`:''}</div></div>`;
+}
+function shell(o){
+  return `${o.crumb!==false?`<div class="crumb">${o.crumb||CRUMB}</div>`:''}
+  <div class="pghd"><div><h2 class="pg">${esc(o.title)}</h2>${o.sub?`<p class="pgsub">${o.sub}</p>`:''}</div>
+    ${o.actions?`<div class="pgact">${o.actions}</div>`:''}</div>
+  ${o.filters?`<div class="pgfilter">${o.filters}</div>`:''}
+  ${o.body||''}`;
+}
+function spark(vals, w=140, h=36, color='var(--primary)'){
+  if(!vals || vals.length<2) return '<span class="faint">数据不足</span>';
+  const min=Math.min(...vals), max=Math.max(...vals), rng=(max-min)||1;
+  const pts=vals.map((v,i)=>`${(i/(vals.length-1)*w).toFixed(1)},${(h-3-(v-min)/rng*(h-6)).toFixed(1)}`).join(' ');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
+}
+// 调用曲线柱图：buckets = [{t,calls,done,err,milli}]。done 蓝、err 红叠加。
+function barChart(buckets, w=620, h=120){
+  if(!buckets || !buckets.length) return '<span class="faint">窗口内暂无调用</span>';
+  const max=Math.max(1,...buckets.map(b=>b.calls));
+  const n=buckets.length, gap=2, bw=Math.max(2,(w-(n-1)*gap)/n);
+  const bars=buckets.map((b,i)=>{
+    const x=i*(bw+gap);
+    const hDone=(b.done/max)*(h-18), hErr=(b.err/max)*(h-18);
+    const t=new Date(b.t), lab=t.getHours()+':00';
+    let g=`<rect x="${x.toFixed(1)}" y="${(h-16-hDone).toFixed(1)}" width="${bw.toFixed(1)}" height="${hDone.toFixed(1)}" rx="1.5" fill="var(--primary)"/>`;
+    if(hErr>0) g+=`<rect x="${x.toFixed(1)}" y="${(h-16-hDone-hErr).toFixed(1)}" width="${bw.toFixed(1)}" height="${hErr.toFixed(1)}" rx="1.5" fill="var(--err)"/>`;
+    g+=`<title>${lab} · ${b.calls} 次调用（成功 ${b.done} 失败 ${b.err}）· ${FormatMilli(b.milli)}</title>`;
+    return g;
+  }).join('');
+  const ticks=buckets.map((b,i)=>{ if(i%4)return''; const x=i*(bw+gap)+bw/2; return `<text x="${x.toFixed(1)}" y="${h-3}" font-size="9" fill="var(--fg-faint)" text-anchor="middle">${new Date(b.t).getHours()}</text>`;}).join('');
+  return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="max-width:100%">${bars}${ticks}</svg>`;
+}
+function FormatMilli(m){ if(!m) return '¥0'; return '¥'+(m/1000).toFixed(m<1000?3:2); }
+function modChip(mod){ const map={image:'图像',video:'视频',audio:'音频',text:'文本',mixed:'多模态'}; return map[mod]||mod; }
+function kpi(label,value,sub,iconName){
+  return `<div class="tile"><div class="lb">${iconName?ic(iconName):''}${esc(label)}</div><div class="v">${value}</div>${sub?`<div class="s">${sub}</div>`:''}</div>`;
+}
+function hbars(rows){
+  if(!rows.length) return '<div class="faint" style="padding:12px">暂无数据</div>';
+  const max=Math.max(1,...rows.map(r=>r.value));
+  return rows.map(r=>`<div class="hbar" ${r.hash?`onclick="location.hash='${r.hash}'" style="cursor:pointer"`:''}>
+    <div class="hbar-l">${esc(r.label)}</div>
+    <div class="hbar-track"><div class="hbar-fill" style="width:${(r.value/max*100).toFixed(1)}%"></div></div>
+    <div class="hbar-v">${num(r.value)}${r.sub?` <span class="faint" style="font-weight:400">${r.sub}</span>`:''}</div></div>`).join('');
+}
+function flywheel(stages){
+  return `<div class="flow">`+stages.map((s,i)=>`
+    <div class="flowstep${s.flag?' flag':''}">
+      <div class="flowname">${esc(s.name)}</div>
+      <div class="flowbig">${s.big}</div>
+      ${(s.lines||[]).map(l=>`<div class="flowsub">${l}</div>`).join('')}
+    </div>${i<stages.length-1?`<div class="flowarrow">${ic('chev')}</div>`:''}`).join('')+`</div>`;
+}
+function statusDot(kind){ // g|y|r|gr
+  const map={g:['g','运行正常'],y:['y','部分异常'],r:['r','连接失败'],gr:['gr','未知']};
+  const [c,t]=map[kind]||map.gr; return `<span class="dot8 ${c}"></span> ${t}`;
+}
+
+/* ---------------- login ---------------- */
+async function doLogin(){
+  const tok = $('#tokIn').value.trim();
+  if(!tok) return;
+  $('#loginBtn').disabled = true; $('#loginErr').textContent='';
+  try{
+    const r = await fetch(BASE+'/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});
+    const j = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(j.error||'登录失败');
+    TOKEN = tok; localStorage.setItem('anethub_admin_token', tok);
+    boot();
+  }catch(e){ $('#loginErr').textContent = e.message }
+  $('#loginBtn').disabled = false;
+}
+function logout(){TOKEN='';localStorage.removeItem('anethub_admin_token');$('#app').style.display='none';$('#login').style.display='flex';closeDrawer()}
+$('#loginBtn').onclick = doLogin;
+$('#tokIn').addEventListener('keydown', e=>{if(e.key==='Enter')doLogin()});
+
+/* ---------------- workspaces + nav ---------------- */
+const WS = [
+  {id:'operations', name:'运营中心', icon:'dash', def:'overview', sections:[
+    {items:[{id:'overview', name:'运营总览', icon:'dash'}]},
+    {label:'Agent 资产', items:[
+      {id:'agents', name:'全部 Agent', icon:'bot'},
+      {id:'onboarding', name:'接入队列', icon:'inbox', ph:1},
+      {id:'reviews', name:'审核认证', icon:'shield', ph:1}]},
+    {label:'发布与分发', items:[
+      {id:'store', name:'商店目录', icon:'store'},
+      {id:'capabilities', name:'能力包', icon:'layers'},
+      {id:'channels', name:'产品渠道', icon:'compass', ph:1}]},
+    {label:'运行与可靠性', items:[
+      {id:'insights', name:'调用观测', icon:'gauge'},
+      {id:'deployments', name:'部署与实例', icon:'cpu'},
+      {id:'incidents', name:'告警事故', icon:'alert', ph:1}]},
+    {label:'安全治理', items:[
+      {id:'risk', name:'风险处置', icon:'shield'},
+      {id:'enforcement', name:'违规下架', icon:'trash'}]},
+  ]},
+  {id:'data', name:'数据智能', icon:'db', def:'overview', sections:[
+    {items:[{id:'overview', name:'数据总览', icon:'db'}]},
+    {label:'采收与交互', items:[
+      {id:'sessions', name:'OKF 会话浏览', icon:'db'},
+      {id:'anomalies', name:'异常会话', icon:'alert'}]},
+    {label:'能力运营', items:[
+      {id:'caps', name:'能力总览', icon:'chart'},
+      {id:'grounding', name:'Intent Grounding', icon:'compass'},
+      {id:'precognition', name:'Pre-cognition', icon:'gauge'},
+      {id:'collab', name:'共脑协同', icon:'share'}]},
+    {label:'数据治理', items:[
+      {id:'governance', name:'授权与用途', icon:'shield', ph:1}]},
+  ]},
+  {id:'ecosystem', name:'生态全景', icon:'compass', def:'overview', sections:[
+    {items:[{id:'overview', name:'生态概览', icon:'compass'}]},
+    {items:[
+      {id:'matrix', name:'产品矩阵', icon:'store'},
+      {id:'network', name:'Agent 网络', icon:'share'},
+      {id:'vision', name:'能力跃升', icon:'up'}]},
+  ]},
+  {id:'platform', name:'平台管理', icon:'wrench', def:'status', sections:[
+    {items:[{id:'status', name:'系统状态', icon:'activity'}]},
+    {items:[
+      {id:'models', name:'成本与模型', icon:'cpu'},
+      {id:'audit', name:'审计日志', icon:'scroll'},
+      {id:'connections', name:'连接与集成', icon:'compass', ph:1}]},
+  ]},
+];
+const WS_BY_ID = Object.fromEntries(WS.map(w=>[w.id,w]));
+function wsDef(id){return (WS_BY_ID[id]||WS[0]).def}
+function itemName(ws,item){
+  const w=WS_BY_ID[ws]; if(!w) return item;
+  for(const s of w.sections) for(const it of s.items) if(it.id===item) return it.name;
+  return item;
+}
+function renderTop(){
+  $('#wsseg').innerHTML = WS.map(w=>
+    `<button class="${w.id===CURRENT_WS?'on':''}" onclick="location.hash='#/${w.id}/${w.def}'">${ic(w.icon)}${w.name}</button>`).join('');
+}
+function renderNav(activeItem){
+  const w = WS_BY_ID[CURRENT_WS]||WS[0];
+  $('#sidebar').innerHTML = w.sections.map(sec=>
+    (sec.label?`<div class="navsec">${sec.label}</div>`:'<div style="height:6px"></div>') +
+    sec.items.map(it=>`<button class="nav ${it.id===activeItem?'on':''}" onclick="location.hash='#/${w.id}/${it.id}'">${ic(it.icon)}<span>${it.name}</span>${it.ph?'<span class="ph">规划</span>':''}</button>`).join('')
+  ).join('');
+}
+
+/* ---------------- routing ---------------- */
+function parseHash(){ return (location.hash||'').replace(/^#\/?/,'').split('/').filter(Boolean); }
+function goAgent(aid, tab){ location.hash='#/agents/'+encodeURIComponent(aid)+(tab?'/'+tab:''); }
+window.addEventListener('hashchange', ()=>render());
+
+const ROUTES = {}; // filled after view fns defined
+
+async function render(force){
+  if(!TOKEN) return;
+  const parts = parseHash();
+  // unified agent detail
+  if(parts[0]==='agents' && parts[1]){
+    renderTop(); renderNav('agents');
+    return renderAgent(decodeURIComponent(parts[1]), parts[2]||'overview');
+  }
+  const ws = WS_BY_ID[parts[0]] ? parts[0] : 'operations';
+  CURRENT_WS = ws;
+  const item = parts[1] || wsDef(ws);
+  CRUMB = `${WS_BY_ID[ws].name} <span>›</span> ${esc(itemName(ws,item))}`;
+  renderTop(); renderNav(item);
+  const fn = ROUTES[ws+'/'+item];
+  $('#main').innerHTML = loadingHTML();
+  try{ await (fn?fn(force):notFoundView(ws,item)); }
+  catch(e){ $('#main').innerHTML = shell({title:itemName(ws,item), body:errCard(e.message)}); }
+}
+async function notFoundView(ws,item){ $('#main').innerHTML = shell({title:itemName(ws,item), body:empty('未找到该页面','路由 '+esc(ws+'/'+item)+' 未注册。')}); }
+async function boot(){
+  $('#login').style.display='none'; $('#app').style.display='block';
+  try{ await api('/overview') }catch(e){ return; }
+  if(!location.hash || parseHash().length===0) location.hash = '#/operations/overview';
+  render();
+}
+function refreshCurrent(){
+  const parts=parseHash();
+  if(parts[0]==='agents'&&parts[1]) renderAgent(decodeURIComponent(parts[1]), parts[2]||'overview');
+  else render();
+}
+// global search → agents (wired in init, after the topbar icon-replace rebuilds #gq)
+function wireGlobalSearch(){
+  const g=$('#gq'); if(!g) return;
+  g.addEventListener('keydown', e=>{
+    if(e.key==='Enter'){ agentsQ=e.target.value.trim(); agentsTier=''; if(location.hash==='#/operations/agents') vAgents(); else location.hash='#/operations/agents'; }
+  });
+}
+
+/* ---------------- drawer ---------------- */
+function openDrawer(title, html){$('#drawerTitle').textContent=title;$('#drawerBody').innerHTML=html;$('#ovl').style.display='block';$('#drawer').style.display='flex'}
+function closeDrawer(){$('#ovl').style.display='none';$('#drawer').style.display='none'}
+
+/* ================= OPERATIONS ================= */
+
+/* ---- 运营总览 (dashboard) ---- */
+async function vOpsOverview(){
+  const [ov, ags, st] = await Promise.all([
+    api('/overview').catch(e=>({_err:e.message})),
+    api('/agents').then(r=>r.agents||[]).catch(()=>null),
+    api('/store').catch(()=>null),
+  ]);
+  if(ov._err){ $('#main').innerHTML = shell({title:'运营总览', body:errCard(ov._err)}); return; }
+  const t = ov.totals||{}, probes = ov.probes||[], harvest = ov.harvest||[], ds = ov.datasets||{};
+  const offCount = ov.officials||0;
+  const good = p => { const u=p.units||{}; const all=Object.keys(u).length, okU=Object.values(u).filter(v=>v==='active').length; return p.monitor==='ok' || (all>0 && okU===all && p.ssh==='ok'); };
+  const running = probes.filter(good).length;
+  const sessTotal = Object.values(ds).reduce((s,c)=>s+(c.sessions||0),0);
+  const recTotal = harvest.reduce((s,h)=>s+(h.records||0),0);
+  const srcCount = Object.keys(ds).length;
+  const harvestErrs = harvest.filter(h=>h.note).length;
+  const prodLines = st? Object.keys(st.product_lines||{}).filter(k=>(st.product_lines[k]||[]).length) : [];
+  const flagged = ags? ags.filter(a=>a.moderation==='flagged') : [];
+  const delisted = ags? ags.filter(a=>a.moderation==='delisted') : [];
+  const backlog = ags? ags.filter(a=>a.mailbox_backlog>0) : [];
+  const capCount = st? Object.keys(st.capabilities||{}).length : 0;
+
+  // flywheel
+  const stages = [
+    {name:'Agent 供给', big:num(t.agents||0), lines:[`官方 ${offCount} · 社区 ${(t.agents||0)-offCount}`,'注册身份总量']},
+    {name:'审核发布', big:flagged.length, lines:[`待处理监管 ${flagged.length}`,'审核流水线：数据待接入']},
+    {name:'产品分发', big:num(t.listed||0), lines:[`覆盖产品 ${prodLines.length}`,`已下架 ${delisted.length}`]},
+    {name:'在线运行', big:`${running}/${offCount}`, lines:[`异常 ${offCount-running}`,'官方 agent 探活'], flag:true},
+    {name:'OKF 沉淀', big:num(sessTotal), lines:[`交互记录 ${num(recTotal)}`,`采收源 ${srcCount}`]},
+    {name:'训练可用', big:num(recTotal), lines:['授权/质量分级','数据待接入']},
+  ];
+
+  // action items
+  const items=[];
+  probes.forEach(p=>{ if(!good(p)) items.push({sev:0,label:'严重', txt:`官方 agent ${esc(p.id)} 探测异常（monitor ${esc(p.monitor||'-')}）`, aid:null, id:p.id, act:`operations/deployments`}); });
+  flagged.forEach(a=>items.push({sev:1,label:'高', txt:`${esc(a.name||shortAid(a.aid))} 已标记关注`, aid:a.aid}));
+  harvest.filter(h=>h.note).forEach(h=>items.push({sev:2,label:'中', txt:`采收源 ${esc(h.source)} 异常：${esc((h.note||'').slice(0,50))}`, act:'data/sessions'}));
+  backlog.slice(0,5).forEach(a=>items.push({sev:2,label:'中', txt:`${esc(a.name||shortAid(a.aid))} 信箱积压 ${a.mailbox_backlog}`, aid:a.aid}));
+  items.sort((a,b)=>a.sev-b.sev);
+  const sevBadge = s => s===0?'<span class="badge err">严重</span>':s===1?'<span class="badge warn">高</span>':'<span class="badge cap">中</span>';
+  const actionRows = items.length? items.slice(0,10).map(it=>`
+    <tr class="click" onclick="${it.aid?`goAgent('${esc(it.aid)}')`:`location.hash='#/${it.act||'operations/overview'}'`}">
+      <td>${sevBadge(it.sev)}</td><td>${it.txt}</td><td class="faint" style="text-align:right">${ic('chev')}</td></tr>`).join('')
+    : `<tr><td colspan="3" class="faint tac" style="padding:20px">当前无待处理项 — 平台运行正常</td></tr>`;
+
+  // health snapshot from snapshots
+  const snaps = ov.snapshots||[];
+  const tasksSeries = snaps.map(s=>s.tasks_completed), backlogSeries = snaps.map(s=>s.relay_backlog);
+
+  $('#main').innerHTML = shell({
+    title:'运营总览',
+    sub:'接入与治理 Agent，将其分发到 ANet 产品，持续观测运行，并把交互沉淀为可训练的 OKF 数据资产。',
+    actions:`<button class="btn" onclick="location.hash='#/operations/agents'">${ic('bot')} 全部 Agent</button>
+             <button class="btn pri" onclick="location.hash='#/data/sessions'">${ic('db')} OKF 数据资产</button>`,
+    body:`
+    <div class="sect">${ic('activity')} Agent 运营与数据飞轮</div>
+    ${flywheel(stages)}
+    <div class="grid mt14" style="grid-template-columns:1.6fr 1fr">
+      <div class="card"><div class="hd">${ic('gauge')} 运行健康趋势 <span class="sp"></span><span class="faint" style="font-weight:400;font-size:11.5px">按 5 分钟快照</span></div>
+        <div class="bd">
+          <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
+            ${kpi('注册 Agent', num(t.agents||0), `官方 ${offCount} · 社区 ${(t.agents||0)-offCount}`)}
+            ${kpi('完成任务', num(t.tasks_completed||0), spark(tasksSeries,120,26))}
+            ${kpi('可信评价', num(t.reviews||0), `均分 ${(t.avg_rating||0).toFixed(2)}`)}
+            ${kpi('Relay 积压', num(t.relay_backlog||0), spark(backlogSeries,120,26, (backlogSeries.at(-1)>backlogSeries[0])?'var(--warn)':'var(--ok)'))}
+          </div>
+          <div class="wrap">${probes.map(p=>`<span class="badge ${good(p)?'ok':'err'}"><span class="dot8 ${good(p)?'g':'r'}"></span>${esc(p.id)}${p.monitor?` · ${esc(p.monitor)}`:''}</span>`).join(' ')||'<span class="faint">尚无官方 agent</span>'}</div>
+        </div></div>
+      <div class="card"><div class="hd">${ic('alert')} 需要处理 <span class="sp"></span><span class="badge ${items.length?'warn':'ok'}">${items.length}</span></div>
+        <div class="bd p0"><div class="tbwrap"><table class="tb">${actionRows}</table></div></div></div>
+    </div>
+
+    <div class="grid g2b mt14">
+      <div class="card"><div class="hd">${ic('bot')} Agent 生命周期</div><div class="bd">
+        ${hbars([
+          {label:'注册在册', value:t.agents||0, sub:'总量'},
+          {label:'已上架', value:t.listed||0, sub:'有资料/能力', hash:'#/operations/store'},
+          {label:'官方托管', value:offCount, sub:'可深度观测', hash:'#/operations/deployments'},
+          {label:'标记关注', value:flagged.length, sub:'待处置', hash:'#/operations/risk'},
+          {label:'已下架', value:delisted.length, sub:'监管移除', hash:'#/operations/enforcement'},
+        ])}
+        <div class="note">生命周期状态机（接入→审核→认证→上架）尚未接入，当前以在册/上架/托管/处置四类近似。</div>
+      </div></div>
+      <div class="card"><div class="hd">${ic('store')} 产品与渠道</div><div class="bd">
+        ${st? hbars(prodLines.map(k=>({label:LINE_NAMES[k]||k, value:(st.product_lines[k]||[]).length, sub:`官方 ${(st.product_lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'}))) : '<div class="faint">商店数据不可用</div>'}
+      </div></div>
+    </div>
+
+    <div class="grid g2c mt14">
+      <div class="card"><div class="hd">${ic('db')} OKF 数据资产 <span class="sp"></span><button class="btn sm pri" onclick="runHarvest(this)">${ic('play')} 立即采收</button></div>
+        <div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>来源</th><th>会话</th><th>累计记录</th><th>上次运行</th><th>状态</th></tr>
+        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td><td>${h.note?`<span class="badge err">异常</span>`:'<span class="badge ok">正常</span>'}</td></tr>`).join('')||'<tr><td colspan="5" class="faint" style="padding:16px;text-align:center">尚未采收</td></tr>'}
+        </table></div></div></div>
+      <div class="card"><div class="hd">${ic('layers')} 核心能力供给</div><div class="bd">
+        ${kpi('能力包总数', capCount, '认证 + 社区，见「能力包」', 'layers')}
+        <div style="height:10px"></div>
+        <div class="wrap">
+          <a class="badge cap" href="#/data/grounding">Intent Grounding 素材 ›</a>
+          <a class="badge cap" href="#/data/precognition">Pre-cognition 素材 ›</a>
+          <a class="badge cap" href="#/data/collab">共脑协同素材 ›</a>
+        </div>
+        <div class="note">三项差异化能力当前以 OKF 会话与官方实测数据作为数据底座，详见「数据智能 › 能力运营」。</div>
+      </div></div>
+    </div>`,
+  });
+}
+async function runHarvest(btn){
+  if(btn){btn.disabled=true;const svg=btn.querySelector('svg');btn.innerHTML=ic('refresh')+' 采收中…';btn.querySelector('svg').classList.add('spin')}
+  try{
+    const r = await api('/harvest',{method:'POST',body:'{}'});
+    const parts = (r.results||[]).map(x=>`${x.source}: +${x.events}${x.err?' (错误: '+x.err.slice(0,50)+')':''}`);
+    toast('采收完成 — '+parts.join('；'), 5000);
+    refreshCurrent();
+  }catch(e){toast('采收失败：'+e.message);if(btn){btn.disabled=false;btn.innerHTML=ic('play')+' 立即采收'}}
+}
+
+/* ---- 全部 Agent ---- */
+let agentsQ = '', agentsTier = '';
+async function vAgents(){
+  const d = await api('/agents?q='+encodeURIComponent(agentsQ)+(agentsTier?'&tier='+agentsTier:''));
+  const list = d.agents||[];
+  const rows = list.map(a=>{
+    const caps = (a.caps||[]).slice(0,4).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')+((a.caps||[]).length>4?`<span class="badge cap">+${a.caps.length-4}</span>`:'');
+    const obs = a.tier==='official'?'<span class="badge official">全链路</span>':'<span class="badge cap">黑盒</span>';
+    return `<tr class="click" onclick="goAgent('${esc(a.aid)}')">
+      <td><div style="font-weight:550">${esc(a.name||'(未命名)')} ${a.tier==='official'?'<span class="badge official">官方</span>':''} ${a.moderation?`<span class="badge err">${esc(a.moderation)}</span>`:''} ${!a.listed?'<span class="badge community">未上架</span>':''}</div>
+          <div class="mono faint">${shortAid(a.aid)}</div></td>
+      <td>${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</td>
+      <td>${obs}</td>
+      <td><div class="wrap">${caps||'<span class="faint">-</span>'}</div></td>
+      <td>${a.review_count?`${a.avg_rating.toFixed(1)} <span class="faint">(${a.review_count})</span>`:'<span class="faint">-</span>'}</td>
+      <td>${a.tasks_as_provider}<span class="faint"> / ${a.tasks_as_requester}</span></td>
+      <td>${a.mailbox_backlog>0?`<span class="badge warn">${a.mailbox_backlog}</span>`:'<span class="faint">0</span>'}</td>
+      <td class="muted" style="white-space:nowrap">${fmtTime(a.registered_at)}</td></tr>`;
+  }).join('');
+  $('#main').innerHTML = shell({
+    title:'全部 Agent', sub:'全网注册身份（含未上架）· 官方/社区、可观测等级与生命周期统一入口 · 点击进入 Agent 详情',
+    body:`
+    <div class="pgfilter">
+      <div class="gsearch" style="flex:0 1 300px"><span class="gsic">${ic('search')}</span><input id="agq" placeholder="搜索 AID / 名称 / 能力…" value="${esc(agentsQ)}"/></div>
+      <div class="seg">
+        <button class="${agentsTier===''?'on':''}" onclick="agentsTier='';vAgents()">全部</button>
+        <button class="${agentsTier==='official'?'on':''}" onclick="agentsTier='official';vAgents()">官方</button>
+        <button class="${agentsTier==='community'?'on':''}" onclick="agentsTier='community';vAgents()">社区</button>
+      </div>
+      <span class="sp"></span><span class="muted" style="font-size:12.5px">${list.length} 个</span></div>
+    <div class="card"><div class="tbwrap"><table class="tb">
+      <tr><th>Agent</th><th>所有权</th><th>可观测</th><th>能力</th><th>评分</th><th>任务 供/求</th><th>积压</th><th>注册时间</th></tr>
+      ${rows||'<tr><td colspan="8" class="faint" style="padding:24px;text-align:center">无结果</td></tr>'}</table></div></div>`,
+  });
+  const inp=$('#agq'); inp.addEventListener('keydown',e=>{if(e.key==='Enter'){agentsQ=inp.value;vAgents()}});
+}
+
+/* ---- 调用观测 (official insights across agents) ---- */
+async function vInsightsList(){
+  const all = await getAllInsights();
+  let totCalls=0,totDone=0,totErr=0,totMilli=0;
+  const rows = all.map(x=>{
+    const st=(x.d&&x.d.stats)||{}; const by=st.by_service||[];
+    const c=by.reduce((s,e)=>s+(e.calls||0),0), dn=by.reduce((s,e)=>s+(e.done||0),0), er=by.reduce((s,e)=>s+(e.err||0),0);
+    totCalls+=c;totDone+=dn;totErr+=er;totMilli+=(st.total_milli||0);
+    return {...x,c,dn,er};
+  });
+  const succ = (totDone+totErr)>0 ? totDone/(totDone+totErr) : null;
+  const body = all.length? `
+    <div class="grid g4 mb16">
+      ${kpi('官方 agent', all.length, '可深度观测', 'shield')}
+      ${kpi('近窗调用', num(totCalls), '跨 agent 合计', 'activity')}
+      ${kpi('调用成功率', pct(succ), `成功 ${num(totDone)} · 失败 ${num(totErr)}`)}
+      ${kpi('近窗开销', FormatMilli(totMilli), '实测计费', 'coin')}
+    </div>
+    <div class="card"><div class="tbwrap"><table class="tb">
+      <tr><th>官方 Agent</th><th>状态</th><th>近窗调用</th><th>成功/失败</th><th>开销</th><th></th></tr>
+      ${rows.map(x=>`<tr>
+        <td><div style="font-weight:550">${esc(x.name)}</div><div class="mono faint">${esc(x.id)}</div></td>
+        <td>${x.ok?'<span class="badge ok">monitor ok</span>':`<span class="badge err">${esc((x.err||x.d&&x.d.error||'不可达').slice(0,40))}</span>`}</td>
+        <td>${num(x.c)}</td><td class="muted">${num(x.dn)} / ${num(x.er)}</td><td class="muted">${x.d&&x.d.cost_yuan||FormatMilli(x.d&&x.d.cost_milli)}</td>
+        <td><button class="btn sm" onclick="goAgent('${esc(x.aid||'')}','insights')" ${x.aid?'':'disabled'}>${ic('gauge')} 洞察</button></td></tr>`).join('')}
+    </table></div></div>
+    <div class="note">数据源为各官方 agent 自身 monitor 的 /api/stats（近 24h 窗口）。点击「洞察」进入该 Agent 的「调用与洞察」页。</div>`
+    : empty('尚无可观测的官方 Agent','官方 agent 需在 manifest 中声明 monitor.url 才能被彻底观测。');
+  $('#main').innerHTML = shell({title:'调用观测', sub:'跨官方 Agent 的调用量、成功率与实测开销汇总 — 单一事实源来自各 agent 的 monitor', body});
+}
+
+/* ---- 部署与实例 (official probes + ops) ---- */
+async function vDeployments(force){
+  const d = await api('/official'+(force?'?probe=force':''));
+  const cards = (d.officials||[]).map(o=>{
+    const m=o.manifest, p=o.probe;
+    const units = Object.entries(p.units||{}).map(([u,stt])=>
+      `<span class="badge ${stt==='active'?'ok':'err'}"><span class="dot8 ${stt==='active'?'g':'r'}"></span>${esc(u.replace('.service',''))}</span>`).join(' ');
+    const ops=(m.ops&&m.ops.allowed)||[];
+    const btn=(op,label,icn,danger)=>ops.includes(op)?`<button class="btn sm ${danger?'danger':''}" onclick="runOp('${esc(m.id)}','${op}')">${ic(icn)} ${label}</button>`:'';
+    const sshBad = p.ssh!=='ok';
+    return `<div class="card">
+      <div class="hd">${ic('cpu')}<a href="javascript:void(0)" onclick="goAgent('${esc(m.aid||'')}','run')" style="color:inherit;font-weight:600">${esc(m.name)}</a>
+        <span class="badge official">官方</span><span class="badge cap">${esc(m.product_line)}</span>
+        <span class="sp"></span>
+        ${m.monitor&&m.monitor.url?`<a class="btn sm" href="${esc(m.monitor.url)}" target="_blank">${ic('term')} 原生监控</a>`:''}
+        <button class="btn sm" onclick="vDeployments(true)">${ic('refresh')} 重新探测</button></div>
+      <div class="bd">
+        <div class="kv" style="grid-template-columns:90px 1fr">
+          <div class="k">主机</div><div class="mono">${esc((m.runtime&&m.runtime.host)||'-')}</div>
+          <div class="k">AID</div><div class="mono" style="word-break:break-all">${esc(m.aid||'-')}</div>
+          <div class="k">单元状态</div><div class="wrap">${units||'<span class="faint">-</span>'} <span class="badge ${p.monitor==='ok'?'ok':'err'}">monitor ${esc(p.monitor||'-')}</span> <span class="faint" style="font-size:11px">探测于 ${fmtTime(p.checked_at)}</span></div>
+          ${sshBad?`<div class="k">运维通道</div><div><span class="badge warn">ssh 不可用</span> <span class="muted" style="font-size:12px">${esc(String(p.ssh).slice(0,120))}</span></div>`:''}
+        </div>
+        <div class="row" style="margin-top:12px;flex-wrap:wrap">
+          <button class="btn sm pri" onclick="goAgent('${esc(m.aid||'')}','insights')">${ic('gauge')} 调用与洞察</button>
+          ${btn('status','状态','activity')}${btn('logs','日志','file')}
+          ${btn('start','启动','play')}${btn('stop','停止','stop',1)}${btn('restart','重启','restart',1)}${btn('update','更新','up',1)}
+          <button class="btn sm" onclick="monView('${esc(m.id)}')">${ic('term')} 调用历史</button>
+        </div>
+        <div id="ops-out-${esc(m.id)}"></div>
+      </div></div>`;
+  }).join('');
+  $('#main').innerHTML = shell({
+    title:'部署与实例', sub:'官方 agent 运行实例：单元活性、心跳、白名单 ops（状态/日志/上下线/更新，全程审计）',
+    body:`<div class="grid" style="grid-template-columns:1fr">${cards||empty('尚无官方 agent manifest','通过 POST /admin/api/official 上传 manifest 后即可纳管。')}</div>`,
+  });
+}
+async function runOp(id, op){
+  let arg='';
+  if(op==='logs'){ arg = prompt('日志行数（或 "单元名 行数"）','200')||''; if(arg===null)return }
+  if(['stop','restart','update'].includes(op) && !confirm(`确认对 ${id} 执行 ${op}？该操作将被审计。`)) return;
+  const out = $('#ops-out-'+CSS.escape(id));
+  if(out) out.innerHTML = `<pre class="out" style="margin-top:12px">$ ${op} 执行中…</pre>`;
+  try{
+    const r = await api('/official/'+encodeURIComponent(id)+'/ops',{method:'POST',body:JSON.stringify({op,arg})});
+    if(out) out.innerHTML = `<pre class="out" style="margin-top:12px">$ ${esc(r.command||op)}\n${esc(r.output||'')}${r.err?'\n[err] '+esc(r.err):''}\n(exit ${r.exit_code}, ${r.duration_ms}ms)</pre>`;
+  }catch(e){ if(out) out.innerHTML = `<pre class="out" style="margin-top:12px">[失败] ${esc(e.message)}</pre>` }
+}
+async function monView(id){
+  try{
+    const stt = await api('/official/'+encodeURIComponent(id)+'/monitor/state');
+    const jobs = (stt.jobs||stt.recent||[]).slice(0,40).map(j=>
+      `<tr><td class="mono">${esc((j.ix||'').slice(0,14))}</td><td>${esc(j.service||'-')}</td><td class="muted">${esc((j.prompt||'').slice(0,44))}</td>
+       <td>${j.state==='done'?'<span class="badge ok">done</span>':j.state==='error'?'<span class="badge err">error</span>':'<span class="badge warn">'+esc(j.state||'?')+'</span>'}</td>
+       <td class="muted">${j.dur_ms?(j.dur_ms/1000).toFixed(1)+'s':'-'}</td><td class="muted">${j.out_kind?esc(j.out_kind)+' '+fmtBytes(j.out_bytes):'-'}</td></tr>`).join('');
+    openDrawer(id+' · 调用历史（monitor 直连）', `
+      <div class="tbwrap"><table class="tb"><tr><th>IX</th><th>服务</th><th>输入</th><th>状态</th><th>耗时</th><th>产物</th></tr>${jobs||'<tr><td colspan="6" class="faint">monitor 未返回任务记录</td></tr>'}</table></div>
+      <div class="sec">原始 state</div><pre class="md">${esc(JSON.stringify(stt,null,2).slice(0,8000))}</pre>`);
+  }catch(e){ toast('monitor 获取失败：'+e.message) }
+}
+
+/* ---- 风险处置 (moderation queue) ---- */
+async function vRisk(){
+  const d = await api('/agents');
+  const list = (d.agents||[]).filter(a=>a.moderation==='flagged' || a.mailbox_backlog>0);
+  const rows = list.map(a=>`<tr>
+    <td><div style="font-weight:550">${esc(a.name||shortAid(a.aid))}</div><div class="mono faint">${shortAid(a.aid)}</div></td>
+    <td>${a.moderation?`<span class="badge err">${esc(a.moderation)}</span>`:'<span class="badge cap">-</span>'}</td>
+    <td>${a.mailbox_backlog>0?`<span class="badge warn">积压 ${a.mailbox_backlog}</span>`:'<span class="faint">0</span>'}</td>
+    <td>${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</td>
+    <td><div class="row">
+      <button class="btn sm" onclick="moderate('${esc(a.aid)}','ok')">恢复正常</button>
+      <button class="btn sm" onclick="goAgent('${esc(a.aid)}','gov')">${ic('shield')} 治理</button>
+    </div></td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'风险处置', sub:'统一风险队列：标记关注、信箱异常积压 — 处置动作全部落审计',
+    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
+      <tr><th>Agent</th><th>监管状态</th><th>信箱</th><th>所有权</th><th>操作</th></tr>${rows}</table></div></div>
+      <div class="note">内容违规/权限过大/异常调用等风险类型需要更细的信号接入，当前以监管标记与信箱积压近似。</div>`
+      : empty('当前无风险项','没有被标记关注或信箱异常积压的 Agent。', `<button class="btn" onclick="location.hash='#/operations/agents'">查看全部 Agent</button>`),
+  });
+}
+
+/* ---- 违规下架 (enforcement) ---- */
+async function vEnforcement(){
+  const d = await api('/agents');
+  const list = (d.agents||[]).filter(a=>a.moderation==='delisted' || a.moderation==='flagged');
+  const rows = list.map(a=>`<tr>
+    <td><div style="font-weight:550">${esc(a.name||shortAid(a.aid))}</div><div class="mono faint">${shortAid(a.aid)}</div></td>
+    <td>${a.moderation==='delisted'?'<span class="badge err">已下架</span>':'<span class="badge warn">关注</span>'}</td>
+    <td class="muted">${esc(a.moderation_note||'-')}</td>
+    <td><div class="row">
+      <button class="btn sm" onclick="moderate('${esc(a.aid)}','ok')">恢复</button>
+      <button class="btn sm danger" onclick="delAgent('${esc(a.aid)}')">${ic('trash')} 移除注册</button>
+    </div></td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'违规与下架', sub:'监管闭环：标记 → 下架 → 从注册表移除（需二次确认 + 审计）。移除后身份可重新注册，黑名单强制阻断为路线图项。',
+    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
+      <tr><th>Agent</th><th>状态</th><th>原因</th><th>操作</th></tr>${rows}</table></div></div>`
+      : empty('暂无处置对象','没有处于关注或下架状态的 Agent。'),
+  });
+}
+async function moderate(aid,status){
+  try{ await api('/agents/'+encodeURIComponent(aid)+'/moderate',{method:'POST',body:JSON.stringify({status,note:$('#mNote')?.value||''})}); toast('已更新监管状态'); refreshCurrent() }catch(e){toast(e.message)}
+}
+async function setQuota(aid){
+  try{ await api('/agents/'+encodeURIComponent(aid)+'/quota',{method:'POST',body:JSON.stringify({guest_quota:parseInt($('#mQuota').value)||0})}); toast('已更新访客额度'); refreshCurrent() }catch(e){toast(e.message)}
+}
+async function delAgent(aid){
+  if(!confirm('确认将该 agent 从公共注册表移除？其评价与任务记录会保留，身份可重新注册。')) return;
+  try{ await api('/agents/'+encodeURIComponent(aid),{method:'DELETE'}); toast('已移除'); location.hash='#/operations/enforcement'; }catch(e){toast(e.message)}
+}
+
+/* ---- 商店目录 ---- */
+const LINE_NAMES = {anetos:'ANetOS 智能相框', anetscreen:'ANetScreen', anetpin:'ANetPIN', anetcraft:'ANetCraft 竞技场', agentnetwork:'AgentNetwork 网络', community:'社区接入'};
+async function vStore(){
+  const d = await api('/store');
+  const lines = d.product_lines||{};
+  const order = ['anetos','anetscreen','anetpin','anetcraft','agentnetwork','community'];
+  const secs = order.filter(k=>lines[k]&&lines[k].length).map(k=>{
+    const cards = lines[k].map(a=>`
+      <div class="card" style="min-width:250px;flex:1;max-width:340px">
+        <div class="bd">
+          <div class="row"><div style="font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.name||'(未命名)')}</div>
+            ${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</div>
+          <div class="muted" style="font-size:12.5px;margin:6px 0;min-height:34px">${esc((a.summary||'').slice(0,80))||'<span class="faint">无简介</span>'}</div>
+          <div class="wrap" style="margin-bottom:8px">${(a.caps||[]).slice(0,5).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')}</div>
+          <div class="row" style="font-size:12px;color:var(--fg-muted)">
+            <span>${a.review_count?a.avg_rating.toFixed(1)+'★ ('+a.review_count+')':'暂无评价'}</span><span>·</span><span>${a.tasks} 任务</span>
+            <span class="sp"></span><a href="javascript:goAgent('${esc(a.aid)}')">详情 ›</a>
+          </div>
+        </div></div>`).join('');
+    return `<div style="margin-bottom:22px"><div class="row" style="margin-bottom:10px"><div style="font-weight:650;font-size:14.5px">${LINE_NAMES[k]||k}</div><span class="badge cap">${lines[k].length}</span></div><div style="display:flex;flex-wrap:wrap;gap:12px">${cards}</div></div>`;
+  }).join('');
+  const caps = Object.entries(d.capabilities||{}).sort((a,b)=>b[1]-a[1]).slice(0,30)
+    .map(([c,n])=>`<span class="badge cap">${esc(c)} · ${n}</span>`).join(' ');
+  $('#main').innerHTML = shell({
+    title:'商店目录', sub:'按产品线组织的公网服务目录 · 官方/社区分层（结算体系后续接入，当前定价仅展示）',
+    body:`${secs||empty('暂无上架 agent','agent 需登记能力或资料后才会进入商店目录。')}
+    <div class="card" style="margin-top:6px"><div class="hd">${ic('layers')} 能力分布</div><div class="bd wrap">${caps||'<span class="faint">-</span>'}</div></div>`,
+  });
+}
+
+/* ---- 能力包 ---- */
+let capsQ='';
+async function vCapabilities(){
+  const d = await api('/capabilities');
+  render_caps(d.capsules||[], `${d.count} 个能力包`);
+  const inp=$('#capq'); if(inp) inp.addEventListener('keydown',async e=>{ if(e.key==='Enter'){ capsQ=inp.value.trim();
+    if(!capsQ){ vCapabilities(); return; }
+    try{ const r=await api('/discover?task='+encodeURIComponent(capsQ));
+      render_caps(r.matches||[], `任务「${esc(capsQ)}」匹配到 ${(r.matches||[]).length} 个能力包`, true, r.method);
+    }catch(err){ toast('发现失败：'+err.message); }
+  }});
+}
+function render_caps(caps, subtitle, isSearch, method){
+  const cards = caps.map(c=>`
+    <div class="card" style="min-width:230px;flex:1;max-width:320px">
+      <div class="bd">
+        <div class="row"><div style="font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</div>
+          ${c.cert==='certified'?'<span class="badge ok">已认证</span>':'<span class="badge community">社区</span>'}</div>
+        <div class="wrap" style="margin:6px 0"><span class="badge cap">${modChip(c.modality)}</span>${c.line?`<span class="badge cap">${esc(c.line)}</span>`:''}${c.provider_id?`<span class="badge official">${esc(c.provider_id)}</span>`:''}</div>
+        <div class="muted" style="font-size:12px;min-height:32px">${esc((c.desc||'').slice(0,90))}</div>
+        ${(c.models&&c.models.length)?`<div class="wrap" style="margin-top:6px">${c.models.slice(0,3).map(m=>`<span class="badge cap" style="font-family:ui-monospace">${esc(m)}</span>`).join('')}</div>`:''}
+        <div class="row faint" style="font-size:11px;margin-top:8px">${c.calls?`${c.calls} 次调用`:'暂无调用'}<span class="sp"></span>${c.provider_aid?`<a class="mono" href="javascript:goAgent('${esc(c.provider_aid)}')">${shortAid(c.provider_aid)}</a>`:''}</div>
+      </div></div>`).join('');
+  const methodBadge = method? `<span class="badge ${method==='semantic'?'official':'cap'}">${method==='semantic'?'语义检索':'词法检索'}</span>` : '';
+  $('#main').innerHTML = shell({
+    title:'能力包仓库', sub:'愿景「全球能力仓库」— 每个官方服务/社区能力抽象为可发现、可调用、带认证档位的能力包',
+    body:`
+    <div class="pgfilter">
+      <div class="gsearch" style="flex:1;max-width:520px"><span class="gsic">${ic('search')}</span><input id="capq" placeholder="按任务描述发现能力（例：把这段语音转成文字 / 生成一段风景视频）…" value="${esc(capsQ)}"/></div>
+      ${isSearch?`<button class="btn sm" onclick="capsQ='';vCapabilities()">清除</button>`:''}
+      ${methodBadge}
+      <span class="sp"></span><span class="muted" style="font-size:12.5px">${esc(subtitle||'')} · 认证 ${caps.filter(c=>c.cert==='certified').length} · 社区 ${caps.filter(c=>c.cert!=='certified').length}</span></div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">${cards||empty('无匹配能力包','换一种任务描述再试，或查看全部能力包。')}</div>`,
+  });
+}
+
+/* ================= DATA INTELLIGENCE ================= */
+
+/* ---- 数据总览 ---- */
+async function vDataOverview(){
+  const [ov, ss] = await Promise.all([
+    api('/overview').catch(e=>({_err:e.message})),
+    api('/sessions?limit=400').catch(()=>null),
+  ]);
+  if(ov._err){ $('#main').innerHTML = shell({title:'数据总览', body:errCard(ov._err)}); return; }
+  const ds=ov.datasets||{}, harvest=ov.harvest||[];
+  const sessTotal=Object.values(ds).reduce((s,c)=>s+(c.sessions||0),0);
+  const eventTotal=Object.values(ds).reduce((s,c)=>s+(c.events||0),0);
+  const byteTotal=Object.values(ds).reduce((s,c)=>s+(c.bytes||0),0);
+  const recTotal=harvest.reduce((s,h)=>s+(h.records||0),0);
+  // intent distribution
+  let intents={}, labeled=0, unlabeled=0;
+  (ss&&ss.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;}else unlabeled++; });
+  const topIntents = Object.entries(intents).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v,hash:'#/data/grounding'}));
+  $('#main').innerHTML = shell({
+    title:'数据总览', sub:'运行交互沉淀了什么、能否训练、质量如何 —— 采用 OKF 格式，落盘于 admin/datasets/',
+    actions:`<button class="btn pri" onclick="runHarvest(this)">${ic('play')} 立即采收</button>`,
+    body:`
+    <div class="grid g4 mb16">
+      ${kpi('OKF 会话', num(sessTotal), `${Object.keys(ds).length} 个来源`, 'db')}
+      ${kpi('交互记录', num(recTotal), `${num(eventTotal)} 事件`, 'activity')}
+      ${kpi('原始载荷', fmtBytes(byteTotal), '已采收', 'layers')}
+      ${kpi('已标注意图', num(labeled), `未标注 ${num(unlabeled)}`, 'compass')}
+    </div>
+    <div class="grid g2c">
+      <div class="card"><div class="hd">${ic('db')} 采收管道</div><div class="bd p0"><div class="tbwrap"><table class="tb">
+        <tr><th>来源</th><th>会话</th><th>累计记录</th><th>上次运行</th><th>游标</th><th>状态</th></tr>
+        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td><td class="mono faint">${esc((h.cursor||'').slice(0,16))}</td><td>${h.note?`<span class="badge err" title="${esc(h.note)}">异常</span>`:'<span class="badge ok">正常</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="faint" style="padding:16px;text-align:center">尚未采收</td></tr>'}
+      </table></div></div></div>
+      <div class="card"><div class="hd">${ic('compass')} 意图分布 <span class="sp"></span><a href="#/data/grounding" style="font-size:12px">Intent Grounding ›</a></div><div class="bd">
+        ${hbars(topIntents)}</div></div>
+    </div>
+    <div class="note">训练授权、脱敏状态、质量分级尚未建模 —— 当前展示的是原始 OKF 采收量，可训练资产的授权/质量口径为数据待接入。</div>`,
+  });
+}
+
+/* ---- OKF 会话浏览 ---- */
+let dsSource='', dsQ='';
+async function vSessions(){
+  const d = await api('/sessions?source='+encodeURIComponent(dsSource)+'&q='+encodeURIComponent(dsQ)+'&limit=200');
+  const counts = d.counts||{};
+  const tiles = Object.entries(counts).map(([src,c])=>`
+    <div class="tile"><div class="lb">${ic('db')}${esc(src)}</div><div class="v">${num(c.sessions)}</div>
+    <div class="s">${num(c.events)} 事件 · ${fmtBytes(c.bytes)} 原始载荷</div></div>`).join('');
+  const rows = (d.sessions||[]).map(s=>`
+    <tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
+      <td class="mono">${esc(s.session_id.slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
+      <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
+      <td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.goal||'-')}</td>
+      <td>${s.status==='done'?'<span class="badge ok">done</span>':s.status?'<span class="badge warn">'+esc(s.status)+'</span>':'-'}</td>
+      <td>${s.events}</td><td class="muted" style="white-space:nowrap">${fmtTime(s.updated_at)}</td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'OKF 会话浏览', sub:'意图对齐 / 预认知 / 共脑协同的数据底座 — 卡片 + 原始 JSONL',
+    body:`
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:14px">${tiles||'<div class="tile"><div class="lb">暂无数据</div><div class="s">点击「立即采收」开始</div></div>'}</div>
+    <div class="pgfilter">
+      <div class="gsearch" style="flex:0 1 260px"><span class="gsic">${ic('search')}</span><input id="dsq" placeholder="搜索会话 / AID / 意图…" value="${esc(dsQ)}"/></div>
+      <select id="dss" class="inp" onchange="dsSource=this.value;vSessions()">
+        <option value="">全部来源</option>
+        ${Object.keys(counts).map(s=>`<option ${dsSource===s?'selected':''} value="${esc(s)}">${esc(s)}</option>`).join('')}
+      </select>
+      <span class="sp"></span>
+      <button class="btn sm pri" onclick="runHarvest(this)">${ic('play')} 立即采收</button></div>
+    <div class="card"><div class="tbwrap"><table class="tb">
+      <tr><th>会话</th><th>来源</th><th>意图</th><th>目标 / 输入</th><th>状态</th><th>事件</th><th>更新</th></tr>
+      ${rows||'<tr><td colspan="7" class="faint" style="padding:24px;text-align:center">无会话</td></tr>'}</table></div></div>`,
+  });
+  const inp=$('#dsq'); inp.addEventListener('keydown',e=>{if(e.key==='Enter'){dsQ=inp.value;vSessions()}});
+}
+async function openSession(source,id){
+  const d = await api('/sessions/'+encodeURIComponent(source)+'/'+encodeURIComponent(id));
+  const s=d.session||{};
+  const evs=(d.events||[]).map(e=>{
+    const j=typeof e==='string'?JSON.parse(e):e;
+    return `<pre class="md" style="margin-bottom:6px">${esc(JSON.stringify(j,null,1).slice(0,2000))}</pre>`;
+  }).join('');
+  openDrawer(`${source} / ${id}`, `
+    <div class="kv">
+      <div class="k">意图</div><div>${esc(s.intent||'-')}</div>
+      <div class="k">状态</div><div>${esc(s.status||'-')}</div>
+      <div class="k">供给方</div><div class="mono" style="word-break:break-all">${s.provider_aid?`<a href="javascript:goAgent('${esc(s.provider_aid)}')">${esc(s.provider_aid)}</a>`:'-'}</div>
+      <div class="k">需求方</div><div class="mono" style="word-break:break-all">${s.requester_aid?`<a href="javascript:goAgent('${esc(s.requester_aid)}')">${esc(s.requester_aid)}</a>`:'-'}</div>
+      <div class="k">时间窗</div><div>${fmtTime(s.started_at)} → ${fmtTime(s.ended_at)}</div>
+      <div class="k">体量</div><div>${s.events} 事件 · ${fmtBytes(s.bytes)}</div>
+      <div class="k">卡片</div><div class="mono">${esc(s.card_path||'-')}</div>
+      <div class="k">数据</div><div class="mono">${esc(s.data_path||'-')}</div>
+    </div>
+    <div class="sec">OKF 概念卡</div><pre class="md">${esc(d.card||'(无)')}</pre>
+    <div class="sec">原始事件（前 ${(d.events||[]).length} 条）</div>${evs||'<div class="faint">无</div>'}`);
+}
+
+/* ---- 异常会话 ---- */
+async function vAnomalies(){
+  const d = await api('/sessions?limit=400');
+  const list = (d.sessions||[]).filter(s=>s.status && s.status!=='done');
+  const rows = list.map(s=>`
+    <tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
+      <td class="mono">${esc(s.session_id.slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
+      <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
+      <td><span class="badge warn">${esc(s.status)}</span></td>
+      <td class="muted" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.goal||'-')}</td>
+      <td class="muted">${fmtTime(s.updated_at)}</td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'异常会话', sub:'状态非 done 的会话（未完成 / 失败）— grounding 失败、协同冲突、工具调用失败等的初筛入口',
+    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
+      <tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>目标</th><th>更新</th></tr>${rows}</table></div></div>
+      <div class="note">失败类型细分（歧义/预判错误/协同冲突/敏感命中）需要 OKF Schema 扩展字段，当前以会话状态近似。</div>`
+      : empty('未发现异常会话','采样范围内所有会话状态均为 done 或未标注。'),
+  });
+}
+
+/* ---- 能力总览 (differentiator overview) ---- */
+async function vCapOps(){
+  const [ss, all, ov] = await Promise.all([
+    api('/sessions?limit=400').catch(()=>null),
+    getAllInsights().catch(()=>[]),
+    api('/overview').catch(()=>null),
+  ]);
+  // grounding: intents
+  let intents={}, labeled=0;
+  (ss&&ss.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;} });
+  const intentKinds = Object.keys(intents).length;
+  // precog: latency + cost from official stats
+  let totMs=0, msN=0, totMilli=0;
+  all.forEach(x=>{ const st=(x.d&&x.d.stats)||{}; (st.by_service||[]).forEach(s=>{ if(s.avg_ms){totMs+=s.avg_ms*(s.calls||1);msN+=(s.calls||1);} }); totMilli+=(st.total_milli||0); });
+  const avgMs = msN? totMs/msN : 0;
+  // collab
+  const tc=(ov&&ov.totals&&ov.totals.tasks_completed)||0, rv=(ov&&ov.totals&&ov.totals.reviews)||0, ar=(ov&&ov.totals&&ov.totals.avg_rating)||0;
+  const capCard=(title,icn,metric,note,hash,tag)=>`
+    <div class="card"><div class="hd">${ic(icn)} ${title} <span class="sp"></span><span class="badge cap">${tag}</span></div>
+      <div class="bd">
+        <div style="font-size:22px;font-weight:650;letter-spacing:-.01em">${metric}</div>
+        <div class="muted" style="font-size:12.5px;margin:8px 0 12px;min-height:34px">${note}</div>
+        <a class="btn sm" href="${hash}">进入工作台 ›</a>
+      </div></div>`;
+  $('#main').innerHTML = shell({
+    title:'能力总览', sub:'三项差异化能力的统一入口 —— 当前均为「数据底座/素材」而非已训练模型，口径如实标注',
+    body:`
+    <div class="grid g3">
+      ${capCard('Intent Grounding','compass', `${num(labeled)} 条已标注 · ${intentKinds} 类意图`, '来自 OKF 会话的 intent 字段分布，作为意图对齐的标注数据底座。', '#/data/grounding', '数据底座')}
+      ${capCard('Pre-cognition','gauge', `均时 ${(avgMs/1000).toFixed(2)}s · ${FormatMilli(totMilli)}`, '来自官方 agent 实测 stats 的按服务耗时与开销，作为「耗时/成本预测」的素材。', '#/data/precognition', '预测素材')}
+      ${capCard('共脑协同','share', `${num(tc)} 交付 · ${num(rv)} 评价`, '来自任务交付与可信评价流，作为多 Agent 协同效果的评估底座。', '#/data/collab', '协同底座')}
+    </div>
+    <div class="faint" style="font-size:11.5px;margin-top:14px">诚实口径：以上均为线上观测/实测数据的聚合，尚未接入固定评测集与人工标签，得分/置信区间为后续阶段目标。</div>`,
+  });
+}
+
+/* ---- Intent Grounding ---- */
+async function vGrounding(){
+  const d = await api('/sessions?limit=500');
+  let intents={}, labeled=0, unlabeled=0;
+  (d.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;}else unlabeled++; });
+  const sorted = Object.entries(intents).sort((a,b)=>b[1]-a[1]);
+  const rows = sorted.map(([k,v])=>`<tr class="click" onclick="dsQ='${esc(k)}';dsSource='';location.hash='#/data/sessions'">
+    <td><span class="badge official">${esc(k)}</span></td><td>${v}</td>
+    <td><div class="hbar-track" style="width:180px"><div class="hbar-fill" style="width:${(v/(sorted[0][1]||1)*100).toFixed(1)}%"></div></div></td>
+    <td class="faint">${ic('chev')}</td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'Intent Grounding', sub:'意图对齐数据底座 —— 按 OKF 会话 intent 字段统计意图分布，下钻到对应会话',
+    body:`
+    <div class="grid g3 mb16">
+      ${kpi('已标注意图会话', num(labeled), '含 intent 字段', 'compass')}
+      ${kpi('意图种类', sorted.length, '去重后', 'layers')}
+      ${kpi('未标注会话', num(unlabeled), '待补充意图', 'inbox')}
+    </div>
+    <div class="card"><div class="hd">${ic('chart')} 意图分布（点击下钻到会话）</div>
+      <div class="bd p0"><div class="tbwrap"><table class="tb">
+        <tr><th>意图</th><th>会话数</th><th>占比</th><th></th></tr>
+        ${rows||'<tr><td colspan="4" class="faint tac" style="padding:20px">采样范围内暂无带 intent 的会话</td></tr>'}</table></div></div></div>
+    <div class="note">口径：线上观测。意图混淆矩阵、槽位与澄清轮数、意图→能力包映射为后续阶段（需 OKF grounding.* 字段）。</div>`,
+  });
+}
+
+/* ---- Pre-cognition ---- */
+async function vPrecog(){
+  const all = await getAllInsights();
+  const cards = all.filter(x=>x.ok).map(x=>{
+    const st=x.d.stats||{};
+    const curve = barChart(st.curve||[]);
+    const svcRows=(st.by_service||[]).slice(0,10).map(s=>`<tr><td>${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${s.avg_ms?(s.avg_ms/1000).toFixed(2)+'s':'-'}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
+    const mdlRows=(st.by_model||[]).slice(0,10).map(s=>`<tr><td class="mono">${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${s.avg_ms?(s.avg_ms/1000).toFixed(2)+'s':'-'}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
+    return `<div class="card" style="margin-bottom:14px"><div class="hd">${ic('gauge')} ${esc(x.name)} <span class="badge cap mono">${esc(x.id)}</span><span class="sp"></span><span class="muted" style="font-size:12px">近窗开销 ${esc(x.d.cost_yuan||FormatMilli(x.d.cost_milli))}</span></div>
+      <div class="bd">
+        <div class="sect" style="margin-top:0">调用曲线（近 24h）</div>${curve}
+        <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:12px">
+          <div><div class="sect" style="margin-top:0">按服务：耗时/成本素材</div><div class="tbwrap"><table class="tb"><tr><th>服务</th><th>调用</th><th>均时</th><th>开销</th></tr>${svcRows||'<tr><td class="faint">无</td></tr>'}</table></div></div>
+          <div><div class="sect" style="margin-top:0">按模型：耗时/成本素材</div><div class="tbwrap"><table class="tb"><tr><th>模型</th><th>调用</th><th>均时</th><th>开销</th></tr>${mdlRows||'<tr><td class="faint">无</td></tr>'}</table></div></div>
+        </div>
+      </div></div>`;
+  }).join('');
+  $('#main').innerHTML = shell({
+    title:'Pre-cognition', sub:'耗时/成本预测素材 —— 来自官方 agent 实测 stats 的按模型/服务延迟与开销',
+    body: cards || empty('尚无实测数据','需要至少一个声明 monitor 且已产生调用的官方 agent。'),
+  });
+  $('#main').innerHTML += `<div class="note">口径：线上实测。预测准确率/召回率/有效提前量/打扰率等需要 OKF precognition.* 字段与介入结果标签，为后续阶段。</div>`;
+}
+
+/* ---- 共脑协同 ---- */
+async function vCollab(){
+  const [ov, rv] = await Promise.all([ api('/overview'), api('/reviews?limit=50').catch(()=>({reviews:[]})) ]);
+  const t=ov.totals||{};
+  const reviews=(rv.reviews||[]).map(r=>`<tr>
+    <td>${'★'.repeat(Math.max(0,Math.min(5,r.rating)))}<span class="faint">${'☆'.repeat(5-Math.max(0,Math.min(5,r.rating)))}</span></td>
+    <td class="mono">${r.subject_aid?`<a href="javascript:goAgent('${esc(r.subject_aid)}')">${shortAid(r.subject_aid)}</a>`:'-'}</td>
+    <td class="muted" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((r.goal||r.comment||'-'))}</td>
+    <td class="muted">${fmtTime(new Date((r.created_at||0)*1000).toISOString())}</td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'共脑协同', sub:'多 Agent 协同与交付评估的数据底座 —— 任务交付、可信评价与在途积压',
+    body:`
+    <div class="grid g4 mb16">
+      ${kpi('完成任务', num(t.tasks_completed||0), '跨 Agent 交付', 'activity')}
+      ${kpi('可信评价', num(t.reviews||0), '交付后评价', 'star')}
+      ${kpi('平均评分', (t.avg_rating||0).toFixed(2), '满分 5', 'gauge')}
+      ${kpi('在途积压', num(t.relay_backlog||0), '未投递 relay', 'inbox')}
+    </div>
+    <div class="card"><div class="hd">${ic('star')} 最近协同交付评价</div>
+      <div class="bd p0"><div class="tbwrap"><table class="tb">
+        <tr><th>评分</th><th>对象</th><th>目标 / 评论</th><th>时间</th></tr>
+        ${reviews||'<tr><td colspan="4" class="faint tac" style="padding:20px">暂无评价</td></tr>'}</table></div></div></div>
+    <div class="note">口径：线上观测。协同 DAG 回放、贡献归因、冲突矩阵、相对单 Agent 提升需要 OKF collaboration.* 字段，为后续阶段。</div>`,
+  });
+}
+
+/* ================= ECOSYSTEM ================= */
+
+/* ---- 生态概览 ---- */
+async function vEcoOverview(){
+  const [ov, st] = await Promise.all([ api('/overview'), api('/store').catch(()=>null) ]);
+  const t=ov.totals||{}, off=ov.officials||0;
+  const ds=ov.datasets||{}; const sessTotal=Object.values(ds).reduce((s,c)=>s+(c.sessions||0),0);
+  const prodLines = st? Object.keys(st.product_lines||{}).filter(k=>(st.product_lines[k]||[]).length) : [];
+  const capCount = st? Object.keys(st.capabilities||{}).length : 0;
+  $('#main').innerHTML = shell({
+    title:'生态概览', sub:'ANet 智能体互联网的整体规模与构成 —— 面向理解与叙事',
+    body:`
+    <div class="grid g4 mb16">
+      ${kpi('注册 Agent', num(t.agents||0), `官方 ${off} · 社区 ${(t.agents||0)-off}`, 'bot')}
+      ${kpi('已上架', num(t.listed||0), `覆盖 ${prodLines.length} 条产品线`, 'store')}
+      ${kpi('能力包供给', capCount, '认证 + 社区', 'layers')}
+      ${kpi('OKF 会话资产', num(sessTotal), `完成任务 ${num(t.tasks_completed||0)}`, 'db')}
+    </div>
+    <div class="grid g2">
+      <div class="card"><div class="hd">${ic('store')} 产品线覆盖</div><div class="bd">
+        ${st? hbars(prodLines.map(k=>({label:LINE_NAMES[k]||k, value:(st.product_lines[k]||[]).length, sub:`官方 ${(st.product_lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'}))) : '<div class="faint">商店数据不可用</div>'}
+      </div></div>
+      <div class="card"><div class="hd">${ic('share')} 生态构成</div><div class="bd">
+        ${hbars([
+          {label:'官方托管 Agent', value:off, sub:'全链路可观测', hash:'#/operations/deployments'},
+          {label:'社区 Agent', value:(t.agents||0)-off, sub:'黑盒', hash:'#/operations/agents'},
+          {label:'可信评价', value:t.reviews||0, sub:`均分 ${(t.avg_rating||0).toFixed(2)}`},
+        ])}
+        <div class="row" style="margin-top:12px"><a class="btn sm" href="#/ecosystem/network">${ic('share')} Agent 网络</a><a class="btn sm" href="#/ecosystem/vision">${ic('up')} 能力跃升</a></div>
+      </div></div>
+    </div>`,
+  });
+}
+
+/* ---- 产品矩阵 ---- */
+async function vMatrix(){
+  const d = await api('/store'); const lines=d.product_lines||{};
+  const order=['anetos','anetscreen','anetpin','anetcraft','agentnetwork','community'];
+  const present=order.filter(k=>lines[k]&&lines[k].length);
+  const rows=present.map(k=>{
+    const arr=lines[k]; const official=arr.filter(a=>a.tier==='official').length;
+    const tasks=arr.reduce((s,a)=>s+(a.tasks||0),0);
+    const rev=arr.reduce((s,a)=>s+(a.review_count||0),0);
+    return `<tr><td style="font-weight:550">${LINE_NAMES[k]||k}</td><td>${arr.length}</td><td>${official}</td><td>${arr.length-official}</td><td>${tasks}</td><td>${rev}</td></tr>`;
+  }).join('');
+  $('#main').innerHTML = shell({
+    title:'产品矩阵', sub:'按 ANet 产品线组织的 Agent 供给与活跃度',
+    body:`
+    <div class="card"><div class="bd">${hbars(present.map(k=>({label:LINE_NAMES[k]||k, value:(lines[k]||[]).length, sub:`官方 ${(lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'})))}</div></div>
+    <div class="card mt14"><div class="tbwrap"><table class="tb">
+      <tr><th>产品线</th><th>上架 Agent</th><th>官方</th><th>社区</th><th>任务</th><th>评价</th></tr>
+      ${rows||'<tr><td colspan="6" class="faint tac" style="padding:20px">暂无上架 agent</td></tr>'}</table></div></div>`,
+  });
+}
+
+/* ---- Agent 网络 ---- */
+async function vNetwork(){
+  const d = await api('/agents');
+  const agents = (d.agents||[]).slice().sort((a,b)=>((b.tasks_as_provider+b.tasks_as_requester)-(a.tasks_as_provider+a.tasks_as_requester))).slice(0,40);
+  $('#main').innerHTML = shell({
+    title:'Agent 网络', sub:'注册在册 Agent 与 Hub 的连接关系 —— 节点大小按任务量，颜色区分官方/社区/风险；点击进入详情',
+    body:`
+    <div class="card"><div class="bd">${networkSVG(agents)}</div></div>
+    <div class="wrap" style="margin-top:10px;font-size:12px">
+      <span class="badge official">官方</span><span class="badge community">社区</span><span class="badge err">风险</span>
+      <span class="muted">节点大小 = 任务量（供给+需求）</span></div>
+    <div class="note">当前边表示与 Hub 的注册/中继关系；Agent↔Agent 协同边需要 OKF collaboration.* 数据，为后续阶段。</div>`,
+  });
+}
+function networkSVG(agents){
+  if(!agents.length) return '<div class="faint" style="padding:24px;text-align:center">暂无 Agent</div>';
+  const W=780,H=440,cx=W/2,cy=H/2,R=Math.min(cx,cy)-46,n=agents.length;
+  let edges='',nodes='';
+  agents.forEach((a,i)=>{
+    const ang=(i/n)*Math.PI*2 - Math.PI/2;
+    const x=cx+R*Math.cos(ang), y=cy+R*Math.sin(ang);
+    const tk=(a.tasks_as_provider||0)+(a.tasks_as_requester||0);
+    const r=Math.max(5,Math.min(16,5+Math.sqrt(tk)*1.6));
+    const col=a.moderation?'var(--err)':a.tier==='official'?'var(--primary)':'var(--fg-faint)';
+    edges+=`<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`;
+    nodes+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${col}" opacity=".85" style="cursor:pointer" onclick="goAgent('${esc(a.aid)}')"><title>${esc(a.name||a.aid)} · ${tk} 任务</title></circle>`;
+  });
+  const hub=`<circle cx="${cx}" cy="${cy}" r="22" fill="var(--primary-soft)" stroke="var(--primary)" stroke-width="2"/><text x="${cx}" y="${cy+4}" text-anchor="middle" font-size="11" fill="var(--primary)" font-weight="700">Hub</text>`;
+  return `<svg width="100%" viewBox="0 0 ${W} ${H}" style="max-width:100%">${edges}${hub}${nodes}</svg>`;
+}
+
+/* ---- 能力跃升 (vision map) ---- */
+const LEAP_STATUS = {live:['ok','已运行'], partial:['warn','建设中'], planned:['community','规划中']};
+const LEAP_DRILL = {backbone:'#/operations/agents', discovery:'#/operations/capabilities', access:'#/operations/deployments', regulation:'#/platform/audit', evolution:'#/data/sessions', demonstration:'#/ecosystem/matrix'};
+async function vVision(){
+  const d = await api('/vision');
+  const cards = (d.leaps||[]).map((l,i)=>{
+    const [cls,txt] = LEAP_STATUS[l.status]||['community',l.status];
+    const metrics = Object.entries(l.metrics||{}).map(([k,v])=>
+      `<div class="tile" style="padding:10px 12px;box-shadow:none;background:var(--bg-subtle)"><div class="lb" style="font-size:11px">${esc(k)}</div><div style="font-size:18px;font-weight:650;margin-top:2px">${esc(String(v))}</div></div>`).join('');
+    const drill = LEAP_DRILL[l.key];
+    return `<div class="card">
+      <div class="hd"><span style="width:24px;height:24px;border-radius:7px;background:var(--primary-soft);color:var(--primary);display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:12px">${i+1}</span>
+        ${esc(l.title)} <span class="badge ${cls}">${esc(txt)}</span>
+        <span class="sp"></span>${drill?`<a class="btn sm" href="${drill}">下钻 ›</a>`:''}</div>
+      <div class="bd">
+        <div class="muted" style="font-size:13px;margin-bottom:4px">${esc(l.leap)}</div>
+        <div style="font-size:12px;color:var(--primary);margin-bottom:12px">${ic('layers')} 承载：${esc(l.component)}</div>
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">${metrics}</div>
+      </div></div>`;
+  }).join('');
+  $('#main').innerHTML = shell({
+    title:'能力跃升', sub:esc(d.headline||''),
+    body:`<div class="grid" style="grid-template-columns:1fr">${cards}</div>`,
+  });
+}
+
+/* ================= PLATFORM ================= */
+
+/* ---- 系统状态 ---- */
+async function vPlatformStatus(){
+  const d = await api('/overview');
+  const probes=d.probes||[], harvest=d.harvest||[], snaps=d.snapshots||[];
+  const good = p => { const u=p.units||{}; const all=Object.keys(u).length, okU=Object.values(u).filter(v=>v==='active').length; return p.monitor==='ok' || (all>0 && okU===all && p.ssh==='ok'); };
+  const probeChips=probes.map(p=>`<span class="badge ${good(p)?'ok':'err'}"><span class="dot8 ${good(p)?'g':'r'}"></span>${esc(p.id)}${p.monitor?` · monitor ${esc(p.monitor)}`:''}${p.ssh!=='ok'?' · ssh 异常':''}</span>`).join(' ');
+  $('#main').innerHTML = shell({
+    title:'系统状态', sub:'anet-hub-admin 服务、公网 hub.db 读取、采收管道与官方 monitor 拉取的健康快照',
+    body:`
+    <div class="grid g4 mb16">
+      ${kpi('hub.db', fmtBytes(d.hub_db_bytes), '公网存储（只读）', 'db')}
+      ${kpi('官方 agent', d.officials||0, `${probes.filter(good).length} 探活正常`, 'shield')}
+      ${kpi('采收源', harvest.length, `${harvest.filter(h=>h.note).length} 异常`, 'activity')}
+      ${kpi('快照点', snaps.length, '每 5 分钟采样', 'chart')}
+    </div>
+    <div class="card"><div class="hd">${ic('shield')} 官方 agent 探活</div><div class="bd wrap">${probeChips||'<span class="faint">尚无官方 agent</span>'}</div></div>
+    <div class="card mt14"><div class="hd">${ic('db')} 采收管道状态</div><div class="bd p0"><div class="tbwrap"><table class="tb">
+      <tr><th>来源</th><th>会话</th><th>累计记录</th><th>上次运行</th><th>状态</th></tr>
+      ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td><td>${h.note?`<span class="badge err" title="${esc(h.note)}">异常</span>`:'<span class="badge ok">正常</span>'}</td></tr>`).join('')||'<tr><td colspan="5" class="faint" style="padding:16px;text-align:center">尚未采收</td></tr>'}
+    </table></div></div></div>`,
+  });
+}
+
+/* ---- 成本与模型 ---- */
+async function vModels(){
+  const all = await getAllInsights();
+  const byModel={}; let totMilli=0, totCalls=0;
+  all.forEach(x=>{ const st=(x.d&&x.d.stats)||{}; totMilli+=(st.total_milli||0);
+    (st.by_model||[]).forEach(m=>{ const k=m.key||'-'; byModel[k]=byModel[k]||{calls:0,milli:0,ms:0,msN:0}; byModel[k].calls+=m.calls||0; byModel[k].milli+=m.milli||0; if(m.avg_ms){byModel[k].ms+=m.avg_ms*(m.calls||1);byModel[k].msN+=(m.calls||1);} totCalls+=m.calls||0; });
+  });
+  const rows=Object.entries(byModel).sort((a,b)=>b[1].milli-a[1].milli).map(([k,v])=>`<tr>
+    <td class="mono">${esc(k)}</td><td>${num(v.calls)}</td><td class="muted">${v.msN?(v.ms/v.msN/1000).toFixed(2)+'s':'-'}</td><td class="muted">${FormatMilli(v.milli)}</td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'成本与模型', sub:'跨官方 agent 的模型目录与实测调用成本（来自各 agent monitor 的 /api/stats）',
+    body:`
+    <div class="grid g3 mb16">
+      ${kpi('近窗总开销', FormatMilli(totMilli), '跨 agent 合计', 'coin')}
+      ${kpi('模型数', Object.keys(byModel).length, '去重', 'cpu')}
+      ${kpi('模型调用', num(totCalls), '近 24h', 'activity')}
+    </div>
+    <div class="card"><div class="hd">${ic('cpu')} 模型调用与成本</div><div class="bd p0"><div class="tbwrap"><table class="tb">
+      <tr><th>模型</th><th>调用</th><th>均时</th><th>开销</th></tr>
+      ${rows||'<tr><td colspan="4" class="faint tac" style="padding:20px">无模型级统计（需官方 agent monitor 支持 by_model）</td></tr>'}</table></div></div></div>
+    <div class="note">预算与配额、预付/后付结算为路线图项；当前仅呈现实测成本。</div>`,
+  });
+}
+
+/* ---- 审计日志 ---- */
+async function vAudit(){
+  const d = await api('/audit?limit=500');
+  const rows=(d.audit||[]).map(a=>`
+    <tr><td class="muted" style="white-space:nowrap">${fmtTime(a.ts)}</td><td>${esc(a.actor)}</td>
+    <td class="mono">${esc(a.action)}</td><td class="mono">${a.target?`<a href="javascript:goAgent('${esc(a.target)}')">${shortAid(a.target)}</a>`:'-'}</td>
+    <td class="muted" style="max-width:420px;word-break:break-all">${esc((a.detail||'').slice(0,300))}</td></tr>`).join('');
+  $('#main').innerHTML = shell({
+    title:'审计日志', sub:'全部管理操作留痕（ops 命令 / 监管动作 / ACL / 采收）— 亦嵌入各 Agent 详情的「审计」页',
+    body:`<div class="card"><div class="tbwrap"><table class="tb"><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr>
+    ${rows||'<tr><td colspan="5" class="faint" style="padding:24px;text-align:center">暂无</td></tr>'}</table></div></div>`,
+  });
+}
+
+/* ================= UNIFIED AGENT DETAIL ================= */
+async function renderAgent(aid, tab){
+  CUR_AGENT = aid;
+  $('#main').innerHTML = loadingHTML('加载 Agent…');
+  let d, officials=[];
+  try{
+    [d, officials] = await Promise.all([
+      api('/agents/'+encodeURIComponent(aid)),
+      api('/official').then(r=>r.officials||[]).catch(()=>[]),
+    ]);
+  }catch(e){ $('#main').innerHTML = shell({crumb:`<a href="#/operations/agents">全部 Agent</a> <span>›</span> ${esc(shortAid(aid))}`, title:shortAid(aid), body:errCard('加载 Agent 失败：'+e.message)}); return; }
+  const a=d.agent||{};
+  const mrow = officials.find(o=>o.manifest && o.manifest.aid===aid);
+  const isOff = !!mrow;
+  const man = mrow&&mrow.manifest, probe = mrow&&mrow.probe;
+  const hasMon = isOff && man.monitor && man.monitor.url;
+  const mod = d.moderation;
+  // health
+  let health='gr';
+  if(isOff && probe){ const u=probe.units||{}; const all=Object.keys(u).length, okU=Object.values(u).filter(v=>v==='active').length;
+    health = (probe.monitor==='ok'||(all>0&&okU===all&&probe.ssh==='ok'))?'g':(okU>0?'y':'r'); }
+  const obs = hasMon?'<span class="badge official">全链路</span>':'<span class="badge cap">黑盒</span>';
+  const tabs = isOff
+    ? [['overview','概览'],['run','运行'],['insights','调用与洞察'],['caps','能力'],['data','数据'],['gov','权限与治理'],['audit','审计']]
+    : [['overview','概览'],['caps','能力'],['data','数据'],['gov','权限与治理'],['audit','审计']];
+  if(!tabs.find(t=>t[0]===tab)) tab='overview';
+  CRUMB = `<a href="#/operations/agents">全部 Agent</a> <span>›</span> ${esc(a.name||shortAid(aid))}`;
+
+  const actions = isOff
+    ? `${hasMon?`<a class="btn" href="${esc(man.monitor.url)}" target="_blank">${ic('term')} 原生监控</a>`:''}
+       <button class="btn" onclick="goAgent('${esc(aid)}','run')">${ic('cpu')} 运行控制</button>
+       <button class="btn pri" onclick="goAgent('${esc(aid)}','insights')">${ic('gauge')} 调用与洞察</button>`
+    : `<button class="btn" onclick="goAgent('${esc(aid)}','gov')">${ic('shield')} 治理</button>`;
+
+  $('#main').innerHTML = `
+    <div class="crumb">${CRUMB}</div>
+    <div class="ahead">
+      <div class="ava">${initial(a.name,aid)}</div>
+      <div style="flex:1;min-width:0">
+        <div class="row" style="flex-wrap:wrap"><div style="font-size:19px;font-weight:650">${esc(a.name||'(未命名)')}</div>
+          ${isOff?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'} ${obs}
+          ${a.listed?'<span class="badge cap">已上架</span>':'<span class="badge community">未上架</span>'}
+          <span class="badge ${health==='g'?'ok':health==='y'?'warn':health==='r'?'err':'community'}">${statusDot(health)}</span>
+          ${mod&&mod.status&&mod.status!=='ok'?`<span class="badge err">${esc(mod.status)}</span>`:''}</div>
+        <div class="mono faint" style="margin-top:5px;word-break:break-all">${esc(aid)}</div>
+      </div>
+      <div class="pgact">${actions}</div>
+    </div>
+    <div class="tabs">${tabs.map(t=>`<button class="${t[0]===tab?'on':''}" onclick="goAgent('${esc(aid)}','${t[0]}')">${t[1]}</button>`).join('')}</div>
+    <div id="atab"></div>`;
+  renderAgentTab(tab, {aid, d, a, isOff, man, probe, hasMon, mod});
+}
+
+function renderAgentTab(tab, ctx){
+  const el=$('#atab'); if(!el) return;
+  const {aid, d, a, isOff, man, probe, hasMon, mod} = ctx;
+  if(tab==='overview'){
+    el.innerHTML = `
+      <div class="grid g4 mb16">
+        ${kpi('评分', a.review_count?a.avg_rating.toFixed(2):'-', a.review_count?`${a.review_count} 条评价`:'暂无评价', 'star')}
+        ${kpi('任务 供/求', `${a.tasks_as_provider}/${a.tasks_as_requester}`, '交付 / 发起', 'activity')}
+        ${kpi('信箱积压', a.mailbox_backlog||0, '未投递', 'inbox')}
+        ${kpi('访客额度', a.guest_quota, '免费试用', 'users')}
+      </div>
+      <div class="card"><div class="hd">${ic('bot')} 基本信息</div><div class="bd"><div class="kv">
+        <div class="k">简介</div><div>${esc(a.summary||'-')}</div>
+        <div class="k">能力</div><div class="wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'-'}</div>
+        <div class="k">定价</div><div>${esc(a.pricing||'-')}</div>
+        <div class="k">所有权</div><div>${isOff?`官方 · ${esc(man.product_line||'-')} · 维护者 ${esc(man.maintainer||'-')}`:'社区'}</div>
+        <div class="k">可观测</div><div>${hasMon?'全链路（monitor + ops）':'黑盒（仅注册面板信息）'}</div>
+        <div class="k">注册时间</div><div>${fmtTime(a.registered_at)}</div>
+      </div></div></div>
+      ${a.readme?`<div class="card mt14"><div class="hd">${ic('file')} README</div><div class="bd"><pre class="md">${esc(a.readme.slice(0,6000))}</pre></div></div>`:''}`;
+  }
+  else if(tab==='run'){
+    const units = Object.entries((probe&&probe.units)||{}).map(([u,stt])=>`<span class="badge ${stt==='active'?'ok':'err'}"><span class="dot8 ${stt==='active'?'g':'r'}"></span>${esc(u.replace('.service',''))}</span>`).join(' ');
+    const ops=(man.ops&&man.ops.allowed)||[];
+    const btn=(op,label,icn,danger)=>ops.includes(op)?`<button class="btn sm ${danger?'danger':''}" onclick="runOp('${esc(man.id)}','${op}')">${ic(icn)} ${label}</button>`:'';
+    el.innerHTML=`
+      <div class="card"><div class="hd">${ic('cpu')} 运行实例 <span class="sp"></span><button class="btn sm" onclick="reprobeAgent('${esc(aid)}')">${ic('refresh')} 重新探测</button></div>
+        <div class="bd">
+          <div class="kv" style="grid-template-columns:90px 1fr">
+            <div class="k">主机</div><div class="mono">${esc((man.runtime&&man.runtime.host)||'-')}</div>
+            <div class="k">工作目录</div><div class="mono">${esc((man.runtime&&man.runtime.workdir)||'-')}</div>
+            <div class="k">单元状态</div><div class="wrap">${units||'<span class="faint">-</span>'} <span class="badge ${probe&&probe.monitor==='ok'?'ok':'err'}">monitor ${esc((probe&&probe.monitor)||'-')}</span> <span class="faint" style="font-size:11px">探测于 ${fmtTime(probe&&probe.checked_at)}</span></div>
+            ${probe&&probe.ssh!=='ok'?`<div class="k">运维通道</div><div><span class="badge warn">ssh 不可用</span> <span class="muted" style="font-size:12px">${esc(String(probe.ssh).slice(0,120))}</span></div>`:''}
+          </div>
+          <div class="row" style="margin-top:12px;flex-wrap:wrap">
+            ${btn('status','状态','activity')}${btn('logs','日志','file')}
+            ${btn('start','启动','play')}${btn('stop','停止','stop',1)}${btn('restart','重启','restart',1)}${btn('update','更新','up',1)}
+            <button class="btn sm" onclick="monView('${esc(man.id)}')">${ic('term')} 调用历史</button>
+          </div>
+          <div id="ops-out-${esc(man.id)}"></div>
+        </div></div>`;
+  }
+  else if(tab==='insights'){
+    el.innerHTML=`<div id="insbox">${loadingHTML('拉取 monitor…')}</div>`;
+    loadInsights(man.id, '#insbox');
+  }
+  else if(tab==='caps'){
+    el.innerHTML=`
+      <div class="card"><div class="hd">${ic('layers')} 声明能力</div><div class="bd wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">未声明能力</span>'}</div></div>
+      ${isOff?`<div class="card mt14"><div class="hd">${ic('store')} 能力清单（catalog）</div><div class="bd" id="catbox">${loadingHTML()}</div></div>`:''}`;
+    if(isOff) loadCatalog(man.id, '#catbox');
+  }
+  else if(tab==='data'){
+    const sessions=(d.sessions||[]).map(s=>`<tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
+      <td class="mono">${esc((s.session_id||'').slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
+      <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
+      <td>${s.status==='done'?'<span class="badge ok">done</span>':s.status?'<span class="badge warn">'+esc(s.status)+'</span>':'-'}</td>
+      <td class="muted">${fmtTime(s.updated_at)}</td></tr>`).join('');
+    el.innerHTML=`<div class="card"><div class="hd">${ic('db')} 本 Agent 沉淀的 OKF 会话</div>
+      <div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>更新</th></tr>
+      ${sessions||'<tr><td colspan="5" class="faint tac" style="padding:20px">尚无采收会话</td></tr>'}</table></div></div></div>`;
+  }
+  else if(tab==='gov'){
+    el.innerHTML=`
+      <div class="card"><div class="hd">${ic('shield')} 监管与配额</div><div class="bd">
+        <div class="kv" style="margin-bottom:14px">
+          <div class="k">监管状态</div><div>${mod&&mod.status&&mod.status!=='ok'?`<span class="badge err">${esc(mod.status)}</span> ${esc(mod.note||'')}`:'<span class="badge ok">正常</span>'}</div>
+        </div>
+        <div class="row" style="flex-wrap:wrap">
+          <input id="mQuota" class="inp" type="number" min="0" max="1000" value="${a.guest_quota}" style="width:90px"/>
+          <button class="btn sm" onclick="setQuota('${esc(aid)}')">设置访客额度</button>
+          <input id="mNote" class="inp" placeholder="处置备注" style="width:180px"/>
+          <button class="btn sm" onclick="moderate('${esc(aid)}','flagged')">标记关注</button>
+          <button class="btn sm" onclick="moderate('${esc(aid)}','ok')">恢复正常</button>
+          <button class="btn sm danger" onclick="delAgent('${esc(aid)}')">${ic('trash')} 移除注册</button>
+        </div>
+        <div class="faint" style="font-size:12px;margin-top:8px">移除后该身份可重新注册（黑名单强制阻断为 hub 侧路线图项）。访客额度设为 0 可将 agent 移出访客流量。</div>
+      </div></div>
+      ${isOff&&hasMon?`<div class="card mt14"><div class="hd">${ic('shield')} 授权门 ACL（monitor 直连）</div><div class="bd" id="aclbox">${loadingHTML()}</div></div>`
+        :`<div class="card mt14"><div class="bd faint">社区/黑盒 Agent 无平台侧 ACL 管理（不可深度观测）。</div></div>`}`;
+    if(isOff&&hasMon) loadACL(man.id, '#aclbox');
+  }
+  else if(tab==='audit'){
+    el.innerHTML=`<div id="audbox">${loadingHTML()}</div>`;
+    api('/audit?limit=500').then(r=>{
+      const rows=(r.audit||[]).filter(x=>x.target===aid).map(x=>`<tr><td class="muted" style="white-space:nowrap">${fmtTime(x.ts)}</td><td>${esc(x.actor)}</td><td class="mono">${esc(x.action)}</td><td class="muted" style="max-width:420px;word-break:break-all">${esc((x.detail||'').slice(0,300))}</td></tr>`).join('');
+      $('#audbox').innerHTML=`<div class="card"><div class="tbwrap"><table class="tb"><tr><th>时间</th><th>操作者</th><th>动作</th><th>详情</th></tr>${rows||'<tr><td colspan="4" class="faint tac" style="padding:20px">该 Agent 暂无审计记录</td></tr>'}</table></div></div>`;
+    }).catch(e=>{ $('#audbox').innerHTML=errCard(e.message); });
+  }
+}
+async function reprobeAgent(aid){
+  try{ await api('/official?probe=force'); }catch(e){}
+  renderAgent(aid,'run');
+}
+
+/* ---- insights loaders (shared) ---- */
+async function loadInsights(id, sel){
+  const el=$(sel); if(!el) return;
+  let d; try{ d=await api('/official/'+encodeURIComponent(id)+'/insights'); }
+  catch(e){ el.innerHTML=errCard(e.message); return; }
+  if(!d.ok){ el.innerHTML=`<div class="card"><div class="bd" style="color:var(--warn);display:flex;gap:8px;align-items:center">${ic('alert')} ${esc(d.error||'monitor 不可达')}</div></div>`; return; }
+  el.innerHTML=insightsBody(id, d);
+}
+function aclBlock(id, d){
+  const acl=(d.acl&&d.acl.acl)||{}, rejects=(d.acl&&d.acl.rejects)||{};
+  const allow=(acl.allow||[]).map(x=>`<tr><td class="mono">${shortAid(x)}</td><td class="muted">${esc((acl.notes&&acl.notes[x])||'')}</td><td><button class="btn sm danger" onclick="aclAction('${esc(id)}','revoke','${esc(x)}')">撤销</button></td></tr>`).join('');
+  const rej=Object.entries(rejects).map(([x,n])=>`<tr><td class="mono">${shortAid(x)}</td><td>${n} 次被拒</td><td><button class="btn sm" onclick="aclAction('${esc(id)}','grant','${esc(x)}')">授权</button></td></tr>`).join('');
+  return `<div class="row" style="margin-bottom:8px"><span class="badge cap">模式 ${esc(acl.mode||'-')}</span><input id="aclGrant" class="inp mono sp" placeholder="AID 授权…"/><button class="btn sm pri" onclick="aclAction('${esc(id)}','grant',document.getElementById('aclGrant').value.trim())">授权</button><button class="btn sm" onclick="aclAction('${esc(id)}','mode','','${acl.mode==='open'?'allowlist':'open'}')">${acl.mode==='open'?'切到 allowlist':'切到 open'}</button></div>
+    <div class="tbwrap"><table class="tb"><tr><th>已授权 AID</th><th>备注</th><th></th></tr>${allow||'<tr><td class="faint">无</td></tr>'}</table></div>
+    ${rej?`<div class="sec">被拒请求（可一键授权）</div><div class="tbwrap"><table class="tb">${rej}</table></div>`:''}`;
+}
+function insightsBody(id, d){
+  const stats=d.stats||{}, acl=(d.acl&&d.acl.acl)||{};
+  const curve=barChart(stats.curve||[]);
+  const svcRows=(stats.by_service||[]).slice(0,12).map(s=>`<tr><td>${esc(s.key)}</td><td>${s.calls}</td><td>${s.done}/${s.err}</td><td class="muted">${s.avg_ms?(s.avg_ms/1000).toFixed(1)+'s':'-'}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
+  const mdlRows=(stats.by_model||[]).slice(0,12).map(s=>`<tr><td class="mono">${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
+  const modRows=(stats.by_modality||[]).map(s=>`<span class="badge cap">${modChip(s.key)} · ${s.calls}</span>`).join(' ');
+  const epRows=(stats.endpoints||[]).map(s=>`<tr><td class="mono">${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
+  return `
+    <div class="grid g3 mb16">
+      ${kpi('近窗开销', esc(d.cost_yuan||FormatMilli(d.cost_milli||0)), '实测计费', 'coin')}
+      ${kpi('授权模式', esc(acl.mode||'-'), `${(acl.allow||[]).length} 个 AID`, 'shield')}
+      ${kpi('模态分布', (stats.by_modality||[]).length+' 类', '按输出类型', 'layers')}
+    </div>
+    <div class="card"><div class="hd">${ic('gauge')} 调用曲线（近 24h）</div><div class="bd">${curve}<div class="wrap" style="margin-top:8px">${modRows||'<span class="faint">无</span>'}</div></div></div>
+    <div class="grid g2 mt14">
+      <div class="card"><div class="hd">${ic('activity')} 按服务</div><div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>服务</th><th>调用</th><th>成/败</th><th>均时</th><th>开销</th></tr>${svcRows||'<tr><td class="faint">无</td></tr>'}</table></div></div></div>
+      <div class="card"><div class="hd">${ic('cpu')} 按模型</div><div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>模型</th><th>调用</th><th>开销</th></tr>${mdlRows||'<tr><td class="faint">无</td></tr>'}</table></div></div></div>
+    </div>
+    <div class="card mt14"><div class="hd">${ic('coin')} API 接口分布</div><div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>端点</th><th>调用</th><th>开销</th></tr>${epRows||'<tr><td class="faint">无</td></tr>'}</table></div></div></div>
+    <div class="card mt14"><div class="hd">${ic('shield')} 授权名单（${(acl.allow||[]).length}）</div><div class="bd">${aclBlock(id,d)}</div></div>`;
+}
+async function loadCatalog(id, sel){
+  const el=$(sel); if(!el) return;
+  try{ const cat=await api('/official/'+encodeURIComponent(id)+'/monitor/catalog');
+    const services=cat.services||[];
+    el.innerHTML = services.length? `<div class="wrap">${services.map(s=>`<span class="badge cap" title="${esc(s.desc||'')}">${esc(s.name||s.id)}${s.out?` · ${modChip(modalityFromOut(s.out))}`:''}</span>`).join('')}</div>`
+      : '<span class="faint">catalog 未返回服务</span>';
+  }catch(e){ el.innerHTML=errCard(e.message); }
+}
+function modalityFromOut(o){o=String(o).toLowerCase();return o==='image'?'image':o==='video'?'video':o==='music'?'audio':o==='album'?'mixed':'text';}
+async function loadACL(id, sel){
+  const el=$(sel); if(!el) return;
+  try{ const d=await api('/official/'+encodeURIComponent(id)+'/insights');
+    if(!d.ok){ el.innerHTML=`<div class="faint">${esc(d.error||'monitor 不可达')}</div>`; return; }
+    el.innerHTML=aclBlock(id, d);
+  }catch(e){ el.innerHTML=errCard(e.message); }
+}
+async function aclAction(id, action, aid, mode){
+  try{
+    const body = action==='mode' ? {action:'mode',mode} : {action, aid, note:action==='grant'?'hub admin 授权':''};
+    await api('/official/'+encodeURIComponent(id)+'/acl',{method:'POST',body:JSON.stringify(body)});
+    toast('已更新授权');
+    // refresh whichever context is open
+    if(CUR_AGENT && parseHash()[0]==='agents'){ const tab=parseHash()[2]||'overview'; renderAgent(CUR_AGENT, tab); }
+    else refreshCurrent();
+  }catch(e){ toast('失败：'+e.message); }
+}
+
+/* ---- shared: fetch all official insights ---- */
+async function getAllInsights(){
+  let offs=[]; try{ offs=(await api('/official')).officials||[]; }catch(e){ return []; }
+  return Promise.all(offs.map(async o=>{
+    const m=o.manifest;
+    try{ const d=await api('/official/'+encodeURIComponent(m.id)+'/insights'); return {id:m.id,name:m.name,aid:m.aid,ok:!!d.ok,d}; }
+    catch(e){ return {id:m.id,name:m.name,aid:m.aid,ok:false,err:e.message,d:{}}; }
+  }));
+}
+
+/* ---- placeholder views ---- */
+function placeholderView(title, note){
+  return async ()=>{ $('#main').innerHTML = shell({title, body: empty('模块建设中', note)}); };
+}
+
+/* ---------------- route table ---------------- */
+Object.assign(ROUTES, {
+  'operations/overview': vOpsOverview,
+  'operations/agents': vAgents,
+  'operations/onboarding': placeholderView('接入队列','将展示待验证/验证失败/接入测试中的 Agent 及协议、健康检查与签名状态。需接入接入流水线数据。'),
+  'operations/reviews': placeholderView('审核认证','首次发布/官方认证/版本更新审核工作台（资料·能力·权限·版本差异 + 自动检测）。需接入审核流水线。'),
+  'operations/store': vStore,
+  'operations/capabilities': vCapabilities,
+  'operations/channels': placeholderView('产品渠道','配置 Agent 在各 ANet 产品中的分发策略、曝光范围、访客额度与灰度比例。需接入渠道配置。'),
+  'operations/insights': vInsightsList,
+  'operations/deployments': vDeployments,
+  'operations/incidents': placeholderView('告警与事故','将区分告警（信号）与事故（需跟踪处置的事件），带状态机与影响面。需接入事故管理。'),
+  'operations/risk': vRisk,
+  'operations/enforcement': vEnforcement,
+  'data/overview': vDataOverview,
+  'data/sessions': vSessions,
+  'data/anomalies': vAnomalies,
+  'data/caps': vCapOps,
+  'data/grounding': vGrounding,
+  'data/precognition': vPrecog,
+  'data/collab': vCollab,
+  'data/governance': placeholderView('数据治理','授权与用途、脱敏与保留、数据血缘与删除。需 OKF 扩展授权/脱敏/血缘字段。'),
+  'ecosystem/overview': vEcoOverview,
+  'ecosystem/matrix': vMatrix,
+  'ecosystem/network': vNetwork,
+  'ecosystem/vision': vVision,
+  'platform/status': vPlatformStatus,
+  'platform/models': vModels,
+  'platform/audit': vAudit,
+  'platform/connections': placeholderView('连接与集成','Agent 接入协议、Monitor 连接、采收通道与 Webhook/API 配置总览。'),
+});
+
+/* ---------------- init ---------------- */
+$('#topbar').innerHTML = $('#topbar').innerHTML.replace(/\$\{ic\('(\w+)'\)\}/g,(_,n)=>ic(n));
+wireGlobalSearch();
+if(TOKEN){ boot() } else { $('#login').style.display='flex' }
+</script>
+</body>
+</html>

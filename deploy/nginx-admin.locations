@@ -1,0 +1,11 @@
+# hub.agentnetwork.org.cn — operator plane. Insert INSIDE the 443 server block, BEFORE `location /`.
+# The admin service binds 127.0.0.1:8078 (anet-hub-admin.service); the public hub on 8088 is untouched.
+    location ^~ /admin {
+        proxy_pass http://127.0.0.1:8078;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
+        client_max_body_size 1m;
+    }

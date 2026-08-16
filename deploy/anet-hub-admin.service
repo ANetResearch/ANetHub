@@ -1,0 +1,23 @@
+[Unit]
+Description=AgentNetwork Hub operator plane (anet-hub-admin)
+After=network-online.target anet-hub.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root: the ops plane needs the host's ssh identity (/root/.ssh) to reach official agents'
+# runtime hosts, and write access to the hub-owned hub.db + its own admin/ tree. It binds loopback
+# only; nginx is the sole public face.
+# ADMIN_TOKEN is REQUIRED (no default): set your own secret before starting.
+Environment=ADMIN_TOKEN=CHANGE_ME
+ExecStart=/data/projs/anet-hub/bin/anet-hub-admin \
+  --addr 127.0.0.1:8078 \
+  --hub-data /data/projs/anet-hub/data \
+  --data /data/projs/anet-hub/admin
+WorkingDirectory=/data/projs/anet-hub
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

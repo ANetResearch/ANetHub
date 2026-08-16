@@ -1,0 +1,22 @@
+[Unit]
+Description=AgentNetwork official Hub (anet-hub)
+Documentation=https://github.com/ChatChatTech/AgentNetwork
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=anet-hub
+Group=anet-hub
+WorkingDirectory=/data/projs/anet-hub
+ExecStart=/data/projs/anet-hub/bin/anet-hub --addr 127.0.0.1:8088 --data /data/projs/anet-hub/data
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/data/projs/anet-hub/data
+
+[Install]
+WantedBy=multi-user.target
