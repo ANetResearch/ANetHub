@@ -35,3 +35,15 @@ jobs:
           go-version-file: go.mod
       - name: build without ${{ matrix.tags }}
         run: go build -tags "${{ matrix.tags }}" ./...
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: tests under the race detector
+        env:
+          CGO_ENABLED: "1"   # -race needs cgo; runners ship gcc
+        run: go test -race ./...
