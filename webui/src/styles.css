@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/* Bebas Neue is embedded (小体积 ttf → data URI at build time)。Roboto 变量字体太大，
+   正文退化为系统字体栈（本机装了 Roboto 会优先使用）。 */
+@font-face {
+  font-family: "Bebas Neue";
+  src: url("./assets/BebasNeue-Regular.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@theme {
+  --font-bebas: "Bebas Neue", "Arial Narrow", sans-serif;
+  --font-body: "Roboto", -apple-system, "SF Pro", "Segoe UI", system-ui,
+    "PingFang SC", "Microsoft YaHei", sans-serif;
+  --color-brand: #e60000;
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --muted: #ececf0;
+  --muted-foreground: #717182;
+  --border: rgba(0, 0, 0, 0.1);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: #e60000;
+  color: #fff;
+}
+
+/* thin neutral scrollbars for inner panes */
+.thin-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.thin-scroll::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 3px; }
+.thin-scroll { scrollbar-width: thin; }
+.dark-scroll::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.22); }
+
+/* ---- rendered markdown (agent README / chat messages / transcripts) ---- */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { font-size: 0.85rem; font-weight: 700; margin: 0.75rem 0 0.35rem; }
+.md p { margin: 0.4rem 0; }
+.md ul, .md ol { margin: 0.4rem 0; padding-left: 1.25rem; }
+.md li { margin: 0.15rem 0; }
+.md a { color: #e60000; text-decoration: underline; text-underline-offset: 2px; }
+.md strong { font-weight: 700; }
+.md code {
+  background: #f4f4f5; border: 1px solid rgba(0, 0, 0, 0.08); border-radius: 4px;
+  padding: 0.05rem 0.3rem; font-size: 0.75rem; font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.md blockquote { margin: 0.4rem 0; padding: 0.1rem 0.75rem; border-left: 3px solid #e60000; color: #52525b; }
+.md hr { border: none; border-top: 1px solid rgba(0, 0, 0, 0.1); margin: 0.6rem 0; }
+.md .mdpre {
+  background: #0a0a0a; color: #e4e4e7; border-radius: 6px; padding: 0.6rem 0.75rem;
+  overflow: auto; font-size: 0.72rem; line-height: 1.55; white-space: pre; margin: 0.5rem 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.md .mdtable { border-collapse: collapse; width: 100%; margin: 0.5rem 0; font-size: 0.75rem; }
+.md .mdtable th, .md .mdtable td { border: 1px solid rgba(0, 0, 0, 0.12); padding: 0.3rem 0.55rem; text-align: left; vertical-align: top; }
+.md .mdtable th { background: #f4f4f5; font-weight: 600; }
+
+/* bubbles from the agent render markdown on light-gray background */
+.bubble-them .md code { background: #fff; }
+
+@keyframes hub-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.dot-pulse { animation: hub-pulse 1.4s ease-in-out infinite; }
+.dot-pulse:nth-child(2) { animation-delay: 0.2s; }
+.dot-pulse:nth-child(3) { animation-delay: 0.4s; }

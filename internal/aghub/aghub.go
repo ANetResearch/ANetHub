@@ -1,0 +1,552 @@
+// Package aghub is the v0.1 centralized Agent Hub — the single official service the whole network runs
+// through. It is three things over one SQLite store:
+//
+//	registry — agents register their AgentCard + KEL. The Hub derives the AID from the KEL and checks it
+//	           matches, so a registration cannot claim someone else's AID.
+//	relay    — a store-and-forward message broker addressed by recipient AID. It is how one agent
+//	           delegates a task to another and how the deliverable comes back: agents POST a message for
+//	           a recipient (/relay/send) and the recipient PULLS its mailbox (/relay/poll, KEL-signed).
+//	           The relayed payloads (a signed TaskDoc, a provider-signed receipt) are end-to-end
+//	           verifiable, so the Hub only moves bytes — it cannot forge an interaction.
+//	reviews  — a requester uploads {provider-signed receipt, requester-signed review}. The Hub verifies
+//	           BOTH signatures against the registered KELs and checks they interlock (same interaction,
+//	           reviewer == receipt.requester, subject == receipt.provider, review→receipt CID). Neither
+//	           party can forge the other's signature, so a stored rating provably came from a real
+//	           counterparty of a real interaction. interaction_id is the uniqueness key (one review each).
+//
+// v0.1 is deliberately centralized: there is no P2P. Aggregation is intentionally simple (mean + count);
+// richer reputation and a decentralized transport are later versions.
+package aghub
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
+
+	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetHub/internal/protocol/evidence"
+)
+
+// AgentView is an agent's public registry entry plus its aggregate rating. Agents are addressed purely
+// by AID (v0.1 has no P2P endpoint) — all traffic flows through the Hub relay. The profile fields
+// (summary/readme/pricing) are AGENT-authored self-description (set via `anet profile set`); pricing is
+// display-only text in v0.1 (no settlement).
+type AgentView struct {
+	AID          string   `json:"aid"`
+	Name         string   `json:"name"`
+	Caps         []string `json:"caps"`
+	Summary      string   `json:"summary,omitempty"` // one-line self-description
+	Readme       string   `json:"readme,omitempty"`  // longer markdown self-description
+	Pricing      string   `json:"pricing,omitempty"` // free-form pricing text (display-only in v0.1)
+	Listed       bool     `json:"listed"`            // true if it advertises a service (caps or profile) — only listed agents appear in the starfield/find
+	GuestQuota   int      `json:"guest_quota"`       // guest-mode trial messages a visitor may send this agent (0 = opts out of guest traffic)
+	AvgRating    float64  `json:"avg_rating"`
+	ReviewCount  int      `json:"review_count"`
+	RegisteredAt string   `json:"registered_at"`
+}
+
+// ReviewView is one stored, verified review. Beyond the rating it carries the VERIFIED interaction
+// content: the goal (re-derived from the request TaskDoc whose bytes hash to the receipt's request_cid)
+// and the deliverable (whose bytes hash to the receipt's result_cid). So a viewer sees what was actually
+// asked and delivered — not just a star + comment — and both are cryptographically bound to the receipt.
+type ReviewView struct {
+	InteractionID string `json:"interaction_id"`
+	SubjectAID    string `json:"subject_aid"`
+	ReviewerAID   string `json:"reviewer_aid"`
+	Rating        int    `json:"rating"`
+	Comment       string `json:"comment,omitempty"`
+	ReceiptCID    string `json:"receipt_cid"`
+	Goal          string `json:"goal"`         // what the requester asked (verified via request_cid)
+	Deliverable   string `json:"deliverable"`  // what the provider returned (verified via result_cid)
+	RequestCID    string `json:"request_cid"`  // content anchor of the request
+	ResultCID     string `json:"result_cid"`   // content anchor of the deliverable
+	CompletedAt   uint64 `json:"completed_at"` // provider's receipt time (unix millis)
+	CreatedAt     uint64 `json:"created_at"`   // review time (unix millis)
+}
+
+// ReviewDetail is the verified interaction content the Hub stores alongside a review (extracted + checked
+// by the server before this is called).
+type ReviewDetail struct {
+	Goal        string
+	Deliverable string
+	RequestCID  string
+	ResultCID   string
+	CompletedAt uint64
+}
+
+// RelayMessage is one store-and-forward message queued for a recipient AID.
+type RelayMessage struct {
+	ID            int64  `json:"id"`
+	ToAID         string `json:"to_aid"`
+	FromAID       string `json:"from_aid"`
+	Kind          string `json:"kind"` // "delegate" | "message" | "result"
+	InteractionID string `json:"interaction_id"`
+	Payload       []byte `json:"-"` // opaque, end-to-end verifiable (base64 on the wire)
+	CreatedAt     string `json:"created_at"`
+}
+
+// Relay message kinds.
+const (
+	RelayKindDelegate = "delegate" // a signed delegation (delegation.DelegateReq bytes)
+	RelayKindResult   = "result"   // a completion (delegation.ResultResp bytes: transcript + provider receipt)
+	RelayKindMessage  = "message"  // a conversation message (delegation.ChatMsg bytes: text / end negotiation)
+)
+
+// Store is the Hub's durable registry + relay + review store (SQLite).
+type Store struct {
+	db *sql.DB
+	mu sync.Mutex
+}
+
+// Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
+func Open(dir string) (*Store, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("hub: dir required")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("hub: mkdir: %w", err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)")
+	if err != nil {
+		return nil, fmt.Errorf("hub: open db: %w", err)
+	}
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Close closes the db handle.
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) migrate() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS agent (
+		   aid TEXT PRIMARY KEY,
+		   name TEXT NOT NULL DEFAULT '',
+		   caps TEXT NOT NULL DEFAULT '[]',
+		   summary TEXT NOT NULL DEFAULT '',
+		   readme TEXT NOT NULL DEFAULT '',
+		   pricing TEXT NOT NULL DEFAULT '',
+		   guest_quota INTEGER NOT NULL DEFAULT 5,
+		   kel BLOB NOT NULL,
+		   registered_at TEXT NOT NULL
+		 )`,
+		`CREATE TABLE IF NOT EXISTS review (
+		   interaction_id TEXT PRIMARY KEY,
+		   subject_aid TEXT NOT NULL,
+		   reviewer_aid TEXT NOT NULL,
+		   rating INTEGER NOT NULL,
+		   comment TEXT NOT NULL DEFAULT '',
+		   receipt_cid TEXT NOT NULL,
+		   goal TEXT NOT NULL DEFAULT '',
+		   deliverable TEXT NOT NULL DEFAULT '',
+		   request_cid TEXT NOT NULL DEFAULT '',
+		   result_cid TEXT NOT NULL DEFAULT '',
+		   completed_at INTEGER NOT NULL DEFAULT 0,
+		   created_at INTEGER NOT NULL,
+		   stored_at TEXT NOT NULL
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_review_subject ON review(subject_aid)`,
+		`CREATE TABLE IF NOT EXISTS relay_message (
+		   id INTEGER PRIMARY KEY AUTOINCREMENT,
+		   to_aid TEXT NOT NULL,
+		   from_aid TEXT NOT NULL DEFAULT '',
+		   kind TEXT NOT NULL,
+		   interaction_id TEXT NOT NULL DEFAULT '',
+		   payload BLOB NOT NULL,
+		   created_at TEXT NOT NULL,
+		   delivered_at TEXT
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_relay_mailbox ON relay_message(to_aid, delivered_at, id)`,
+		// completed_task counts interactions that reached a DELIVERED result (a provider relayed a
+		// "result" back to its requester). This is the network's "work done" metric: reviews are a
+		// voluntary subset of these (most completed tasks are never reviewed). One row per interaction.
+		`CREATE TABLE IF NOT EXISTS completed_task (
+		   interaction_id TEXT PRIMARY KEY,
+		   provider_aid TEXT NOT NULL DEFAULT '',
+		   requester_aid TEXT NOT NULL DEFAULT '',
+		   completed_at TEXT NOT NULL
+		 )`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("hub: migrate: %w", err)
+		}
+	}
+	// Additive upgrade for pre-existing DBs: add the profile columns if they are missing. ADD COLUMN
+	// errors with "duplicate column name" when they already exist (fresh DBs from the CREATE above) —
+	// that is expected and ignored, so migrate stays idempotent.
+	for _, q := range []string{
+		`ALTER TABLE agent ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agent ADD COLUMN readme TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agent ADD COLUMN pricing TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE agent ADD COLUMN guest_quota INTEGER NOT NULL DEFAULT 5`,
+	} {
+		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("hub: migrate profile: %w", err)
+		}
+	}
+	return nil
+}
+
+// PutAgent registers or updates an agent (upsert on AID). The caller has already verified the KEL
+// derives this AID. anet models no availability class — an agent may always be offline (the relay is
+// store-and-forward), so nothing about "resident vs intermittent" is recorded. guestQuota is how many
+// guest-mode trial messages a visitor may send this agent (0 = opt out of guest traffic).
+func (s *Store) PutAgent(aid, name string, caps []string, guestQuota int, kel []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	capsJSON, _ := json.Marshal(caps)
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`INSERT INTO agent(aid,name,caps,guest_quota,kel,registered_at) VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(aid) DO UPDATE SET name=excluded.name, caps=excluded.caps,
+		   guest_quota=excluded.guest_quota, kel=excluded.kel`,
+		aid, name, string(capsJSON), guestQuota, kel, now)
+	return err
+}
+
+// PutProfile updates an agent's self-authored profile (summary/readme/pricing). The agent must already
+// be registered (its identity is proven at registration + on this call's signed challenge). Profile is
+// kept separate from PutAgent so a plain re-registration never wipes it.
+func (s *Store) PutProfile(aid, summary, readme, pricing string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE agent SET summary=?, readme=?, pricing=? WHERE aid=?`,
+		summary, readme, pricing, aid)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("hub: agent %s not registered", aid)
+	}
+	return nil
+}
+
+// AgentKEL returns the stored KEL bytes for aid (used to verify uploaded evidence + relay auth).
+func (s *Store) AgentKEL(aid string) ([]byte, error) {
+	var kel []byte
+	err := s.db.QueryRow(`SELECT kel FROM agent WHERE aid=?`, aid).Scan(&kel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("hub: agent %s not registered", aid)
+	}
+	return kel, err
+}
+
+// HasInteraction reports whether a review for interactionID already exists (one-review-per-interaction).
+func (s *Store) HasInteraction(interactionID string) bool {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM review WHERE interaction_id=?`, interactionID).Scan(&one)
+	return err == nil
+}
+
+// PutReview stores a verified review + its verified interaction content (interaction_id is the unique key).
+func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`INSERT INTO review(interaction_id,subject_aid,reviewer_aid,rating,comment,receipt_cid,
+		   goal,deliverable,request_cid,result_cid,completed_at,created_at,stored_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		rv.InteractionID, rv.SubjectAID, rv.ReviewerAID, rv.Rating, rv.Comment, rv.ReceiptCID,
+		d.Goal, d.Deliverable, d.RequestCID, d.ResultCID, d.CompletedAt, rv.CreatedAt, now)
+	return err
+}
+
+// ListAgents returns LISTED agents (those advertising a service — caps or a profile) with their
+// aggregate rating, best-rated first. A non-empty query filters to agents whose AID, name, caps or
+// profile contain it (case-insensitive) — the `find` backend. Pure requesters (registered but with no
+// caps/profile) are intentionally omitted so they do not clutter the starfield.
+func (s *Store) ListAgents(query string) ([]AgentView, error) {
+	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at,
+	             COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+	      FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid`
+	var args []any
+	if query != "" {
+		like := "%" + query + "%"
+		q += ` WHERE a.aid LIKE ? OR a.name LIKE ? OR a.caps LIKE ? OR a.summary LIKE ? OR a.readme LIKE ?`
+		args = append(args, like, like, like, like, like)
+	}
+	q += ` GROUP BY a.aid ORDER BY AVG(r.rating) DESC, COUNT(r.interaction_id) DESC, a.registered_at`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentView
+	for rows.Next() {
+		av, err := scanAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		if !av.Listed {
+			continue // registered-but-unlisted (a pure requester) — not shown as a provider
+		}
+		out = append(out, av)
+	}
+	return out, rows.Err()
+}
+
+// GetAgent returns one agent's entry + aggregate and its reviews (newest first).
+func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
+	row := s.db.QueryRow(
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at,
+		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		 FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
+		 WHERE a.aid=? GROUP BY a.aid`, aid)
+	av, err := scanAgent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, fmt.Errorf("hub: agent %s not found", aid)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	rrows, err := s.db.Query(
+		`SELECT interaction_id, subject_aid, reviewer_aid, rating, comment, receipt_cid,
+		        goal, deliverable, request_cid, result_cid, completed_at, created_at
+		 FROM review WHERE subject_aid=? ORDER BY created_at DESC`, aid)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rrows.Close()
+	var reviews []ReviewView
+	for rrows.Next() {
+		var rv ReviewView
+		if err := rrows.Scan(&rv.InteractionID, &rv.SubjectAID, &rv.ReviewerAID, &rv.Rating, &rv.Comment, &rv.ReceiptCID,
+			&rv.Goal, &rv.Deliverable, &rv.RequestCID, &rv.ResultCID, &rv.CompletedAt, &rv.CreatedAt); err != nil {
+			return nil, nil, err
+		}
+		reviews = append(reviews, rv)
+	}
+	return &av, reviews, rrows.Err()
+}
+
+// --- relay broker: store-and-forward mailboxes keyed by recipient AID ---
+
+// RelayEnqueue queues a message for toAID and returns its id. Payload is opaque bytes (the Hub does not
+// interpret it — a delegation or a result is end-to-end verifiable by the recipient).
+func (s *Store) RelayEnqueue(toAID, fromAID, kind, interactionID string, payload []byte) (int64, error) {
+	if toAID == "" || kind == "" || len(payload) == 0 {
+		return 0, fmt.Errorf("hub: relay enqueue needs to_aid, kind and payload")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.db.Exec(
+		`INSERT INTO relay_message(to_aid,from_aid,kind,interaction_id,payload,created_at)
+		 VALUES(?,?,?,?,?,?)`, toAID, fromAID, kind, interactionID, payload, now)
+	if err != nil {
+		return 0, err
+	}
+	// A relayed "result" is a provider delivering the final deliverable to its requester — i.e. a task
+	// reached completion. Record it once per interaction (guest trials use "message", not "result", so
+	// they are naturally excluded). This underpins the network's "completed tasks" stat.
+	if kind == RelayKindResult && interactionID != "" {
+		_, _ = s.db.Exec(
+			`INSERT OR IGNORE INTO completed_task(interaction_id,provider_aid,requester_aid,completed_at)
+			 VALUES(?,?,?,?)`, interactionID, fromAID, toAID, now)
+	}
+	return res.LastInsertId()
+}
+
+// HubStats are the headline metrics shown on the public landing page.
+type HubStats struct {
+	Agents         int     `json:"agents"`          // listed providers (advertise a service)
+	TasksCompleted int     `json:"tasks_completed"` // interactions that reached a delivered result
+	Reviews        int     `json:"reviews"`         // verified reviews (a voluntary subset of completed)
+	AvgRating      float64 `json:"avg_rating"`      // mean rating over all reviews (0 if none)
+}
+
+// Stats computes the landing metrics in one pass.
+func (s *Store) Stats() (HubStats, error) {
+	var out HubStats
+	agents, err := s.ListAgents("")
+	if err != nil {
+		return out, err
+	}
+	for _, a := range agents {
+		if a.Listed {
+			out.Agents++
+		}
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM completed_task`).Scan(&out.TasksCompleted); err != nil {
+		return out, err
+	}
+	var avg sql.NullFloat64
+	if err := s.db.QueryRow(`SELECT COUNT(*), AVG(rating) FROM review`).Scan(&out.Reviews, &avg); err != nil {
+		return out, err
+	}
+	if avg.Valid {
+		out.AvgRating = avg.Float64
+	}
+	return out, nil
+}
+
+// relayPollByteBudget caps the cumulative raw payload returned by one RelayPoll so a poll response stays
+// well under the daemon's response cap even with inline attachments; base64 on the wire inflates this ~4/3
+// (48 MiB → ~64 MiB JSON), comfortably below maxHubResponse.
+const relayPollByteBudget = 48 << 20 // 48 MiB
+
+// RelayPoll returns undelivered messages for toAID, oldest first (limit ≤ 0 → 100).
+func (s *Store) RelayPoll(toAID string, limit int) ([]RelayMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(
+		`SELECT id,to_aid,from_aid,kind,interaction_id,payload,created_at
+		 FROM relay_message WHERE to_aid=? AND delivered_at IS NULL ORDER BY id LIMIT ?`, toAID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RelayMessage
+	var acc int64
+	for rows.Next() {
+		var m RelayMessage
+		if err := rows.Scan(&m.ID, &m.ToAID, &m.FromAID, &m.Kind, &m.InteractionID, &m.Payload, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		// Bound the cumulative payload of one poll response so a backlog of large ATTACHMENT-bearing
+		// messages can't produce a body that overflows the poller's response cap (which would truncate
+		// and wedge the mailbox). Always return the first message — even if it alone exceeds the budget —
+		// so a single big message is still deliverable; then stop before adding one that would blow it.
+		if len(out) > 0 && acc+int64(len(m.Payload)) > relayPollByteBudget {
+			break
+		}
+		acc += int64(len(m.Payload))
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// RelayAck marks messages delivered, scoped to toAID so a caller can only ack its own mailbox. Returns
+// how many rows were marked.
+func (s *Store) RelayAck(toAID string, ids []int64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	total := 0
+	for _, id := range ids {
+		res, err := s.db.Exec(
+			`UPDATE relay_message SET delivered_at=? WHERE id=? AND to_aid=? AND delivered_at IS NULL`,
+			now, id, toAID)
+		if err != nil {
+			return total, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			total++
+		}
+	}
+	return total, nil
+}
+
+// PurgeGuestRelay deletes ALREADY-DELIVERED relay rows to or from a guest-broker AID. Guest-mode traffic
+// is transient by design ("data not stored"): once a message has been delivered (the handler pulled the
+// task, or the broker pulled the reply), the row is no longer needed, so this keeps guest chatter from
+// accumulating in the store. Undelivered rows are left intact so nothing in flight is lost.
+func (s *Store) PurgeGuestRelay(guestAID string) (int, error) {
+	if guestAID == "" {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(
+		`DELETE FROM relay_message WHERE (to_aid=? OR from_aid=?) AND delivered_at IS NOT NULL`,
+		guestAID, guestAID)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// PurgeStaleGuestRelay deletes ALL relay rows to or from the guest broker created before cutoff, whether
+// or not they were delivered. It backstops PurgeGuestRelay: a visitor who abandons the tab (or whose
+// message went to an offline handler that never pulled it) leaves rows that never get "delivered" and so
+// are never purged on poll. Guest sessions are ephemeral (dropped after guestSessionTTL), so once a row
+// is older than that its session is dead and the row can go — nothing in flight is lost. created_at is
+// RFC3339Nano text; lexicographic comparison is correct to well below the minute-scale cutoff used here.
+func (s *Store) PurgeStaleGuestRelay(guestAID string, cutoff time.Time) (int, error) {
+	if guestAID == "" {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(
+		`DELETE FROM relay_message WHERE (to_aid=? OR from_aid=?) AND created_at < ?`,
+		guestAID, guestAID, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// Edge is a verified review relationship: the reviewer rated the subject. It is the real, cryptographically
+// backed collaboration signal the starfield draws (reviewer → subject).
+type Edge struct {
+	Source string `json:"source"` // reviewer AID
+	Target string `json:"target"` // subject (provider) AID
+	Rating int    `json:"rating"`
+}
+
+// ReviewEdges returns one edge per stored review (reviewer → subject).
+func (s *Store) ReviewEdges() ([]Edge, error) {
+	rows, err := s.db.Query(`SELECT reviewer_aid, subject_aid, rating FROM review`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Edge
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.Source, &e.Target, &e.Rating); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+type scanner interface{ Scan(dest ...any) error }
+
+func scanAgent(sc scanner) (AgentView, error) {
+	var av AgentView
+	var capsJSON string
+	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme, &av.Pricing,
+		&av.GuestQuota, &av.RegisteredAt, &av.AvgRating, &av.ReviewCount); err != nil {
+		return av, err
+	}
+	_ = json.Unmarshal([]byte(capsJSON), &av.Caps)
+	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
+	// profile text. A pure requester has none of these and stays out of the public listing.
+	av.Listed = len(av.Caps) > 0 || av.Summary != "" || av.Readme != "" || av.Pricing != ""
+	return av, nil
+}
+
+// aidFromKEL derives the self-certifying AID from a KEL's inception→final state.
+func aidFromKEL(kel []identity.SignedEvent) (string, error) {
+	states, err := identity.Replay(kel)
+	if err != nil {
+		return "", err
+	}
+	if len(states) == 0 {
+		return "", errors.New("hub: empty KEL")
+	}
+	return states[len(states)-1].AID, nil
+}
