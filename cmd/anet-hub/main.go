@@ -19,9 +19,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
-	"github.com/ANetResearch/ANetHub/internal/taskboard"
 	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
@@ -53,32 +51,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	tb, err := taskboard.Open(*data)
-	if err != nil {
-		log.Fatalf("anet-hub: open taskboard: %v", err)
-	}
-	defer tb.Close()
 	hubID, err := hubid.LoadOrIncept(*data)
 	if err != nil {
 		log.Fatalf("anet-hub: hub identity: %v", err)
 	}
 	log.Printf("anet-hub identity: %s", hubID.AID)
 
-	fedCfg, err := federation.LoadConfig(*data)
-	if err != nil {
-		log.Fatalf("anet-hub: federation config: %v", err)
-	}
-	fed, err := federation.New(*data, fedCfg, hubID, storeDelivery{store})
-	if err != nil {
-		log.Fatalf("anet-hub: federation: %v", err)
-	}
-	defer fed.Close()
-
 	srv0 := aghub.NewServer(store)
-	if fed.Enabled() {
-		srv0.SetForwarder(fed.TryForward)
-		log.Printf("anet-hub federation: delivery=%s peers=%d", fedCfg.Delivery, len(fedCfg.Peers))
-	}
 	// Guest mode is always on: no-daemon visitors are brokered to any registered agent that accepts guests
 	// (guest_quota > 0, default 5 — each agent opts out via `anet hub-register --guest-messages 0`).
 	if err := srv0.EnableGuestMode(ctx, *data); err != nil {
@@ -89,10 +68,21 @@ func main() {
 	// taskboard authenticates against the same agent registry (one KEL, one
 	// auth scheme); /hub/identity is the federation trust anchor (K208).
 	root := http.NewServeMux()
-	root.Handle("/tasks/", taskboard.NewServer(tb, store).Handler())
 	root.Handle("/hub/identity", hubID.Handler())
-	root.Handle("/fed/v1/", fed.Handler())
 	root.Handle("/", srv0.Handler())
+	deps := &hubDeps{data: *data, store: store, hubID: hubID, srv0: srv0, root: root}
+	names := ""
+	for _, m := range mounts {
+		closer, err := m.wire(deps)
+		if err != nil {
+			log.Fatalf("anet-hub: module %s: %v", m.name, err)
+		}
+		if closer != nil {
+			defer closer()
+		}
+		names += " " + m.name
+	}
+	log.Printf("anet-hub modules:%s", names)
 
 	srv := &http.Server{
 		Addr:              *addr,

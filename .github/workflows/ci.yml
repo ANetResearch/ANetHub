@@ -20,3 +20,18 @@ jobs:
         run: go vet ./...
       - name: tests
         run: go test ./...
+
+  unplug:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tags: ["no_taskboard", "no_federation", "no_taskboard,no_federation"]
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build without ${{ matrix.tags }}
+        run: go build -tags "${{ matrix.tags }}" ./...
