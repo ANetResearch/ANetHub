@@ -1,6 +1,6 @@
 module github.com/ANetResearch/ANetHub
 
-go 1.26.1
+go 1.26.6
 
 require (
 	github.com/ANetResearch/ANetCore v0.2.0
