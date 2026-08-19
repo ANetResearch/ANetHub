@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -367,5 +368,58 @@ func TestRegisterAidKelMismatchRejected(t *testing.T) {
 		"aid": a.AID(), "kel": base64.StdEncoding.EncodeToString(kelB),
 	}); code == 200 {
 		t.Fatal("aid/kel mismatch must be rejected")
+	}
+}
+
+// C2 states its version on the wire.
+//
+// Three repos had drifted onto three different kernel versions at once and
+// nothing on the wire could have told anybody. A contract that cannot say
+// which contract it is has no way to catch that.
+func TestWireContractVersionIsStated(t *testing.T) {
+	srv := newHub(t)
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("X-ANet-Wire"); got != "1" {
+		t.Fatalf("every response must state the contract version, got %q", got)
+	}
+}
+
+// A caller from the future is refused with both numbers named, because the
+// alternative is a delegation that half-arrives.
+func TestWireContractRefusesANewerCaller(t *testing.T) {
+	srv := newHub(t)
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/agents", nil)
+	req.Header.Set("X-ANet-Wire", "99")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a newer caller must be refused, got %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), "upgrade the hub") {
+		t.Errorf("the refusal must say what to do: %s", b)
+	}
+}
+
+// Everything built before the header existed keeps working.
+func TestWireContractAcceptsALegacyCaller(t *testing.T) {
+	srv := newHub(t)
+
+	resp, err := http.Get(srv.URL + "/agents") // no version header at all
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("a daemon predating the header must still be served, got %d", resp.StatusCode)
 	}
 }

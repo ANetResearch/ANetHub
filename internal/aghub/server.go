@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,6 +52,47 @@ func limitBody(next http.Handler) http.Handler {
 	})
 }
 
+// C2 — the Hub wire contract's own version.
+//
+// The daemon, this hub and ANetLink each depend only on ANetCore, which is
+// what keeps them from knowing about each other. That discipline is worth
+// nothing if they silently disagree about which contract they are speaking:
+// the three repos had drifted onto three different kernel versions at once
+// and nothing on the wire could have told anybody. So both sides state the
+// contract version they speak, on every request and every response.
+//
+// The daemon declares the same number in its own package. That duplication
+// is the point — two programs that never import each other still have to
+// agree, and a header is how they say so.
+const (
+	wireVersion       = 1
+	wireVersionHeader = "X-ANet-Wire"
+)
+
+// wireContract stamps this hub's contract version on every response and
+// turns away a caller speaking a newer one.
+//
+// A newer daemon is the case worth refusing: it may send fields this hub
+// will silently drop, and a delegation that half-arrives is worse than one
+// that is plainly rejected. An older or absent version is accepted — that
+// is every daemon built before this header existed, and they work.
+func wireContract(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(wireVersionHeader, strconv.Itoa(wireVersion))
+		if v := r.Header.Get(wireVersionHeader); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > wireVersion {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": fmt.Sprintf(
+						"this hub speaks wire contract %d, the caller speaks %d — upgrade the hub",
+						wireVersion, n),
+				})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Handler builds the routed, CORS-enabled HTTP handler (the anetspace web is a browser origin).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -90,7 +132,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		fileSrv.ServeHTTP(w, r)
 	})
-	return cors(limitBody(mux))
+	return cors(wireContract(limitBody(mux)))
 }
 
 // hIndex serves the Hub SPA (a hand-written, self-contained page whose per-agent chat is natively the
