@@ -32,9 +32,9 @@ import (
 
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/coredet"
+	"github.com/ANetResearch/ANetCore/delegation"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/tsir"
-	"github.com/ANetResearch/ANetHub/internal/protocol/delegation"
 )
 
 const (

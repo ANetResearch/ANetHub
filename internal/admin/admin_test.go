@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/coredet"
+	"github.com/ANetResearch/ANetCore/delegation"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/tsir"
+
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/protocol/delegation"
 )
 
 // buildHubDB seeds a hub store with two agents and one full delegate→message→result interaction, then

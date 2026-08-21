@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/protocol/relayauth"
 	"github.com/ANetResearch/ANetHub/internal/taskboard"
 )
 

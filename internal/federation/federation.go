@@ -17,11 +17,10 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	_ "modernc.org/sqlite"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
