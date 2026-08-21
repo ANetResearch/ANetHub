@@ -11,10 +11,10 @@ import (
 
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/coredet"
+	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/tsir"
-	"github.com/ANetResearch/ANetHub/internal/protocol/evidence"
-	"github.com/ANetResearch/ANetHub/internal/protocol/relayauth"
 )
 
 // Server is the Hub HTTP API over a Store. guest is the guest-mode broker (nil until EnableGuestMode is

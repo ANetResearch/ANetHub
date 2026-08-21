@@ -12,10 +12,11 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/anetcid"
+	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/relayauth"
+
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/protocol/evidence"
-	"github.com/ANetResearch/ANetHub/internal/protocol/relayauth"
 )
 
 func newHub(t *testing.T) *httptest.Server {

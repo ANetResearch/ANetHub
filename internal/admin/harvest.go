@@ -17,8 +17,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/ANetResearch/ANetCore/coredet"
+	"github.com/ANetResearch/ANetCore/delegation"
 	"github.com/ANetResearch/ANetCore/tsir"
-	"github.com/ANetResearch/ANetHub/internal/protocol/delegation"
 )
 
 // Harvester turns live platform traffic into OKF dataset assets. Two sources:
