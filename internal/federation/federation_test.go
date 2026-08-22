@@ -451,3 +451,48 @@ func TestAPermanentRefusalStillAdvances(t *testing.T) {
 			len(sink.got))
 	}
 }
+
+// The cursor is an optimisation, and it can be wrong.
+//
+// Holding it at a transient refusal stops new entries being lost. It does
+// nothing for the ones already lost — and in production there was already
+// one: a card skipped before the fix existed, with the cursor sitting
+// past it for ever. So a peer's directory is re-read from the start every
+// so often, which heals that and every cause not yet thought of.
+func TestTheDirectoryHealsWhatTheCursorSkipped(t *testing.T) {
+	dir := t.TempDir()
+	source := &fakeDirectory{cards: []FedCardView{
+		{Card: []byte(`{"subject_did":"did:anet:a"}`), KEL: []byte("k"), FedSeq: 1},
+	}}
+	svcA := newDiscoveryService(t, filepath.Join(dir, "a"), Config{
+		Discovery: "allowlist", Home: "https://hub-a.example",
+		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
+	}, source)
+	srvA := httptest.NewServer(svcA.Handler())
+	defer srvA.Close()
+
+	sink := &fakeDirectory{}
+	svcB := newDiscoveryService(t, filepath.Join(dir, "b"), Config{
+		Discovery: "allowlist", Home: "https://hub-b.example",
+		Peers: []Peer{{AID: "did:anet:a", Endpoint: srvA.URL}},
+	}, sink)
+
+	svcB.SyncOnce(context.Background())
+	if len(sink.got) != 1 {
+		t.Fatalf("setup: admitted %d", len(sink.got))
+	}
+	// The entry is lost — a bad restore, an admission bug, anything. The
+	// cursor is past it, so ordinary rounds will never ask again.
+	sink.got = nil
+	for i := 0; i < fullResyncEvery-2; i++ {
+		svcB.SyncOnce(context.Background())
+	}
+	if len(sink.got) != 0 {
+		t.Fatalf("re-read too eagerly: a full pass every round would make the cursor pointless")
+	}
+	// The scheduled full pass brings it back.
+	svcB.SyncOnce(context.Background())
+	if len(sink.got) != 1 {
+		t.Errorf("the directory did not heal: admitted %d after a full resync round", len(sink.got))
+	}
+}
