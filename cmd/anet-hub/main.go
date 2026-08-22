@@ -58,6 +58,9 @@ func main() {
 	log.Printf("anet-hub identity: %s", hubID.AID)
 
 	srv0 := aghub.NewServer(store)
+	// This hub's own AID names the ledger it settles on (hub:<aid>), so a
+	// credit here is visibly not a credit somewhere else.
+	srv0.SetHubAID(hubID.AID)
 	// Guest mode is always on: no-daemon visitors are brokered to any registered agent that accepts guests
 	// (guest_quota > 0, default 5 — each agent opts out via `anet hub-register --guest-messages 0`).
 	if err := srv0.EnableGuestMode(ctx, *data); err != nil {

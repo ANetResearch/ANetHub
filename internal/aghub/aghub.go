@@ -198,6 +198,33 @@ func (s *Store) migrate() error {
 		// here. Which hub an agent actually lives on decides where its
 		// work is delivered, and a directory that forgot the difference
 		// would answer with agents it cannot reach.
+		// The credit ledger. Balances live here, which is exactly what
+		// makes this hub their custodian — see facilitator.go.
+		`CREATE TABLE IF NOT EXISTS credit_balance (
+		   aid TEXT PRIMARY KEY,
+		   credits INTEGER NOT NULL DEFAULT 0
+		 )`,
+		// Every movement, so a balance can be explained rather than just
+		// asserted.
+		`CREATE TABLE IF NOT EXISTS credit_entry (
+		   seq INTEGER PRIMARY KEY AUTOINCREMENT,
+		   aid TEXT NOT NULL,
+		   delta INTEGER NOT NULL,
+		   reason TEXT NOT NULL DEFAULT '',
+		   at TEXT NOT NULL
+		 )`,
+		// One row per settled authorization: the idempotency key and the
+		// replay guard in one. Inserted before the balance moves, so a
+		// concurrent second settle loses on the primary key rather than
+		// on a check it raced.
+		`CREATE TABLE IF NOT EXISTS credit_settled (
+		   auth_id TEXT PRIMARY KEY,
+		   payer TEXT NOT NULL,
+		   pay_to TEXT NOT NULL,
+		   amount INTEGER NOT NULL,
+		   interaction_id TEXT NOT NULL DEFAULT '',
+		   at TEXT NOT NULL
+		 )`,
 		`CREATE TABLE IF NOT EXISTS fed_card (
 		   aid TEXT PRIMARY KEY,
 		   seq INTEGER NOT NULL,
