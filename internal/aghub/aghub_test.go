@@ -829,3 +829,99 @@ func TestRegistrationWithoutACardStillWorks(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A peer hub can hide a card. It must not be able to invent one, and
+// these are the three ways it would try.
+func TestAPeerCannotForgeADirectoryEntry(t *testing.T) {
+	dir := t.TempDir()
+	s, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mallory, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kelOf := func(c *identity.Controller) string {
+		b, err := identity.MarshalKEL(c.KEL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(b)
+	}
+
+	// Honest: signed by its subject, with that subject's key history.
+	good := aghub.FedCard{
+		Card: mintCard(t, agent, "Remote", []string{"cas.put"}),
+		KEL:  kelOf(agent), Home: "https://hub-a.example",
+	}
+	if err := s.AdmitFedCard("did:anet:peer", good); err != nil {
+		t.Fatalf("an honest federated card must be admitted: %v", err)
+	}
+
+	// Someone else's key history bolted onto a real card. Without binding
+	// the KEL to the subject, a peer could pair any card with any keys and
+	// both halves would "verify".
+	swapped := good
+	swapped.KEL = kelOf(mallory)
+	if err := s.AdmitFedCard("did:anet:peer", swapped); err == nil {
+		t.Error("a card paired with somebody else's key history was admitted")
+	}
+
+	// A card the peer signed itself, claiming to be the agent.
+	forged := aghub.FedCard{
+		Card: mintCard(t, mallory, "Remote", []string{"anything"}),
+		KEL:  kelOf(mallory), Home: "https://hub-a.example",
+	}
+	// It verifies — mallory really did sign it — and it speaks only for
+	// mallory, which is the whole protection: a signature cannot be
+	// stretched over a name it does not own.
+	if err := s.AdmitFedCard("did:anet:peer", forged); err != nil {
+		t.Fatalf("mallory's own card should store under mallory: %v", err)
+	}
+	fed, err := s.FederatedAgents("cas.put")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fed) != 1 || fed[0].AID != agent.AID() {
+		t.Errorf("cas.put answered with %v, want only the real agent", fed)
+	}
+}
+
+// A peer must not be able to claim one of our own agents. Letting it
+// would redirect that agent's work to the peer, by asserting it is home.
+func TestAPeerCannotClaimAnAgentRegisteredHere(t *testing.T) {
+	srv := newHub(t)
+	local, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, local, "Ours", []string{"cas.put"})
+
+	s, err := aghub.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	// Rebuild the same situation in a store we can reach directly.
+	kelB, _ := identity.MarshalKEL(local.KEL())
+	if err := s.PutAgent(local.AID(), "Ours", []string{"cas.put"}, 5, kelB); err != nil {
+		t.Fatal(err)
+	}
+	err = s.AdmitFedCard("did:anet:peer", aghub.FedCard{
+		Card: mintCard(t, local, "Stolen", []string{"cas.put"}),
+		KEL:  base64.StdEncoding.EncodeToString(kelB), Home: "https://peer.example",
+	})
+	if err == nil {
+		t.Fatal("a peer claimed an agent registered here")
+	}
+	if !strings.Contains(err.Error(), "registered here") {
+		t.Errorf("refused for the wrong reason: %v", err)
+	}
+}
