@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -136,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
 	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
 	mux.HandleFunc("GET /agents/{aid}/balance", s.hBalance)
+	mux.HandleFunc("GET /agents/{aid}/ledger", s.hLedger)
 	// The three endpoints x402 defines for a facilitator. This hub hosts
 	// its own, which the spec permits outright — and for a ledger rail
 	// there is nothing to separate from, because the balances are here.
@@ -339,6 +341,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	firstTime := !s.store.KnowsAgent(req.AID)
 	if err := s.store.PutAgent(req.AID, req.Name, req.Caps, quota, kelBytes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -348,6 +351,14 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		if err := s.store.PutProfile(req.AID, req.Summary, req.Readme, req.Pricing); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
+		}
+	}
+	if firstTime {
+		// A grant on arrival, so a new node can try a paid capability
+		// before anyone has funded it. A network where nothing works
+		// until an operator notices you is a network nobody evaluates.
+		if err := s.store.GrantOnRegistration(req.AID); err != nil {
+			log.Printf("hub: registration grant for %s: %v", req.AID, err)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aid": req.AID, "status": "registered"})
@@ -801,4 +812,16 @@ func (s *Server) federatedAgents(capFilter string) []AgentView {
 		return nil
 	}
 	return out
+}
+
+// hLedger explains a balance. Public, like the balance: an account on a
+// ledger somebody else keeps is exactly the thing its owner must be able
+// to audit without asking permission.
+func (s *Server) hLedger(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.store.LedgerEntries(r.PathValue("aid"), 100)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aid": r.PathValue("aid"), "entries": entries})
 }

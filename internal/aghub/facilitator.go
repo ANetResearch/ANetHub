@@ -97,7 +97,24 @@ func (s *Store) VerifyPayment(hubAID string, p *payment.PaymentPayload) payment.
 // because a reply was lost must not charge twice, and the id derives from
 // the signed bytes so a payer cannot make two different authorizations
 // look like one.
+// PeerSettler forwards a settlement to the hub that owns the ledger and
+// clears the result locally. Wired by the application, so this package
+// keeps knowing nothing about federation.
+type PeerSettler func(network string, p *payment.PaymentPayload) (payment.SettlementResponse, bool)
+
+// SetPeerSettler installs the cross-hub settlement path.
+func (s *Store) SetPeerSettler(f PeerSettler) { s.peerSettle = f }
+
 func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.SettlementResponse {
+	// A payment on another hub's ledger is that hub's to settle. We ask
+	// it, and if it says yes we credit our own payee and record what that
+	// hub now owes us — the two hubs clearing against each other rather
+	// than one of them minting.
+	if p != nil && p.Accepted.Network != payment.CreditNetwork(hubAID) && s.peerSettle != nil {
+		if r, handled := s.peerSettle(p.Accepted.Network, p); handled {
+			return r
+		}
+	}
 	auth, err := s.decodeAuth(hubAID, p)
 	if err != nil {
 		return payment.SettlementResponse{Success: false, ErrorReason: err.Error(),
@@ -157,8 +174,102 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 	if err := tx.Commit(); err != nil {
 		return fail(err.Error())
 	}
-	return payment.SettlementResponse{Success: true, Payer: auth.Payer, Transaction: id,
-		Network: auth.Network, Amount: payment.Amount(auth.Amount)}
+	return s.signSettlement(payment.SettlementResponse{Success: true, Payer: auth.Payer,
+		Transaction: id, Network: auth.Network, Amount: payment.Amount(auth.Amount)}, auth, id)
+}
+
+// signSettlement attaches this hub's signed receipt.
+//
+// Every settlement, not only the cross-hub ones. A payer holding a
+// receipt for its own hub's settlement can show what it was charged
+// without asking the hub to agree, and that is worth more than the one
+// line it costs.
+func (s *Store) signSettlement(r payment.SettlementResponse, auth *payment.Authorization,
+	authID string) payment.SettlementResponse {
+	if s.hubKey == nil {
+		return r
+	}
+	rec := &payment.Receipt{
+		AuthID: authID, Payer: auth.Payer, PayTo: auth.PayTo, Amount: auth.Amount,
+		Network: auth.Network, SettleAt: time.Now().UnixMilli(),
+	}
+	if err := rec.Sign(s.hubKey); err != nil {
+		return r
+	}
+	b, err := rec.Marshal()
+	if err != nil {
+		return r
+	}
+	if r.Extensions == nil {
+		r.Extensions = map[string]any{}
+	}
+	r.Extensions[payment.ExtReceipt] = base64.StdEncoding.EncodeToString(b)
+	return r
+}
+
+// SetHubKey gives the store the identity it signs settlements with.
+func (s *Store) SetHubKey(c *identity.Controller) { s.hubKey = c }
+
+// ClearFromPeer credits a local payee against a peer hub's signed
+// settlement, and records what that peer now owes us.
+//
+// This is the whole of "two hubs clearing against each other", and the
+// trust it introduces is worth naming. We are crediting our own user
+// because another hub says it debited theirs. The receipt makes that
+// claim attributable — we can show exactly what they told us — but it
+// does not make it true: a peer that signs settlements it never performed
+// has issued itself credit here. Which is why peers are an allowlist and
+// the balance owed is recorded rather than netted away.
+func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
+	rec *payment.Receipt) error {
+	if rec == nil {
+		return fmt.Errorf("no settlement receipt")
+	}
+	if rec.Network != payment.CreditNetwork(peerAID) {
+		return fmt.Errorf("receipt is for %s, not %s's ledger", rec.Network, peerAID)
+	}
+	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("settlement receipt from %s: %w", peerAID, err)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// One row per foreign authorization: a peer repeating a receipt must
+	// not credit our user twice.
+	if _, err := tx.Exec(
+		`INSERT INTO credit_cleared(auth_id, peer_aid, pay_to, amount, at) VALUES(?,?,?,?,?)`,
+		rec.AuthID, peerAID, rec.PayTo, int64(rec.Amount),
+		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return nil // already cleared; the same statement, not a new one
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
+		 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
+		rec.PayTo, int64(rec.Amount), int64(rec.Amount)); err != nil {
+		return err
+	}
+	// What the peer owes us, kept as a running total rather than netted
+	// into anyone's balance: it is a claim on another hub, not credit
+	// here, and the two must not be allowed to look alike.
+	if _, err := tx.Exec(
+		`INSERT INTO hub_owed(peer_aid, amount) VALUES(?,?)
+		 ON CONFLICT(peer_aid) DO UPDATE SET amount = amount + ?`,
+		peerAID, int64(rec.Amount), int64(rec.Amount)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Owed reports what a peer hub owes this one.
+func (s *Store) Owed(peerAID string) (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT amount FROM hub_owed WHERE peer_aid=?`, peerAID).Scan(&n)
+	if err != nil && err.Error() == "sql: no rows in result set" {
+		return 0, nil
+	}
+	return n, err
 }
 
 // decodeAuth pulls the anet-credit authorization out of a payload and
@@ -173,7 +284,9 @@ func (s *Store) decodeAuth(hubAID string, p *payment.PaymentPayload) (*payment.A
 	want := payment.CreditNetwork(hubAID)
 	if p.Accepted.Network != want {
 		// A credit on another hub is not a credit here, and settling one
-		// as though it were would mint money.
+		// as though it were would mint money. Forwarding it to the hub
+		// that owns that ledger is a different matter, and happens above
+		// this — see SettlePayment.
 		return nil, fmt.Errorf("this facilitator settles %q, not %q", want, p.Accepted.Network)
 	}
 	raw, _ := p.Payload["authorization"].(string)
@@ -265,4 +378,87 @@ func (s *Server) hBalance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, Balance{AID: aid, Credits: n})
+}
+
+// ---- how credit gets into the system ----
+
+// RegistrationGrant is what a newly registered agent is given, so it can
+// try a paid capability before anyone has funded it.
+//
+// A network where nothing works until an operator notices you is a
+// network nobody evaluates. The number is small on purpose: enough to
+// find out whether this is useful, not enough to be worth farming
+// identities for — and an identity is free to mint, so the grant must
+// never be worth more than the effort of minting one.
+const RegistrationGrant = 100
+
+// grantOnRegistration credits a first-time registrant.
+//
+// First time only, keyed on the agent row rather than a separate flag: an
+// agent re-registering is the same agent, and paying out again for a
+// changed capability list would make re-registration a faucet.
+func (s *Store) GrantOnRegistration(aid string) error {
+	var entries int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(1) FROM credit_entry WHERE aid=? AND reason=?`,
+		aid, "registration grant").Scan(&entries); err != nil {
+		return err
+	}
+	if entries > 0 {
+		return nil
+	}
+	return s.Credit(aid, RegistrationGrant, "registration grant")
+}
+
+// GrantCredit is the operator's way in. Everything else that creates
+// credit on this ledger is either this or the registration grant, which
+// is what makes the total supply something an operator can account for.
+func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
+	if amount <= 0 {
+		return fmt.Errorf("a grant must be positive, got %d", amount)
+	}
+	if reason == "" {
+		reason = "operator grant"
+	}
+	return s.Credit(aid, amount, reason)
+}
+
+// LedgerEntries returns an account's movements, newest last.
+//
+// The point of keeping them is that a balance can be explained rather
+// than asserted — by the account holder, without asking the hub to agree
+// about anything except what it already published.
+func (s *Store) LedgerEntries(aid string, limit int) ([]LedgerEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.Query(
+		`SELECT delta, reason, at FROM credit_entry WHERE aid=? ORDER BY seq DESC LIMIT ?`, aid, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LedgerEntry{}
+	for rows.Next() {
+		var e LedgerEntry
+		if err := rows.Scan(&e.Delta, &e.Reason, &e.At); err != nil {
+			return nil, err
+		}
+		out = append([]LedgerEntry{e}, out...)
+	}
+	return out, rows.Err()
+}
+
+// LedgerEntry is one movement on an account.
+type LedgerEntry struct {
+	Delta  int64  `json:"delta"`
+	Reason string `json:"reason"`
+	At     string `json:"at"`
+}
+
+// KnowsAgent reports whether an agent has registered here before.
+func (s *Store) KnowsAgent(aid string) bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(1) FROM agent WHERE aid=?`, aid).Scan(&n)
+	return n > 0
 }
