@@ -1,0 +1,62 @@
+# Reference vhost for a public anet-hub.
+#
+# This file is here because of a bug that cost an afternoon. The daemon's
+# control plane caps request bodies, the hub caps them again, and nginx
+# caps them a third time — and nginx is the one that decides, because it
+# is first. Raising the two limits that live in Go changed nothing over
+# the public path, since the vhost still said 1m.
+#
+# Three layers, and the deciding one lived in a file no repository
+# contained. Now one of them does.
+#
+#     daemon control plane   internal/daemon/control_api.go  maxControlBody
+#     hub                    internal/aghub/server.go        maxHubBody
+#     nginx                  this file                       client_max_body_size
+#
+# The number below must be the smallest of the three you actually want,
+# and it is a memory decision as much as a size one: nginx buffers a body
+# to disk before proxying, and the hub buffers it again to decode. On a
+# small box, 512m of allowed body is a promise about disk you may not want
+# to keep.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name hub.example.org;
+
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name hub.example.org;
+
+    ssl_certificate     /etc/letsencrypt/live/hub.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hub.example.org/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    location / {
+        proxy_pass http://127.0.0.1:8088;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # A delegation may carry an image or an archive inline. See the
+        # note at the top before changing this: it is the limit that
+        # actually applies.
+        client_max_body_size 512m;
+
+        # A capability call is work, not a page load. A caption model on
+        # a cold start can take a minute, and a timeout here surfaces to
+        # the caller as a failed delegation rather than a slow one.
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+}
