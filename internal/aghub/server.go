@@ -101,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /reviews", s.hUploadReview)
 	mux.HandleFunc("GET /agents", s.hAgents)
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
+	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay broker (v0.1 centralized transport): send is open (payloads are end-to-end verifiable);
@@ -688,5 +689,31 @@ func cors(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// hAgentKEL publishes an agent's key event log.
+//
+// A KEL is public by construction — it is a log of key events, each one
+// signed by the key it supersedes, and its whole design assumes anyone can
+// replay it. This Hub has stored them since v0.1 and published none, which
+// quietly made "anyone can verify a receipt" false: a receipt names the
+// AID that signed it, and verifying that signature needs that AID's key
+// history. Without this endpoint the only way to obtain one was to ask the
+// requester nicely, so the audit worked exactly when a participant chose
+// to cooperate — which is the property the whole scheme exists to remove.
+//
+// Publishing costs nothing and is not an authorization: holding the KEL
+// lets you CHECK signatures, never make them.
+func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
+	aid := r.PathValue("aid")
+	kel, err := s.store.AgentKEL(aid)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"aid": aid,
+		"kel": base64.StdEncoding.EncodeToString(kel),
 	})
 }

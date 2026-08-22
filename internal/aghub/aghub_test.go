@@ -424,3 +424,108 @@ func TestWireContractAcceptsALegacyCaller(t *testing.T) {
 		t.Fatalf("a daemon predating the header must still be served, got %d", resp.StatusCode)
 	}
 }
+
+// A receipt names the AID that signed it, and checking that signature
+// needs that AID's key history. The Hub has stored every KEL since v0.1
+// and published none — so the only way to obtain one was to ask a
+// participant, which made "anyone can verify a receipt" true exactly when
+// someone chose to cooperate. That is the property the whole scheme
+// exists to remove.
+func TestTheHubPublishesKeyHistories(t *testing.T) {
+	srv := newHub(t)
+	c, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, c, "Provider", []string{"translate"})
+
+	resp, err := http.Get(srv.URL + "/agents/" + c.AID() + "/kel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("kel endpoint = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		AID string `json:"aid"`
+		KEL string `json:"kel"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.KEL == "" {
+		t.Fatal("no kel published — a third party cannot check this agent's signatures")
+	}
+	raw, err := base64.StdEncoding.DecodeString(out.KEL)
+	if err != nil {
+		t.Fatalf("kel is not base64: %v", err)
+	}
+	kel, err := identity.UnmarshalKEL(raw)
+	if err != nil {
+		t.Fatalf("published kel does not decode: %v", err)
+	}
+	// Usable, not merely present: replaying it must yield the AID it was
+	// served under, or the endpoint is handing out somebody else's keys.
+	states, err := identity.Replay(kel)
+	if err != nil {
+		t.Fatalf("published kel does not replay: %v", err)
+	}
+	if got := states[len(states)-1].AID; got != c.AID() {
+		t.Errorf("published kel belongs to %s, served under %s", got, c.AID())
+	}
+}
+
+// The published KEL is enough to verify a real receipt, which is the
+// whole point of publishing it. This is the third party's path end to
+// end: fetch the key history from the Hub, check the provider's
+// signature, and never ask either participant for anything.
+func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
+	srv := newHub(t)
+	prov, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, prov, "Provider", []string{"translate"})
+
+	rc := &evidence.Receipt{
+		InteractionID: "ix-1", RequesterAID: "did:anet:someone",
+		ProviderAID: prov.AID(), RequestCID: "bafyreq", ResultCID: "bafyres",
+		CompletedAt: uint64(time.Now().UnixMilli()),
+	}
+	if err := rc.Sign(prov); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/agents/" + rc.ProviderAID + "/kel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		KEL string `json:"kel"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(out.KEL)
+	kel, err := identity.UnmarshalKEL(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rc.Verify(kel, rc.CompletedAt); err != nil {
+		t.Fatalf("a stranger with the published KEL must be able to verify: %v", err)
+	}
+}
+
+func TestAnUnknownAgentHasNoKEL(t *testing.T) {
+	srv := newHub(t)
+	resp, err := http.Get(srv.URL + "/agents/did:anet:nobody/kel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown agent kel = %d, want 404", resp.StatusCode)
+	}
+}
