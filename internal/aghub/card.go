@@ -218,7 +218,14 @@ func (s *Store) AdmitFedCard(peerAID string, fc FedCard) error {
 		return err
 	}
 	if local > 0 {
-		return fmt.Errorf("federated card for %s, which is registered here", card.SubjectDID)
+		// Transient, and saying so matters. This agent is registered here
+		// TODAY; if it leaves tomorrow the peer's card becomes admissible
+		// and the sync must be able to pick it up. A caller that treated
+		// every refusal alike would advance its cursor past this card and
+		// never see it again — which is exactly what happened in
+		// production, and the agent stayed missing from the directory
+		// long after the reason had gone away.
+		return fmt.Errorf("%w: %s is registered here", federation.ErrRefusedForNow, card.SubjectDID)
 	}
 	var high uint64
 	_ = s.db.QueryRow(`SELECT seq FROM fed_card WHERE aid=?`, card.SubjectDID).Scan(&high)

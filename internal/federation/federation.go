@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -130,6 +131,9 @@ type Service struct {
 	dir   Directory
 	db    *sql.DB
 	http  *http.Client
+	// round counts sync passes, so a full re-read can be scheduled
+	// without a second timer. Touched only from the sync loop.
+	round int
 }
 
 // SetDirectory wires the discovery sub-plane. Separate from New because
@@ -368,7 +372,9 @@ func nowMillisForTest() uint64               { return uint64(time.Now().UnixMill
 type Directory interface {
 	// CardsSince serves this hub's own opted-in cards after a cursor.
 	CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error)
-	// AdmitFedCard verifies and stores a card learned from a peer.
+	// AdmitFedCard verifies and stores a card learned from a peer. An
+	// error wrapping ErrRefusedForNow means the refusal may stop
+	// applying, and the cursor must not advance past that card.
 	AdmitFedCard(peerAID string, card, kel []byte, home string) error
 	// ReviewsSince serves this hub's own opted-in reviews after a cursor,
 	// as opaque JSON. Opaque because federation moves the bytes and the
@@ -378,6 +384,16 @@ type Directory interface {
 	// AdmitFedReview verifies and stores a review learned from a peer.
 	AdmitFedReview(peerAID string, review json.RawMessage) error
 }
+
+// ErrRefusedForNow marks a refusal that may stop applying.
+//
+// Part of the Directory contract rather than an implementation detail,
+// because it is the sync loop that has to act on it. A malformed card, a
+// bad signature or a subject that does not match its key history is
+// wrong for ever and the stream should move past it. "This agent is
+// registered here" is a fact about today, and moving past it loses the
+// card the moment the fact changes.
+var ErrRefusedForNow = errors.New("federation: refused for now")
 
 // FedCardView is one entry of the sync stream, as the kernel hands it over.
 type FedCardView struct {
@@ -393,6 +409,12 @@ type fedCardWire struct {
 	Home   string          `json:"home"`
 	FedSeq int64           `json:"fed_seq"`
 }
+
+// fullResyncEvery is how many sync rounds pass between full re-reads of
+// a peer's directory. At the steady two-minute cadence this is about
+// every half hour, so a directory that lost an entry heals well inside
+// an hour without anyone restarting anything.
+const fullResyncEvery = 15
 
 // DiscoveryEnabled reports whether this hub publishes and pulls directories.
 func (s *Service) DiscoveryEnabled() bool {
@@ -522,9 +544,30 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 	if !s.DiscoveryEnabled() || s.dir == nil {
 		return 0, 0
 	}
+	// Every so often, re-read a peer's directory from the beginning.
+	//
+	// The cursor is an optimisation and it can be wrong. A card refused
+	// for a reason that later stopped applying, a bug in admission, a
+	// database restored from a backup taken after the cursor moved — each
+	// leaves an agent the peer is publishing and this hub will never ask
+	// for again. Holding the cursor at a transient refusal prevents that
+	// going forward; this recovers the ones already lost, including every
+	// cause not yet thought of.
+	//
+	// Admission is idempotent (the card table upserts on subject), so a
+	// full pass costs a re-read and changes nothing that is already
+	// right. Rare enough not to matter, frequent enough that a directory
+	// heals within the hour rather than at the next restart.
+	s.round++
+	full := s.round%fullResyncEvery == 0
+
 	for i := range s.cfg.Peers {
 		p := &s.cfg.Peers[i]
 		cursor := s.peerCursor(p.AID)
+		if full {
+			log.Printf("hub: federation full resync from %s", p.AID)
+			cursor = 0
+		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 			fmt.Sprintf("%s/fed/v1/cards?cursor=%d", strings.TrimSuffix(p.Endpoint, "/"), cursor), nil)
 		if err != nil {
@@ -545,6 +588,7 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 			log.Printf("hub: federation sync %s: %v", p.AID, derr)
 			continue
 		}
+		var stall int64
 		for _, c := range out.Cards {
 			kel, kerr := base64.StdEncoding.DecodeString(c.KEL)
 			if kerr != nil {
@@ -561,11 +605,36 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 			if err := s.dir.AdmitFedCard(p.AID, c.Card, kel, home); err != nil {
 				log.Printf("hub: federation card from %s refused: %v", p.AID, err)
 				refused++
+				// A refusal that may stop applying must not be skipped
+				// past. Advancing over it loses the card for ever the
+				// moment the reason goes away — which is what happened
+				// in production: a peer's card was refused because that
+				// agent was registered here, the agent later moved, and
+				// the directory never learned it existed.
+				//
+				// Holding the cursor here means a peer that keeps
+				// sending such a card stalls its own stream. That is
+				// visible in the log every round, which is the right
+				// place for it: silently dropping an agent from the
+				// directory is the failure nobody notices.
+				if errors.Is(err, ErrRefusedForNow) {
+					stall = c.FedSeq
+					break
+				}
 				continue
 			}
 			admitted++
 		}
-		if out.Cursor > cursor {
+		switch {
+		case stall > 0 && stall > cursor:
+			s.setPeerCursor(p.AID, stall-1)
+		case out.Cursor > cursor:
+			s.setPeerCursor(p.AID, out.Cursor)
+		}
+		if full && out.Cursor > 0 && stall == 0 {
+			// A full pass that admitted everything leaves the cursor
+			// where the peer says the end is, so the next ordinary round
+			// picks up from there rather than replaying the directory.
 			s.setPeerCursor(p.AID, out.Cursor)
 		}
 	}
