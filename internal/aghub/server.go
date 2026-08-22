@@ -113,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents", s.hAgents)
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
+	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay broker (v0.1 centralized transport): send is open (payloads are end-to-end verifiable);
@@ -252,6 +253,12 @@ type RegisterRequest struct {
 	TS          uint64 `json:"ts"`
 	KeyStateSeq uint64 `json:"key_state_seq"`
 	Sig         string `json:"sig"` // base64
+	// Card is the agent's own signed statement of what it offers (an ADP
+	// AgentCard). The challenge above proves who is calling and covers
+	// none of what they said; only this makes Name and Caps attributable
+	// to the agent rather than to this hub. Optional — a node running an
+	// older build sends none, and still registers.
+	Card json.RawMessage `json:"card"`
 }
 
 func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
@@ -294,6 +301,15 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		quota = 0
 	} else if quota > guestMaxQuota {
 		quota = guestMaxQuota
+	}
+	// The card, if one came, before the row it speaks for — so a
+	// registration whose card is a forgery does not first take effect and
+	// then get rejected.
+	if len(req.Card) > 0 {
+		if err := s.store.AdmitCard(req.AID, req.Card, kel); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	if err := s.store.PutAgent(req.AID, req.Name, req.Caps, quota, kelBytes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -717,4 +733,24 @@ func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
 		"aid": aid,
 		"kel": base64.StdEncoding.EncodeToString(kel),
 	})
+}
+
+// hAgentCard serves an agent's own signed statement of what it offers.
+//
+// Published rather than kept internal, for the same reason the key
+// history is: a claim nobody outside can check is a claim this hub is
+// making on the agent's behalf. With the card and the KEL, anyone can
+// confirm the directory entry is the agent's own words.
+func (s *Server) hAgentCard(w http.ResponseWriter, r *http.Request) {
+	raw, err := s.store.AgentCard(r.PathValue("aid"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if len(raw) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no card published for this agent"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(raw)
 }

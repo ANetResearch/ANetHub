@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
@@ -48,19 +49,63 @@ func post(t *testing.T, url string, body any) (int, []byte) {
 	return resp.StatusCode, b
 }
 
+// register does what the daemon does: signs the challenge AND publishes a
+// card, so the claims are attributable to the agent rather than to the
+// hub storing them.
 func register(t *testing.T, srv *httptest.Server, c *identity.Controller, name string, caps []string) {
+	t.Helper()
+	code, b := registerWithCard(t, srv, c, name, caps, mintCard(t, c, name, caps))
+	if code != 200 {
+		t.Fatalf("register %s: %d %s", name, code, b)
+	}
+}
+
+// registerLegacy is a node that predates cards. It must still register.
+func registerLegacy(t *testing.T, srv *httptest.Server, c *identity.Controller, name string, caps []string) {
+	t.Helper()
+	code, b := registerWithCard(t, srv, c, name, caps, nil)
+	if code != 200 {
+		t.Fatalf("register %s: %d %s", name, code, b)
+	}
+}
+
+func registerWithCard(t *testing.T, srv *httptest.Server, c *identity.Controller,
+	name string, caps []string, card json.RawMessage) (int, []byte) {
 	t.Helper()
 	kelB, _ := identity.MarshalKEL(c.KEL())
 	ts := uint64(time.Now().UnixMilli())
 	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionRegister, c.AID(), ts))
-	code, b := post(t, srv.URL+"/register", map[string]any{
+	body := map[string]any{
 		"aid": c.AID(), "name": name, "caps": caps,
 		"kel": base64.StdEncoding.EncodeToString(kelB),
 		"ts":  ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig),
-	})
-	if code != 200 {
-		t.Fatalf("register %s: %d %s", name, code, b)
 	}
+	if len(card) > 0 {
+		body["card"] = card
+	}
+	return post(t, srv.URL+"/register", body)
+}
+
+func mintCard(t *testing.T, c *identity.Controller, name string, caps []string) json.RawMessage {
+	t.Helper()
+	if caps == nil {
+		caps = []string{}
+	}
+	now := time.Now()
+	card := &adp.AgentCard{
+		SubjectDID: c.AID(), CardSchema: adp.CardSchema{Major: 1},
+		Seq: uint64(now.UnixNano()), IssuedAt: now.Unix(),
+		NotBefore:    now.Add(-time.Minute).Unix(),
+		Capabilities: caps, CriticalExtensions: []string{}, Name: name,
+	}
+	if err := card.Sign(c); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // interactionContent is the raw request + deliverable bytes an upload must carry; the Hub re-hashes them
@@ -681,5 +726,106 @@ func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
 	}
 	if len(out.Agents) != 0 {
 		t.Errorf("a withdrawn capability still answers: %v", out.Agents)
+	}
+}
+
+// A registration says what an agent offers, and nothing made that
+// attributable to the agent saying it.
+//
+// The register challenge signs an action, an AID and a timestamp. It
+// proves who is calling and covers none of what they said, so this hub
+// could change an agent's name or capability list and no party could tell
+// — including the agent. Tolerable for a hub someone chose to trust;
+// untenable the moment a directory is federated, where the property being
+// relied on is that a peer can hide a card and never invent one.
+func TestASignedCardMakesTheRegistrationAttributable(t *testing.T) {
+	srv := newHub(t)
+	c, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, c, "Honest", []string{"cas.put"})
+
+	resp, err := http.Get(srv.URL + "/agents/" + c.AID() + "/card")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("card endpoint = %d, want 200", resp.StatusCode)
+	}
+	var card adp.AgentCard
+	if err := json.NewDecoder(resp.Body).Decode(&card); err != nil {
+		t.Fatal(err)
+	}
+	if card.SubjectDID != c.AID() {
+		t.Errorf("card subject = %s, want %s", card.SubjectDID, c.AID())
+	}
+	// The claims are inside the signature, which is the whole point.
+	if len(card.Capabilities) != 1 || card.Capabilities[0] != "cas.put" {
+		t.Errorf("capabilities not in the card: %v", card.Capabilities)
+	}
+	if _, err := adp.AdmitCard(&card, time.Now(), 0, c.KEL(),
+		map[uint16]bool{1: true}, nil); err != nil {
+		t.Errorf("the published card does not verify against the agent's own KEL: %v", err)
+	}
+}
+
+// A card may only speak for the agent registering it. Otherwise any
+// registrant could publish claims in someone else's name — the exact
+// forgery a card exists to prevent.
+func TestACardForSomebodyElseIsRefused(t *testing.T) {
+	srv := newHub(t)
+	mallory, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := &adp.AgentCard{
+		SubjectDID: victim.AID(), CardSchema: adp.CardSchema{Major: 1},
+		Seq: uint64(time.Now().Unix()), IssuedAt: time.Now().Unix(),
+		NotBefore:    time.Now().Add(-time.Minute).Unix(),
+		Capabilities: []string{"anything.at.all"}, CriticalExtensions: []string{},
+	}
+	if err := card.Sign(mallory); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, body := registerWithCard(t, srv, mallory, "Mallory", []string{"x"}, raw)
+	if code == http.StatusOK {
+		t.Fatalf("a card naming somebody else was accepted: %s", body)
+	}
+	if !strings.Contains(string(body), "not the registrant") {
+		t.Errorf("refused for the wrong reason: %s", body)
+	}
+}
+
+// A node running an older build sends no card and must still register.
+// Refusing it would make upgrading this hub look like an outage to
+// everyone who had not upgraded.
+func TestRegistrationWithoutACardStillWorks(t *testing.T) {
+	srv := newHub(t)
+	c, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerLegacy(t, srv, c, "Legacy", []string{"cas.get"})
+	resp, err := http.Get(srv.URL + "/agents/" + c.AID() + "/card")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("no card should be 404, got %d", resp.StatusCode)
+	}
+	// …and the agent is registered regardless.
+	if _, err := http.Get(srv.URL + "/agents/" + c.AID() + "/kel"); err != nil {
+		t.Fatal(err)
 	}
 }
