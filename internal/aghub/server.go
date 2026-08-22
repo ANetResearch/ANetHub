@@ -170,6 +170,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}/balance", s.hBalance)
 	mux.HandleFunc("GET /agents/{aid}/ledger", s.hLedger)
 	mux.HandleFunc("POST /agents/{aid}/visibility", s.hVisibility)
+	// The other half of registration: leaving. See deregister.go.
+	mux.HandleFunc("POST /agents/{aid}/deregister", s.hDeregister)
 	// The three endpoints x402 defines for a facilitator. This hub hosts
 	// its own, which the spec permits outright — and for a ledger rail
 	// there is nothing to separate from, because the balances are here.
