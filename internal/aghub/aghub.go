@@ -175,6 +175,15 @@ func (s *Store) migrate() error {
 		   PRIMARY KEY (aid, cap)
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_cap ON agent_cap(cap)`,
+		// The agent's own signed statement of what it offers. Stored
+		// verbatim, because the signature covers these exact bytes and a
+		// re-encoding would break it for everyone downstream.
+		`CREATE TABLE IF NOT EXISTS agent_card (
+		   aid TEXT PRIMARY KEY,
+		   seq INTEGER NOT NULL,
+		   card BLOB NOT NULL,
+		   stored_at TEXT NOT NULL
+		 )`,
 		`CREATE TABLE IF NOT EXISTS relay_message (
 		   id INTEGER PRIMARY KEY AUTOINCREMENT,
 		   to_aid TEXT NOT NULL,
