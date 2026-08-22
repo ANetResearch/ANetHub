@@ -514,6 +514,33 @@ func (s *Store) AgentKEL(aid string) ([]byte, error) {
 	return kel, err
 }
 
+// AnyKEL resolves a key history for an agent registered here OR learned
+// from a peer hub.
+//
+// Needed because a cross-hub interaction could not be reviewed at all.
+// The reviewer has an account here and the provider has one somewhere
+// else, so "are both parties registered here" — the question the local
+// upload path asks — is false for every interaction that crossed a
+// boundary, and federation therefore produced work nobody could rate.
+//
+// Widening it is safe for the reason the whole evidence model rests on:
+// the interlock is checked against these key histories, and a review is
+// only admitted if the provider's own signature anchors it. A hub that
+// supplied the wrong history for a foreign agent would fail that check,
+// not pass it — the KEL is what the arithmetic is done against, not a
+// permission to skip the arithmetic.
+func (s *Store) AnyKEL(aid string) ([]byte, error) {
+	if kel, err := s.AgentKEL(aid); err == nil {
+		return kel, nil
+	}
+	var kel []byte
+	err := s.db.QueryRow(`SELECT kel FROM fed_card WHERE aid=?`, aid).Scan(&kel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("hub: %s is neither registered here nor known from a peer", aid)
+	}
+	return kel, err
+}
+
 // HasInteraction reports whether a review for interactionID already exists (one-review-per-interaction).
 func (s *Store) HasInteraction(interactionID string) bool {
 	var one int

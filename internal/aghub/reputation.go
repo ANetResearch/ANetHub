@@ -68,15 +68,32 @@ func (s *Store) ReviewsSince(cursor int64, limit int) ([]FedReview, int64, error
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
+	// The subject may be one of ours or one we learned from a peer, and
+	// the KEL comes from wherever it is. An inner join on the local agent
+	// table served nothing for a cross-hub interaction — the subject is
+	// not in it — so a rating of a foreign agent, by our own user, sat in
+	// the database and was published to nobody. Same assumption as the
+	// KEL lookup had, found the same way: by watching one fail to travel.
+	//
+	// The reviewer must be local: this hub publishes what its OWN users
+	// said, which is first-hand. Forwarding what a peer told us is the
+	// laundering the one-hop rule forbids.
+	//
+	// Whose consent governs is the subject's, because the reputation at
+	// stake is the subject's. A local subject opts in by visibility; a
+	// foreign one already did, at its home hub, by federating the card
+	// that is how we know it exists.
 	rows, err := s.db.Query(
 		`SELECT r.rowid, r.interaction_id, r.subject_aid, r.reviewer_aid,
 		        r.rating, r.comment, r.receipt_cid, r.created_at,
 		        r.goal, r.deliverable, r.request_cid, r.result_cid, r.completed_at,
-		        p.kel, q.kel
+		        COALESCE(p.kel, f.kel), q.kel
 		   FROM review r
-		   JOIN agent p ON p.aid = r.subject_aid
 		   JOIN agent q ON q.aid = r.reviewer_aid
-		  WHERE r.rowid > ? AND p.visibility IN (?, ?)
+		   LEFT JOIN agent p ON p.aid = r.subject_aid
+		   LEFT JOIN fed_card f ON f.aid = r.subject_aid
+		  WHERE r.rowid > ?
+		    AND (p.visibility IN (?, ?) OR f.aid IS NOT NULL)
 		  ORDER BY r.rowid LIMIT ?`,
 		cursor, VisibilityFederated, VisibilityPublic, limit)
 	if err != nil {
@@ -212,15 +229,21 @@ func (s *Store) AdmitFedReview(peerAID string, fr FedReview) error {
 	if err := evidence.VerifyInterlock(rc, rv, docBytes, delivBytes, provKEL, revKEL); err != nil {
 		return fmt.Errorf("federated review refused: %w", err)
 	}
-	// An agent registered HERE has its ratings here; a peer's copy must
-	// not add to them, or a peer could inflate one of our own agents.
-	var local int
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM agent WHERE aid=?`, rv.SubjectAID).Scan(&local); err != nil {
-		return err
-	}
-	if local > 0 {
-		return fmt.Errorf("federated review for %s, which is registered here", rv.SubjectAID)
-	}
+	// A review of one of OUR agents, arriving from a peer, is kept — and
+	// kept as that peer's.
+	//
+	// The first version refused it outright, reasoning that a peer must
+	// not be able to inflate a local agent. That reasoning was wrong, and
+	// wrong in a way that cost real function: the interlock means a peer
+	// cannot forge a review of our agent at all, because the anchor is
+	// our agent's OWN signature over a receipt. What a peer sends is
+	// either a genuine interaction our agent performed, or nothing.
+	//
+	// Refusing them meant an agent that works across hubs could never
+	// accumulate a rating for the half of its work that crossed. What
+	// actually contains the risk is the per-source arithmetic that is
+	// already here: a peer's reviews go in the peer's column, never the
+	// local one, and concentration says how much rests on that column.
 	_, err = s.db.Exec(
 		`INSERT INTO fed_review(interaction_id, subject_aid, reviewer_aid, rating, comment,
 		   receipt_cid, peer_aid, created_at, stored_at)

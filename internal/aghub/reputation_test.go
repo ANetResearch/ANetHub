@@ -128,11 +128,35 @@ func TestAPeerCannotInventARating(t *testing.T) {
 		}
 	})
 
-	t.Run("a review for an agent registered here", func(t *testing.T) {
-		// Otherwise a peer could inflate one of our own agents by
-		// claiming to hold ratings for it.
-		if err := homeStore.AdmitFedReview("did:anet:liar", good); err == nil {
-			t.Error("a peer's review for a locally registered agent was admitted")
+	t.Run("a review of OUR agent stays in the peer's column", func(t *testing.T) {
+		// This one is admitted, and that is the correction. Refusing it
+		// looked prudent and cost real function: an agent working across
+		// hubs could never accumulate a rating for the half of its work
+		// that crossed. A peer cannot forge a review of our agent — the
+		// anchor is our agent's own signature over a receipt — so what
+		// arrives is a genuine interaction or nothing.
+		//
+		// What contains the risk is where it lands.
+		before, err := homeStore.ReputationOf(provider.AID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := homeStore.AdmitFedReview("did:anet:peer", good); err != nil {
+			t.Fatalf("a genuine cross-hub review of our own agent was refused: %v", err)
+		}
+		after, err := homeStore.ReputationOf(provider.AID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Local.Reviews != before.Local.Reviews {
+			t.Errorf("a peer's review moved the LOCAL count: %d → %d",
+				before.Local.Reviews, after.Local.Reviews)
+		}
+		if len(after.Peers) != 1 || after.Peers[0].Hub != "did:anet:peer" {
+			t.Fatalf("it did not land in the peer's column: %+v", after.Peers)
+		}
+		if after.Combined.Reviews != before.Combined.Reviews+1 {
+			t.Errorf("combined = %d, want %d", after.Combined.Reviews, before.Combined.Reviews+1)
 		}
 	})
 }
@@ -220,5 +244,62 @@ func TestTheHubPublishesItsOwnKeyHistory(t *testing.T) {
 	}
 	if out.Role != "hub" {
 		t.Errorf("role = %q — a reader should be able to tell this is the custodian", out.Role)
+	}
+}
+
+// A cross-hub interaction must be reviewable at all.
+//
+// It was not. The reviewer banks at one hub and the provider at another,
+// so "are both parties registered here" — the only question the upload
+// path asked — was false for every interaction that crossed a boundary.
+// Federation was producing work that nothing could rate, and the shape of
+// the bug is familiar: each half was correct and nobody had walked the
+// line between them.
+func TestAnInteractionThatCrossedAHubCanStillBeReviewed(t *testing.T) {
+	// hub1 is where the reviewer banks; the provider lives on hub2 and
+	// hub1 knows it only as a federated card.
+	hub1, store1 := newHubWithStore(t)
+	provider, requester := twoAgents(t)
+	register(t, hub1, requester, "Requester", nil)
+
+	// The provider's card reaches hub1 the way federation delivers it.
+	kel, err := identity.MarshalKEL(provider.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store1.AdmitFedCard("did:anet:hub2", aghub.FedCard{
+		Card: mintCard(t, provider, "Provider", []string{"work.do"}),
+		KEL:  base64.StdEncoding.EncodeToString(kel),
+		Home: "https://hub2.example",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The requester reviews the work it had done on the other hub.
+	body := makeEvidence(t, provider, requester, "ix-crossed", 5, "")
+	if code, b := post(t, hub1.URL+"/reviews", body); code != 200 {
+		t.Fatalf("a cross-hub interaction could not be reviewed: %d %s", code, b)
+	}
+
+	// hub1 holds it and will serve it, because it is first-hand: its own
+	// user said it. That is different from forwarding what a peer said,
+	// which the one-hop rule still forbids.
+	rep, err := store1.ReputationOf(provider.AID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Local.Reviews != 1 || rep.Local.Avg != 5 {
+		t.Errorf("hub1 did not record its own user's review: %+v", rep.Local)
+	}
+
+	// And a stranger who never registered anywhere still cannot be
+	// reviewed — the widening is "known to this hub", not "anyone".
+	stranger, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body2 := makeEvidence(t, stranger, requester, "ix-stranger", 5, "")
+	if code, _ := post(t, hub1.URL+"/reviews", body2); code == 200 {
+		t.Error("a review of a provider this hub has never heard of was accepted")
 	}
 }
