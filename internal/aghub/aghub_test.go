@@ -2,11 +2,15 @@ package aghub_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +19,8 @@ import (
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -527,5 +533,153 @@ func TestAnUnknownAgentHasNoKEL(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown agent kel = %d, want 404", resp.StatusCode)
+	}
+}
+
+// A capability id is precise, structured and machine-resolvable. Discovery
+// could only match it as a substring inside a JSON blob, alongside the
+// agent's prose — so "who serves cas.put" was a question the network
+// could not be asked, though C1 had been answering it on every single
+// invocation.
+func TestFindByCapability(t *testing.T) {
+	srv := newHub(t)
+	store, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cam, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prose, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, store, "StoreNode", []string{"cas.put", "cas.get"})
+	register(t, srv, cam, "CameraNode", []string{"ptz.absolute@onvif/camera-006", "ptz.home@onvif/camera-006"})
+	// An agent that merely talks about capabilities must not answer for
+	// them. This is the substring search's failure mode, written down.
+	register(t, srv, prose, "Blogger", []string{"writing"})
+
+	names := func(q string) []string {
+		resp, err := http.Get(srv.URL + "/agents?cap=" + url.QueryEscape(q))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Agents []aghub.AgentView `json:"agents"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		var ns []string
+		for _, a := range out.Agents {
+			ns = append(ns, a.Name)
+		}
+		sort.Strings(ns)
+		return ns
+	}
+
+	if got := names("cas.put"); len(got) != 1 || got[0] != "StoreNode" {
+		t.Errorf("cap=cas.put returned %v, want only StoreNode", got)
+	}
+	// The prefix form is a real question — "who can move a camera" — not a
+	// convenience. The alternative is asking for prose and hoping the
+	// provider described itself the way the caller thought to search.
+	if got := names("ptz.*"); len(got) != 1 || got[0] != "CameraNode" {
+		t.Errorf("cap=ptz.* returned %v, want only CameraNode", got)
+	}
+	if got := names("cas.*"); len(got) != 1 || got[0] != "StoreNode" {
+		t.Errorf("cap=cas.* returned %v, want only StoreNode", got)
+	}
+	// Comma still means OR, as the category directories rely on.
+	if got := names("cas.put,writing"); len(got) != 2 {
+		t.Errorf("cap=cas.put,writing returned %v, want two", got)
+	}
+	// Nothing matches means nothing — never a fallback to prose search.
+	if got := names("nobody.serves.this"); len(got) != 0 {
+		t.Errorf("an unserved capability returned %v", got)
+	}
+	// A LIKE wildcard inside the id must not widen the query.
+	if got := names("cas.%"); len(got) != 0 {
+		t.Errorf("cap=cas.%% must be literal, returned %v", got)
+	}
+}
+
+// An upgraded hub already holds agents whose capabilities were only ever a
+// JSON blob. A directory that silently forgets its contents on upgrade is
+// worse than one that never had an index.
+func TestCapabilitiesAreIndexedForAgentsRegisteredBeforeTheIndex(t *testing.T) {
+	dir := t.TempDir()
+	c, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kel, err := identity.MarshalKEL(c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutAgent(c.AID(), "Old", []string{"cas.put"}, 5, kel); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// The pre-index state: the agent row exists, the index does not. Done
+	// with raw SQL rather than a production method that exists only for a
+	// test — the point is what an old database looks like, and an old
+	// database has no such method either.
+	raw, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP TABLE agent_cap`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	reopened, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.FindByCapability("cas.put")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "Old" {
+		t.Errorf("an agent registered before the index is invisible to it: %v", got)
+	}
+}
+
+// Re-registering replaces the capability set. A node that dropped a
+// capability has stopped offering it, and a directory that kept answering
+// yes would send work to a provider that will refuse it.
+func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
+	srv := newHub(t)
+	c, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, c, "Node", []string{"cas.put", "cas.get"})
+	register(t, srv, c, "Node", []string{"cas.get"})
+
+	resp, err := http.Get(srv.URL + "/agents?cap=cas.put")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Agents []aghub.AgentView `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Agents) != 0 {
+		t.Errorf("a withdrawn capability still answers: %v", out.Agents)
 	}
 }
