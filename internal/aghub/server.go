@@ -40,7 +40,18 @@ func NewServer(store *Store) *Server { return &Server{store: store} }
 // binary ATTACHMENTS (images/media/archives, single attachment ≤ 64 MiB, base64 ≈ +33%), so the cap is
 // sized to admit one such payload plus overhead while still bounding a hostile POST. Keep the reverse
 // proxy's client_max_body_size (deploy/hub/nginx-hub*.conf) in lockstep with this value.
-const maxHubBody = 96 << 20 // 96 MiB (fits a 64 MiB attachment base64-encoded + envelope)
+// maxHubBody caps every relayed body.
+//
+// Raised with the daemon's control-plane limit so the two agree: a daemon
+// that accepts a call it cannot relay has moved the failure from the
+// caller's own machine to a stranger's hub, which is the worse place to
+// discover it.
+//
+// A public hub should lower this. It is multi-tenant and the body is
+// buffered, so the ceiling is what one caller can make this process hold
+// — put a reverse proxy in front with a limit that matches what the
+// operator is willing to allocate.
+const maxHubBody = 1 << 30 // 1 GiB
 
 // limitBody caps every request body (POSTs read JSON/base64; GETs have none). Defense-in-depth for a
 // public deployment — pair it with a reverse proxy (TLS + rate limiting) when exposing the Hub.
