@@ -34,6 +34,37 @@ type Server struct {
 	// are two networks: a credit on one is not a credit on the other, and
 	// settling somebody else's would mint money.
 	hubAID string
+	// peerKELs, when set, resolves a federation peer's verified key
+	// history. Nil in a build without federation — which is also a build
+	// with no peers, so nothing that needs it can happen.
+	peerKELs func(aid string) ([]identity.SignedEvent, error)
+}
+
+// SetPeerKELResolver installs the federation hook for checking what a
+// peer hub signed. Kept a seam rather than an import: the kernel does not
+// know federation exists (K207).
+func (s *Server) SetPeerKELResolver(f func(aid string) ([]identity.SignedEvent, error)) {
+	s.peerKELs = f
+}
+
+// ownKEL marshals this hub's own key history.
+func (s *Server) ownKEL() ([]byte, error) {
+	c := s.store.hubKey
+	if c == nil {
+		return nil, fmt.Errorf("this hub holds no signing key")
+	}
+	return identity.MarshalKEL(c.KEL())
+}
+
+// peerKEL resolves a peer's key history, or explains why it cannot.
+func (s *Server) peerKEL(aid string) ([]identity.SignedEvent, error) {
+	if aid == "" {
+		return nil, fmt.Errorf("name the peer hub")
+	}
+	if s.peerKELs == nil {
+		return nil, fmt.Errorf("this hub federates with nobody, so it owes nobody and is owed by nobody")
+	}
+	return s.peerKELs(aid)
 }
 
 // SetHubAID names the ledger this facilitator settles on.
@@ -143,8 +174,20 @@ func (s *Server) Handler() http.Handler {
 	// its own, which the spec permits outright — and for a ledger rail
 	// there is nothing to separate from, because the balances are here.
 	mux.HandleFunc("GET /x402/supported", s.hX402Supported)
+	// Credit going back out, and the arithmetic of what is outstanding.
+	mux.HandleFunc("POST /x402/redeem", s.hRedeem)
+	mux.HandleFunc("GET /x402/supply", s.hSupply)
+	mux.HandleFunc("GET /agents/{aid}/redemptions", s.hRedemptions)
+	mux.HandleFunc("POST /federation/clear", s.hClear)
+	// Reputation across hub boundaries — the signed evidence, never an
+	// aggregate somebody else computed.
+	mux.HandleFunc("GET /federation/reviews", s.hFedReviews)
+	mux.HandleFunc("GET /agents/{aid}/reputation", s.hReputation)
 	mux.HandleFunc("POST /x402/verify", s.hX402Verify)
 	mux.HandleFunc("POST /x402/settle", s.hX402Settle)
+	// The resource server: pay here, work there. See gateway.go for why
+	// this hands back a voucher instead of proxying the call.
+	mux.HandleFunc("GET /x402/resource/{aid}/{capability}", s.hX402Resource)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay broker (v0.1 centralized transport): send is open (payloads are end-to-end verifiable);
@@ -443,6 +486,13 @@ func (s *Server) hUploadReview(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.PutReview(rv, detail); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "store: " + err.Error()})
 		return
+	}
+	// Keep the bytes that were verified, not only what they meant. A peer
+	// asking for this review later needs the objects to check for itself;
+	// handing it our conclusion would make federated reputation a chain of
+	// hubs trusting hubs.
+	if err := s.store.PutReviewBlob(rv.InteractionID, rcBytes, rvBytes, docBytes, delivBytes); err != nil {
+		log.Printf("hub: review evidence not kept for %s: %v", rv.InteractionID, err)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"interaction_id": rv.InteractionID, "status": "accepted"})
 }
@@ -769,6 +819,25 @@ func cors(next http.Handler) http.Handler {
 // lets you CHECK signatures, never make them.
 func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
+	// The hub's own history is served here too.
+	//
+	// It signs settlements, redemption receipts and vouchers, and every
+	// one of those is worthless to a holder who cannot check the
+	// signature. Until this line the hub was the one signer on the
+	// network whose key nobody could look up — it published everyone
+	// else's and not its own, so "you can verify what the custodian did"
+	// was true of the objects and false of the system.
+	//
+	// Served from the same path as everyone else's rather than a special
+	// one, because a verifier holding a receipt should not need to know
+	// whether the signer happened to be a hub.
+	if aid == s.hubAID {
+		if kel, err := s.ownKEL(); err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"aid": aid, "kel": base64.StdEncoding.EncodeToString(kel), "role": "hub"})
+			return
+		}
+	}
 	kel, err := s.store.AgentKEL(aid)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})

@@ -275,8 +275,15 @@ func TestDiscoveryIsOffUnlessAskedFor(t *testing.T) {
 
 // fakeDirectory stands in for the hub kernel.
 type fakeDirectory struct {
-	cards []FedCardView
-	got   []storedCard
+	cards   []FedCardView
+	got     []storedCard
+	reviews []json.RawMessage
+	gotRevs []storedReview
+}
+
+type storedReview struct {
+	peer string
+	raw  json.RawMessage
 }
 
 type storedCard struct {
@@ -295,6 +302,23 @@ func (f *fakeDirectory) CardsSince(cursor int64, limit int, home string) ([]FedC
 		}
 	}
 	return out, next, nil
+}
+
+func (f *fakeDirectory) ReviewsSince(cursor int64, limit int) ([]json.RawMessage, int64, error) {
+	out := []json.RawMessage{}
+	next := cursor
+	for i, r := range f.reviews {
+		if int64(i+1) > cursor {
+			out = append(out, r)
+			next = int64(i + 1)
+		}
+	}
+	return out, next, nil
+}
+
+func (f *fakeDirectory) AdmitFedReview(peerAID string, raw json.RawMessage) error {
+	f.gotRevs = append(f.gotRevs, storedReview{peer: peerAID, raw: raw})
+	return nil
 }
 
 func (f *fakeDirectory) AdmitFedCard(peerAID string, card, kel []byte, home string) error {

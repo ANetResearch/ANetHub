@@ -44,9 +44,20 @@ type Balance struct {
 
 // Credit adds to an agent's balance — how a hub operator funds an
 // account, however they decide accounts get funded.
+//
+// The matching debit goes on the hub's own row. Credit does not appear
+// from nowhere: it is issued, and the issuer carries the liability. That
+// is what makes Supply computable instead of asserted — the rows across
+// the whole ledger sum to zero, so "what this hub owes its users" is
+// arithmetic anyone can repeat rather than a number the hub reports.
 func (s *Store) Credit(aid string, amount int64, reason string) error {
 	if amount == 0 {
 		return nil
+	}
+	if s.hubAID != "" && aid != s.hubAID {
+		if err := s.entry(s.hubAID, -amount, reasonIssued+":"+reason); err != nil {
+			return err
+		}
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
@@ -146,9 +157,19 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		// Already settled: report the same success as the first call, so a
 		// retried settle is indistinguishable from the one that worked.
-		return payment.SettlementResponse{Success: true, Payer: auth.Payer, Transaction: id,
-			Network: auth.Network, Amount: payment.Amount(auth.Amount),
-			Extensions: map[string]any{"anet.replayed": true}}
+		//
+		// Including the receipt. A caller whose first response was lost is
+		// the caller most in need of the hub's signed statement, and
+		// answering the retry with a bare success would leave the one
+		// party who has actually been charged holding nothing to show for
+		// it. The flag says it was a replay; the proof is the same proof.
+		replay := s.signSettlement(payment.SettlementResponse{Success: true, Payer: auth.Payer,
+			Transaction: id, Network: auth.Network, Amount: payment.Amount(auth.Amount)}, auth, id)
+		if replay.Extensions == nil {
+			replay.Extensions = map[string]any{}
+		}
+		replay.Extensions["anet.replayed"] = true
+		return replay
 	}
 
 	var bal int64
@@ -157,7 +178,10 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 		return fail(err.Error())
 	}
 	if bal < int64(auth.Amount) {
-		return fail(fmt.Sprintf("insufficient balance: has %d, needs %d", bal, auth.Amount))
+		// The x402 reason first so a client can branch on a constant, the
+		// numbers after so a person can see how short they were.
+		return fail(fmt.Sprintf("%s: has %d, needs %d",
+			payment.ReasonInsufficientFunds, bal, auth.Amount))
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO credit_balance(aid, credits) VALUES(?, -?)
@@ -207,8 +231,12 @@ func (s *Store) signSettlement(r payment.SettlementResponse, auth *payment.Autho
 	return r
 }
 
-// SetHubKey gives the store the identity it signs settlements with.
-func (s *Store) SetHubKey(c *identity.Controller) { s.hubKey = c }
+// SetHubKey gives the store the identity it signs settlements with, and
+// the row credit is issued from and redeemed back into.
+func (s *Store) SetHubKey(c *identity.Controller) {
+	s.hubKey = c
+	s.hubAID = c.AID()
+}
 
 // ClearFromPeer credits a local payee against a peer hub's signed
 // settlement, and records what that peer now owes us.

@@ -111,8 +111,11 @@ type Store struct {
 	hubKey *identity.Controller
 	// peerSettle forwards a payment on another hub'''s ledger to that hub.
 	peerSettle PeerSettler
-	db         *sql.DB
-	mu         sync.Mutex
+	// hubAID is the row credit is issued from and redeemed into, so the
+	// ledger sums to zero and the hub's liability is countable.
+	hubAID string
+	db     *sql.DB
+	mu     sync.Mutex
 }
 
 // Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
@@ -243,6 +246,50 @@ func (s *Store) migrate() error {
 		// What each peer hub owes this one. A claim on another hub, kept
 		// apart from credit here — the two must not be allowed to look
 		// alike.
+		// Credit taken back out of circulation, one row per authorization
+		// the agent signed away. The reference is what the hub agreed to
+		// settle against outside this system; opaque here on purpose.
+		// The exact bytes a review was verified from. Kept because a hub
+		// that stored the conclusion and discarded the evidence can only
+		// pass on its own say-so, and federating reputation on say-so is
+		// the thing this design exists to avoid.
+		`CREATE TABLE IF NOT EXISTS review_blob (
+			interaction_id  TEXT PRIMARY KEY,
+			receipt_raw     BLOB NOT NULL,
+			review_raw      BLOB NOT NULL,
+			request_doc_raw BLOB NOT NULL,
+			deliverable_raw BLOB NOT NULL
+		)`,
+		// Reviews learned from a peer hub, kept apart from local ones so
+		// the arithmetic can stay per source.
+		`CREATE TABLE IF NOT EXISTS fed_review (
+			interaction_id TEXT PRIMARY KEY,
+			subject_aid    TEXT NOT NULL,
+			reviewer_aid   TEXT NOT NULL,
+			rating         INTEGER NOT NULL,
+			comment        TEXT NOT NULL DEFAULT '',
+			receipt_cid    TEXT NOT NULL DEFAULT '',
+			peer_aid       TEXT NOT NULL,
+			created_at     INTEGER NOT NULL DEFAULT 0,
+			stored_at      TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fed_review_subject ON fed_review(subject_aid)`,
+		`CREATE TABLE IF NOT EXISTS credit_redemption (
+			auth_id   TEXT PRIMARY KEY,
+			aid       TEXT NOT NULL,
+			amount    INTEGER NOT NULL,
+			reference TEXT NOT NULL DEFAULT '',
+			at        TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_redemption_aid ON credit_redemption(aid)`,
+		// A peer hub's signed discharge of what it owed us. Keyed on the
+		// statement id so a replayed discharge clears the debt once.
+		`CREATE TABLE IF NOT EXISTS hub_cleared (
+			auth_id  TEXT PRIMARY KEY,
+			peer_aid TEXT NOT NULL,
+			amount   INTEGER NOT NULL,
+			at       TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS hub_owed (
 		   peer_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0

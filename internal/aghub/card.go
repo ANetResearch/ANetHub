@@ -256,6 +256,34 @@ func (d FedDirectory) CardsSince(cursor int64, limit int, home string) ([]federa
 	return out, next, nil
 }
 
+// ReviewsSince and AdmitFedReview complete the Directory seam. Federation
+// carries the bytes; what a review means stays here, because a module
+// with an opinion about reputation is a module that would need to be
+// trusted about it.
+func (d FedDirectory) ReviewsSince(cursor int64, limit int) ([]json.RawMessage, int64, error) {
+	revs, next, err := d.S.ReviewsSince(cursor, limit)
+	if err != nil {
+		return nil, cursor, err
+	}
+	out := make([]json.RawMessage, 0, len(revs))
+	for _, r := range revs {
+		b, merr := json.Marshal(r)
+		if merr != nil {
+			return nil, cursor, merr
+		}
+		out = append(out, b)
+	}
+	return out, next, nil
+}
+
+func (d FedDirectory) AdmitFedReview(peerAID string, raw json.RawMessage) error {
+	var fr FedReview
+	if err := json.Unmarshal(raw, &fr); err != nil {
+		return err
+	}
+	return d.S.AdmitFedReview(peerAID, fr)
+}
+
 func (d FedDirectory) AdmitFedCard(peerAID string, card, kel []byte, home string) error {
 	return d.S.AdmitFedCard(peerAID, FedCard{
 		Card: json.RawMessage(card), KEL: base64.StdEncoding.EncodeToString(kel), Home: home,
