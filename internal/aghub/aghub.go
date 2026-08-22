@@ -50,6 +50,10 @@ type AgentView struct {
 	AvgRating    float64  `json:"avg_rating"`
 	ReviewCount  int      `json:"review_count"`
 	RegisteredAt string   `json:"registered_at"`
+	// HomeHub is set only on an agent learned from a peer hub: which hub
+	// it lives on, and so where work for it must be sent. Empty means
+	// this hub.
+	HomeHub string `json:"home_hub,omitempty"`
 }
 
 // ReviewView is one stored, verified review. Beyond the rating it carries the VERIFIED interaction
@@ -182,6 +186,25 @@ func (s *Store) migrate() error {
 		   aid TEXT PRIMARY KEY,
 		   seq INTEGER NOT NULL,
 		   card BLOB NOT NULL,
+		   stored_at TEXT NOT NULL,
+		   -- fed_seq orders cards for federation sync: a peer asks for
+		   -- everything after the cursor it holds. It advances on every
+		   -- store, including an update, or a peer that already synced an
+		   -- agent would never see that agent change.
+		   fed_seq INTEGER NOT NULL DEFAULT 0
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_card_fedseq ON agent_card(fed_seq)`,
+		// Cards learned from a peer hub, kept apart from cards published
+		// here. Which hub an agent actually lives on decides where its
+		// work is delivered, and a directory that forgot the difference
+		// would answer with agents it cannot reach.
+		`CREATE TABLE IF NOT EXISTS fed_card (
+		   aid TEXT PRIMARY KEY,
+		   seq INTEGER NOT NULL,
+		   card BLOB NOT NULL,
+		   kel BLOB NOT NULL,
+		   home TEXT NOT NULL,
+		   peer_aid TEXT NOT NULL,
 		   stored_at TEXT NOT NULL
 		 )`,
 		`CREATE TABLE IF NOT EXISTS relay_message (
@@ -218,6 +241,13 @@ func (s *Store) migrate() error {
 		`ALTER TABLE agent ADD COLUMN readme TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agent ADD COLUMN pricing TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agent ADD COLUMN guest_quota INTEGER NOT NULL DEFAULT 5`,
+		// Visibility is the agent's answer to "may this hub tell other
+		// hubs about me". Three tiers, hub-local by default — the
+		// conservative default is deliberate (K208 §5.2): a directory
+		// that federated by default would publish, once and for everyone
+		// who never thought about it.
+		`ALTER TABLE agent ADD COLUMN visibility TEXT NOT NULL DEFAULT 'hub-local'`,
+		`ALTER TABLE agent_card ADD COLUMN fed_seq INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("hub: migrate profile: %w", err)

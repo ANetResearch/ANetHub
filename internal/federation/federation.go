@@ -7,14 +7,18 @@ package federation
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/anetcid"
@@ -41,7 +45,16 @@ type Peer struct {
 // Config is federation.json in the hub data dir; absent file = federation off.
 type Config struct {
 	Delivery string `json:"delivery"` // "off" | "allowlist"
-	Peers    []Peer `json:"peers"`
+	// Discovery is the second sub-plane and switches independently
+	// (K208 §0): delivery is federated by default, discovery by choice. A
+	// hub may carry a peer's traffic without also publishing its
+	// directory, and those are genuinely different decisions.
+	Discovery string `json:"discovery"` // "off" | "allowlist"
+	// Home is this hub's own public endpoint, sent as the routing hint on
+	// every card it serves. A card without one tells a peer who exists
+	// and not where to reach them.
+	Home  string `json:"home"`
+	Peers []Peer `json:"peers"`
 }
 
 // LoadConfig reads dir/federation.json (absent → off).
@@ -114,9 +127,15 @@ type Service struct {
 	cfg   Config
 	id    *hubid.Identity
 	local LocalDelivery
+	dir   Directory
 	db    *sql.DB
 	http  *http.Client
 }
+
+// SetDirectory wires the discovery sub-plane. Separate from New because
+// the two sub-planes switch independently and a hub running only delivery
+// should not have to supply a directory it will never serve.
+func (s *Service) SetDirectory(d Directory) { s.dir = d }
 
 func New(dir string, cfg Config, id *hubid.Identity, local LocalDelivery) (*Service, error) {
 	db, err := sql.Open("sqlite", filepath.Join(dir, "federation.db")+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(15000)")
@@ -126,6 +145,7 @@ func New(dir string, cfg Config, id *hubid.Identity, local LocalDelivery) (*Serv
 	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS fed_dedupe (payload_cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_peer_kel (aid TEXT PRIMARY KEY, kel BLOB NOT NULL, fetched_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS fed_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 `); err != nil {
 		db.Close()
 		return nil, err
@@ -186,6 +206,7 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fed/v1/forward", s.hForward)
+	mux.HandleFunc("GET /fed/v1/cards", s.hCards)
 	return mux
 }
 
@@ -335,3 +356,138 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // one place; no behavioral surface).
 func sumRawForTest(b []byte) (string, error) { return anetcid.SumRaw(b) }
 func nowMillisForTest() uint64               { return uint64(time.Now().UnixMilli()) }
+
+// ---- sub-plane B: discovery federation (K208 §5) ----
+
+// Directory is what discovery federation needs from the hub kernel. Kept
+// separate from LocalDelivery because the two sub-planes switch
+// independently, and a hub running only one should not have to implement
+// the other's seam.
+type Directory interface {
+	// CardsSince serves this hub's own opted-in cards after a cursor.
+	CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error)
+	// AdmitFedCard verifies and stores a card learned from a peer.
+	AdmitFedCard(peerAID string, card, kel []byte, home string) error
+}
+
+// FedCardView is one entry of the sync stream, as the kernel hands it over.
+type FedCardView struct {
+	Card   []byte
+	KEL    []byte
+	Home   string
+	FedSeq int64
+}
+
+type fedCardWire struct {
+	Card   json.RawMessage `json:"card"`
+	KEL    string          `json:"kel"`
+	Home   string          `json:"home"`
+	FedSeq int64           `json:"fed_seq"`
+}
+
+// DiscoveryEnabled reports whether this hub publishes and pulls directories.
+func (s *Service) DiscoveryEnabled() bool {
+	return s.cfg.Discovery != "" && s.cfg.Discovery != "off" && len(s.cfg.Peers) > 0
+}
+
+// hCards serves GET /fed/v1/cards?cursor=<c>.
+//
+// Unauthenticated on purpose. Everything it serves is an agent's own
+// signed card, published by an agent that asked to be federated — there
+// is nothing here a caller could learn that the agent did not choose to
+// say, and requiring a signature to read public statements would only
+// stop the honest.
+func (s *Service) hCards(w http.ResponseWriter, r *http.Request) {
+	if !s.DiscoveryEnabled() || s.dir == nil {
+		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "discovery federation disabled")
+		return
+	}
+	cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
+	cards, next, err := s.dir.CardsSince(cursor, 200, s.cfg.Home)
+	if err != nil {
+		fedErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	out := make([]fedCardWire, 0, len(cards))
+	for _, c := range cards {
+		out = append(out, fedCardWire{
+			Card: json.RawMessage(c.Card), KEL: base64.StdEncoding.EncodeToString(c.KEL),
+			Home: c.Home, FedSeq: c.FedSeq,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"cursor": next, "cards": out})
+}
+
+// SyncOnce pulls each peer's directory forward by one page.
+//
+// Per peer, because a peer that is down or lying must not stop the
+// others: its cursor simply does not advance, and the next attempt asks
+// for the same page. A card that fails admission is dropped and the
+// cursor still advances past it — refusing to move would let one bad card
+// from one peer wedge that peer's stream forever.
+func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
+	if !s.DiscoveryEnabled() || s.dir == nil {
+		return 0, 0
+	}
+	for i := range s.cfg.Peers {
+		p := &s.cfg.Peers[i]
+		cursor := s.peerCursor(p.AID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			fmt.Sprintf("%s/fed/v1/cards?cursor=%d", strings.TrimSuffix(p.Endpoint, "/"), cursor), nil)
+		if err != nil {
+			continue
+		}
+		resp, err := s.http.Do(req)
+		if err != nil {
+			log.Printf("hub: federation sync %s: %v", p.AID, err)
+			continue
+		}
+		var out struct {
+			Cursor int64         `json:"cursor"`
+			Cards  []fedCardWire `json:"cards"`
+		}
+		derr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out)
+		resp.Body.Close()
+		if derr != nil {
+			log.Printf("hub: federation sync %s: %v", p.AID, derr)
+			continue
+		}
+		for _, c := range out.Cards {
+			kel, kerr := base64.StdEncoding.DecodeString(c.KEL)
+			if kerr != nil {
+				refused++
+				continue
+			}
+			home := c.Home
+			if home == "" {
+				// A peer that names no home still tells us who exists;
+				// its own endpoint is the honest fallback for where they
+				// are reachable.
+				home = p.Endpoint
+			}
+			if err := s.dir.AdmitFedCard(p.AID, c.Card, kel, home); err != nil {
+				log.Printf("hub: federation card from %s refused: %v", p.AID, err)
+				refused++
+				continue
+			}
+			admitted++
+		}
+		if out.Cursor > cursor {
+			s.setPeerCursor(p.AID, out.Cursor)
+		}
+	}
+	return admitted, refused
+}
+
+func (s *Service) peerCursor(aid string) int64 {
+	var c int64
+	_ = s.db.QueryRow(`SELECT cursor FROM fed_cursor WHERE peer_aid=?`, aid).Scan(&c)
+	return c
+}
+
+func (s *Service) setPeerCursor(aid string, c int64) {
+	_, _ = s.db.Exec(
+		`INSERT INTO fed_cursor(peer_aid, cursor) VALUES(?,?)
+		 ON CONFLICT(peer_aid) DO UPDATE SET cursor=excluded.cursor`, aid, c)
+}

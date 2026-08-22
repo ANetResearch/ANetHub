@@ -2,11 +2,17 @@ package federation
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/ANetResearch/ANetCore/adp"
+	"github.com/ANetResearch/ANetCore/identity"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
@@ -189,4 +195,146 @@ func TestPayloadCIDMismatch(t *testing.T) {
 	if code != 400 || out["error"] != "MALFORMED" {
 		t.Fatalf("cid mismatch must be MALFORMED: %d %v", code, out)
 	}
+}
+
+// Two hubs, one agent, and a directory that crosses between them.
+//
+// The property being tested is not "the card arrived" but that it arrived
+// as the agent's own signed statement. A peer hub can decline to tell us
+// about an agent — hiding is allowed and unavoidable — and this is what
+// stops it inventing one.
+func TestDirectoryFederation(t *testing.T) {
+	dir := t.TempDir()
+
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kel, err := identity.MarshalKEL(agent.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := signedCardFor(t, agent, "RemoteNode", []string{"cas.put"})
+
+	// Hub A publishes one opted-in card.
+	source := &fakeDirectory{cards: []FedCardView{{
+		Card: card, KEL: kel, Home: "https://hub-a.example", FedSeq: 7,
+	}}}
+	svcA := newDiscoveryService(t, filepath.Join(dir, "a"), Config{
+		Discovery: "allowlist", Home: "https://hub-a.example",
+		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
+	}, source)
+	srvA := httptest.NewServer(svcA.Handler())
+	defer srvA.Close()
+
+	// Hub B pulls from A.
+	sink := &fakeDirectory{}
+	svcB := newDiscoveryService(t, filepath.Join(dir, "b"), Config{
+		Discovery: "allowlist", Home: "https://hub-b.example",
+		Peers: []Peer{{AID: "did:anet:a", Endpoint: srvA.URL}},
+	}, sink)
+	admitted, refused := svcB.SyncOnce(context.Background())
+	if admitted != 1 || refused != 0 {
+		t.Fatalf("sync admitted=%d refused=%d, want 1/0", admitted, refused)
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("hub B stored %d cards", len(sink.got))
+	}
+	if sink.got[0].home != "https://hub-a.example" {
+		t.Errorf("routing hint lost: %q — B would not know where to deliver", sink.got[0].home)
+	}
+
+	// The cursor advances, so a second sync is not a second copy.
+	admitted2, _ := svcB.SyncOnce(context.Background())
+	if admitted2 != 0 {
+		t.Errorf("re-syncing re-admitted %d cards; the cursor did not advance", admitted2)
+	}
+}
+
+// Discovery is off by default and switches independently of delivery. A
+// hub may carry a peer's traffic without publishing its directory.
+func TestDiscoveryIsOffUnlessAskedFor(t *testing.T) {
+	svc := newDiscoveryService(t, t.TempDir(), Config{
+		Delivery: "allowlist", // delivery on…
+		Peers:    []Peer{{AID: "did:anet:a", Endpoint: "http://unused"}},
+	}, &fakeDirectory{})
+	if svc.DiscoveryEnabled() {
+		t.Error("discovery must not follow delivery — they are separate decisions about a peer")
+	}
+	srv := httptest.NewServer(svc.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/fed/v1/cards")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("a hub with discovery off served its directory: %d", resp.StatusCode)
+	}
+}
+
+// fakeDirectory stands in for the hub kernel.
+type fakeDirectory struct {
+	cards []FedCardView
+	got   []storedCard
+}
+
+type storedCard struct {
+	peer, home string
+	card       []byte
+}
+
+func (f *fakeDirectory) CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error) {
+	out := []FedCardView{}
+	next := cursor
+	for _, c := range f.cards {
+		if c.FedSeq > cursor {
+			c.Home = home
+			out = append(out, c)
+			next = c.FedSeq
+		}
+	}
+	return out, next, nil
+}
+
+func (f *fakeDirectory) AdmitFedCard(peerAID string, card, kel []byte, home string) error {
+	f.got = append(f.got, storedCard{peer: peerAID, home: home, card: card})
+	return nil
+}
+
+func newDiscoveryService(t *testing.T, dir string, cfg Config, d Directory) *Service {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id, err := hubid.LoadOrIncept(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(dir, cfg, id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+	svc.SetDirectory(d)
+	return svc
+}
+
+func signedCardFor(t *testing.T, c *identity.Controller, name string, caps []string) []byte {
+	t.Helper()
+	now := time.Now()
+	card := &adp.AgentCard{
+		SubjectDID: c.AID(), CardSchema: adp.CardSchema{Major: 1},
+		Seq: uint64(now.UnixNano()), IssuedAt: now.Unix(),
+		NotBefore:    now.Add(-time.Minute).Unix(),
+		Capabilities: caps, CriticalExtensions: []string{}, Name: name,
+	}
+	if err := card.Sign(c); err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

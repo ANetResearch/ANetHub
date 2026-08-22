@@ -25,11 +25,25 @@ type Server struct {
 	// never imports modules), offers a locally-unknown recipient to
 	// federation peers. Returns (accepted, peerHubAID, error).
 	forwardUnknown func(toAID, fromAID, kind, interactionID string, payload []byte) (bool, string, error)
+	// federated, when set, answers discovery with agents learned from
+	// peer hubs. Nil in a build without federation, which is how that
+	// build says it has none.
+	federated func(capFilter string) ([]AgentView, error)
 }
 
 // SetForwarder installs the federation egress hook.
 func (s *Server) SetForwarder(f func(toAID, fromAID, kind, interactionID string, payload []byte) (bool, string, error)) {
 	s.forwardUnknown = f
+}
+
+// SetFederatedDirectory lets discovery answer with agents learned from
+// peer hubs as well as those registered here.
+//
+// Injected rather than read directly, so this package keeps knowing
+// nothing about federation: a hub built with -tags no_federation has no
+// federated agents, and that is expressed by nobody calling this.
+func (s *Server) SetFederatedDirectory(f func(capFilter string) ([]AgentView, error)) {
+	s.federated = f
 }
 
 // NewServer wraps a store.
@@ -493,6 +507,11 @@ func (s *Server) hAgents(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		// Agents learned from peer hubs answer the same question, and
+		// carry the home hub that says where to reach them. Local first:
+		// an agent this hub can deliver to directly is a better answer
+		// than one behind another hop.
+		agents = append(agents, s.federatedAgents(capID)...)
 		if agents == nil {
 			agents = []AgentView{}
 		}
@@ -753,4 +772,19 @@ func (s *Server) hAgentCard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(raw)
+}
+
+// federatedAgents returns peer-learned agents, or nothing when discovery
+// federation is not wired in.
+func (s *Server) federatedAgents(capFilter string) []AgentView {
+	if s.federated == nil {
+		return nil
+	}
+	out, err := s.federated(capFilter)
+	if err != nil {
+		// A peer directory that cannot be read must not fail a query this
+		// hub can answer from its own records.
+		return nil
+	}
+	return out
 }
