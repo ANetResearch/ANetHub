@@ -122,6 +122,11 @@ func Open(dir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// An upgraded hub already holds agents whose capabilities were only
+	// ever a JSON blob; index them before serving.
+	if err := s.backfillCaps(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -157,6 +162,19 @@ func (s *Store) migrate() error {
 		   stored_at TEXT NOT NULL
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_review_subject ON review(subject_aid)`,
+		// A capability id is precise, structured and machine-resolvable —
+		// "cas.put", "ptz.absolute@onvif/camera-006" — and discovery could
+		// only match it as a substring inside a JSON blob, alongside the
+		// agent's prose. So "who serves cas.put" was a question the network
+		// could not be asked, though C1 had been answering it in every
+		// invocation. A row per capability makes it answerable, and makes
+		// prefix search ("ptz.*") mean what it says.
+		`CREATE TABLE IF NOT EXISTS agent_cap (
+		   aid TEXT NOT NULL,
+		   cap TEXT NOT NULL,
+		   PRIMARY KEY (aid, cap)
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_cap ON agent_cap(cap)`,
 		`CREATE TABLE IF NOT EXISTS relay_message (
 		   id INTEGER PRIMARY KEY AUTOINCREMENT,
 		   to_aid TEXT NOT NULL,
@@ -208,12 +226,130 @@ func (s *Store) PutAgent(aid, name string, caps []string, guestQuota int, kel []
 	defer s.mu.Unlock()
 	capsJSON, _ := json.Marshal(caps)
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
 		`INSERT INTO agent(aid,name,caps,guest_quota,kel,registered_at) VALUES(?,?,?,?,?,?)
 		 ON CONFLICT(aid) DO UPDATE SET name=excluded.name, caps=excluded.caps,
 		   guest_quota=excluded.guest_quota, kel=excluded.kel`,
-		aid, name, string(capsJSON), guestQuota, kel, now)
-	return err
+		aid, name, string(capsJSON), guestQuota, kel, now); err != nil {
+		return err
+	}
+	// Re-registering replaces the capability set rather than adding to it:
+	// a node that dropped a capability has stopped offering it, and a
+	// directory that kept answering yes would be sending work to a
+	// provider that will refuse it.
+	if _, err := tx.Exec(`DELETE FROM agent_cap WHERE aid=?`, aid); err != nil {
+		return err
+	}
+	for _, c := range caps {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO agent_cap(aid,cap) VALUES(?,?)`, aid, c); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// FindByCapability returns agents offering a capability id.
+//
+// Exact by default, prefix when the query ends in "*". A capability id is
+// structured — family, action, and often a device or vendor after "@" —
+// so "ptz.*" is a real question ("who can move a camera") and not a
+// convenience: the alternative is asking for prose and hoping the
+// provider described itself the way the caller thought to search.
+func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
+	var preds []string
+	var args []any
+	for _, term := range strings.Split(cap, ",") {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		if strings.HasSuffix(term, "*") {
+			// LIKE's own wildcards must not leak in from a capability id,
+			// or "cas.%" would quietly become a broader query than asked.
+			stem := strings.NewReplacer("%", `\%`, "_", `\_`).Replace(strings.TrimSuffix(term, "*"))
+			preds = append(preds, "c.cap LIKE ? ESCAPE '\\'")
+			args = append(args, stem+"%")
+			continue
+		}
+		preds = append(preds, "c.cap = ?")
+		args = append(args, term)
+	}
+	if len(preds) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at,
+		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		 FROM agent a
+		 JOIN agent_cap c ON c.aid = a.aid
+		 LEFT JOIN review r ON r.subject_aid = a.aid
+		 WHERE `+strings.Join(preds, " OR ")+`
+		 GROUP BY a.aid
+		 ORDER BY AVG(r.rating) DESC, COUNT(r.interaction_id) DESC, a.registered_at`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentView
+	for rows.Next() {
+		av, err := scanAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, av)
+	}
+	return out, rows.Err()
+}
+
+// backfillCaps populates agent_cap for rows registered before the table
+// existed. Without it an upgraded hub answers "nobody serves that" for
+// every agent already registered — a directory that silently forgets its
+// contents on upgrade is worse than one that never had an index.
+func (s *Store) backfillCaps() error {
+	rows, err := s.db.Query(
+		`SELECT aid, caps FROM agent WHERE aid NOT IN (SELECT DISTINCT aid FROM agent_cap)`)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		aid, caps string
+	}
+	var pending []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.aid, &r.caps); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range pending {
+		var caps []string
+		if json.Unmarshal([]byte(r.caps), &caps) != nil {
+			continue
+		}
+		for _, c := range caps {
+			if c = strings.TrimSpace(c); c != "" {
+				if _, err := s.db.Exec(`INSERT OR IGNORE INTO agent_cap(aid,cap) VALUES(?,?)`, r.aid, c); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // PutProfile updates an agent's self-authored profile (summary/readme/pricing). The agent must already

@@ -462,46 +462,36 @@ func goalFromTaskDoc(docBytes []byte) string {
 }
 
 func (s *Server) hAgents(w http.ResponseWriter, r *http.Request) {
+	// ?cap= is answered from the capability index rather than by
+	// post-filtering a prose search. Same parameter, same comma-OR
+	// meaning, two things it can now do that it could not: match a
+	// structured id exactly, and match a family by prefix.
+	//
+	// It does not fall back to the prose search when nothing matches.
+	// "who serves cas.put" and "who mentions cas.put" are different
+	// questions, and answering the second when asked the first sends work
+	// to a provider that will refuse it.
+	if capID := strings.TrimSpace(r.URL.Query().Get("cap")); capID != "" {
+		agents, err := s.store.FindByCapability(capID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if agents == nil {
+			agents = []AgentView{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+		return
+	}
 	agents, err := s.store.ListAgents(r.URL.Query().Get("q"))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	// Optional exact-capability filter (e.g. ?cap=research): a precise membership test the substring `q`
-	// search can't express (q=research would also match any readme mentioning the word). This powers
-	// category directories such as the researcher sub-page without adding a schema field — a reserved cap
-	// IS the category. Multiple caps may be OR-ed with a comma: ?cap=research,reviewer.
-	if cap := strings.TrimSpace(r.URL.Query().Get("cap")); cap != "" {
-		agents = filterByCap(agents, cap)
-	}
 	if agents == nil {
 		agents = []AgentView{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
-}
-
-// filterByCap keeps agents whose caps contain ANY of the requested caps (comma-separated), matched as
-// exact case-insensitive tokens. Used by category views (e.g. the research directory).
-func filterByCap(agents []AgentView, cap string) []AgentView {
-	want := map[string]bool{}
-	for _, c := range strings.Split(cap, ",") {
-		if c = strings.ToLower(strings.TrimSpace(c)); c != "" {
-			want[c] = true
-		}
-	}
-	if len(want) == 0 {
-		return agents
-	}
-	out := agents[:0]
-	for _, a := range agents {
-		for _, c := range a.Caps {
-			if want[strings.ToLower(strings.TrimSpace(c))] {
-				out = append(out, a)
-				break
-			}
-		}
-	}
-	return out
 }
 
 // --- relay broker handlers ---
