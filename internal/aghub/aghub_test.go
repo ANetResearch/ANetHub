@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	_ "modernc.org/sqlite"
@@ -27,15 +30,51 @@ import (
 )
 
 func newHub(t *testing.T) *httptest.Server {
+	srv, _ := newHubWithStore(t)
+	return srv
+}
+
+// newHubWithStore also hands back the store, for the things a hub
+// operator does directly rather than over HTTP.
+func newHubWithStore(t *testing.T) (*httptest.Server, *aghub.Store) {
 	t.Helper()
 	store, err := aghub.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(aghub.NewServer(store).Handler())
+	id, err := hubid.LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := aghub.NewServer(store)
+	s.SetHubAID(id.AID)
+	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(func() { srv.Close(); store.Close() })
-	return srv
+	testHubAID.Store(srv.URL, id.AID)
+	testHubStores.Store(srv.URL, store)
+	return srv, store
 }
+
+var testHubAID sync.Map
+
+// fundAgent credits an account.
+//
+// Deliberately not an HTTP endpoint. Who may create credit is a policy
+// question — an operator's billing system, a faucet, a grant — and this
+// round answers the protocol, not that. Until it is answered, funding is
+// something the operator does to their own store.
+func fundAgent(t *testing.T, srv *httptest.Server, aid string, amount int64) {
+	t.Helper()
+	v, ok := testHubStores.Load(srv.URL)
+	if !ok {
+		t.Fatal("no store for this hub")
+	}
+	if err := v.(*aghub.Store).Credit(aid, amount, "test grant"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+var testHubStores sync.Map
 
 func post(t *testing.T, url string, body any) (int, []byte) {
 	t.Helper()
@@ -923,5 +962,195 @@ func TestAPeerCannotClaimAnAgentRegisteredHere(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "registered here") {
 		t.Errorf("refused for the wrong reason: %v", err)
+	}
+}
+
+// The facilitator settles credit, once, for the payer who signed it.
+func TestCreditSettlement(t *testing.T) {
+	srv := newHub(t)
+	payer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payee, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, payer, "Payer", nil)
+	register(t, srv, payee, "Payee", []string{"cas.put"})
+
+	hubAID := hubAIDOf(t, srv)
+	fundAgent(t, srv, payer.AID(), 500)
+
+	auth := signedAuth(t, payer, payee.AID(), 120, hubAID, "ix-1")
+	payload := creditPayload(t, auth, payee.AID(), payment.CreditNetwork(hubAID))
+
+	// Verify first: it must not move anything.
+	var vr payment.VerifyResponse
+	postJSON(t, srv.URL+"/x402/verify", map[string]any{
+		"x402Version": payment.Version, "paymentPayload": payload}, &vr)
+	if !vr.IsValid {
+		t.Fatalf("a funded, signed authorization must verify: %s", vr.InvalidReason)
+	}
+	if got := balanceOf(t, srv, payer.AID()); got != 500 {
+		t.Errorf("verify moved credit: balance is %d", got)
+	}
+
+	var sr payment.SettlementResponse
+	postJSON(t, srv.URL+"/x402/settle", map[string]any{
+		"x402Version": payment.Version, "paymentPayload": payload}, &sr)
+	if !sr.Success {
+		t.Fatalf("settle failed: %s", sr.ErrorReason)
+	}
+	if balanceOf(t, srv, payer.AID()) != 380 || balanceOf(t, srv, payee.AID()) != 120 {
+		t.Errorf("balances after settle: payer=%d payee=%d, want 380/120",
+			balanceOf(t, srv, payer.AID()), balanceOf(t, srv, payee.AID()))
+	}
+
+	// Settling again must not charge again. A lost reply is the ordinary
+	// case, and the retry has to be indistinguishable from the call that
+	// worked.
+	var again payment.SettlementResponse
+	postJSON(t, srv.URL+"/x402/settle", map[string]any{
+		"x402Version": payment.Version, "paymentPayload": payload}, &again)
+	if !again.Success {
+		t.Errorf("a retried settle must succeed, got %s", again.ErrorReason)
+	}
+	if balanceOf(t, srv, payer.AID()) != 380 {
+		t.Errorf("the authorization was spent twice: balance %d", balanceOf(t, srv, payer.AID()))
+	}
+	if again.Transaction != sr.Transaction {
+		t.Errorf("a retry reported a different transaction: %s vs %s", again.Transaction, sr.Transaction)
+	}
+}
+
+func TestPaymentRefusals(t *testing.T) {
+	srv := newHub(t)
+	payer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payee, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, payer, "Payer", nil)
+	register(t, srv, payee, "Payee", nil)
+	hubAID := hubAIDOf(t, srv)
+
+	settle := func(p *payment.PaymentPayload) payment.SettlementResponse {
+		var sr payment.SettlementResponse
+		postJSON(t, srv.URL+"/x402/settle", map[string]any{
+			"x402Version": payment.Version, "paymentPayload": p}, &sr)
+		return sr
+	}
+
+	// No balance.
+	broke := settle(creditPayload(t, signedAuth(t, payer, payee.AID(), 50, hubAID, "ix-a"), payee.AID(), payment.CreditNetwork(hubAID)))
+	if broke.Success || !strings.Contains(broke.ErrorReason, "insufficient") {
+		t.Errorf("an unfunded payment settled: %+v", broke)
+	}
+
+	// Another hub's ledger. Settling it here would mint money.
+	fundAgent(t, srv, payer.AID(), 500)
+	foreign := signedAuth(t, payer, payee.AID(), 50, "did:anet:another-hub", "ix-b")
+	fr := settle(creditPayload(t, foreign, payee.AID(), payment.CreditNetwork("did:anet:another-hub")))
+	if fr.Success {
+		t.Error("this hub settled another hub's credit")
+	}
+
+	// An unregistered payer has no key history here, so nothing can say
+	// they authorised it.
+	stranger, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sr := settle(creditPayload(t, signedAuth(t, stranger, payee.AID(), 10, hubAID, "ix-c"), payee.AID(), payment.CreditNetwork(hubAID)))
+	if sr.Success || !strings.Contains(sr.ErrorReason, "not registered") {
+		t.Errorf("a stranger's payment settled: %+v", sr)
+	}
+}
+
+// /supported is how a client learns what this facilitator will settle.
+func TestFacilitatorAdvertisesItsRail(t *testing.T) {
+	srv := newHub(t)
+	resp, err := http.Get(srv.URL + "/x402/supported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var sup payment.Supported
+	if err := json.NewDecoder(resp.Body).Decode(&sup); err != nil {
+		t.Fatal(err)
+	}
+	if len(sup.Kinds) != 1 || sup.Kinds[0].Scheme != payment.SchemeCredit {
+		t.Fatalf("supported = %+v", sup.Kinds)
+	}
+	if sup.Kinds[0].Network != payment.CreditNetwork(hubAIDOf(t, srv)) {
+		t.Errorf("network = %s, want this hub's own ledger", sup.Kinds[0].Network)
+	}
+}
+
+func hubAIDOf(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	v, ok := testHubAID.Load(srv.URL)
+	if !ok {
+		t.Fatal("no hub identity for this server")
+	}
+	return v.(string)
+}
+
+func signedAuth(t *testing.T, payer *identity.Controller, payTo string, amount uint64,
+	hubAID, ix string) *payment.Authorization {
+	t.Helper()
+	now := time.Now().UnixMilli()
+	a := &payment.Authorization{
+		PayTo: payTo, Amount: amount, Network: payment.CreditNetwork(hubAID),
+		Nonce: ix + "-nonce", IssuedAt: now - 1000, NotAfter: now + 60_000, InteractionID: ix,
+	}
+	if err := a.Sign(payer); err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func creditPayload(t *testing.T, a *payment.Authorization, payTo, network string) *payment.PaymentPayload {
+	t.Helper()
+	b, err := a.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &payment.PaymentPayload{
+		X402Version: payment.Version,
+		Accepted: payment.PaymentOption{
+			Scheme: payment.SchemeCredit, Network: network,
+			Amount: payment.Amount(a.Amount), Asset: payment.AssetCredit, PayTo: payTo,
+		},
+		Payload: map[string]any{"authorization": base64.StdEncoding.EncodeToString(b)},
+	}
+}
+
+func balanceOf(t *testing.T, srv *httptest.Server, aid string) int64 {
+	t.Helper()
+	resp, err := http.Get(srv.URL + "/agents/" + aid + "/balance")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var b aghub.Balance
+	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
+		t.Fatal(err)
+	}
+	return b.Credits
+}
+
+func postJSON(t *testing.T, url string, body any, out any) {
+	t.Helper()
+	code, b := post(t, url, body)
+	if code != 200 {
+		t.Fatalf("POST %s: %d %s", url, code, b)
+	}
+	if err := json.Unmarshal(b, out); err != nil {
+		t.Fatalf("decode %s: %v (%s)", url, err, b)
 	}
 }

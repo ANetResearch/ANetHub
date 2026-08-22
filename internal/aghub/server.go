@@ -29,7 +29,14 @@ type Server struct {
 	// peer hubs. Nil in a build without federation, which is how that
 	// build says it has none.
 	federated func(capFilter string) ([]AgentView, error)
+	// hubAID names this hub's own ledger network (hub:<aid>). Two hubs
+	// are two networks: a credit on one is not a credit on the other, and
+	// settling somebody else's would mint money.
+	hubAID string
 }
+
+// SetHubAID names the ledger this facilitator settles on.
+func (s *Server) SetHubAID(aid string) { s.hubAID = aid }
 
 // SetForwarder installs the federation egress hook.
 func (s *Server) SetForwarder(f func(toAID, fromAID, kind, interactionID string, payload []byte) (bool, string, error)) {
@@ -128,6 +135,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
 	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
+	mux.HandleFunc("GET /agents/{aid}/balance", s.hBalance)
+	// The three endpoints x402 defines for a facilitator. This hub hosts
+	// its own, which the spec permits outright — and for a ledger rail
+	// there is nothing to separate from, because the balances are here.
+	mux.HandleFunc("GET /x402/supported", s.hX402Supported)
+	mux.HandleFunc("POST /x402/verify", s.hX402Verify)
+	mux.HandleFunc("POST /x402/settle", s.hX402Settle)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay broker (v0.1 centralized transport): send is open (payloads are end-to-end verifiable);
