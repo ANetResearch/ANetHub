@@ -46,16 +46,26 @@ func newHubWithStore(t *testing.T) (*httptest.Server, *aghub.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The signing key too, as main.go does. Without it signSettlement is
+	// a silent no-op and every test here would be exercising a hub that
+	// signs nothing — which is precisely the shape of harness that lets an
+	// unsigned production path pass a full green suite.
+	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(func() { srv.Close(); store.Close() })
 	testHubAID.Store(srv.URL, id.AID)
 	testHubStores.Store(srv.URL, store)
+	testHubCtrl.Store(srv.URL, id.Ctrl)
 	return srv, store
 }
 
 var testHubAID sync.Map
+
+// testHubCtrl is the hub identity behind a test server, for checking
+// signatures the hub produced.
+var testHubCtrl sync.Map
 
 // fundAgent credits an account.
 //
@@ -1283,5 +1293,54 @@ func TestClearingAgainstAPeerHub(t *testing.T) {
 	}
 	if got, _ := store.Balance("did:anet:our-provider"); got != 300 {
 		t.Errorf("the impostor moved credit: %d", got)
+	}
+}
+
+// hubKELOf is the hub's own key history, for checking what it signed.
+func hubKELOf(t *testing.T, url string) []identity.SignedEvent {
+	t.Helper()
+	v, ok := testHubCtrl.Load(url)
+	if !ok {
+		t.Fatal("no hub identity for " + url)
+	}
+	return v.(*identity.Controller).KEL()
+}
+
+// twoAgents mints a provider and a requester.
+func twoAgents(t *testing.T) (*identity.Controller, *identity.Controller) {
+	t.Helper()
+	prov, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return prov, req
+}
+
+// setVisibility opts an agent into (or out of) federation, signed as the
+// agent, because that is a decision only the agent makes.
+func setVisibility(t *testing.T, srv *httptest.Server, c *identity.Controller, v string) {
+	t.Helper()
+	ts := uint64(time.Now().UnixMilli())
+	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionProfile, c.AID(), ts))
+	code, b := post(t, srv.URL+"/agents/"+c.AID()+"/visibility", map[string]any{
+		"visibility": v, "ts": ts, "key_state_seq": seq,
+		"sig": base64.StdEncoding.EncodeToString(sig),
+	})
+	if code != 200 {
+		t.Fatalf("visibility: %d %s", code, b)
+	}
+}
+
+// uploadInterlockedReview posts one real, verified review.
+func uploadInterlockedReview(t *testing.T, srv *httptest.Server, prov, req *identity.Controller,
+	rating int, comment string) {
+	t.Helper()
+	body := makeEvidence(t, prov, req, "ix-"+comment+"-"+prov.AID()[:8], rating, "")
+	if code, b := post(t, srv.URL+"/reviews", body); code != 200 {
+		t.Fatalf("upload review: %d %s", code, b)
 	}
 }

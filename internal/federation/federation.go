@@ -146,6 +146,7 @@ func New(dir string, cfg Config, id *hubid.Identity, local LocalDelivery) (*Serv
 CREATE TABLE IF NOT EXISTS fed_dedupe (payload_cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_peer_kel (aid TEXT PRIMARY KEY, kel BLOB NOT NULL, fetched_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS fed_review_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 `); err != nil {
 		db.Close()
 		return nil, err
@@ -207,6 +208,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fed/v1/forward", s.hForward)
 	mux.HandleFunc("GET /fed/v1/cards", s.hCards)
+	mux.HandleFunc("GET /fed/v1/reviews", s.hFedReviewStream)
 	return mux
 }
 
@@ -368,6 +370,13 @@ type Directory interface {
 	CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error)
 	// AdmitFedCard verifies and stores a card learned from a peer.
 	AdmitFedCard(peerAID string, card, kel []byte, home string) error
+	// ReviewsSince serves this hub's own opted-in reviews after a cursor,
+	// as opaque JSON. Opaque because federation moves the bytes and the
+	// kernel decides what they mean — a module that understood the shape
+	// of a review would be a module with an opinion about reputation.
+	ReviewsSince(cursor int64, limit int) ([]json.RawMessage, int64, error)
+	// AdmitFedReview verifies and stores a review learned from a peer.
+	AdmitFedReview(peerAID string, review json.RawMessage) error
 }
 
 // FedCardView is one entry of the sync stream, as the kernel hands it over.
@@ -417,6 +426,89 @@ func (s *Service) hCards(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"cursor": next, "cards": out})
+}
+
+// hFedReviewStream serves GET /fed/v1/reviews?cursor=<c>.
+//
+// Unauthenticated for the same reason as the card stream: every review
+// here is a signature the reviewer already published, over an interaction
+// the provider already receipted. There is nothing to withhold from a
+// reader that the parties did not choose to say.
+func (s *Service) hFedReviewStream(w http.ResponseWriter, r *http.Request) {
+	if !s.DiscoveryEnabled() || s.dir == nil {
+		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "discovery federation disabled")
+		return
+	}
+	cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
+	revs, next, err := s.dir.ReviewsSince(cursor, 100)
+	if err != nil {
+		fedErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	if revs == nil {
+		revs = []json.RawMessage{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"cursor": next, "reviews": revs})
+}
+
+// syncReviews pulls each peer's reputation stream forward by one page.
+//
+// A separate cursor from the card stream, because the two advance at
+// different rates and sharing one would have a busy review stream drag
+// the directory along with it — or a quiet one hold it back.
+func (s *Service) syncReviews(ctx context.Context) (admitted, refused int) {
+	if !s.DiscoveryEnabled() || s.dir == nil {
+		return 0, 0
+	}
+	for i := range s.cfg.Peers {
+		p := &s.cfg.Peers[i]
+		cursor := s.peerReviewCursor(p.AID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			fmt.Sprintf("%s/fed/v1/reviews?cursor=%d", strings.TrimSuffix(p.Endpoint, "/"), cursor), nil)
+		if err != nil {
+			continue
+		}
+		resp, err := s.http.Do(req)
+		if err != nil {
+			log.Printf("hub: reputation sync %s: %v", p.AID, err)
+			continue
+		}
+		var out struct {
+			Cursor  int64             `json:"cursor"`
+			Reviews []json.RawMessage `json:"reviews"`
+		}
+		derr := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out)
+		resp.Body.Close()
+		if derr != nil {
+			log.Printf("hub: reputation sync %s: %v", p.AID, derr)
+			continue
+		}
+		for _, rv := range out.Reviews {
+			if err := s.dir.AdmitFedReview(p.AID, rv); err != nil {
+				log.Printf("hub: federated review from %s refused: %v", p.AID, err)
+				refused++
+				continue
+			}
+			admitted++
+		}
+		if out.Cursor > cursor {
+			s.setPeerReviewCursor(p.AID, out.Cursor)
+		}
+	}
+	return admitted, refused
+}
+
+func (s *Service) peerReviewCursor(aid string) int64 {
+	var c int64
+	_ = s.db.QueryRow(`SELECT cursor FROM fed_review_cursor WHERE peer_aid=?`, aid).Scan(&c)
+	return c
+}
+
+func (s *Service) setPeerReviewCursor(aid string, c int64) {
+	_, _ = s.db.Exec(
+		`INSERT INTO fed_review_cursor(peer_aid, cursor) VALUES(?,?)
+		 ON CONFLICT(peer_aid) DO UPDATE SET cursor=excluded.cursor`, aid, c)
 }
 
 // SyncOnce pulls each peer's directory forward by one page.
@@ -477,7 +569,12 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 			s.setPeerCursor(p.AID, out.Cursor)
 		}
 	}
-	return admitted, refused
+	// Reputation rides the same tick. Cards say who exists; reviews say
+	// how they have done. Pulling one without the other gives a directory
+	// full of strangers with no standing, which is a directory nobody can
+	// choose from.
+	ra, rr := s.syncReviews(ctx)
+	return admitted + ra, refused + rr
 }
 
 func (s *Service) peerCursor(aid string) int64 {

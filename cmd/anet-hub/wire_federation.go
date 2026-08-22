@@ -71,6 +71,10 @@ func init() {
 			return out, true
 		})
 		stop := func() error { return fed.Close() }
+		// A peer that says it has paid what it owed has to be checkable.
+		// Wired here rather than imported, so the kernel still knows
+		// nothing about federation (K207).
+		d.srv0.SetPeerKELResolver(fed.PeerKEL)
 		if fed.DiscoveryEnabled() {
 			d.srv0.SetFederatedDirectory(d.store.FederatedAgents)
 			ctx, cancel := context.WithCancel(context.Background())
