@@ -520,13 +520,20 @@ func (s *Server) verify(rc *evidence.Receipt, rv *evidence.Review, requestDoc, d
 	// agents it knows. The KELs it holds are what the interlock is checked
 	// against, so a stranger re-checking later uses the published KELs and
 	// reaches the same verdict.
-	provKELBytes, err := s.store.AgentKEL(rc.ProviderAID)
-	if err != nil {
-		return zero, fmt.Errorf("provider not registered")
-	}
+	// The reviewer must have an account here — this hub rates on behalf
+	// of its own users and not on behalf of strangers.
 	reqKELBytes, err := s.store.AgentKEL(rv.ReviewerAID)
 	if err != nil {
 		return zero, fmt.Errorf("reviewer not registered")
+	}
+	// The provider need only be SOMEBODY this hub can identify, here or
+	// at a peer. Requiring it to be local meant a cross-hub interaction
+	// could not be reviewed by either side: the reviewer banks here, the
+	// provider banks there, and neither hub knew both. Federation was
+	// producing work that nothing could rate.
+	provKELBytes, err := s.store.AnyKEL(rc.ProviderAID)
+	if err != nil {
+		return zero, fmt.Errorf("provider unknown to this hub: %w", err)
 	}
 	provKEL, err := identity.UnmarshalKEL(provKELBytes)
 	if err != nil {
