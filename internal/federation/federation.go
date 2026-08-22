@@ -491,3 +491,54 @@ func (s *Service) setPeerCursor(aid string, c int64) {
 		`INSERT INTO fed_cursor(peer_aid, cursor) VALUES(?,?)
 		 ON CONFLICT(peer_aid) DO UPDATE SET cursor=excluded.cursor`, aid, c)
 }
+
+// ---- cross-hub settlement (the clearing half of discovery federation) ----
+
+// SettleAtPeer asks the hub that owns a ledger to settle a payment on it.
+//
+// The provider's hub cannot settle a balance it does not keep, and
+// refusing would make a paid capability unusable across a federation. So
+// it forwards, and the answer comes back with the settling hub's signed
+// receipt — which is what lets the asking hub credit its own payee on
+// another hub's word and still be able to show what that word was.
+//
+// Only allowlisted peers, and only the peer whose AID the network names.
+// A settlement request routed by the caller would be a request to credit
+// whoever the caller chose.
+func (s *Service) SettleAtPeer(ctx context.Context, network string, body []byte) ([]byte, string, error) {
+	if !s.DiscoveryEnabled() && !s.Enabled() {
+		return nil, "", fmt.Errorf("federation disabled")
+	}
+	const prefix = "hub:"
+	if !strings.HasPrefix(network, prefix) {
+		return nil, "", fmt.Errorf("not a hub ledger: %q", network)
+	}
+	peerAID := strings.TrimPrefix(network, prefix)
+	p := s.peer(peerAID)
+	if p == nil {
+		return nil, "", fmt.Errorf("hub %s is not a peer of this one", peerAID)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimSuffix(p.Endpoint, "/")+"/x402/settle", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	out, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return out, peerAID, err
+}
+
+// PeerKEL exposes a peer's verified key history, so the kernel can check
+// a settlement receipt the peer signed.
+func (s *Service) PeerKEL(peerAID string) ([]identity.SignedEvent, error) {
+	p := s.peer(peerAID)
+	if p == nil {
+		return nil, fmt.Errorf("hub %s is not a peer of this one", peerAID)
+	}
+	return s.peerKEL(p)
+}

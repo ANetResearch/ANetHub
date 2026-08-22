@@ -4,6 +4,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"github.com/ANetResearch/ANetCore/payment"
 	"log"
 	"time"
 
@@ -31,6 +35,41 @@ func init() {
 		// a peer's traffic without also publishing its directory, and
 		// those are genuinely different decisions to make about a peer.
 		fed.SetDirectory(aghub.FedDirectory{S: d.store})
+		// A payment on a peer's ledger is that peer's to settle. We ask
+		// it, verify the receipt it signs, credit our own payee, and
+		// record what the peer now owes us.
+		d.store.SetPeerSettler(func(network string, pp *payment.PaymentPayload) (payment.SettlementResponse, bool) {
+			body, err := json.Marshal(map[string]any{
+				"x402Version": payment.Version, "paymentPayload": pp,
+			})
+			if err != nil {
+				return payment.SettlementResponse{}, false
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			raw, peerAID, err := fed.SettleAtPeer(ctx, network, body)
+			if err != nil {
+				return payment.SettlementResponse{Success: false,
+					ErrorReason: "cross-hub settlement: " + err.Error(), Network: network}, true
+			}
+			var out payment.SettlementResponse
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return payment.SettlementResponse{Success: false,
+					ErrorReason: "cross-hub settlement: malformed reply", Network: network}, true
+			}
+			if !out.Success {
+				return out, true
+			}
+			if err := clearPeerSettlement(d.store, fed, peerAID, out); err != nil {
+				// The peer moved credit and we could not credit our payee.
+				// Saying so is the only honest answer: the money left one
+				// ledger and did not arrive on the other, and somebody has
+				// to know that happened.
+				out.Success = false
+				out.ErrorReason = "settled at " + peerAID + " but not cleared here: " + err.Error()
+			}
+			return out, true
+		})
 		stop := func() error { return fed.Close() }
 		if fed.DiscoveryEnabled() {
 			d.srv0.SetFederatedDirectory(d.store.FederatedAgents)
@@ -63,4 +102,27 @@ func syncLoop(ctx context.Context, fed *federation.Service) {
 		case <-t.C:
 		}
 	}
+}
+
+// clearPeerSettlement verifies the peer's signed receipt and credits the
+// local payee against it.
+func clearPeerSettlement(store *aghub.Store, fed *federation.Service,
+	peerAID string, out payment.SettlementResponse) error {
+	b64, _ := out.Extensions[payment.ExtReceipt].(string)
+	if b64 == "" {
+		return fmt.Errorf("peer settled without a receipt we can keep")
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return err
+	}
+	rec, err := payment.UnmarshalReceipt(raw)
+	if err != nil {
+		return err
+	}
+	kel, err := fed.PeerKEL(peerAID)
+	if err != nil {
+		return err
+	}
+	return store.ClearFromPeer(peerAID, kel, rec)
 }

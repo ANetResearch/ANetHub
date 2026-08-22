@@ -105,8 +105,14 @@ const (
 
 // Store is the Hub's durable registry + relay + review store (SQLite).
 type Store struct {
-	db *sql.DB
-	mu sync.Mutex
+	// hubKey signs settlement receipts. Nil until the application wires
+	// it, and a store without one settles without signing rather than
+	// refusing — an unsigned settlement is weaker, not broken.
+	hubKey *identity.Controller
+	// peerSettle forwards a payment on another hub'''s ledger to that hub.
+	peerSettle PeerSettler
+	db         *sql.DB
+	mu         sync.Mutex
 }
 
 // Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
@@ -224,6 +230,22 @@ func (s *Store) migrate() error {
 		   amount INTEGER NOT NULL,
 		   interaction_id TEXT NOT NULL DEFAULT '',
 		   at TEXT NOT NULL
+		 )`,
+		// Foreign authorizations already cleared here, so a peer
+		// repeating a receipt cannot credit our user twice.
+		`CREATE TABLE IF NOT EXISTS credit_cleared (
+		   auth_id TEXT PRIMARY KEY,
+		   peer_aid TEXT NOT NULL,
+		   pay_to TEXT NOT NULL,
+		   amount INTEGER NOT NULL,
+		   at TEXT NOT NULL
+		 )`,
+		// What each peer hub owes this one. A claim on another hub, kept
+		// apart from credit here — the two must not be allowed to look
+		// alike.
+		`CREATE TABLE IF NOT EXISTS hub_owed (
+		   peer_aid TEXT PRIMARY KEY,
+		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
 		`CREATE TABLE IF NOT EXISTS fed_card (
 		   aid TEXT PRIMARY KEY,

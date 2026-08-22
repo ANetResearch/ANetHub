@@ -980,6 +980,9 @@ func TestCreditSettlement(t *testing.T) {
 	register(t, srv, payee, "Payee", []string{"cas.put"})
 
 	hubAID := hubAIDOf(t, srv)
+	// Registering already granted each of them something, so the sums
+	// below start from the grant rather than from zero.
+	grant := int64(aghub.RegistrationGrant)
 	fundAgent(t, srv, payer.AID(), 500)
 
 	auth := signedAuth(t, payer, payee.AID(), 120, hubAID, "ix-1")
@@ -992,8 +995,8 @@ func TestCreditSettlement(t *testing.T) {
 	if !vr.IsValid {
 		t.Fatalf("a funded, signed authorization must verify: %s", vr.InvalidReason)
 	}
-	if got := balanceOf(t, srv, payer.AID()); got != 500 {
-		t.Errorf("verify moved credit: balance is %d", got)
+	if got := balanceOf(t, srv, payer.AID()); got != grant+500 {
+		t.Errorf("verify moved credit: balance is %d, want %d", got, grant+500)
 	}
 
 	var sr payment.SettlementResponse
@@ -1002,9 +1005,9 @@ func TestCreditSettlement(t *testing.T) {
 	if !sr.Success {
 		t.Fatalf("settle failed: %s", sr.ErrorReason)
 	}
-	if balanceOf(t, srv, payer.AID()) != 380 || balanceOf(t, srv, payee.AID()) != 120 {
-		t.Errorf("balances after settle: payer=%d payee=%d, want 380/120",
-			balanceOf(t, srv, payer.AID()), balanceOf(t, srv, payee.AID()))
+	if balanceOf(t, srv, payer.AID()) != grant+380 || balanceOf(t, srv, payee.AID()) != grant+120 {
+		t.Errorf("balances after settle: payer=%d payee=%d, want %d/%d",
+			balanceOf(t, srv, payer.AID()), balanceOf(t, srv, payee.AID()), grant+380, grant+120)
 	}
 
 	// Settling again must not charge again. A lost reply is the ordinary
@@ -1016,7 +1019,7 @@ func TestCreditSettlement(t *testing.T) {
 	if !again.Success {
 		t.Errorf("a retried settle must succeed, got %s", again.ErrorReason)
 	}
-	if balanceOf(t, srv, payer.AID()) != 380 {
+	if balanceOf(t, srv, payer.AID()) != grant+380 {
 		t.Errorf("the authorization was spent twice: balance %d", balanceOf(t, srv, payer.AID()))
 	}
 	if again.Transaction != sr.Transaction {
@@ -1045,8 +1048,9 @@ func TestPaymentRefusals(t *testing.T) {
 		return sr
 	}
 
-	// No balance.
-	broke := settle(creditPayload(t, signedAuth(t, payer, payee.AID(), 50, hubAID, "ix-a"), payee.AID(), payment.CreditNetwork(hubAID)))
+	// More than the registration grant, and nothing else funded.
+	over := uint64(aghub.RegistrationGrant + 1)
+	broke := settle(creditPayload(t, signedAuth(t, payer, payee.AID(), over, hubAID, "ix-a"), payee.AID(), payment.CreditNetwork(hubAID)))
 	if broke.Success || !strings.Contains(broke.ErrorReason, "insufficient") {
 		t.Errorf("an unfunded payment settled: %+v", broke)
 	}
@@ -1152,5 +1156,132 @@ func postJSON(t *testing.T, url string, body any, out any) {
 	}
 	if err := json.Unmarshal(b, out); err != nil {
 		t.Fatalf("decode %s: %v (%s)", url, err, b)
+	}
+}
+
+// A new node can try a paid capability before anyone has funded it. A
+// network where nothing works until an operator notices you is a network
+// nobody evaluates.
+func TestRegistrationGrantsCreditOnce(t *testing.T) {
+	srv := newHub(t)
+	c, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, c, "Newcomer", []string{"x"})
+	if got := balanceOf(t, srv, c.AID()); got != aghub.RegistrationGrant {
+		t.Fatalf("a new agent has %d credits, want %d", got, aghub.RegistrationGrant)
+	}
+	// Re-registering is the same agent, not a faucet.
+	register(t, srv, c, "Newcomer", []string{"x", "y"})
+	register(t, srv, c, "Newcomer", []string{"z"})
+	if got := balanceOf(t, srv, c.AID()); got != aghub.RegistrationGrant {
+		t.Errorf("re-registration paid out again: %d", got)
+	}
+}
+
+// A balance must be explainable by its owner, not merely asserted by the
+// hub keeping it.
+func TestABalanceCanBeExplained(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	c, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, c, "Auditor", nil)
+	if err := store.GrantCredit(c.AID(), 250, "topped up"); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.Get(srv.URL + "/agents/" + c.AID() + "/ledger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Entries []aghub.LedgerEntry `json:"entries"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Entries) != 2 {
+		t.Fatalf("ledger has %d entries, want the grant and the top-up", len(out.Entries))
+	}
+	var total int64
+	for _, e := range out.Entries {
+		total += e.Delta
+		if e.Reason == "" {
+			t.Error("a movement with no reason explains nothing")
+		}
+	}
+	if total != balanceOf(t, srv, c.AID()) {
+		t.Errorf("the entries sum to %d but the balance is %d", total, balanceOf(t, srv, c.AID()))
+	}
+}
+
+// A grant is the operator's doing and must be a positive amount: a
+// negative "grant" is a confiscation wearing the wrong name.
+func TestAGrantMustBePositive(t *testing.T) {
+	_, store := newHubWithStore(t)
+	for _, n := range []int64{0, -1, -1000} {
+		if err := store.GrantCredit("did:anet:x", n, "test"); err == nil {
+			t.Errorf("granting %d was allowed", n)
+		}
+	}
+}
+
+// One hub credits its own payee against another hub's signed settlement,
+// and records what that hub now owes it. The trust introduced is real and
+// bounded: we can show exactly what the peer told us.
+func TestClearingAgainstAPeerHub(t *testing.T) {
+	_, store := newHubWithStore(t)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &payment.Receipt{
+		AuthID: "bafyauth-1", Payer: "did:anet:their-user", PayTo: "did:anet:our-provider",
+		Amount: 300, Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli(),
+	}
+	if err := rec.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), rec); err != nil {
+		t.Fatalf("clearing a genuine peer settlement: %v", err)
+	}
+	if got, _ := store.Balance("did:anet:our-provider"); got != 300 {
+		t.Errorf("payee credited %d, want 300", got)
+	}
+	owed, _ := store.Owed(peer.AID())
+	if owed != 300 {
+		t.Errorf("peer owes %d, want 300 — a claim on another hub, tracked as one", owed)
+	}
+
+	// The same receipt again must not credit twice.
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.Balance("did:anet:our-provider"); got != 300 {
+		t.Errorf("a repeated receipt credited again: %d", got)
+	}
+
+	// A receipt signed by somebody who is not the ledger's hub is refused
+	// — otherwise any peer could issue itself credit here.
+	impostor, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := &payment.Receipt{
+		AuthID: "bafyauth-2", Payer: "did:anet:x", PayTo: "did:anet:our-provider",
+		Amount: 99999, Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli(),
+	}
+	if err := forged.Sign(impostor); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), forged); err == nil {
+		t.Error("a receipt signed by an impostor cleared")
+	}
+	if got, _ := store.Balance("did:anet:our-provider"); got != 300 {
+		t.Errorf("the impostor moved credit: %d", got)
 	}
 }
