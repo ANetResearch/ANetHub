@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
@@ -380,52 +379,29 @@ func (s *Server) hUploadReview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"interaction_id": rv.InteractionID, "status": "accepted"})
 }
 
-// verify is the heart of the trust model: it checks the receipt+review interlock, both signatures
-// against the registered KELs, AND that the uploaded interaction content hashes to the content anchors
-// the provider signed. Any failure ⇒ the review is rejected (never displayed). On success it returns the
-// verified, displayable interaction content (goal + deliverable) extracted from those bytes.
+// verify is the heart of the trust model. Two halves, deliberately split:
+// what only this Hub can know (has this interaction been rated, are these
+// agents registered here) stays here; the interlock itself — same
+// interaction, right parties, review anchored to this receipt, content
+// hashing to the signed anchors, both signatures live — is
+// evidence.VerifyInterlock, so a third party holding the same files
+// reaches the same verdict without trusting this Hub.
+//
+// Any failure ⇒ the review is rejected and never displayed. On success it
+// returns the verified, displayable content extracted from those bytes.
 func (s *Server) verify(rc *evidence.Receipt, rv *evidence.Review, requestDoc, deliverable []byte) (ReviewDetail, error) {
 	var zero ReviewDetail
-	if !rv.ValidRating() {
-		return zero, fmt.Errorf("rating out of range")
-	}
-	// Interlock: the two objects must describe the SAME interaction and agree on both parties.
-	if rc.InteractionID != rv.InteractionID {
-		return zero, fmt.Errorf("interaction_id mismatch")
-	}
-	if rv.ReviewerAID != rc.RequesterAID {
-		return zero, fmt.Errorf("reviewer is not the interaction's requester")
-	}
-	if rv.SubjectAID != rc.ProviderAID {
-		return zero, fmt.Errorf("review subject is not the interaction's provider")
-	}
-	receiptCID, err := rc.CID()
-	if err != nil {
-		return zero, err
-	}
-	if rv.ReceiptCID != receiptCID {
-		return zero, fmt.Errorf("review does not reference this receipt")
-	}
-	// Content binding: the uploaded request + deliverable must hash to the receipt's signed anchors.
-	reqCID, err := anetcid.Sum(requestDoc)
-	if err != nil {
-		return zero, err
-	}
-	if reqCID != rc.RequestCID {
-		return zero, fmt.Errorf("request content does not match receipt request_cid")
-	}
-	resCID, err := anetcid.Sum(deliverable)
-	if err != nil {
-		return zero, err
-	}
-	if resCID != rc.ResultCID {
-		return zero, fmt.Errorf("deliverable content does not match receipt result_cid")
-	}
-	// Uniqueness: one review per interaction.
+
+	// Uniqueness first: it is the cheapest check and the only one that is
+	// this Hub's business rather than a fact about the objects.
 	if s.store.HasInteraction(rv.InteractionID) {
 		return zero, fmt.Errorf("interaction already reviewed")
 	}
-	// Signatures: provider signed the receipt, requester signed the review, each under a REGISTERED KEL.
+
+	// Registration is likewise policy, not arithmetic — this Hub rates
+	// agents it knows. The KELs it holds are what the interlock is checked
+	// against, so a stranger re-checking later uses the published KELs and
+	// reaches the same verdict.
 	provKELBytes, err := s.store.AgentKEL(rc.ProviderAID)
 	if err != nil {
 		return zero, fmt.Errorf("provider not registered")
@@ -442,11 +418,13 @@ func (s *Server) verify(rc *evidence.Receipt, rv *evidence.Review, requestDoc, d
 	if err != nil {
 		return zero, fmt.Errorf("reviewer kel corrupt")
 	}
-	if err := rc.Verify(provKEL, rc.CompletedAt); err != nil {
-		return zero, fmt.Errorf("receipt signature invalid: %w", err)
-	}
-	if err := rv.Verify(reqKEL, rv.CreatedAt); err != nil {
-		return zero, fmt.Errorf("review signature invalid: %w", err)
+
+	// Everything else is arithmetic over the objects, and it lives in
+	// ANetCore so that anyone holding these files reaches this same
+	// verdict without trusting this Hub — which is the whole content of
+	// "the Hub cannot fake a rating".
+	if err := evidence.VerifyInterlock(rc, rv, requestDoc, deliverable, provKEL, reqKEL); err != nil {
+		return zero, err
 	}
 	return ReviewDetail{
 		Goal:        goalFromTaskDoc(requestDoc),
