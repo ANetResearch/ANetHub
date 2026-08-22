@@ -11,3 +11,4 @@ datasets/
 *.log
 *.bak*
 .DS_Store
+webui/node_modules/

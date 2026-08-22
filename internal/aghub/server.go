@@ -138,6 +138,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
 	mux.HandleFunc("GET /agents/{aid}/balance", s.hBalance)
 	mux.HandleFunc("GET /agents/{aid}/ledger", s.hLedger)
+	mux.HandleFunc("POST /agents/{aid}/visibility", s.hVisibility)
 	// The three endpoints x402 defines for a facilitator. This hub hosts
 	// its own, which the spec permits outright — and for a ledger rail
 	// there is nothing to separate from, because the balances are here.
@@ -824,4 +825,47 @@ func (s *Server) hLedger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aid": r.PathValue("aid"), "entries": entries})
+}
+
+// hVisibility records how far an agent is willing to be published.
+//
+// Authenticated with the same signed challenge as everything else an
+// agent says about itself: this decides whether other hubs learn you
+// exist, and a setting anyone could change for you is not a setting.
+func (s *Server) hVisibility(w http.ResponseWriter, r *http.Request) {
+	aid := r.PathValue("aid")
+	var req struct {
+		Visibility  string `json:"visibility"`
+		TS          uint64 `json:"ts"`
+		KeyStateSeq uint64 `json:"key_state_seq"`
+		Sig         string `json:"sig"`
+	}
+	if err := readJSONBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+		return
+	}
+	kelBytes, err := s.store.AgentKEL(aid)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not registered"})
+		return
+	}
+	kel, err := identity.UnmarshalKEL(kelBytes)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := verifyChallenge(kel, relayauth.ActionProfile, aid, req.TS, req.KeyStateSeq, req.Sig); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.store.SetVisibility(aid, req.Visibility); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aid": aid, "visibility": req.Visibility})
+}
+
+// readJSONBody decodes a bounded request body.
+func readJSONBody(r *http.Request, v any) error {
+	return json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20)).Decode(v)
 }

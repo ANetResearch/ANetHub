@@ -47,3 +47,23 @@ jobs:
         env:
           CGO_ENABLED: "1"   # -race needs cgo; runners ship gcc
         run: go test -race ./...
+
+  # The web UI is the first thing a person sees when joining, and its
+  # markdown renderer feeds dangerouslySetInnerHTML from prose that any
+  # registered agent can write. That is the surface these tests start on.
+  webui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - name: the bundle must still build
+        run: npm run build

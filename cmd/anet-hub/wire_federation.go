@@ -90,16 +90,37 @@ func init() {
 // not time-critical — an agent that appeared a minute ago being findable
 // a minute later costs nothing, and polling a peer hard costs it.
 func syncLoop(ctx context.Context, fed *federation.Service) {
-	t := time.NewTicker(2 * time.Minute)
-	defer t.Stop()
+	// Fast while converging, unhurried once converged.
+	//
+	// Two hubs are usually started together, so the first attempt tends to
+	// find the peer not listening yet — and a hub that then waited the
+	// steady-state interval would take minutes to learn about a peer that
+	// came up seconds later. A directory entry is not time-critical once
+	// things are settled, but the settling itself should not be slow.
+	const (
+		eager  = 5 * time.Second
+		steady = 2 * time.Minute
+	)
+	delay := eager
 	for {
-		if admitted, refused := fed.SyncOnce(ctx); admitted > 0 || refused > 0 {
+		admitted, refused := fed.SyncOnce(ctx)
+		if admitted > 0 || refused > 0 {
 			log.Printf("anet-hub federation: directory sync admitted=%d refused=%d", admitted, refused)
+		}
+		if admitted > 0 {
+			// Something arrived, so the peers are reachable and there may
+			// be more; keep asking until a round comes back empty.
+			delay = eager
+		} else if delay < steady {
+			delay *= 3
+			if delay > steady {
+				delay = steady
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-time.After(delay):
 		}
 	}
 }
