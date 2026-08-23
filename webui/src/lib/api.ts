@@ -12,6 +12,13 @@ export interface AgentView {
   avg_rating: number;
   review_count: number;
   registered_at: string;
+  // 只在从对等 hub 学来的条目上有:这个 agent 住在哪个 hub。
+  // 空表示本 hub。缺了它,页面就分不清本地和联邦来的 agent。
+  home_hub?: string;
+  // 它最后一次取信的时间,以及是否已经很久没取了。
+  // 一个只列出 agent 而不说谁已经不再应答的目录,是在让人去等死人。
+  last_seen?: string;
+  quiet?: boolean;
 }
 
 export interface ReviewView {
