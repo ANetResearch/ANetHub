@@ -324,7 +324,37 @@ func (s *Server) hGraph(w http.ResponseWriter, _ *http.Request) {
 	if edges == nil {
 		edges = []Edge{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": agents, "edges": edges})
+	// Every AID an edge names must have a node.
+	//
+	// nodes came from the browsable listing and edges from every stored
+	// review, and the two disagree by construction: an agent that left,
+	// or went quiet for a month, drops out of the listing while its
+	// reviews stay — because leaving removes routing and keeps evidence.
+	// Production had one node and fifteen edges.
+	//
+	// The missing ones are added rather than the edges dropped. Dropping
+	// them would make the graph consistent by hiding interactions that
+	// really happened, which is the opposite of what this endpoint is
+	// for: the directory answers "who can I reach now", the graph answers
+	// "what has happened here".
+	known := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		known[a.AID] = true
+	}
+	for _, e := range edges {
+		for _, aid := range []string{e.Source, e.Target} {
+			if aid == "" || known[aid] {
+				continue
+			}
+			known[aid] = true
+			agents = append(agents, s.store.GraphNodeFor(aid))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes": agents, "edges": edges,
+		"note": "nodes with registered=false are agents this hub no longer routes for — " +
+			"they left, or have not collected mail in a long time. Their reviews stay " +
+			"because those record things that happened."})
 }
 
 // RegisterRequest is an agent's self-registration: its AgentCard + its KEL (base64 CoreDet-CBOR) + a

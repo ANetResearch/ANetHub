@@ -1,14 +1,18 @@
 package aghub_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"github.com/ANetResearch/ANetCore/relayauth"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/version"
@@ -183,4 +187,75 @@ func TestHealthzReportsTheBuild(t *testing.T) {
 	if out["commit"] != version.Commit {
 		t.Errorf("commit = %q, want %q", out["commit"], version.Commit)
 	}
+}
+
+// Every AID an edge names must have a node.
+//
+// nodes came from the browsable listing and edges from every stored
+// review, and the two disagree by construction: an agent that left, or
+// went quiet for a month, drops out of the listing while its reviews
+// stay — because leaving removes routing and keeps evidence. Production
+// served one node and fifteen edges, and a renderer given that either
+// drops the edges silently or fails.
+func TestTheGraphHasANodeForEveryEdge(t *testing.T) {
+	srv, _ := newHubWithStore(t)
+	provider, requester := twoAgents(t)
+	register(t, srv, provider, "Provider", []string{"work.do"})
+	register(t, srv, requester, "Requester", nil)
+	uploadInterlockedReview(t, srv, provider, requester, 5, "good")
+
+	// The provider leaves. Its reviews stay, which is the design.
+	ts := uint64(time.Now().UnixMilli())
+	sig, seq := provider.Sign(relayauth.Preimage(relayauth.ActionProfile, provider.AID(), ts))
+	if code, b := post(t, srv.URL+"/agents/"+provider.AID()+"/deregister", map[string]any{
+		"ts": ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig)}); code != 200 {
+		t.Fatalf("deregister: %d %s", code, b)
+	}
+
+	g := graphOf(t, srv)
+	if len(g.Edges) == 0 {
+		t.Fatal("the review edge vanished with the agent — evidence was deleted, not just routing")
+	}
+	nodes := map[string]aghub.AgentView{}
+	for _, n := range g.Nodes {
+		nodes[n.AID] = n
+	}
+	for _, e := range g.Edges {
+		for _, aid := range []string{e.Source, e.Target} {
+			if _, ok := nodes[aid]; !ok {
+				t.Errorf("edge names %s, which has no node", aid[:12])
+			}
+		}
+	}
+	// And the one that left is marked, so a reader can tell it apart from
+	// an agent still being routed to.
+	if n, ok := nodes[provider.AID()]; !ok {
+		t.Error("the departed provider has no node at all")
+	} else if n.Registered {
+		t.Error("a departed agent is marked as still registered")
+	}
+	// The requester never left and must still read as registered.
+	if n, ok := nodes[requester.AID()]; ok && !n.Registered {
+		t.Error("an agent that is still here is marked as gone")
+	}
+}
+
+func graphOf(t *testing.T, srv *httptest.Server) struct {
+	Nodes []aghub.AgentView `json:"nodes"`
+	Edges []aghub.Edge      `json:"edges"`
+} {
+	t.Helper()
+	var out struct {
+		Nodes []aghub.AgentView `json:"nodes"`
+		Edges []aghub.Edge      `json:"edges"`
+	}
+	resp, err := http.Get(srv.URL + "/graph")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
