@@ -104,7 +104,11 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	// is issued and up when credit comes home, so the rows across the
 	// whole ledger sum to zero and a hub's outstanding liability is a
 	// number anyone can compute rather than one it reports.
-	_ = s.entry(hubAID, int64(auth.Amount), reasonRedeemed+":"+reference)
+	//
+	// The entry is NOT written here. A redemption is a payment whose
+	// payee is the hub, and SettlePayment now writes an entry for both
+	// parties — so adding one here counted the hub's row twice and drove
+	// outstanding negative by the redeemed amount.
 	// And on the signed chain, so the supply is auditable in both
 	// directions. A redemption missing from the chain would leave the
 	// chain overstating what is outstanding.
