@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/ael"
@@ -60,10 +61,22 @@ func (s *Store) StoreAttestation(a *ael.HeadAttestation) error {
 	if err != nil {
 		return err
 	}
+	// Keyed on witness AND statement, not the statement alone.
+	//
+	// The attestation's CID covers {chain, seq, head, observed_at} and
+	// not the signer — the envelope carries that. Two witnesses observing
+	// the same head at the same moment therefore produce the same CID,
+	// which is correct as a content identifier and wrong as a storage
+	// key: the second insert was discarded, so a chain watched by six
+	// parties reported one witness.
+	//
+	// That is the number the whole trust argument rests on, and it was
+	// silently the wrong one.
+	key := a.WitnessAID() + ":" + id
 	_, err = s.db.Exec(
 		`INSERT INTO head_attestation(id, chain_did, witness_aid, seq, head_id, observed_at, blob)
 		 VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
-		id, a.ChainDID, a.WitnessAID(), int64(a.Seq), a.HeadID, a.ObservedAt, raw)
+		key, a.ChainDID, a.WitnessAID(), int64(a.Seq), a.HeadID, a.ObservedAt, raw)
 	return err
 }
 
@@ -178,6 +191,91 @@ func (w FedWitness) Attest(peerAID, headID string, seq uint64) ([]byte, error) {
 	return a.Marshal()
 }
 
+// WitnessHealth is how much independent observation this chain has.
+//
+// The trust model is "the hub and its witnesses did not all collude",
+// which is only worth something if a reader can see how many witnesses
+// there are and how recently they looked. A hub with one witness that
+// last looked in March is technically witnessed and practically not, and
+// nothing distinguished that from a hub with six witnesses looking
+// hourly.
+//
+// This adds no guarantee. It makes the existing one measurable.
+type WitnessHealth struct {
+	ChainDID string `json:"chain_did"`
+	// Witnesses is how many distinct parties have ever attested.
+	//
+	// Distinct by AID, which is the only thing this hub can check. Two
+	// AIDs run by the same operator count as two here and are worth one;
+	// no hub can tell the difference, and a reader deciding whether the
+	// count means anything has to look at who the witnesses are. That is
+	// why they are listed rather than only counted.
+	Witnesses int `json:"witnesses"`
+	// Attestations is the total held, across all witnesses.
+	Attestations int `json:"attestations"`
+	// LatestAt and LatestSeq describe the most recent observation.
+	LatestAt  int64  `json:"latest_at,omitempty"`
+	LatestSeq uint64 `json:"latest_seq"`
+	// StaleFor is how long since anybody looked, in seconds. A chain
+	// whose head has moved since the last attestation has records nobody
+	// outside has pinned.
+	StaleFor int64 `json:"stale_seconds,omitempty"`
+	// UnwitnessedRecords is how many records sit above the highest
+	// witnessed sequence. These are the ones the hub could still rewrite
+	// without contradicting anybody.
+	UnwitnessedRecords uint64 `json:"unwitnessed_records"`
+	// Who has attested, so a reader can judge whether the count means
+	// anything.
+	WitnessAIDs []string `json:"witness_aids,omitempty"`
+}
+
+// WitnessHealthOf measures the observation on one chain.
+func (s *Store) WitnessHealthOf(chainDID string, now time.Time) (WitnessHealth, error) {
+	h := WitnessHealth{ChainDID: chainDID, WitnessAIDs: []string{}}
+	rows, err := s.db.Query(
+		`SELECT witness_aid, COUNT(*), MAX(seq), MAX(observed_at)
+		   FROM head_attestation WHERE chain_did=? GROUP BY witness_aid`, chainDID)
+	if err != nil {
+		return h, err
+	}
+	defer rows.Close()
+	var highest uint64
+	for rows.Next() {
+		var aid string
+		var n int
+		var maxSeq int64
+		var maxAt int64
+		if err := rows.Scan(&aid, &n, &maxSeq, &maxAt); err != nil {
+			return h, err
+		}
+		h.Witnesses++
+		h.Attestations += n
+		h.WitnessAIDs = append(h.WitnessAIDs, aid)
+		if uint64(maxSeq) > highest {
+			highest = uint64(maxSeq)
+		}
+		if maxAt > h.LatestAt {
+			h.LatestAt = maxAt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return h, err
+	}
+	sort.Strings(h.WitnessAIDs)
+	h.LatestSeq = highest
+	if h.LatestAt > 0 {
+		h.StaleFor = now.UnixMilli()/1000 - h.LatestAt/1000
+	}
+	// How far the chain has run past the last thing anybody pinned.
+	_, headSeq, ok := s.IssuanceHead()
+	if ok && h.Attestations > 0 && headSeq > highest {
+		h.UnwitnessedRecords = headSeq - highest
+	} else if ok && h.Attestations == 0 {
+		h.UnwitnessedRecords = headSeq + 1 // nothing pinned, including seq 0
+	}
+	return h, nil
+}
+
 // ---- HTTP ----
 
 // hIssuanceHead serves what a witness signs.
@@ -265,11 +363,20 @@ func (s *Server) hWitnesses(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	health, herr := s.store.WitnessHealthOf(s.hubAID, time.Now())
+	if herr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": herr.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"chain_did": s.hubAID, "attestations": out,
+		"chain_did": s.hubAID, "attestations": out, "health": health,
 		"note": "this hub can withhold an attestation but cannot forge one. " +
 			"Resolve each witness and verify the signature yourself; then ask that " +
-			"witness directly, since what it holds is what it will not have edited."})
+			"witness directly, since what it holds is what it will not have edited. " +
+			"witnesses counts distinct AIDs, which is all this hub can check — two " +
+			"AIDs run by one operator count as two here and are worth one, so read " +
+			"witness_aids rather than the number. unwitnessed_records is how far the " +
+			"chain has run past the last thing anybody pinned."})
 }
 
 // verifyRecords decodes and verifies a run of chain records.

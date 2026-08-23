@@ -2,6 +2,7 @@ package aghub_test
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"reflect"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
 // The web UI declares TypeScript interfaces that mirror this package's
@@ -147,5 +149,38 @@ func TestQuietSurvivesEncoding(t *testing.T) {
 	// needs both halves: without last_seen it cannot say how long.
 	if !strings.Contains(string(live), `"last_seen"`) {
 		t.Errorf("a live agent does not report when it was last seen: %s", live)
+	}
+}
+
+// healthz must say which build is answering.
+//
+// A bare {"status":"ok"} cannot answer "is the binary running in
+// production the one I just deployed", which is the question that comes
+// up — and the one that had a stale check on cmax reporting failures for
+// three hours against a hub that was fine.
+func TestHealthzReportsTheBuild(t *testing.T) {
+	srv := newHub(t)
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"status", "version", "commit", "built_at"} {
+		if out[k] == "" {
+			t.Errorf("healthz does not report %q: %v", k, out)
+		}
+	}
+	if out["status"] != "ok" {
+		t.Errorf("status = %q", out["status"])
+	}
+	// An unstamped build says so rather than inventing something
+	// plausible. A wrong commit is worse than an absent one: a check
+	// comparing versions would pass while comparing two fabrications.
+	if out["commit"] != version.Commit {
+		t.Errorf("commit = %q, want %q", out["commit"], version.Commit)
 	}
 }
