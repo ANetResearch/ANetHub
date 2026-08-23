@@ -120,8 +120,12 @@ type Store struct {
 	// hubAID is the row credit is issued from and redeemed into, so the
 	// ledger sums to zero and the hub's liability is countable.
 	hubAID string
-	db     *sql.DB
-	mu     sync.Mutex
+	// issuance serialises appends to the supply chain. A gap or a
+	// duplicate sequence number would make the chain unverifiable, and
+	// two concurrent grants are an ordinary thing to have.
+	issuance issuanceChain
+	db       *sql.DB
+	mu       sync.Mutex
 }
 
 // Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
@@ -280,6 +284,34 @@ func (s *Store) migrate() error {
 			stored_at      TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fed_review_subject ON fed_review(subject_aid)`,
+		// Every change to the total supply, in order, signed. The record
+		// column holds the ael.EventRecord that actually verifies; the
+		// parsed columns beside it are for querying and are not what a
+		// reader should check.
+		// Attestations: what somebody signed about a chain's head at a
+		// moment. Both directions live here — what others said about
+		// this hub, and what this hub said about its peers.
+		`CREATE TABLE IF NOT EXISTS head_attestation (
+			id          TEXT PRIMARY KEY,
+			chain_did   TEXT NOT NULL,
+			witness_aid TEXT NOT NULL,
+			seq         INTEGER NOT NULL,
+			head_id     TEXT NOT NULL,
+			observed_at INTEGER NOT NULL,
+			blob        BLOB NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_attestation_chain ON head_attestation(chain_did, seq)`,
+		`CREATE TABLE IF NOT EXISTS credit_issuance (
+			seq     INTEGER PRIMARY KEY,
+			id      TEXT NOT NULL UNIQUE,
+			prev_id TEXT NOT NULL,
+			kind    TEXT NOT NULL,
+			aid     TEXT NOT NULL,
+			amount  INTEGER NOT NULL,
+			reason  TEXT NOT NULL DEFAULT '',
+			at      INTEGER NOT NULL,
+			record  BLOB NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS credit_redemption (
 			auth_id   TEXT PRIMARY KEY,
 			aid       TEXT NOT NULL,

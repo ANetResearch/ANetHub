@@ -75,10 +75,19 @@ func init() {
 		// Wired here rather than imported, so the kernel still knows
 		// nothing about federation (K207).
 		d.srv0.SetPeerKELResolver(fed.PeerKEL)
+		// Pinning peers' issuance heads. Default on; "witness":"off" in
+		// federation.json turns it off. See internal/aghub/witness.go for
+		// why a peer's attestation is worth more than the subject's own
+		// record of itself.
+		fed.SetWitness(aghub.FedWitness{S: d.store})
 		if fed.DiscoveryEnabled() {
 			d.srv0.SetFederatedDirectory(d.store.FederatedAgents)
 			ctx, cancel := context.WithCancel(context.Background())
 			go syncLoop(ctx, fed)
+			if cfg.WitnessEnabled() {
+				go witnessLoop(ctx, fed)
+				log.Printf("anet-hub federation: witnessing %d peer(s)", len(cfg.Peers))
+			}
 			stop = func() error { cancel(); return fed.Close() }
 			log.Printf("anet-hub federation: discovery=%s home=%s", cfg.Discovery, cfg.Home)
 		}
@@ -150,4 +159,32 @@ func clearPeerSettlement(store *aghub.Store, fed *federation.Service,
 		return err
 	}
 	return store.ClearFromPeer(peerAID, kel, rec)
+}
+
+// witnessLoop pins each peer's issuance head on a slow cadence.
+//
+// Hourly rather than with the directory sync. A directory entry is worth
+// having quickly; a chain head is worth having *often enough that the
+// gaps are short*, which is a different requirement. Pinning every two
+// minutes would multiply the stored attestations by thirty for no gain —
+// what an auditor needs is a head from an hour ago, not from ninety
+// seconds ago, because a hub rewriting its ledger is not doing it in the
+// gaps between two-minute polls.
+func witnessLoop(ctx context.Context, fed *federation.Service) {
+	const every = time.Hour
+	// One pass shortly after start, so a hub restarted after a long
+	// outage does not leave an hour-shaped hole before its first pin.
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if n := fed.WitnessOnce(ctx); n > 0 {
+			log.Printf("anet-hub federation: pinned %d peer issuance head(s)", n)
+		}
+		timer.Reset(every)
+	}
 }

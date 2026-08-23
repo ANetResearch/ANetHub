@@ -1,0 +1,294 @@
+package aghub
+
+import (
+	"encoding/base64"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/ANetResearch/ANetCore/ael"
+	"github.com/ANetResearch/ANetCore/coredet"
+	"github.com/ANetResearch/ANetCore/identity"
+)
+
+// Witnessing: holding somebody else's chain head so they cannot deny it
+// later.
+//
+// The issuance chain makes a rewrite detectable by anyone who already
+// holds an older copy. It offers nothing to a reader seeing the chain for
+// the first time, because a hub that has never been observed can present
+// whatever chain it likes.
+//
+// A witness closes that. It fetches this hub's head periodically and
+// signs "at time T, that chain's head was N with id X". The attestation
+// lives with the WITNESS, which is what makes it worth anything — a
+// statement the subject could delete is not evidence about the subject.
+// This hub also accepts and serves attestations made about it, but that
+// is a convenience for readers looking for somewhere to start, not a
+// source of authority: a hub can withhold an inconvenient attestation.
+// It cannot forge one, because the witness's signature is over the head
+// the witness saw.
+//
+// Who witnesses whom:
+//
+//	peer hubs   default on, configurable off. They already poll each
+//	            other for directory and reputation, they have identities
+//	            on an allowlist, and they have their own users — which
+//	            is what makes their attestation worth something.
+//	agents      opt-in, off by default. An agent may be a trimmed build
+//	            that serves nothing and only talks to its hub, and such
+//	            a node should not be made to do work for the network.
+//	            An agent that does witness gains the most: it holds
+//	            independent evidence about the ledger its own balance
+//	            lives on.
+
+// StoreAttestation records an attestation somebody made about a chain.
+//
+// Kept whether the subject is this hub or another. Attestations about
+// this hub are served to readers; attestations this hub made about a peer
+// are the evidence it holds as a witness, and those are the ones that
+// matter if that peer ever rewrites.
+func (s *Store) StoreAttestation(a *ael.HeadAttestation) error {
+	if a == nil || a.Envelope == nil {
+		return fmt.Errorf("hub: unsigned attestation")
+	}
+	raw, err := a.Marshal()
+	if err != nil {
+		return err
+	}
+	id, err := a.ID()
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO head_attestation(id, chain_did, witness_aid, seq, head_id, observed_at, blob)
+		 VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
+		id, a.ChainDID, a.WitnessAID(), int64(a.Seq), a.HeadID, a.ObservedAt, raw)
+	return err
+}
+
+// AttestationView is one stored attestation as served.
+type AttestationView struct {
+	WitnessAID string `json:"witness_aid"`
+	ChainDID   string `json:"chain_did"`
+	Seq        uint64 `json:"seq"`
+	HeadID     string `json:"head_id"`
+	ObservedAt int64  `json:"observed_at"`
+	// Attestation is the signed object, base64 CoreDet-CBOR. A reader
+	// checking this must verify the object, not the JSON beside it.
+	Attestation string `json:"attestation"`
+}
+
+// AttestationsAbout returns what is held about one chain, newest first.
+func (s *Store) AttestationsAbout(chainDID string, limit int) ([]AttestationView, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.Query(
+		`SELECT witness_aid, chain_did, seq, head_id, observed_at, blob
+		   FROM head_attestation WHERE chain_did=?
+		  ORDER BY seq DESC, observed_at DESC LIMIT ?`, chainDID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AttestationView{}
+	for rows.Next() {
+		var v AttestationView
+		var seq int64
+		var raw []byte
+		if err := rows.Scan(&v.WitnessAID, &v.ChainDID, &seq, &v.HeadID, &v.ObservedAt, &raw); err != nil {
+			return nil, err
+		}
+		v.Seq = uint64(seq)
+		v.Attestation = base64.StdEncoding.EncodeToString(raw)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// WitnessPeer fetches a peer's issuance head and signs what it saw.
+//
+// Returns the attestation so the caller can also send it to the peer;
+// storing it here is what matters, because evidence held only by the
+// subject is not evidence.
+func (s *Store) WitnessPeer(peerAID, headID string, seq uint64) (*ael.HeadAttestation, error) {
+	if s.hubKey == nil {
+		return nil, fmt.Errorf("hub: no signing key, so this hub cannot witness")
+	}
+	a := &ael.HeadAttestation{
+		ChainDID: peerAID, Seq: seq, HeadID: headID,
+		ObservedAt: time.Now().UnixMilli(),
+	}
+	if err := a.Sign(s.hubKey); err != nil {
+		return nil, err
+	}
+	if err := s.StoreAttestation(a); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// CheckAgainstAttestations reports any stored attestation that the given
+// chain records contradict.
+//
+// This is the payoff. An attestation and a record signed by different
+// parties, naming the same position in the same chain with different
+// contents, demonstrate a rewrite without either party agreeing to
+// anything.
+func (s *Store) CheckAgainstAttestations(chainDID string, recs []*ael.EventRecord) ([]AttestationView, error) {
+	held, err := s.AttestationsAbout(chainDID, 500)
+	if err != nil {
+		return nil, err
+	}
+	bySeq := map[uint64]*ael.EventRecord{}
+	for _, r := range recs {
+		bySeq[r.Seq] = r
+	}
+	var bad []AttestationView
+	for _, v := range held {
+		r := bySeq[v.Seq]
+		if r == nil {
+			continue // not in the range we were given; not a contradiction
+		}
+		raw, derr := base64.StdEncoding.DecodeString(v.Attestation)
+		if derr != nil {
+			continue
+		}
+		a, aerr := ael.UnmarshalHeadAttestation(raw)
+		if aerr != nil {
+			continue
+		}
+		if a.ContradictedBy(r) {
+			bad = append(bad, v)
+		}
+	}
+	return bad, nil
+}
+
+// FedWitness adapts the store to federation's Witness seam, so the
+// federation module never imports the kernel's internals.
+type FedWitness struct{ S *Store }
+
+func (w FedWitness) Attest(peerAID, headID string, seq uint64) ([]byte, error) {
+	a, err := w.S.WitnessPeer(peerAID, headID, seq)
+	if err != nil {
+		return nil, err
+	}
+	return a.Marshal()
+}
+
+// ---- HTTP ----
+
+// hIssuanceHead serves what a witness signs.
+func (s *Server) hIssuanceHead(w http.ResponseWriter, _ *http.Request) {
+	id, seq, ok := s.store.IssuanceHead()
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"chain_did": s.hubAID,
+			"note":      "nothing has been issued on this hub yet, so there is no head to pin"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chain_did": s.hubAID, "seq": seq, "head_id": id,
+		"note": "sign {chain_did, seq, head_id, observed_at} and keep it. " +
+			"An attestation held only by this hub is not evidence about this hub.",
+	})
+}
+
+// hIssuance serves the chain.
+func (s *Server) hIssuance(w http.ResponseWriter, r *http.Request) {
+	// Inclusive: ?from=0 (or absent) starts at the genesis record, which
+	// a verifier must have. Continue with head_seq+1.
+	var from uint64
+	if v := r.URL.Query().Get("from"); v != "" {
+		_, _ = fmt.Sscanf(v, "%d", &from)
+	}
+	entries, err := s.store.IssuanceSince(from, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	id, seq, _ := s.store.IssuanceHead()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chain_did": s.hubAID, "entries": entries, "head_id": id, "head_seq": seq,
+		"note": "verify the record field, not the parsed columns beside it — " +
+			"those are rendered by this hub and are not what it signed.",
+	})
+}
+
+// hWitnessSubmit accepts an attestation somebody made about this hub.
+//
+// Unauthenticated: the attestation carries its own signature, and the
+// worst a stranger can do is store a statement attributed to themselves.
+// The witness's key history is not fetched here — a reader deciding
+// whether an attestation means anything must resolve the witness and
+// check it themselves, which is the only way it could ever be worth
+// anything to them.
+func (s *Server) hWitnessSubmit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Attestation string `json:"attestation"`
+	}
+	if err := readJSONBody(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(req.Attestation)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attestation not base64"})
+		return
+	}
+	a, err := ael.UnmarshalHeadAttestation(raw)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if a.ChainDID != s.hubAID {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "this attestation is about " + a.ChainDID + ", not this hub"})
+		return
+	}
+	if err := s.store.StoreAttestation(a); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "stored", "witness": a.WitnessAID(), "seq": a.Seq,
+		"note": "keep your own copy. This hub serving your attestation is a convenience; " +
+			"evidence about a party that only that party holds is not evidence."})
+}
+
+// hWitnesses serves the attestations held about this hub.
+func (s *Server) hWitnesses(w http.ResponseWriter, _ *http.Request) {
+	out, err := s.store.AttestationsAbout(s.hubAID, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"chain_did": s.hubAID, "attestations": out,
+		"note": "this hub can withhold an attestation but cannot forge one. " +
+			"Resolve each witness and verify the signature yourself; then ask that " +
+			"witness directly, since what it holds is what it will not have edited."})
+}
+
+// verifyRecords decodes and verifies a run of chain records.
+func verifyRecords(entries []IssuanceEntry, kel []identity.SignedEvent) ([]*ael.EventRecord, error) {
+	ledger := ael.NewLedger()
+	var out []*ael.EventRecord
+	for _, e := range entries {
+		raw, err := base64.StdEncoding.DecodeString(e.Record)
+		if err != nil {
+			return nil, fmt.Errorf("seq %d: %w", e.Seq, err)
+		}
+		var rec ael.EventRecord
+		if err := coredet.Unmarshal(raw, &rec); err != nil {
+			return nil, fmt.Errorf("seq %d: %w", e.Seq, err)
+		}
+		if err := ledger.Append(&rec, kel); err != nil {
+			return nil, fmt.Errorf("seq %d: %w", e.Seq, err)
+		}
+		out = append(out, &rec)
+	}
+	return out, nil
+}

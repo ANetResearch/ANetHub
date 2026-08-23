@@ -179,6 +179,12 @@ func (s *Server) Handler() http.Handler {
 	// Credit going back out, and the arithmetic of what is outstanding.
 	mux.HandleFunc("POST /x402/redeem", s.hRedeem)
 	mux.HandleFunc("GET /x402/supply", s.hSupply)
+	// The signed record of every supply change, and the witnesses who
+	// have pinned it. See issuance.go and witness.go.
+	mux.HandleFunc("GET /x402/issuance", s.hIssuance)
+	mux.HandleFunc("GET /x402/issuance/head", s.hIssuanceHead)
+	mux.HandleFunc("POST /x402/witness", s.hWitnessSubmit)
+	mux.HandleFunc("GET /x402/witnesses", s.hWitnesses)
 	mux.HandleFunc("GET /agents/{aid}/redemptions", s.hRedemptions)
 	mux.HandleFunc("POST /federation/clear", s.hClear)
 	// Reputation across hub boundaries — the signed evidence, never an
