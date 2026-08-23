@@ -784,7 +784,13 @@ func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
 			log.Printf("hub: witness %s: %v", p.AID, derr)
 			continue
 		}
-		if head.Seq == 0 || head.HeadID == "" {
+		// HeadID alone says whether there is a head. Seq must not be part
+		// of this test: an AEL's first record is seq 0, so a chain
+		// holding exactly one record — the opening entry every upgraded
+		// hub starts with — was skipped as though it had nothing to pin.
+		// On the live topology that meant one hub witnessed the other and
+		// was never witnessed back.
+		if head.HeadID == "" {
 			continue // nothing issued yet; there is no head to pin
 		}
 		// The peer must be attesting to its own chain. A peer serving

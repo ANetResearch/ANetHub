@@ -496,3 +496,84 @@ func TestTheDirectoryHealsWhatTheCursorSkipped(t *testing.T) {
 		t.Errorf("the directory did not heal: admitted %d after a full resync round", len(sink.got))
 	}
 }
+
+// A chain with exactly one record must be witnessable.
+//
+// WitnessOnce tested head.Seq == 0 for "nothing to pin". An AEL's first
+// record is seq 0, and the opening entry every upgraded hub starts with
+// sits there — so a hub whose chain held only that was never witnessed.
+// Live: emax was witnessed zero times while witnessing fmax hourly.
+func TestAOneRecordChainIsStillWitnessed(t *testing.T) {
+	dir := t.TempDir()
+	// A peer serving a head at seq 0.
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/x402/issuance/head" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"chain_did": "did:anet:peer", "seq": 0, "head_id": "bafy-opening"})
+	}))
+	defer peer.Close()
+
+	svc := newDiscoveryService(t, dir, Config{
+		Discovery: "allowlist", Home: "https://ours.example",
+		Peers: []Peer{{AID: "did:anet:peer", Endpoint: peer.URL}},
+	}, &fakeDirectory{})
+	w := &fakeWitness{}
+	svc.SetWitness(w)
+
+	if n := svc.WitnessOnce(context.Background()); n != 1 {
+		t.Fatalf("pinned %d heads, want 1 — a one-record chain was treated as having none", n)
+	}
+	if len(w.pinned) != 1 || w.pinned[0].seq != 0 || w.pinned[0].headID != "bafy-opening" {
+		t.Errorf("pinned = %+v", w.pinned)
+	}
+}
+
+// A peer that has issued nothing has no head, and must not be pinned.
+func TestAPeerWithNoChainIsNotWitnessed(t *testing.T) {
+	dir := t.TempDir()
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"chain_did": "did:anet:peer"})
+	}))
+	defer peer.Close()
+	svc := newDiscoveryService(t, dir, Config{
+		Discovery: "allowlist", Home: "https://ours.example",
+		Peers: []Peer{{AID: "did:anet:peer", Endpoint: peer.URL}},
+	}, &fakeDirectory{})
+	w := &fakeWitness{}
+	svc.SetWitness(w)
+	if n := svc.WitnessOnce(context.Background()); n != 0 {
+		t.Errorf("pinned %d heads for a chain that has none", n)
+	}
+}
+
+// Witnessing is on by default and can be turned off.
+func TestWitnessingDefaultsOnAndCanBeDisabled(t *testing.T) {
+	peers := []Peer{{AID: "did:anet:peer", Endpoint: "http://unused"}}
+	if !(Config{Peers: peers}).WitnessEnabled() {
+		t.Error("witnessing must default on for a hub that has peers")
+	}
+	if (Config{Peers: peers, Witness: "off"}).WitnessEnabled() {
+		t.Error(`"witness":"off" did not disable it`)
+	}
+	if (Config{Witness: "on"}).WitnessEnabled() {
+		t.Error("a hub with no peers has nobody to witness")
+	}
+}
+
+type fakeWitness struct {
+	pinned []struct {
+		peerAID, headID string
+		seq             uint64
+	}
+}
+
+func (f *fakeWitness) Attest(peerAID, headID string, seq uint64) ([]byte, error) {
+	f.pinned = append(f.pinned, struct {
+		peerAID, headID string
+		seq             uint64
+	}{peerAID, headID, seq})
+	return []byte("attestation"), nil
+}
