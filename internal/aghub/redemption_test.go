@@ -455,3 +455,71 @@ func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
 			after.Outstanding, after.Balances)
 	}
 }
+
+// A hub must be able to tell a peer that a debt is discharged.
+//
+// IssueOwedSettlement signed the statement and had no call site, so
+// hub_owed only ever rose: a hub that owed a peer had no way to say it
+// had paid. The live topology had hub_owed empty and hub_cleared at zero,
+// which looked like "nothing has been owed yet" and was also "nothing
+// could have been settled".
+func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
+	ours, ourStore := newHubWithStore(t)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payee, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, ours, payee, "Payee", nil)
+	ourAID := hubAIDOf(t, ours)
+
+	// The peer settled on its own ledger in favour of our agent, so it
+	// owes us.
+	foreign := &payment.Receipt{
+		AuthID: "foreign-clear-1", Payer: "did:anet:their-user", PayTo: payee.AID(),
+		Amount: 400, Network: payment.CreditNetwork(peer.AID()),
+		SettleAt: time.Now().UnixMilli(),
+	}
+	if err := foreign.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := ourStore.ClearFromPeer(peer.AID(), peer.KEL(), foreign); err != nil {
+		t.Fatal(err)
+	}
+	if owed, _ := ourStore.Owed(peer.AID()); owed != 400 {
+		t.Fatalf("owed = %d, want 400", owed)
+	}
+
+	// The peer signs a discharge, the way `anet-hub -clear` does, and
+	// delivers it to POST /federation/clear.
+	//
+	// The peer's key history has to be resolvable for the discharge to
+	// verify, which is what the federation seam supplies in production.
+	rec := &payment.Receipt{
+		AuthID: "clear:live-1", Payer: peer.AID(), PayTo: ourAID, Amount: 400,
+		Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli(),
+	}
+	if err := rec.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := ourStore.SettleOwed(ourAID, peer.AID(), peer.KEL(), rec); err != nil {
+		t.Fatalf("applying the discharge: %v", err)
+	}
+	if owed, _ := ourStore.Owed(peer.AID()); owed != 0 {
+		t.Errorf("owed = %d after discharge, want 0", owed)
+	}
+
+	// The discharge does not create credit here. It records that a claim
+	// on another hub is settled; the payee was already credited when the
+	// peer's settlement was cleared, and crediting again would mint.
+	bal, err := ourStore.Balance(payee.AID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bal != 400+int64(aghub.RegistrationGrant) {
+		t.Errorf("the discharge moved a user's balance: %d", bal)
+	}
+}
