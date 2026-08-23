@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/ael"
@@ -232,6 +233,10 @@ func TestAnUpgradedHubOpensItsChainAtTheOutstandingBalance(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := supplyFull(t, srv)
+	if after.ChainOutstanding != after.Outstanding {
+		t.Errorf("chain outstanding %d, table outstanding %d",
+			after.ChainOutstanding, after.Outstanding)
+	}
 	if after.ChainOpening != before.Outstanding {
 		t.Errorf("opening = %d, want %d", after.ChainOpening, before.Outstanding)
 	}
@@ -267,4 +272,100 @@ func TestAnUpgradedHubOpensItsChainAtTheOutstandingBalance(t *testing.T) {
 	if len(entries) != 2 || entries[1].PrevID != entries[0].ID {
 		t.Errorf("the grant did not link onto the opening: %+v", entries)
 	}
+}
+
+// A hub that had processed a redemption before the chain existed must
+// still reconcile.
+//
+// The first version compared the historical issued/redeemed split, which
+// a chain opening partway through a hub's life cannot know — it knows
+// only the net that was outstanding when it opened. Live deployment
+// reported false disagreement on exactly this shape.
+func TestOpeningReconcilesOnAHubThatHadAlreadyRedeemed(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+	if err := store.GrantCredit(agent.AID(), 1000, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	hubAID := hubAIDOf(t, srv)
+	opt := payment.PaymentOption{
+		Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
+		Amount: "30", Asset: payment.AssetCredit, PayTo: hubAID,
+	}
+	if code, b := post(t, srv.URL+"/x402/redeem", map[string]any{
+		"x402Version": 2, "paymentPayload": json.RawMessage(mustPayload(t, agent, opt, "pre-chain")),
+		"reference": "pre-chain",
+	}); code != 200 {
+		t.Fatalf("redeem: %d %s", code, b)
+	}
+
+	// Now the chain is discarded: this is a hub whose issued/redeemed
+	// history predates it, with the split unknowable from the chain.
+	if err := store.ClearIssuanceForTest(); err != nil {
+		t.Fatal(err)
+	}
+	before := supplyFull(t, srv)
+	if before.Redeemed == 0 {
+		t.Fatal("setup: expected a redemption before the chain")
+	}
+	if err := store.OpenBalance(before.Outstanding); err != nil {
+		t.Fatal(err)
+	}
+	after := supplyFull(t, srv)
+	if !after.ChainAgrees {
+		t.Errorf("a hub with a pre-chain redemption did not reconcile: "+
+			"opening=%d issued=%d retired=%d chain_outstanding=%d table_outstanding=%d",
+			after.ChainOpening, after.ChainIssued, after.ChainRetired,
+			after.ChainOutstanding, after.Outstanding)
+	}
+}
+
+// A one-record chain must be distinguishable from no chain.
+//
+// chain_head_seq carried omitempty, so a chain holding exactly the
+// opening record reported no sequence at all — and every reader deciding
+// whether there is a head to pin would read that as "nothing yet".
+func TestAOneRecordChainReportsItsSequence(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+	if err := store.ClearIssuanceForTest(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.OpenBalance(100); err != nil {
+		t.Fatal(err)
+	}
+	body := rawSupply(t, srv)
+	if !strings.Contains(body, `"chain_head_seq"`) {
+		t.Errorf("chain_head_seq is absent from a chain that has a head: %s", body)
+	}
+	if !strings.Contains(body, `"chain_head"`) {
+		t.Errorf("chain_head is absent: %s", body)
+	}
+}
+
+func rawSupply(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	resp, err := http.Get(srv.URL + "/x402/supply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b := make([]byte, 0, 2048)
+	buf := make([]byte, 1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		b = append(b, buf[:n]...)
+		if rerr != nil {
+			break
+		}
+	}
+	return string(b)
 }

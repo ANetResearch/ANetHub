@@ -186,11 +186,25 @@ type Supply struct {
 	// hub's own statement about its own past, and nothing outside the hub
 	// vouches for it.
 	ChainOpening int64 `json:"chain_opening,omitempty"`
-	ChainAgrees  bool  `json:"chain_agrees"`
+	// ChainOutstanding is what the chain says is outstanding now:
+	// opening + issued - retired.
+	//
+	// This, not the issued/redeemed split, is what the chain and the
+	// table can be held to. A chain that begins partway through a hub's
+	// life knows nothing about how much was issued and redeemed before
+	// it — only the net that was outstanding when it opened. Comparing
+	// the historical split reported false disagreement on any hub that
+	// had processed a redemption before the chain existed.
+	ChainOutstanding int64 `json:"chain_outstanding"`
+	ChainAgrees      bool  `json:"chain_agrees"`
 	// ChainHead is the current head of the issuance chain, which is what
 	// a witness attests to.
+	//
+	// ChainHeadSeq has no omitempty: an AEL's first record is seq 0, and
+	// omitting it would make a one-record chain indistinguishable from no
+	// chain to every reader deciding whether there is a head to pin.
 	ChainHead    string `json:"chain_head,omitempty"`
-	ChainHeadSeq uint64 `json:"chain_head_seq,omitempty"`
+	ChainHeadSeq uint64 `json:"chain_head_seq"`
 }
 
 // Supply computes the hub's position.
@@ -222,10 +236,8 @@ func (s *Store) Supply(hubAID string) (Supply, error) {
 		return out, cerr
 	}
 	out.ChainIssued, out.ChainRetired, out.ChainOpening = ci, cr, co
-	// The opening counts toward the total the chain accounts for, because
-	// it is a claim about supply. It is reported separately so a reader
-	// can subtract it and see what is actually attested.
-	out.ChainAgrees = ci+co == out.Issued && cr == out.Redeemed
+	out.ChainOutstanding = co + ci - cr
+	out.ChainAgrees = out.ChainOutstanding == out.Outstanding
 	out.ChainHead, out.ChainHeadSeq, _ = s.IssuanceHead()
 	return out, nil
 }
