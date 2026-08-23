@@ -291,3 +291,45 @@ func decodeB64(t *testing.T, s string) string {
 	}
 	return string(b)
 }
+
+// An operator must be able to fund an account.
+//
+// GrantCredit described itself as "the operator's way in" and had no call
+// site anywhere — so there was no way in, and every account was stuck
+// with its registration grant for ever. The fourth seam found this month
+// that compiled without being connected.
+//
+// The arithmetic is the part worth pinning: a grant issues credit, and
+// issuing debits the hub's own row. An operator creating credit off the
+// books would break the one equation that makes this custody checkable
+// at all.
+func TestAnOperatorGrantIsIssuedOnTheBooks(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+
+	before := supplyOf(t, srv)
+	if err := store.GrantCredit(agent.AID(), 500, "operator grant"); err != nil {
+		t.Fatal(err)
+	}
+	if bal, _ := store.Balance(agent.AID()); bal != 500+int64(aghub.RegistrationGrant) {
+		t.Errorf("balance = %d after a 500 grant", bal)
+	}
+	after := supplyOf(t, srv)
+	if after.Issued != before.Issued+500 {
+		t.Errorf("issued = %d, want %d — a grant that does not appear as issued "+
+			"is credit created off the books", after.Issued, before.Issued+500)
+	}
+	if after.Outstanding != after.Balances {
+		t.Errorf("the ledger stopped balancing after a grant: %d vs %d",
+			after.Outstanding, after.Balances)
+	}
+	// Zero is refused rather than treated as a no-op: an operator who
+	// typed the amount wrong should find out.
+	if err := store.GrantCredit(agent.AID(), 0, "typo"); err == nil {
+		t.Error("a zero grant was accepted")
+	}
+}
