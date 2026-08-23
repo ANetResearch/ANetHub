@@ -49,6 +49,21 @@ const (
 	EvCreditIssued = "anet.credit.issued"
 	// EvCreditRetired records credit destroyed by redemption.
 	EvCreditRetired = "anet.credit.retired"
+	// EvCreditOpening records supply that existed before this chain did.
+	//
+	// A hub that has been running has credit outstanding from before the
+	// chain was added. Two wrong ways to handle that: leave the chain
+	// permanently disagreeing with the balances, which makes the
+	// comparison useless; or backfill one record per historical grant,
+	// which has the hub signing a reconstruction of its own unaudited
+	// table and presenting it as a contemporaneous record.
+	//
+	// The opening record says what is true: this much was outstanding
+	// when the chain began, it was issued before anything attested to
+	// issuance, and nothing outside this hub vouches for it. Supply
+	// reports it separately so a reader can see how much of the total is
+	// unattested rather than having it folded in silently.
+	EvCreditOpening = "anet.credit.opening"
 )
 
 // issuanceChain is the hub's own supply chain.
@@ -194,18 +209,39 @@ func (s *Store) IssuanceSince(from uint64, limit int) ([]IssuanceEntry, error) {
 	return out, rows.Err()
 }
 
+// OpenBalance writes the opening record if the chain is empty and the
+// balances show credit already outstanding.
+//
+// Called once at startup. Idempotent: a chain that already has records is
+// left alone, so a restart cannot add a second opening.
+func (s *Store) OpenBalance(outstanding int64) error {
+	if outstanding <= 0 || s.hubKey == nil {
+		return nil
+	}
+	s.issuance.mu.Lock()
+	_, _, have, err := s.issuanceHeadLocked()
+	s.issuance.mu.Unlock()
+	if err != nil || have {
+		return err
+	}
+	return s.appendIssuance(EvCreditOpening, s.hubKey.AID(), outstanding,
+		"outstanding before this chain existed; not attested by anything outside this hub")
+}
+
 // IssuanceTotals sums the chain: what it says was issued and retired.
 //
 // Compared against the balance table by Supply. The two are written by
 // the same process and should always agree; when they do not, the hub has
 // moved credit outside the chain, and a reader can see that without
 // trusting either number.
-func (s *Store) IssuanceTotals() (issued, retired int64, err error) {
+func (s *Store) IssuanceTotals() (issued, retired, opening int64, err error) {
 	err = s.db.QueryRow(
 		`SELECT COALESCE(SUM(CASE WHEN kind=? THEN amount ELSE 0 END),0),
+		        COALESCE(SUM(CASE WHEN kind=? THEN amount ELSE 0 END),0),
 		        COALESCE(SUM(CASE WHEN kind=? THEN amount ELSE 0 END),0)
-		   FROM credit_issuance`, EvCreditIssued, EvCreditRetired).Scan(&issued, &retired)
-	return issued, retired, err
+		   FROM credit_issuance`,
+		EvCreditIssued, EvCreditRetired, EvCreditOpening).Scan(&issued, &retired, &opening)
+	return issued, retired, opening, err
 }
 
 // VerifyIssuanceChain replays the stored chain and reports the first
@@ -236,4 +272,12 @@ func (s *Store) VerifyIssuanceChain(kel []identity.SignedEvent) error {
 		}
 	}
 	return nil
+}
+
+// ClearIssuanceForTest empties the chain, to reproduce a hub whose credit
+// predates it. Named so nobody mistakes it for an operation the hub
+// performs.
+func (s *Store) ClearIssuanceForTest() error {
+	_, err := s.db.Exec(`DELETE FROM credit_issuance`)
+	return err
 }

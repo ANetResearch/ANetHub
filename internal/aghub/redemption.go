@@ -177,6 +177,15 @@ type Supply struct {
 	// trusting either number. ChainAgrees says whether they match.
 	ChainIssued  int64 `json:"chain_issued"`
 	ChainRetired int64 `json:"chain_retired"`
+	// ChainOpening is supply that predates the chain: outstanding when
+	// the chain began, issued before anything recorded issuance.
+	//
+	// Reported separately rather than folded into ChainIssued, because
+	// the two are not equally supported. Everything in ChainIssued has a
+	// signed, ordered record that a witness can pin. ChainOpening is this
+	// hub's own statement about its own past, and nothing outside the hub
+	// vouches for it.
+	ChainOpening int64 `json:"chain_opening,omitempty"`
 	ChainAgrees  bool  `json:"chain_agrees"`
 	// ChainHead is the current head of the issuance chain, which is what
 	// a witness attests to.
@@ -208,12 +217,15 @@ func (s *Store) Supply(hubAID string) (Supply, error) {
 		`SELECT COALESCE(SUM(amount),0) FROM hub_owed`).Scan(&out.Owed); err != nil {
 		return out, err
 	}
-	ci, cr, cerr := s.IssuanceTotals()
+	ci, cr, co, cerr := s.IssuanceTotals()
 	if cerr != nil {
 		return out, cerr
 	}
-	out.ChainIssued, out.ChainRetired = ci, cr
-	out.ChainAgrees = ci == out.Issued && cr == out.Redeemed
+	out.ChainIssued, out.ChainRetired, out.ChainOpening = ci, cr, co
+	// The opening counts toward the total the chain accounts for, because
+	// it is a claim about supply. It is reported separately so a reader
+	// can subtract it and see what is actually attested.
+	out.ChainAgrees = ci+co == out.Issued && cr == out.Redeemed
 	out.ChainHead, out.ChainHeadSeq, _ = s.IssuanceHead()
 	return out, nil
 }

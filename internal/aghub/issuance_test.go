@@ -199,3 +199,72 @@ func supplyFull(t *testing.T, srv *httptest.Server) aghub.Supply {
 	}
 	return out.Supply
 }
+
+// A hub that has been running has credit outstanding from before the
+// chain existed, and there is no honest way to make the chain account for
+// it retroactively.
+//
+// Backfilling one record per historical grant would have the hub signing
+// a reconstruction of its own unaudited table and presenting it as a
+// contemporaneous record. Leaving the chain empty would make the
+// comparison useless for ever. The opening record states what is true and
+// is reported separately, so a reader can subtract it and see what is
+// actually attested.
+func TestAnUpgradedHubOpensItsChainAtTheOutstandingBalance(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+
+	// Simulate a hub whose credit predates the chain: clear the chain,
+	// leaving the balances.
+	if err := store.ClearIssuanceForTest(); err != nil {
+		t.Fatal(err)
+	}
+	before := supplyFull(t, srv)
+	if before.ChainAgrees {
+		t.Fatal("setup: the chain should not agree yet")
+	}
+
+	if err := store.OpenBalance(before.Outstanding); err != nil {
+		t.Fatal(err)
+	}
+	after := supplyFull(t, srv)
+	if after.ChainOpening != before.Outstanding {
+		t.Errorf("opening = %d, want %d", after.ChainOpening, before.Outstanding)
+	}
+	if !after.ChainAgrees {
+		t.Errorf("the chain still disagrees after opening: %+v", after)
+	}
+	// Reported separately, never folded into issued. Everything in
+	// ChainIssued has a signed ordered record a witness can pin; the
+	// opening is the hub's own statement about its own past.
+	if after.ChainIssued != 0 {
+		t.Errorf("the opening was counted as issued: %d", after.ChainIssued)
+	}
+
+	// Idempotent: a restart must not add a second opening.
+	if err := store.OpenBalance(before.Outstanding); err != nil {
+		t.Fatal(err)
+	}
+	again := supplyFull(t, srv)
+	if again.ChainOpening != after.ChainOpening {
+		t.Errorf("a second call added another opening: %d → %d",
+			after.ChainOpening, again.ChainOpening)
+	}
+
+	// And issuance after the opening is recorded normally, linked onto it.
+	if err := store.GrantCredit(agent.AID(), 300, "after opening"); err != nil {
+		t.Fatal(err)
+	}
+	final := supplyFull(t, srv)
+	if final.ChainIssued != 300 || !final.ChainAgrees {
+		t.Errorf("post-opening issuance = %d, agrees = %v", final.ChainIssued, final.ChainAgrees)
+	}
+	entries, _ := store.IssuanceSince(0, 0)
+	if len(entries) != 2 || entries[1].PrevID != entries[0].ID {
+		t.Errorf("the grant did not link onto the opening: %+v", entries)
+	}
+}
