@@ -35,6 +35,23 @@ func main() {
 	addr := flag.String("addr", ":8088", "HTTP listen address")
 	data := flag.String("data", "./.anet-hub", "data directory (SQLite store)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	// Funding an account, which had no way in at all.
+	//
+	// Store.GrantCredit called itself "the operator's way in" and had
+	// zero call sites — so an operator could not actually fund anything,
+	// and every account on this hub was stuck with whatever the
+	// registration grant gave it. A seam that compiles is not a seam that
+	// is connected, and this is the fourth of that kind found this month.
+	//
+	// A flag on the hub binary rather than an HTTP endpoint, deliberately.
+	// Who may create credit is a policy question this round does not
+	// answer, and an endpoint would answer it by accident — badly, since
+	// the obvious authentication for it does not exist yet. Requiring
+	// shell access to the machine that holds the ledger is a defensible
+	// interim: it is the same trust boundary as the database file.
+	grant := flag.String("grant", "", "credit an account: -grant <aid> -amount <n> (requires the hub to be stopped)")
+	amount := flag.Int64("amount", 0, "amount for -grant")
+	reason := flag.String("reason", "operator grant", "why, recorded on the ledger entry")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("anet-hub", version.V)
@@ -50,6 +67,13 @@ func main() {
 	// ctx is cancelled on SIGINT/SIGTERM; the guest-mode janitor runs under it and stops on shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *grant != "" {
+		if err := grantCredit(*data, *grant, *amount, *reason); err != nil {
+			log.Fatalf("anet-hub: grant: %v", err)
+		}
+		return
+	}
 
 	hubID, err := hubid.LoadOrIncept(*data)
 	if err != nil {
@@ -108,4 +132,43 @@ func main() {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+}
+
+// grantCredit funds an account from the command line.
+//
+// Opens the store, credits, closes. Run against a stopped hub or a
+// running one — SQLite serialises the write either way — but the balance
+// a running hub has cached in flight is its own business, so the flag's
+// help says stopped and means it.
+//
+// The hub's own row is debited by Credit, so a grant made this way shows
+// up in /x402/supply as issued liability like any other. An operator
+// creating credit off the books would defeat the one arithmetic that
+// makes custody checkable.
+func grantCredit(dir, aid string, amount int64, reason string) error {
+	if amount == 0 {
+		return fmt.Errorf("-amount is required and must not be zero (negative debits)")
+	}
+	store, err := aghub.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	id, err := hubid.LoadOrIncept(dir)
+	if err != nil {
+		return err
+	}
+	// The hub key names the row credit is issued from. Without it the
+	// grant would appear from nowhere and the ledger would stop summing
+	// to zero.
+	store.SetHubKey(id.Ctrl)
+	if err := store.GrantCredit(aid, amount, reason); err != nil {
+		return err
+	}
+	bal, err := store.Balance(aid)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("granted %d to %s (%s) — balance now %d\n", amount, aid, reason, bal)
+	return nil
 }
