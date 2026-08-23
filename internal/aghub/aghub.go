@@ -54,6 +54,12 @@ type AgentView struct {
 	// it lives on, and so where work for it must be sent. Empty means
 	// this hub.
 	HomeHub string `json:"home_hub,omitempty"`
+	// LastSeen and Quiet report whether this agent is still collecting
+	// its mail. A directory that lists agents without saying which of
+	// them have stopped answering is a directory that sends people to
+	// wait on the dead.
+	LastSeen string `json:"last_seen,omitempty"`
+	Quiet    bool   `json:"quiet,omitempty"`
 }
 
 // ReviewView is one stored, verified review. Beyond the rating it carries the VERIFIED interaction
@@ -343,6 +349,10 @@ func (s *Store) migrate() error {
 		// that federated by default would publish, once and for everyone
 		// who never thought about it.
 		`ALTER TABLE agent ADD COLUMN visibility TEXT NOT NULL DEFAULT 'hub-local'`,
+		// When this agent last collected its mail. NULL for rows that
+		// predate the column, which must read as "unknown" and never as
+		// "dead" — see liveness.go.
+		`ALTER TABLE agent ADD COLUMN last_seen_at TEXT`,
 		`ALTER TABLE agent_card ADD COLUMN fed_seq INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
@@ -422,7 +432,7 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at,
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at, a.last_seen_at,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		 FROM agent a
 		 JOIN agent_cap c ON c.aid = a.aid
@@ -439,6 +449,9 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		av, err := scanAgent(rows)
 		if err != nil {
 			return nil, err
+		}
+		if !av.Browsable() {
+			continue
 		}
 		out = append(out, av)
 	}
@@ -567,7 +580,7 @@ func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
 // profile contain it (case-insensitive) — the `find` backend. Pure requesters (registered but with no
 // caps/profile) are intentionally omitted so they do not clutter the starfield.
 func (s *Store) ListAgents(query string) ([]AgentView, error) {
-	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at,
+	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at, a.last_seen_at,
 	             COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 	      FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid`
 	var args []any
@@ -588,18 +601,44 @@ func (s *Store) ListAgents(query string) ([]AgentView, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !av.Listed {
-			continue // registered-but-unlisted (a pure requester) — not shown as a provider
+		if !av.Listed || !av.Browsable() {
+			continue
 		}
 		out = append(out, av)
 	}
 	return out, rows.Err()
 }
 
+// Browsable reports whether this agent belongs in a listing somebody is
+// reading.
+//
+// A method on the view rather than a filter at each query, because there
+// is more than one way to reach a listing — by name, by capability id —
+// and the first version of this put the rule in one of them. The
+// capability search then went on serving an agent that had been gone for
+// forty days, which is precisely the shape of bug this whole file exists
+// to close.
+//
+// Out of the listing is NOT out of the hub: the row, the reviews and the
+// balance all stay, and one poll puts it back. Never true for an agent
+// with no recorded poll — that is every row from before this hub tracked
+// it, and hiding them all on an upgrade would empty the directory for a
+// reason nobody could see.
+func (av AgentView) Browsable() bool {
+	if av.LastSeen == "" {
+		return true
+	}
+	t, err := time.Parse(time.RFC3339, av.LastSeen)
+	if err != nil {
+		return true
+	}
+	return time.Since(t) <= AbandonedAfter
+}
+
 // GetAgent returns one agent's entry + aggregate and its reviews (newest first).
 func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 	row := s.db.QueryRow(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at,
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota, a.registered_at, a.last_seen_at,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		 FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		 WHERE a.aid=? GROUP BY a.aid`, aid)
@@ -825,10 +864,16 @@ type scanner interface{ Scan(dest ...any) error }
 func scanAgent(sc scanner) (AgentView, error) {
 	var av AgentView
 	var capsJSON string
+	var lastSeen sql.NullString
 	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme, &av.Pricing,
-		&av.GuestQuota, &av.RegisteredAt, &av.AvgRating, &av.ReviewCount); err != nil {
+		&av.GuestQuota, &av.RegisteredAt, &lastSeen, &av.AvgRating, &av.ReviewCount); err != nil {
 		return av, err
 	}
+	// Every listing surface runs through this one function, so all of
+	// them agree about who is still collecting. Three copies of the same
+	// arithmetic would be three copies that drift.
+	live := livenessFrom(lastSeen.String, time.Now())
+	av.LastSeen, av.Quiet = live.LastSeen, live.Quiet
 	_ = json.Unmarshal([]byte(capsJSON), &av.Caps)
 	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
 	// profile text. A pure requester has none of these and stays out of the public listing.

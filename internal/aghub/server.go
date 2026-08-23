@@ -657,12 +657,25 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "recipient not registered"})
 		return
 	}
+	// Queued either way — but if the recipient has not collected its mail
+	// in a long time, the sender is told before it starts waiting. This
+	// hub cannot know whether the agent is coming back, and refusing the
+	// send would be asserting that it is not. Saying what it knows is the
+	// honest middle: accepted, and here is the one fact you would want.
+	live, _ := s.store.LivenessOf(req.ToAID)
 	id, err := s.store.RelayEnqueue(req.ToAID, req.FromAID, req.Kind, req.InteractionID, payload)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "queued"})
+	out := map[string]any{"id": id, "status": "queued"}
+	if live.Quiet {
+		out["recipient_quiet"] = true
+		out["warning"] = fmt.Sprintf(
+			"queued, but %s has not collected its mail for %s — it may not be running",
+			req.ToAID, live.QuietFor)
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // RelayAuthRequest carries the signed challenge that authenticates a mailbox owner (poll/ack). The
@@ -696,6 +709,12 @@ func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 		return
 	}
+	// Collecting mail is the liveness signal. Recorded here rather than
+	// at a heartbeat endpoint because this is the thing that actually
+	// matters: a node that asks for its mail is a node that will do the
+	// work, and a node that has stopped asking will not, whatever else it
+	// might still be answering.
+	s.store.SeenPolling(req.AID)
 	msgs, err := s.store.RelayPoll(req.AID, req.Limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
