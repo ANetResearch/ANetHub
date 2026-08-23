@@ -56,6 +56,26 @@ type Config struct {
 	// and not where to reach them.
 	Home  string `json:"home"`
 	Peers []Peer `json:"peers"`
+	// Witness controls whether this hub pins its peers' issuance chain
+	// heads. Absent means on.
+	//
+	// Default on because it costs one HTTP request per peer per interval
+	// and it is the only thing that makes a peer's credit supply auditable
+	// by anyone other than that peer. A hub that federates has already
+	// decided to have a relationship with these peers; holding a signed
+	// record of what their ledger looked like is part of what that
+	// relationship is worth.
+	//
+	// Set "off" to disable. An operator who does not want to store
+	// statements about other people's ledgers, or who does not want their
+	// own hub's signature appearing on somebody else's audit trail, has a
+	// legitimate reason to decline.
+	Witness string `json:"witness,omitempty"` // "" | "on" | "off"
+}
+
+// WitnessEnabled reports whether this hub pins its peers' chain heads.
+func (c Config) WitnessEnabled() bool {
+	return c.Witness != "off" && len(c.Peers) > 0
 }
 
 // LoadConfig reads dir/federation.json (absent → off).
@@ -125,12 +145,13 @@ func (e *Envelope) preimage(payload []byte) ([]byte, error) {
 
 // Service is one hub's federation face.
 type Service struct {
-	cfg   Config
-	id    *hubid.Identity
-	local LocalDelivery
-	dir   Directory
-	db    *sql.DB
-	http  *http.Client
+	cfg     Config
+	id      *hubid.Identity
+	local   LocalDelivery
+	dir     Directory
+	db      *sql.DB
+	http    *http.Client
+	witness Witness
 	// round counts sync passes, so a full re-read can be scheduled
 	// without a second timer. Touched only from the sync loop.
 	round int
@@ -707,4 +728,98 @@ func (s *Service) PeerKEL(peerAID string) ([]identity.SignedEvent, error) {
 		return nil, fmt.Errorf("hub %s is not a peer of this one", peerAID)
 	}
 	return s.peerKEL(p)
+}
+
+// ---- witnessing a peer's issuance chain ----
+
+// Witness is what the kernel supplies so federation can pin peer heads.
+//
+// A seam rather than an import, like Directory and LocalDelivery: the
+// kernel owns the chain and the signing key, federation owns the peers
+// and the polling. Neither needs to know how the other works.
+type Witness interface {
+	// Attest signs and stores this hub's observation of a peer's head,
+	// returning the marshalled attestation to send back to that peer.
+	Attest(peerAID, headID string, seq uint64) ([]byte, error)
+}
+
+// SetWitness wires the witnessing seam.
+func (s *Service) SetWitness(w Witness) { s.witness = w }
+
+// WitnessOnce pins each peer's current issuance head.
+//
+// Per peer, and failures are logged rather than fatal: a peer that is
+// down, or running a build with no issuance chain, must not stop the
+// others being witnessed.
+//
+// The attestation is stored locally first and sent to the peer second.
+// That order is the whole point — evidence about a party that only that
+// party holds is not evidence, so the copy that matters is the one this
+// hub keeps. Sending it is a courtesy that lets the peer show a reader
+// where to start looking.
+func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
+	if !s.cfg.WitnessEnabled() || s.witness == nil {
+		return 0
+	}
+	for i := range s.cfg.Peers {
+		p := &s.cfg.Peers[i]
+		endpoint := strings.TrimSuffix(p.Endpoint, "/")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/x402/issuance/head", nil)
+		if err != nil {
+			continue
+		}
+		resp, err := s.http.Do(req)
+		if err != nil {
+			log.Printf("hub: witness %s: %v", p.AID, err)
+			continue
+		}
+		var head struct {
+			ChainDID string `json:"chain_did"`
+			Seq      uint64 `json:"seq"`
+			HeadID   string `json:"head_id"`
+		}
+		derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&head)
+		resp.Body.Close()
+		if derr != nil {
+			log.Printf("hub: witness %s: %v", p.AID, derr)
+			continue
+		}
+		if head.Seq == 0 || head.HeadID == "" {
+			continue // nothing issued yet; there is no head to pin
+		}
+		// The peer must be attesting to its own chain. A peer serving
+		// somebody else's chain_did would have this hub sign a statement
+		// about a third party it never looked at.
+		if head.ChainDID != p.AID {
+			log.Printf("hub: witness %s: served a head for %s, not itself", p.AID, head.ChainDID)
+			continue
+		}
+		raw, err := s.witness.Attest(p.AID, head.HeadID, head.Seq)
+		if err != nil {
+			log.Printf("hub: witness %s: %v", p.AID, err)
+			continue
+		}
+		pinned++
+		s.sendAttestation(ctx, endpoint, raw)
+	}
+	return pinned
+}
+
+// sendAttestation offers the attestation back to the peer. Best-effort:
+// the copy that matters is already stored here.
+func (s *Service) sendAttestation(ctx context.Context, endpoint string, raw []byte) {
+	body, err := json.Marshal(map[string]string{
+		"attestation": base64.StdEncoding.EncodeToString(raw)})
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		endpoint+"/x402/witness", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if resp, err := s.http.Do(req); err == nil {
+		resp.Body.Close()
+	}
 }

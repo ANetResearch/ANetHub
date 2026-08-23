@@ -58,6 +58,12 @@ func (s *Store) Credit(aid string, amount int64, reason string) error {
 		if err := s.entry(s.hubAID, -amount, reasonIssued+":"+reason); err != nil {
 			return err
 		}
+		// On the signed chain before the balance moves. A grant recorded
+		// only in the balance table is a grant nothing outside this hub
+		// attests to, which is the gap this chain exists to close.
+		if err := s.appendIssuance(EvCreditIssued, aid, amount, reason); err != nil {
+			return err
+		}
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)

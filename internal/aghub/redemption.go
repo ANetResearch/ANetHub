@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -104,6 +105,13 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	// whole ledger sum to zero and a hub's outstanding liability is a
 	// number anyone can compute rather than one it reports.
 	_ = s.entry(hubAID, int64(auth.Amount), reasonRedeemed+":"+reference)
+	// And on the signed chain, so the supply is auditable in both
+	// directions. A redemption missing from the chain would leave the
+	// chain overstating what is outstanding.
+	if err := s.appendIssuance(EvCreditRetired, auth.Payer, int64(auth.Amount), reference); err != nil {
+		log.Printf("hub: redemption %s not recorded on the issuance chain: %v",
+			settled.Transaction, err)
+	}
 
 	out := Redemption{AuthID: settled.Transaction, AID: auth.Payer, Amount: auth.Amount,
 		Reference: reference, At: at}
@@ -159,6 +167,21 @@ type Supply struct {
 	// Owed is what peer hubs owe this one, kept apart from the local
 	// supply because a claim on another hub is not credit here.
 	Owed int64 `json:"owed_by_peers"`
+	// ChainIssued and ChainRetired are the same totals derived from the
+	// signed issuance chain instead of the balance table.
+	//
+	// Published alongside rather than instead, because the point is the
+	// comparison. The two are written by the same process and should
+	// always agree; when they do not, this hub moved credit without
+	// recording it on the chain, and a reader can see that without
+	// trusting either number. ChainAgrees says whether they match.
+	ChainIssued  int64 `json:"chain_issued"`
+	ChainRetired int64 `json:"chain_retired"`
+	ChainAgrees  bool  `json:"chain_agrees"`
+	// ChainHead is the current head of the issuance chain, which is what
+	// a witness attests to.
+	ChainHead    string `json:"chain_head,omitempty"`
+	ChainHeadSeq uint64 `json:"chain_head_seq,omitempty"`
 }
 
 // Supply computes the hub's position.
@@ -185,6 +208,13 @@ func (s *Store) Supply(hubAID string) (Supply, error) {
 		`SELECT COALESCE(SUM(amount),0) FROM hub_owed`).Scan(&out.Owed); err != nil {
 		return out, err
 	}
+	ci, cr, cerr := s.IssuanceTotals()
+	if cerr != nil {
+		return out, cerr
+	}
+	out.ChainIssued, out.ChainRetired = ci, cr
+	out.ChainAgrees = ci == out.Issued && cr == out.Redeemed
+	out.ChainHead, out.ChainHeadSeq, _ = s.IssuanceHead()
 	return out, nil
 }
 
