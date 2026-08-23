@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
@@ -54,6 +55,16 @@ type AgentView struct {
 	// it lives on, and so where work for it must be sent. Empty means
 	// this hub.
 	HomeHub string `json:"home_hub,omitempty"`
+	// Registered is false on a graph node reconstructed from a review
+	// whose subject or reviewer is no longer in the registry.
+	//
+	// Leaving a hub removes the routing and keeps the evidence, which is
+	// the right trade — reviews record things that happened. The
+	// consequence lands here: the graph had edges naming agents with no
+	// node, and a renderer either drops them silently or fails. Saying
+	// "this agent is no longer registered here" keeps the graph
+	// self-consistent and keeps what happened visible.
+	Registered bool `json:"registered"`
 	// LastSeen and Quiet report whether this agent is still collecting
 	// its mail. A directory that lists agents without saying which of
 	// them have stopped answering is a directory that sends people to
@@ -910,6 +921,7 @@ func scanAgent(sc scanner) (AgentView, error) {
 	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
 	// profile text. A pure requester has none of these and stays out of the public listing.
 	av.Listed = len(av.Caps) > 0 || av.Summary != "" || av.Readme != "" || av.Pricing != ""
+	av.Registered = true // it came out of the agent table
 	return av, nil
 }
 
@@ -923,4 +935,34 @@ func aidFromKEL(kel []identity.SignedEvent) (string, error) {
 		return "", errors.New("hub: empty KEL")
 	}
 	return states[len(states)-1].AID, nil
+}
+
+// GraphNodeFor builds a node for an AID that appears in an edge but not
+// in the listing.
+//
+// It looks the agent up first: an agent that is registered but merely
+// unlisted or quiet has a name and capabilities worth showing, and only
+// one that has actually left has nothing. Falling straight to a bare node
+// would throw away information the hub still holds.
+func (s *Store) GraphNodeFor(aid string) AgentView {
+	row := s.db.QueryRow(
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.guest_quota,
+		        a.registered_at, a.last_seen_at,
+		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		   FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
+		  WHERE a.aid=? GROUP BY a.aid`, aid)
+	if av, err := scanAgent(row); err == nil {
+		return av
+	}
+	// Not in the registry at all: it left, or it never banked here and is
+	// only known through a review that crossed from a peer.
+	var fedName string
+	var raw []byte
+	if err := s.db.QueryRow(`SELECT card FROM fed_card WHERE aid=?`, aid).Scan(&raw); err == nil {
+		var card adp.AgentCard
+		if json.Unmarshal(raw, &card) == nil {
+			fedName = card.Name
+		}
+	}
+	return AgentView{AID: aid, Name: fedName, Caps: []string{}, Registered: false}
 }

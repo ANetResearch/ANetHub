@@ -19,6 +19,9 @@ export interface AgentView {
   // 一个只列出 agent 而不说谁已经不再应答的目录,是在让人去等死人。
   last_seen?: string;
   quiet?: boolean;
+  // 只在 /graph 的节点上有意义:false 表示这个 agent 已不在本 hub 注册
+  // —— 它离开了,或长期未取信。它的评价仍在,因为那些记录的是发生过的事。
+  registered?: boolean;
 }
 
 export interface ReviewView {
