@@ -8,13 +8,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -52,6 +57,17 @@ func main() {
 	grant := flag.String("grant", "", "credit an account: -grant <aid> -amount <n> (requires the hub to be stopped)")
 	amount := flag.Int64("amount", 0, "amount for -grant")
 	reason := flag.String("reason", "operator grant", "why, recorded on the ledger entry")
+	// Discharging what this hub owes a peer, which had no way in either.
+	//
+	// Store.IssueOwedSettlement signs the statement and had zero call
+	// sites, so a hub that owed a peer could not tell it the debt was
+	// paid. hub_owed only ever rose. What "paid" means between two hub
+	// operators is outside this software — an invoice, a transfer, a
+	// standing arrangement — and this does not model it. It signs the
+	// statement that the obligation is discharged, and the peer holds the
+	// signature.
+	clearPeer := flag.String("clear", "", "discharge what this hub owes a peer: -clear <peer-aid> -amount <n> -peer-endpoint <url>")
+	peerEndpoint := flag.String("peer-endpoint", "", "where to deliver the discharge for -clear")
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("anet-hub %s (commit %s, built %s)\n",
@@ -69,6 +85,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if *clearPeer != "" {
+		if err := clearOwed(*data, *clearPeer, uint64(*amount), *reason, *peerEndpoint); err != nil {
+			log.Fatalf("anet-hub: clear: %v", err)
+		}
+		return
+	}
 	if *grant != "" {
 		if err := grantCredit(*data, *grant, *amount, *reason); err != nil {
 			log.Fatalf("anet-hub: grant: %v", err)
@@ -186,5 +208,62 @@ func grantCredit(dir, aid string, amount int64, reason string) error {
 		return err
 	}
 	fmt.Printf("granted %d to %s (%s) — balance now %d\n", amount, aid, reason, bal)
+	return nil
+}
+
+// clearOwed signs this hub's statement that it has discharged what it
+// owes a peer, and delivers it.
+//
+// Delivered rather than only printed, because the statement is worth
+// something only to the peer that holds the debt — a discharge sitting on
+// the debtor's disk discharges nothing. The signature is printed too, so
+// an operator who needs to deliver it another way can.
+func clearOwed(dir, peerAID string, amount uint64, reason, endpoint string) error {
+	if amount == 0 {
+		return fmt.Errorf("-amount is required")
+	}
+	store, err := aghub.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	id, err := hubid.LoadOrIncept(dir)
+	if err != nil {
+		return err
+	}
+	store.SetHubKey(id.Ctrl)
+
+	rec, err := store.IssueOwedSettlement(id.AID, peerAID, amount, reason)
+	if err != nil {
+		return err
+	}
+	raw, err := rec.Marshal()
+	if err != nil {
+		return err
+	}
+	enc := base64.StdEncoding.EncodeToString(raw)
+	fmt.Printf("discharge signed: %d to %s (%s)\n", amount, peerAID, reason)
+	fmt.Println(enc)
+
+	if endpoint == "" {
+		fmt.Println("no -peer-endpoint given; deliver the line above to the peer's POST /federation/clear")
+		return nil
+	}
+	body, err := json.Marshal(map[string]string{
+		"peer_aid": id.AID, "receipt": enc})
+	if err != nil {
+		return err
+	}
+	resp, err := http.Post(strings.TrimSuffix(endpoint, "/")+"/federation/clear",
+		"application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("delivering to %s: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("peer answered %s: %s", resp.Status, strings.TrimSpace(string(out)))
+	}
+	fmt.Printf("delivered: %s\n", strings.TrimSpace(string(out)))
 	return nil
 }
