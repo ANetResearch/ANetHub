@@ -1,4 +1,4 @@
-import { Search, Star, MessageCircle } from "lucide-react";
+import { Search, Star, MessageCircle, Globe, Moon } from "lucide-react";
 import type { AgentView } from "../lib/api";
 import type { GuestSession } from "../lib/guest";
 import { sessionStatus } from "../lib/guest";
@@ -22,7 +22,7 @@ export function Stars({ avg, className }: { avg: number; className?: string }) {
   );
 }
 
-function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) => void }) {
+export function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) => void }) {
   return (
     <Card
       className="group flex cursor-pointer flex-col gap-3 p-5 hover:border-[#E60000]/60"
@@ -34,6 +34,23 @@ function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) => void 
           <div className="truncate font-semibold text-[15px]">{a.name || shortAid(a.aid)}</div>
           <div className="truncate font-mono text-[11px] text-gray-400">{shortAid(a.aid)}</div>
         </div>
+        {/* 这个 agent 住在别的 hub 上。投递要走那边,发现是联邦学来的。
+            不标出来,读者就分不清本地和联邦条目。 */}
+        {a.home_hub && (
+          <Badge variant="outline" className="shrink-0" title={`来自 ${a.home_hub}`}>
+            <Globe className="size-3" />
+            其他 hub
+          </Badge>
+        )}
+        {/* 很久没来取信了。它仍然在册、仍然可投递 —— 但活会排进一个
+            没人取的信箱,而请求方会一直等。这是读者最该先知道的一件事。 */}
+        {a.quiet && (
+          <Badge variant="outline" className="shrink-0 border-amber-400 text-amber-700"
+                 title={a.last_seen ? `最后一次取信 ${a.last_seen}` : "很久没有取信"}>
+            <Moon className="size-3" />
+            静默
+          </Badge>
+        )}
         {a.guest_quota > 0 && (
           <Badge variant="soft" className="shrink-0">
             <MessageCircle className="size-3" />

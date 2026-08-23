@@ -15,6 +15,8 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/tsir"
+
+	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
 // Server is the Hub HTTP API over a Store. guest is the guest-mode broker (nil until EnableGuestMode is
@@ -159,7 +161,16 @@ func wireContract(next http.Handler) http.Handler {
 // Handler builds the routed, CORS-enabled HTTP handler (the anetspace web is a browser origin).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
+	// healthz reports which build is answering, not only that something
+	// is. "Is the thing I deployed the thing that is running" is the
+	// question that comes up, and a bare status cannot answer it.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		out := map[string]string{"status": "ok"}
+		for k, v := range version.Full() {
+			out[k] = v
+		}
+		writeJSON(w, 200, out)
+	})
 	mux.HandleFunc("POST /register", s.hRegister)
 	mux.HandleFunc("POST /profile", s.hProfile)
 	mux.HandleFunc("POST /reviews", s.hUploadReview)

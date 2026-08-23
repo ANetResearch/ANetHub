@@ -54,7 +54,8 @@ func main() {
 	reason := flag.String("reason", "operator grant", "why, recorded on the ledger entry")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("anet-hub", version.V)
+		fmt.Printf("anet-hub %s (commit %s, built %s)\n",
+			version.V, version.Commit, version.BuiltAt)
 		return
 	}
 
@@ -135,7 +136,8 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("anet-hub %s listening on %s (data: %s)", version.V, *addr, *data)
+		log.Printf("anet-hub %s (commit %s) listening on %s (data: %s)",
+			version.V, version.Commit, *addr, *data)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("anet-hub: serve: %v", err)
 		}
