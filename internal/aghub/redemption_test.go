@@ -411,3 +411,47 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 		}
 	}
 }
+
+// A redemption must move the hub's supply row exactly once.
+//
+// A redemption is a payment whose payee is the hub. When settlement began
+// writing ledger entries for both parties, the explicit entry redemption
+// had always written became a second one — the hub's row was credited
+// twice and outstanding went negative by the redeemed amount.
+func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
+	srv, _ := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+	fundAgent(t, srv, agent.AID(), 400)
+	hubAID := hubAIDOf(t, srv)
+
+	before := supplyOf(t, srv)
+	opt := payment.PaymentOption{
+		Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
+		Amount: "100", Asset: payment.AssetCredit, PayTo: hubAID,
+	}
+	if code, b := post(t, srv.URL+"/x402/redeem", map[string]any{
+		"x402Version":    payment.Version,
+		"paymentPayload": json.RawMessage(mustPayload(t, agent, opt, "once")),
+		"reference":      "once",
+	}); code != 200 {
+		t.Fatalf("redeem: %d %s", code, b)
+	}
+	after := supplyOf(t, srv)
+
+	if after.Redeemed != before.Redeemed+100 {
+		t.Errorf("redeemed = %d, want %d — the hub's row moved %d times",
+			after.Redeemed, before.Redeemed+100,
+			(after.Redeemed-before.Redeemed)/100)
+	}
+	if after.Outstanding != before.Outstanding-100 {
+		t.Errorf("outstanding = %d, want %d", after.Outstanding, before.Outstanding-100)
+	}
+	if after.Outstanding != after.Balances {
+		t.Errorf("the ledger stopped balancing: outstanding=%d balances=%d",
+			after.Outstanding, after.Balances)
+	}
+}
