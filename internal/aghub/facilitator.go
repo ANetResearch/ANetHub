@@ -201,6 +201,32 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 		auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
 		return fail(err.Error())
 	}
+	// The ledger entries, in the same transaction as the balance move.
+	//
+	// Settlement changed credit_balance and wrote nothing to
+	// credit_entry, so /agents/{aid}/ledger showed grants and nothing
+	// else: an agent could not see what it had paid or been paid, and the
+	// balance disagreed with the entries behind it by exactly the amount
+	// that had moved through payments. Found by `anet reconcile` against
+	// the live hub, which is what it was built to do.
+	//
+	// The reason column carries the transaction id, which is what the
+	// payer's own evidence chain records. That is what lets the two sides
+	// be matched at all.
+	at := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, e := range []struct {
+		aid   string
+		delta int64
+	}{
+		{auth.Payer, -int64(auth.Amount)},
+		{auth.PayTo, int64(auth.Amount)},
+	} {
+		if _, err := tx.Exec(
+			`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
+			e.aid, e.delta, id, at); err != nil {
+			return fail(err.Error())
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fail(err.Error())
 	}
@@ -282,6 +308,15 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
 		 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
 		rec.PayTo, int64(rec.Amount), int64(rec.Amount)); err != nil {
+		return err
+	}
+	// With its ledger entry, for the same reason settlement has one: a
+	// payee whose balance rose with nothing in the entries to explain it
+	// cannot reconcile its own account.
+	if _, err := tx.Exec(
+		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
+		rec.PayTo, int64(rec.Amount), rec.AuthID,
+		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	// What the peer owes us, kept as a running total rather than netted

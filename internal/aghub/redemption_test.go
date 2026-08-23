@@ -333,3 +333,81 @@ func TestAnOperatorGrantIsIssuedOnTheBooks(t *testing.T) {
 		t.Error("a zero grant was accepted")
 	}
 }
+
+// A settlement must appear in both parties' ledger entries.
+//
+// It did not. SettlePayment moved credit_balance and wrote nothing to
+// credit_entry, so /agents/{aid}/ledger showed grants and nothing else —
+// an agent could not see what it had paid or been paid, and its balance
+// disagreed with the entries behind it by exactly the amount that had
+// moved through payments. Found by running `anet reconcile` against the
+// live hub.
+func TestASettlementAppearsInBothLedgers(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	payer, payee := twoAgents(t)
+	register(t, srv, payer, "Payer", nil)
+	register(t, srv, payee, "Payee", []string{"work.do"})
+	fundAgent(t, srv, payer.AID(), 500)
+
+	hubAID := hubAIDOf(t, srv)
+	opt := payment.PaymentOption{
+		Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
+		Amount: "120", Asset: payment.AssetCredit, PayTo: payee.AID(),
+	}
+	code, b := post(t, srv.URL+"/x402/settle", map[string]any{
+		"x402Version":    payment.Version,
+		"paymentPayload": json.RawMessage(mustPayload(t, payer, opt, "ix-ledger")),
+	})
+	if code != 200 {
+		t.Fatalf("settle: %d %s", code, b)
+	}
+	var settled payment.SettlementResponse
+	if err := json.Unmarshal(b, &settled); err != nil {
+		t.Fatal(err)
+	}
+	if !settled.Success {
+		t.Fatalf("settlement failed: %s", settled.ErrorReason)
+	}
+
+	// Both sides, and the entry names the transaction — which is what the
+	// payer's own evidence chain records, and therefore the only thing
+	// that lets the two records be matched.
+	for _, tc := range []struct {
+		who   *identity.Controller
+		delta int64
+	}{{payer, -120}, {payee, 120}} {
+		entries, err := store.LedgerEntries(tc.who.AID(), 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, e := range entries {
+			if e.Reason == settled.Transaction && e.Delta == tc.delta {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s has no entry for the settlement: %+v", tc.who.AID()[:12], entries)
+		}
+	}
+
+	// And the balance now agrees with the entries behind it, which is
+	// what reconcile checks.
+	for _, c := range []*identity.Controller{payer, payee} {
+		bal, err := store.Balance(c.AID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries, err := store.LedgerEntries(c.AID(), 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sum int64
+		for _, e := range entries {
+			sum += e.Delta
+		}
+		if sum != bal {
+			t.Errorf("%s: balance %d but entries sum to %d", c.AID()[:12], bal, sum)
+		}
+	}
+}
