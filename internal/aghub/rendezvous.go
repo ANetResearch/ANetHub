@@ -159,3 +159,13 @@ func (s *Server) hP2PDirectory(w http.ResponseWriter, _ *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": dir, "count": len(dir)})
 }
+
+// MoveBalanceWithoutEntryForTest reproduces the shape the settlement path
+// left before it wrote ledger entries: a balance that moved with nothing
+// behind it. Tests only.
+func (s *Store) MoveBalanceWithoutEntryForTest(aid string, delta int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
+		 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`, aid, delta, delta)
+	return err
+}
