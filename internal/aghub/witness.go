@@ -368,8 +368,24 @@ func (s *Server) hWitnesses(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": herr.Error()})
 		return
 	}
+	// Where each witness can be reached, so the instruction below is one
+	// a reader can actually follow.
+	//
+	// The note told readers to resolve each witness and check the
+	// signature. Nothing said where a witness lives, and the attestation
+	// carries only an AID — so the instruction named a step that could
+	// not be taken. This hub knows: a witness is a federation peer and
+	// the peer's endpoint is in its own configuration.
+	where := map[string]string{}
+	for _, aid := range health.WitnessAIDs {
+		if ep := s.peerEndpoint(aid); ep != "" {
+			where[aid] = ep
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"chain_did": s.hubAID, "attestations": out, "health": health,
+		"witness_endpoints": where,
+		"verify":            "anet verify --attestation <attestation> --hub <this hub url>",
 		"note": "this hub can withhold an attestation but cannot forge one. " +
 			"Resolve each witness and verify the signature yourself; then ask that " +
 			"witness directly, since what it holds is what it will not have edited. " +

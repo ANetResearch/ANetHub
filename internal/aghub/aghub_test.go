@@ -58,7 +58,23 @@ func newHubWithStore(t *testing.T) (*httptest.Server, *aghub.Store) {
 	testHubAID.Store(srv.URL, id.AID)
 	testHubStores.Store(srv.URL, store)
 	testHubCtrl.Store(srv.URL, id.Ctrl)
+	testHubServers.Store(srv.URL, s)
 	return srv, store
+}
+
+// testHubServers holds the *Server behind a test URL, so a test can
+// install the seams main.go installs from federation.
+var testHubServers sync.Map
+
+// serverOf is the *Server behind a test hub, for tests that need to wire
+// a seam the hub binary wires from federation.
+func serverOf(t *testing.T, srv *httptest.Server) *aghub.Server {
+	t.Helper()
+	v, ok := testHubServers.Load(srv.URL)
+	if !ok {
+		t.Fatal("no server recorded for this test hub")
+	}
+	return v.(*aghub.Server)
 }
 
 var testHubAID sync.Map

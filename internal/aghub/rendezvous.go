@@ -58,6 +58,21 @@ func (s *Store) SetP2PAddr(aid, addr string) error {
 	return err
 }
 
+// HomeHubOf is where an agent this hub knows only from a peer actually
+// banks, or empty if this hub holds no such card.
+//
+// Published so a caller holding an AID can be told where to ask. This hub
+// does not proxy the question: an address is published to the hub that
+// verified the publisher's signature, and a second hub repeating it would
+// be vouching for something it was merely told.
+func (s *Store) HomeHubOf(aid string) string {
+	var home string
+	if err := s.db.QueryRow(`SELECT home FROM fed_card WHERE aid=?`, aid).Scan(&home); err != nil {
+		return ""
+	}
+	return home
+}
+
 // P2PAddr reads a published address back. The second result distinguishes
 // "this agent published nothing" from "this agent published an empty
 // address", which the caller must not merge: one means fall back to the
@@ -143,8 +158,20 @@ func (s *Server) hP2PLookup(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	addr, at, ok := s.store.P2PAddr(aid)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error": "this agent has not published a direct address"})
+		// Not here. If this hub knows the agent banks on a peer, say
+		// where — otherwise the cross-hub case, which is the case this
+		// transport exists for, is a flat 404 with nowhere to go next.
+		//
+		// Named rather than followed. The hub does not fetch the peer's
+		// answer and pass it on: an address is published to the hub that
+		// verified the publisher's signature, and relaying it would turn
+		// a checked statement into hearsay.
+		out := map[string]string{"error": "this agent has not published a direct address here"}
+		if home := s.store.HomeHubOf(aid); home != "" {
+			out["home_hub"] = home
+			out["error"] = "this agent banks on another hub; ask that hub for its address"
+		}
+		writeJSON(w, http.StatusNotFound, out)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aid": aid, "addr": addr, "at": at})

@@ -201,6 +201,15 @@ func (s *Service) PeerAIDs() []string {
 	return out
 }
 
+// PeerEndpoint is where a peer hub can be reached, or empty if it is not
+// a peer of this one.
+func (s *Service) PeerEndpoint(aid string) string {
+	if p := s.peer(aid); p != nil {
+		return p.Endpoint
+	}
+	return ""
+}
+
 func (s *Service) peer(aid string) *Peer {
 	for i := range s.cfg.Peers {
 		if s.cfg.Peers[i].AID == aid {

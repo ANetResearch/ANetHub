@@ -3,6 +3,7 @@ package aghub_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -405,5 +406,77 @@ func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 	h, _ = store.WitnessHealthOf(hubAID, time.Now())
 	if h.Witnesses != 4 || h.Attestations != 4 {
 		t.Errorf("a repeated attestation was counted twice: %+v", h)
+	}
+}
+
+// A witness attestation must be checkable by the reader it exists for.
+//
+// /x402/witnesses publishes signed attestations and tells the reader to
+// resolve each witness and check the signature. The key history to do
+// that with was not obtainable: /agents/{aid}/kel served only locally
+// registered agents, and a witness is a peer hub. The instruction named a
+// step that could not be taken, so the evidence the whole issuance
+// argument rests on could not be checked by anybody.
+func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	hubAID := hubAIDOf(t, srv)
+	witness, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Not registered here, and not a peer: the hub genuinely does not
+	// know this AID and must say so rather than serve something.
+	if code, _ := getJSON(t, srv.URL+"/agents/"+witness.AID()+"/kel"); code != 404 {
+		t.Errorf("an unknown AID returned %d, want 404", code)
+	}
+
+	// As a federation peer, it resolves — that is the witness case.
+	srv2 := serverOf(t, srv)
+	srv2.SetPeerKELResolver(func(aid string) ([]identity.SignedEvent, error) {
+		if aid == witness.AID() {
+			return witness.KEL(), nil
+		}
+		return nil, errors.New("not a peer")
+	})
+	code, body := getJSON(t, srv.URL+"/agents/"+witness.AID()+"/kel")
+	if code != 200 {
+		t.Fatalf("a peer hub's key history returned %d: %s", code, body)
+	}
+	var got struct {
+		KEL    string `json:"kel"`
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "peer-hub" {
+		t.Errorf("source = %q, want peer-hub — where a key came from changes what it is worth", got.Source)
+	}
+	// And it is the real thing: an attestation signed by that witness
+	// verifies under it. Serving bytes that do not verify would be worse
+	// than serving nothing.
+	raw, err := base64.StdEncoding.DecodeString(got.KEL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kel, err := identity.UnmarshalKEL(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, seq, ok := store.IssuanceHead()
+	if !ok {
+		if err := store.GrantCredit("did:anet:x", 10, "seed"); err != nil {
+			t.Fatal(err)
+		}
+		head, seq, _ = store.IssuanceHead()
+	}
+	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: seq, HeadID: head,
+		ObservedAt: time.Now().UnixMilli()}
+	if err := a.Sign(witness); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Verify(kel, witness.AID(), time.Now().UnixMilli()); err != nil {
+		t.Errorf("the key history the hub served does not verify the witness's signature: %v", err)
 	}
 }
