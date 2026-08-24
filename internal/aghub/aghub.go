@@ -350,6 +350,11 @@ func (s *Store) migrate() error {
 		// whichever hub holds that agent. Keyed by payee because that is
 		// what the authorization names — which hub holds it is a fact this
 		// hub may not have.
+		`CREATE TABLE IF NOT EXISTS p2p_addr (
+		   aid  TEXT PRIMARY KEY,
+		   addr TEXT NOT NULL,
+		   at   TEXT NOT NULL
+		 )`,
 		`CREATE TABLE IF NOT EXISTS hub_due (
 		   payee_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
