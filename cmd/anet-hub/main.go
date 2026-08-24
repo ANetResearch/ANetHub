@@ -70,6 +70,8 @@ func main() {
 	clearPeer := flag.String("clear", "", "discharge what this hub owes a peer: -clear <peer-aid> -amount <n> -peer-endpoint <url>")
 	peerEndpoint := flag.String("peer-endpoint", "", "where to deliver the discharge for -clear")
 	cleared := flag.String("payee", "", "which obligation -clear discharges: the payee AID from -due")
+	repair := flag.String("repair-ledger", "",
+		"write one entry so <aid>'s entries sum to its balance (amount derived, balance untouched)")
 	showDue := flag.Bool("due", false, "list what this hub owes for payments made to agents that bank elsewhere")
 	flag.Parse()
 	if *showVersion {
@@ -88,6 +90,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if *repair != "" {
+		if err := repairLedger(*data, *repair); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *showDue {
 		if err := listDue(*data); err != nil {
 			log.Fatal(err)
@@ -227,6 +235,26 @@ func grantCredit(dir, aid string, amount int64, reason string) error {
 // something only to the peer that holds the debt — a discharge sitting on
 // the debtor's disk discharges nothing. The signature is printed too, so
 // an operator who needs to deliver it another way can.
+// repairLedger closes the gap between an account's entries and its
+// balance, left by settlements that predate ledger entries existing.
+func repairLedger(dir, aid string) error {
+	store, err := aghub.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	delta, err := store.RepairLedger(aid)
+	if err != nil {
+		return err
+	}
+	if delta == 0 {
+		fmt.Printf("%s: entries already sum to the balance; nothing written\n", aid)
+		return nil
+	}
+	fmt.Printf("%s: wrote a correcting entry of %d\n", aid, delta)
+	return nil
+}
+
 // listDue prints what this hub owes for credit that left its ledger to
 // pay agents banking on peers.
 //

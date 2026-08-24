@@ -737,3 +737,39 @@ func (s *Store) LedgerTotals(aid string) (count int, sum int64, err error) {
 		Scan(&count, &sum)
 	return count, sum, err
 }
+
+// RepairLedger writes one entry so an account's entries sum to its
+// balance, and returns what it wrote.
+//
+// For accounts carrying settlements from before settlement wrote ledger
+// entries at all. Those balances moved and left nothing behind, so the
+// entries are permanently short by that amount and `anet reconcile`
+// reports a discrepancy on every run — which is worse than it sounds,
+// because a check that always says something is wrong is a check people
+// stop reading.
+//
+// It records the correction rather than hiding it: one entry, named for
+// what it is, visible in the same ledger as everything else. Nobody
+// looking at the account later has to wonder where the number came from.
+//
+// It cannot move money. The balance is not touched, and the amount is
+// derived from the gap rather than supplied — an operator can run this
+// and cannot aim it. Running it twice is a no-op, because after the first
+// run there is no gap.
+func (s *Store) RepairLedger(aid string) (int64, error) {
+	var bal int64
+	if err := s.db.QueryRow(`SELECT COALESCE(credits,0) FROM credit_balance WHERE aid=?`,
+		aid).Scan(&bal); err != nil && err.Error() != "sql: no rows in result set" {
+		return 0, err
+	}
+	_, sum, err := s.LedgerTotals(aid)
+	if err != nil {
+		return 0, err
+	}
+	delta := bal - sum
+	if delta == 0 {
+		return 0, nil
+	}
+	return delta, s.entry(aid, delta,
+		"ledger correction: settlements recorded before this hub wrote ledger entries")
+}
