@@ -187,6 +187,9 @@ func (s *Server) Handler() http.Handler {
 	// its own, which the spec permits outright — and for a ledger rail
 	// there is nothing to separate from, because the balances are here.
 	mux.HandleFunc("GET /x402/supported", s.hX402Supported)
+	mux.HandleFunc("POST /agents/{aid}/p2p", s.hP2PPublish)
+	mux.HandleFunc("GET /agents/{aid}/p2p", s.hP2PLookup)
+	mux.HandleFunc("GET /p2p/peers", s.hP2PDirectory)
 	// Credit going back out, and the arithmetic of what is outstanding.
 	mux.HandleFunc("POST /x402/redeem", s.hRedeem)
 	mux.HandleFunc("GET /x402/supply", s.hSupply)
