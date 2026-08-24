@@ -317,3 +317,25 @@ func TestDeleteArchivesAndLimits(t *testing.T) {
 		t.Fatal("destructive rate limit never engaged")
 	}
 }
+
+// A credential this software published must be recognisable as one.
+//
+// Making ADMIN_TOKEN mandatory closed the hole for new deployments and
+// did nothing for existing ones: the old default was copied into a
+// systemd unit at install time and stays there. The production hub was
+// running with it, reachable from the public internet, guarding a surface
+// that can delete agents and run operations.
+func TestAPublishedCredentialIsRecognised(t *testing.T) {
+	for _, tok := range []string{"anetpw2077", "admin", "changeme"} {
+		if !WeakToken(tok) {
+			t.Errorf("%q is in this repository and was not recognised as published", tok)
+		}
+	}
+	// A real credential must not be flagged, or the check becomes noise
+	// an operator learns to ignore.
+	for _, tok := range []string{"", "k7Qw2mZr9TfLpX4v", "anetpw2078"} {
+		if WeakToken(tok) {
+			t.Errorf("%q was flagged as published", tok)
+		}
+	}
+}

@@ -635,3 +635,31 @@ func (s *Server) takeSnapshot() {
 		RelayBacklog: totals.RelayBacklog, HubDBBytes: s.hub.SizeBytes(),
 	})
 }
+
+// shippedDefaults are credentials this software once shipped with.
+//
+// The built-in default was removed and ADMIN_TOKEN made mandatory, which
+// stops a NEW deployment being wide open. It does nothing for one already
+// running: the value was copied into a systemd unit at install time and
+// stays there, so the deployments most likely to be using it are the
+// oldest ones. Found on the production hub, where the admin surface is
+// reachable from the public internet and this list's first entry was
+// still the live credential.
+//
+// Named rather than checked for entropy. A length rule would flag a
+// strong short token and miss a long published one; what makes these
+// unusable is that they are in a public repository, not that they are
+// weak.
+var shippedDefaults = []string{"anetpw2077", "admin", "changeme"}
+
+// WeakToken reports whether a credential is one this software published,
+// and is exported so a deployment check can ask without holding the
+// operator's real token.
+func WeakToken(tok string) bool {
+	for _, d := range shippedDefaults {
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(d)) == 1 {
+			return true
+		}
+	}
+	return false
+}
