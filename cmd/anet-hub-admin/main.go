@@ -75,6 +75,31 @@ func main() {
 	if token == "" {
 		log.Fatal("ADMIN_TOKEN is required: refusing to start the admin surface with no credential (was: insecure built-in default)")
 	}
+	if admin.WeakToken(token) {
+		// Loud, repeated, and not fatal.
+		//
+		// Not fatal because refusing here takes the admin surface down on
+		// the next deploy of a hub that is working, and an operator who
+		// discovers that from an outage learns it at the worst moment.
+		// Loud because this credential is in a public repository and the
+		// surface it guards can delete agents, change quotas and run ops
+		// — a warning nobody reads is the same as no warning, so it is
+		// printed at start and every hour it keeps running.
+		warn := func() {
+			log.Printf("SECURITY: ADMIN_TOKEN is a credential this software published. " +
+				"Anyone who has read the source can log in. Set a new one in the unit " +
+				"file and restart. The admin surface can delete agents, change quotas " +
+				"and run operations.")
+		}
+		warn()
+		go func() {
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			for range t.C {
+				warn()
+			}
+		}()
+	}
 	monToken := envOr("ADMIN_MONITOR_TOKEN", token)
 
 	store, err := admin.OpenStore(*data)
