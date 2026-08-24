@@ -523,3 +523,131 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 		t.Errorf("the discharge moved a user's balance: %d", bal)
 	}
 }
+
+// A cross-hub payment must create credit once, not once on each ledger.
+//
+// The payer's hub credited the payee whether or not the payee banked
+// there, and the payee's hub credited it again when it cleared the peer's
+// signed receipt. One payment therefore produced two credits and the
+// federation's total supply grew by the amount paid. Each hub stayed
+// internally consistent — its own balances still summed to its own
+// outstanding — so neither hub's supply check could see it.
+//
+// What must happen instead: the payer's hub destroys the credit and
+// records the obligation; the payee's hub creates it against the receipt.
+// Both write the change to their signed chains, so the chain equals the
+// balances on both sides afterwards.
+func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	hubAID := hubAIDOf(t, srv)
+	payer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, payer, "Buyer", []string{"work.ask"})
+	if err := store.GrantCredit(payer.AID(), 400, "test grant"); err != nil {
+		t.Fatal(err)
+	}
+	// The payee banks on a peer: never registered here.
+	const foreignPayee = "did:anet:their-provider"
+
+	before := supplyOf(t, srv)
+	if before.Outstanding != before.Balances {
+		t.Fatalf("the ledger does not balance to begin with: %+v", before)
+	}
+
+	opt := payment.PaymentOption{
+		Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
+		Amount: "250", Asset: payment.AssetCredit, PayTo: foreignPayee,
+	}
+	var pp payment.PaymentPayload
+	if err := json.Unmarshal(mustPayload(t, payer, opt, "cross-1"), &pp); err != nil {
+		t.Fatal(err)
+	}
+	out := store.SettlePayment(hubAID, &pp)
+	if !out.Success {
+		t.Fatalf("settling to a foreign payee: %s", out.ErrorReason)
+	}
+
+	// The payer paid.
+	if got, _ := store.Balance(payer.AID()); got != int64(400+aghub.RegistrationGrant-250) {
+		t.Errorf("payer balance = %d", got)
+	}
+	// The foreign payee holds nothing here. Crediting it here is the half
+	// that double-counted, because its own hub credits it too.
+	if got, _ := store.Balance(foreignPayee); got != 0 {
+		t.Errorf("a payee that banks elsewhere was credited %d here", got)
+	}
+	// The obligation is recorded instead.
+	due, err := store.Due()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if due[foreignPayee] != 250 {
+		t.Errorf("due to %s = %d, want 250", foreignPayee, due[foreignPayee])
+	}
+
+	// The supply fell by what left, and the chain agrees with the
+	// balances. A chain that did not record this would keep claiming the
+	// credit was still outstanding here while it was also outstanding on
+	// the peer.
+	after := supplyOf(t, srv)
+	if after.Outstanding != before.Outstanding-250 {
+		t.Errorf("outstanding = %d, want %d", after.Outstanding, before.Outstanding-250)
+	}
+	if after.Outstanding != after.Balances {
+		t.Errorf("the ledger no longer balances: outstanding=%d balances=%d",
+			after.Outstanding, after.Balances)
+	}
+	if !after.ChainAgrees {
+		t.Errorf("the signed chain disagrees with the ledger: chain=%d outstanding=%d",
+			after.ChainOutstanding, after.Outstanding)
+	}
+}
+
+// The payee's side of the same payment: credit is created here, and the
+// signed chain records it as issuance.
+//
+// Clearing raised a local balance with no local account falling, which is
+// issuance by definition, and wrote nothing to the chain. The chain then
+// understated what was outstanding by exactly the cleared amount, so the
+// hub's own audit endpoint reported a discrepancy that was its own
+// omission rather than a ledger problem.
+func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payee, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, payee, "Seller", []string{"work.do"})
+
+	before := supplyOf(t, srv)
+	rec := &payment.Receipt{
+		AuthID: "bafyauth-cross-1", Payer: "did:anet:their-user", PayTo: payee.AID(),
+		Amount: 250, Network: payment.CreditNetwork(peer.AID()),
+		SettleAt: time.Now().UnixMilli(),
+	}
+	if err := rec.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), rec); err != nil {
+		t.Fatal(err)
+	}
+
+	after := supplyOf(t, srv)
+	if after.Outstanding != before.Outstanding+250 {
+		t.Errorf("outstanding = %d, want %d", after.Outstanding, before.Outstanding+250)
+	}
+	if !after.ChainAgrees {
+		t.Errorf("the signed chain disagrees after clearing: chain=%d outstanding=%d",
+			after.ChainOutstanding, after.Outstanding)
+	}
+	if after.ChainIssued != before.ChainIssued+250 {
+		t.Errorf("chain issued = %d, want %d — clearing was not recorded as issuance",
+			after.ChainIssued, before.ChainIssued+250)
+	}
+}

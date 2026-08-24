@@ -38,6 +38,9 @@ func init() {
 		// A payment on a peer's ledger is that peer's to settle. We ask
 		// it, verify the receipt it signs, credit our own payee, and
 		// record what the peer now owes us.
+		// Whose ledgers we will clear against, so an agent here can price
+		// itself in a way a peer's agent can actually pay.
+		d.store.SetClearablePeers(fed.PeerAIDs)
 		d.store.SetPeerSettler(func(network string, pp *payment.PaymentPayload) (payment.SettlementResponse, bool) {
 			body, err := json.Marshal(map[string]any{
 				"x402Version": payment.Version, "paymentPayload": pp,

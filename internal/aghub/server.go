@@ -962,13 +962,43 @@ func (s *Server) federatedAgents(capFilter string) []AgentView {
 // hLedger explains a balance. Public, like the balance: an account on a
 // ledger somebody else keeps is exactly the thing its owner must be able
 // to audit without asking permission.
+// hLedger serves an account's entries, newest first, with the totals.
+//
+// The page was capped at 100 with nothing saying so, and an account with
+// more than that had no way to know its own history was truncated.
+// `anet reconcile` summed the page and compared it against the balance,
+// so every busy account reported a discrepancy that was the cap rather
+// than the ledger — dmax showed a balance of 866 against entries summing
+// to -109.
+//
+// Total and sum cover the whole account regardless of the page, so a
+// caller can reconcile without paging and can see when there is more.
 func (s *Server) hLedger(w http.ResponseWriter, r *http.Request) {
-	entries, err := s.store.LedgerEntries(r.PathValue("aid"), 100)
+	aid := r.PathValue("aid")
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		_, _ = fmt.Sscanf(v, "%d", &limit)
+	}
+	entries, err := s.store.LedgerEntries(aid, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"aid": r.PathValue("aid"), "entries": entries})
+	total, sum, err := s.store.LedgerTotals(aid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := map[string]any{
+		"aid": aid, "entries": entries,
+		"total": total, "sum": sum, "returned": len(entries),
+	}
+	if total > len(entries) {
+		out["truncated"] = true
+		out["note"] = "entries is the newest page; total and sum cover the whole account. " +
+			"Reconcile against sum, not against the page."
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // hVisibility records how far an agent is willing to be published.

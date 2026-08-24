@@ -6,6 +6,8 @@ import (
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"net/http"
 	"net/http/httptest"
+
+	"github.com/ANetResearch/ANetCore/identity"
 	"os"
 	"reflect"
 	"regexp"
@@ -258,4 +260,51 @@ func graphOf(t *testing.T, srv *httptest.Server) struct {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// The ledger endpoint must say how much it did not return.
+//
+// It served the newest hundred entries with nothing marking the cap, and
+// `anet reconcile` summed that page against the full balance. Every
+// account with more history than one page reported a discrepancy that
+// came from the cap rather than the ledger.
+func TestLedgerReportsTheWholeAccountNotJustThePage(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Spender", []string{"work.do"})
+	for i := 0; i < 7; i++ {
+		if err := store.GrantCredit(agent.AID(), 10, "test grant"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, body := getJSON(t, srv.URL+"/agents/"+agent.AID()+"/ledger?limit=3")
+	if code != 200 {
+		t.Fatalf("ledger returned %d: %s", code, body)
+	}
+	var got struct {
+		Entries   []map[string]any `json:"entries"`
+		Total     int              `json:"total"`
+		Returned  int              `json:"returned"`
+		Sum       int64            `json:"sum"`
+		Truncated bool             `json:"truncated"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Returned != 3 || len(got.Entries) != 3 {
+		t.Fatalf("returned %d entries, want 3: %s", len(got.Entries), body)
+	}
+	if got.Total < 7 {
+		t.Errorf("total = %d, want at least the 7 written", got.Total)
+	}
+	if !got.Truncated {
+		t.Error("a truncated page was not marked truncated")
+	}
+	// The sum covers the account, so it must exceed what the page holds.
+	if got.Sum < 70 {
+		t.Errorf("sum = %d, want at least 70 — it summed the page, not the account", got.Sum)
+	}
 }

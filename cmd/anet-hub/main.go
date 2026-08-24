@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -68,6 +69,8 @@ func main() {
 	// signature.
 	clearPeer := flag.String("clear", "", "discharge what this hub owes a peer: -clear <peer-aid> -amount <n> -peer-endpoint <url>")
 	peerEndpoint := flag.String("peer-endpoint", "", "where to deliver the discharge for -clear")
+	cleared := flag.String("payee", "", "which obligation -clear discharges: the payee AID from -due")
+	showDue := flag.Bool("due", false, "list what this hub owes for payments made to agents that bank elsewhere")
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("anet-hub %s (commit %s, built %s)\n",
@@ -85,8 +88,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if *showDue {
+		if err := listDue(*data); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if *clearPeer != "" {
-		if err := clearOwed(*data, *clearPeer, uint64(*amount), *reason, *peerEndpoint); err != nil {
+		if err := clearOwed(*data, *clearPeer, uint64(*amount), *reason, *peerEndpoint, *cleared); err != nil {
 			log.Fatalf("anet-hub: clear: %v", err)
 		}
 		return
@@ -218,7 +227,39 @@ func grantCredit(dir, aid string, amount int64, reason string) error {
 // something only to the peer that holds the debt — a discharge sitting on
 // the debtor's disk discharges nothing. The signature is printed too, so
 // an operator who needs to deliver it another way can.
-func clearOwed(dir, peerAID string, amount uint64, reason, endpoint string) error {
+// listDue prints what this hub owes for credit that left its ledger to
+// pay agents banking on peers.
+//
+// Reported by payee rather than by hub because that is what the
+// authorization named. Which hub holds a payee is a fact this hub may not
+// have, and inferring it would make the operator's discharge depend on a
+// guess.
+func listDue(dir string) error {
+	store, err := aghub.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	due, err := store.Due()
+	if err != nil {
+		return err
+	}
+	if len(due) == 0 {
+		fmt.Println("nothing due")
+		return nil
+	}
+	aids := make([]string, 0, len(due))
+	for aid := range due {
+		aids = append(aids, aid)
+	}
+	sort.Strings(aids)
+	for _, aid := range aids {
+		fmt.Printf("%8d  %s\n", due[aid], aid)
+	}
+	return nil
+}
+
+func clearOwed(dir, peerAID string, amount uint64, reason, endpoint, payeeAID string) error {
 	if amount == 0 {
 		return fmt.Errorf("-amount is required")
 	}
@@ -265,5 +306,18 @@ func clearOwed(dir, peerAID string, amount uint64, reason, endpoint string) erro
 		return fmt.Errorf("peer answered %s: %s", resp.Status, strings.TrimSpace(string(out)))
 	}
 	fmt.Printf("delivered: %s\n", strings.TrimSpace(string(out)))
+	// Only now, and only if the operator named which obligation this was.
+	//
+	// After delivery rather than before: a discharge the peer refused is
+	// one this hub still owes, and reducing the record first would leave
+	// this hub believing it had paid something the peer still shows as
+	// owed. Optional because a discharge can also be an out-of-band
+	// arrangement that no hub_due row corresponds to.
+	if payeeAID != "" {
+		if err := store.DischargeDue(payeeAID, int64(amount)); err != nil {
+			return fmt.Errorf("delivered, but the local record was not reduced: %w", err)
+		}
+		fmt.Printf("due to %s reduced by %d\n", payeeAID, amount)
+	}
 	return nil
 }

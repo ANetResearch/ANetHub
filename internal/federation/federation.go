@@ -184,6 +184,23 @@ func (s *Service) Close() error { return s.db.Close() }
 // Enabled reports whether delivery federation is on.
 func (s *Service) Enabled() bool { return s.cfg.Delivery != "off" && len(s.cfg.Peers) > 0 }
 
+// PeerAIDs is the hubs this one is configured to talk to.
+//
+// Used to answer "whose ledgers will you clear against" on
+// /x402/supported. Gated on the same switch SettleAtPeer is gated on, so
+// the list never advertises a network a settlement would then be refused
+// for.
+func (s *Service) PeerAIDs() []string {
+	if !s.DiscoveryEnabled() && !s.Enabled() {
+		return nil
+	}
+	out := make([]string, 0, len(s.cfg.Peers))
+	for _, p := range s.cfg.Peers {
+		out = append(out, p.AID)
+	}
+	return out
+}
+
 func (s *Service) peer(aid string) *Peer {
 	for i := range s.cfg.Peers {
 		if s.cfg.Peers[i].AID == aid {
