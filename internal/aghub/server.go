@@ -40,6 +40,23 @@ type Server struct {
 	// history. Nil in a build without federation — which is also a build
 	// with no peers, so nothing that needs it can happen.
 	peerKELs func(aid string) ([]identity.SignedEvent, error)
+	// peerEndpoints, when set, answers where a peer hub can be reached.
+	peerEndpoints func(aid string) string
+}
+
+// SetPeerEndpointResolver installs the federation hook for "where does
+// this peer live". Used to tell a reader where to go and check a witness
+// attestation for themselves.
+func (s *Server) SetPeerEndpointResolver(f func(aid string) string) {
+	s.peerEndpoints = f
+}
+
+// peerEndpoint is where a peer hub can be reached, or empty.
+func (s *Server) peerEndpoint(aid string) string {
+	if s.peerEndpoints == nil {
+		return ""
+	}
+	return s.peerEndpoints(aid)
 }
 
 // SetPeerKELResolver installs the federation hook for checking what a
@@ -846,6 +863,17 @@ func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	av, reviews, err := s.store.GetAgent(aid)
 	if err != nil {
+		// Not registered here. This hub may still know the agent from a
+		// peer, and it already says so on /agents?cap= — the two
+		// endpoints gave opposite answers to "do you know this AID",
+		// and the one that 404s is the one a caller holding an AID uses.
+		if node := s.store.GraphNodeFor(aid); node.Name != "" || s.store.HomeHubOf(aid) != "" {
+			node.HomeHub = s.store.HomeHubOf(aid)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"agent": node, "reviews": []ReviewView{},
+				"note": "known from a peer, not registered here"})
+			return
+		}
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
@@ -916,15 +944,45 @@ func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	kel, err := s.store.AgentKEL(aid)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	// Local first, then a peer's agent, then a peer hub itself.
+	//
+	// It served only locally registered agents, which broke the two cases
+	// where a stranger most needs it. A receipt signed by an agent that
+	// banks on a peer could not be checked at the hub the reader was
+	// holding. And a witness attestation could not be checked at all: the
+	// witness is a peer hub, /x402/witnesses tells the reader to verify
+	// each signature, and the key to do it with was not obtainable from
+	// this hub or named anywhere in the attestation. Evidence published
+	// with no way to check it is not evidence.
+	//
+	// Where it came from is reported, because it changes what the answer
+	// is worth: a local KEL is one this hub verified at registration, a
+	// federated one is what a peer told it. Both are checkable against
+	// the signature; only the reader can decide how much the difference
+	// matters.
+	if kel, err := s.store.AgentKEL(aid); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"aid": aid, "kel": base64.StdEncoding.EncodeToString(kel), "source": "local"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"aid": aid,
-		"kel": base64.StdEncoding.EncodeToString(kel),
-	})
+	if kel, err := s.store.AnyKEL(aid); err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"aid": aid, "kel": base64.StdEncoding.EncodeToString(kel), "source": "federated",
+			"note": "this key history came from a peer, not from a registration here"})
+		return
+	}
+	if events, err := s.peerKEL(aid); err == nil && len(events) > 0 {
+		raw, merr := identity.MarshalKEL(events)
+		if merr == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"aid": aid, "kel": base64.StdEncoding.EncodeToString(raw), "source": "peer-hub",
+				"role": "hub",
+				"note": "this is a federation peer of this hub. Ask it directly for its own copy"})
+			return
+		}
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{
+		"error": "hub: " + aid + " is neither registered here, known from a peer, nor a peer hub"})
 }
 
 // hAgentCard serves an agent's own signed statement of what it offers.

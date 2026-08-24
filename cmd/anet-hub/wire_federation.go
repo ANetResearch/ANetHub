@@ -78,6 +78,9 @@ func init() {
 		// Wired here rather than imported, so the kernel still knows
 		// nothing about federation (K207).
 		d.srv0.SetPeerKELResolver(fed.PeerKEL)
+		// And where that peer lives, so /x402/witnesses can tell a reader
+		// where to go and check an attestation for themselves.
+		d.srv0.SetPeerEndpointResolver(fed.PeerEndpoint)
 		// Pinning peers' issuance heads. Default on; "witness":"off" in
 		// federation.json turns it off. See internal/aghub/witness.go for
 		// why a peer's attestation is worth more than the subject's own
