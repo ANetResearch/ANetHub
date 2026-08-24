@@ -355,6 +355,15 @@ func (s *Store) migrate() error {
 		   addr TEXT NOT NULL,
 		   at   TEXT NOT NULL
 		 )`,
+		// Key histories of agents that have left. Routing goes when an
+		// agent deregisters; proof does not. Without this the receipts
+		// and reviews the hub still serves became uncheckable against
+		// any key the hub could produce.
+		`CREATE TABLE IF NOT EXISTS departed_kel (
+		   aid TEXT PRIMARY KEY,
+		   kel BLOB NOT NULL,
+		   at  TEXT NOT NULL
+		 )`,
 		`CREATE TABLE IF NOT EXISTS hub_due (
 		   payee_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
@@ -607,10 +616,18 @@ func (s *Store) AnyKEL(aid string) ([]byte, error) {
 	}
 	var kel []byte
 	err := s.db.QueryRow(`SELECT kel FROM fed_card WHERE aid=?`, aid).Scan(&kel)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("hub: %s is neither registered here nor known from a peer", aid)
+	if err == nil {
+		return kel, nil
 	}
-	return kel, err
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	// An agent that left. Its routing is gone and its proof is not.
+	if derr := s.db.QueryRow(`SELECT kel FROM departed_kel WHERE aid=?`, aid).Scan(&kel); derr == nil {
+		return kel, nil
+	}
+	return nil, fmt.Errorf(
+		"hub: %s is neither registered here, known from a peer, nor a former registrant", aid)
 }
 
 // HasInteraction reports whether a review for interactionID already exists (one-review-per-interaction).

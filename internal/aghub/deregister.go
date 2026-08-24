@@ -3,6 +3,7 @@ package aghub
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
@@ -62,6 +63,30 @@ func (s *Store) Deregister(aid string) (undelivered int, err error) {
 	}
 	if found == 0 {
 		return undelivered, fmt.Errorf("hub: %s is not registered here", aid)
+	}
+	// The key history survives the departure.
+	//
+	// Deleting the agent row removed the only copy of the KEL this hub
+	// held, so /agents/{aid}/kel began answering 404 the moment an agent
+	// left. The evidence it had signed — every receipt, every review —
+	// stayed in the tables and stayed served, and became uncheckable
+	// against any key this hub could produce. `anet verify --receipt
+	// --hub` is the third-party verification story, and it broke for
+	// every agent that had ever left.
+	//
+	// Keeping routing and keeping proof are separate decisions, and only
+	// the first is what leaving asks for. Found by prodtest 9q.
+	var kel []byte
+	if err := tx.QueryRow(`SELECT kel FROM agent WHERE aid=?`, aid).Scan(&kel); err != nil {
+		return undelivered, err
+	}
+	if len(kel) > 0 {
+		if _, err := tx.Exec(
+			`INSERT INTO departed_kel(aid, kel, at) VALUES(?,?,?)
+			 ON CONFLICT(aid) DO UPDATE SET kel=excluded.kel, at=excluded.at`,
+			aid, kel, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return undelivered, err
+		}
 	}
 	for _, q := range []string{
 		`DELETE FROM agent_cap WHERE aid=?`,

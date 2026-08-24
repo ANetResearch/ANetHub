@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,8 +57,23 @@ func TestAnAgentCanLeaveAHub(t *testing.T) {
 	if found := agentsServing(t, srv, "work.do"); found != 0 {
 		t.Errorf("still listed as serving work.do after leaving (%d)", found)
 	}
-	if code, _ := getJSON(t, srv.URL+"/agents/"+agent.AID()+"/kel"); code == 200 {
-		t.Error("the hub still serves a key history for an agent that left")
+	// The key history stays, and this assertion used to say the opposite.
+	//
+	// It treated the KEL as part of routing. It is part of proof: the hub
+	// goes on storing and serving every receipt and review this agent
+	// signed, and without the key none of them can be checked against
+	// anything this hub can produce. Serving the evidence while
+	// withholding the key that checks it is the contradiction, and it
+	// broke `anet verify --receipt --hub` for every agent that had ever
+	// left. Caught in production by prodtest 9q, against the sibling test
+	// below that already said evidence survives.
+	code, body := getJSON(t, srv.URL+"/agents/"+agent.AID()+"/kel")
+	if code != 200 {
+		t.Errorf("an agent left and its key history went with it (%d) — "+
+			"the receipts it signed are now uncheckable here", code)
+	}
+	if !strings.Contains(string(body), "\"kel\"") {
+		t.Errorf("the key history came back empty: %s", body)
 	}
 	// And leaving twice is an error, not a second success — the second
 	// caller is telling the hub something it does not know.
@@ -115,6 +131,37 @@ func TestLeavingDoesNotEraseWhatHappened(t *testing.T) {
 	}
 	if after.Local.Reviews != 1 {
 		t.Errorf("leaving erased a review that really happened: %d", after.Local.Reviews)
+	}
+	// And the review is still checkable, which is the half that was
+	// missing. Keeping the record and dropping the key that verifies it
+	// leaves a hub asserting something nobody can confirm — which is the
+	// state everything else here exists to avoid.
+	kelCode, kelBody := getJSON(t, srv.URL+"/agents/"+provider.AID()+"/kel")
+	if kelCode != 200 {
+		t.Fatalf("the key that verifies the kept review is gone (%d)", kelCode)
+	}
+	var got struct {
+		KEL string `json:"kel"`
+	}
+	if err := json.Unmarshal(kelBody, &got); err != nil || got.KEL == "" {
+		t.Fatalf("empty key history after leaving: %s", kelBody)
+	}
+	raw, derr := base64.StdEncoding.DecodeString(got.KEL)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	kel, kerr := identity.UnmarshalKEL(raw)
+	if kerr != nil {
+		t.Fatalf("the retained key history does not decode: %v", kerr)
+	}
+	// Not "some bytes came back" — the retained history must actually
+	// verify a signature this agent made, which is the only property that
+	// makes a kept receipt checkable.
+	msg := []byte("anything this agent signed")
+	sig, seq := provider.Sign(msg)
+	if err := identity.VerifyObject(kel, provider.AID(), seq,
+		uint64(time.Now().UnixMilli()), msg, sig); err != nil {
+		t.Errorf("the retained key history does not verify this agent's signature: %v", err)
 	}
 	bal, err := store.Balance(provider.AID())
 	if err != nil {
