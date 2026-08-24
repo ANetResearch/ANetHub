@@ -171,6 +171,14 @@ type Supply struct {
 	// Owed is what peer hubs owe this one, kept apart from the local
 	// supply because a claim on another hub is not credit here.
 	Owed int64 `json:"owed_by_peers"`
+	// Due is the other direction: credit this hub destroyed to pay agents
+	// that bank on peers, and therefore owes to those peers' hubs.
+	//
+	// Published because it is the only place the obligation appears. The
+	// credit is already off this ledger — outstanding fell when it left —
+	// so a reader looking only at supply would see a hub that had retired
+	// credit and owed nobody anything.
+	Due int64 `json:"due_to_peers"`
 	// ChainIssued and ChainRetired are the same totals derived from the
 	// signed issuance chain instead of the balance table.
 	//
@@ -233,6 +241,10 @@ func (s *Store) Supply(hubAID string) (Supply, error) {
 	}
 	if err := s.db.QueryRow(
 		`SELECT COALESCE(SUM(amount),0) FROM hub_owed`).Scan(&out.Owed); err != nil {
+		return out, err
+	}
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(SUM(amount),0) FROM hub_due`).Scan(&out.Due); err != nil {
 		return out, err
 	}
 	ci, cr, co, cerr := s.IssuanceTotals()

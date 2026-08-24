@@ -128,6 +128,7 @@ type Store struct {
 	hubKey *identity.Controller
 	// peerSettle forwards a payment on another hub'''s ledger to that hub.
 	peerSettle PeerSettler
+	clearable  func() []string
 	// hubAID is the row credit is issued from and redeemed into, so the
 	// ledger sums to zero and the hub's liability is countable.
 	hubAID string
@@ -341,6 +342,16 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS hub_owed (
 		   peer_aid TEXT PRIMARY KEY,
+		   amount INTEGER NOT NULL DEFAULT 0
+		 )`,
+		// The debtor side of the same relationship, keyed by payee rather
+		// than by hub: this hub settled a payment to an agent that banks
+		// elsewhere, so the credit left this ledger and is owed to
+		// whichever hub holds that agent. Keyed by payee because that is
+		// what the authorization names — which hub holds it is a fact this
+		// hub may not have.
+		`CREATE TABLE IF NOT EXISTS hub_due (
+		   payee_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
 		`CREATE TABLE IF NOT EXISTS fed_card (

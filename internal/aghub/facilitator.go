@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -122,6 +123,22 @@ type PeerSettler func(network string, p *payment.PaymentPayload) (payment.Settle
 // SetPeerSettler installs the cross-hub settlement path.
 func (s *Store) SetPeerSettler(f PeerSettler) { s.peerSettle = f }
 
+// SetClearablePeers records whose ledgers this hub will settle against.
+//
+// Wired from federation rather than read from it, so the kernel still
+// knows nothing about federation (K207).
+func (s *Store) SetClearablePeers(f func() []string) { s.clearable = f }
+
+// ClearablePeers is the AIDs of hubs this one will forward a settlement
+// to. Empty when federation is off, which is the honest answer: an
+// unfederated hub can only settle on its own ledger.
+func (s *Store) ClearablePeers() []string {
+	if s.clearable == nil {
+		return nil
+	}
+	return s.clearable()
+}
+
 func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.SettlementResponse {
 	// A payment on another hub's ledger is that hub's to settle. We ask
 	// it, and if it says yes we credit our own payee and record what that
@@ -195,11 +212,59 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 		auth.Payer, int64(auth.Amount), int64(auth.Amount)); err != nil {
 		return fail(err.Error())
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
-		auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
-		return fail(err.Error())
+	// Whether the payee banks here decides where the credit goes.
+	//
+	// A payee registered here is credited, and the two rows net to zero:
+	// credit moved between two accounts on one ledger and the supply did
+	// not change.
+	//
+	// A payee registered on a peer holds no account here, and crediting it
+	// anyway was wrong in a way nothing local could see. The payee's own
+	// hub credits it too, on the peer's signed receipt — so one payment
+	// produced two credits, one on each ledger, and the total across the
+	// federation grew by the amount paid. Each hub stayed internally
+	// consistent, so neither hub's own supply check could notice.
+	//
+	// So: this hub destroys the credit and records what it now owes the
+	// payee. That is the true position — the value left this ledger — and
+	// it is the debt the payee's hub is recording as a claim.
+	// An account this hub keeps: a registered agent, or the hub itself.
+	// The hub is a payee on every redemption — a redemption is a payment
+	// to the hub — and it holds the supply row rather than an agent
+	// registration, so checking the agent table alone classified every
+	// redemption as cross-hub and stopped moving the supply counter.
+	local := auth.PayTo == hubAID
+	if !local {
+		if err := tx.QueryRow(`SELECT COUNT(1) FROM agent WHERE aid=?`,
+			auth.PayTo).Scan(&local); err != nil {
+			return fail(err.Error())
+		}
+	}
+	if local {
+		if _, err := tx.Exec(
+			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
+			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
+			auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
+			return fail(err.Error())
+		}
+	} else {
+		if _, err := tx.Exec(
+			`INSERT INTO hub_due(payee_aid, amount) VALUES(?,?)
+			 ON CONFLICT(payee_aid) DO UPDATE SET amount = amount + ?`,
+			auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
+			return fail(err.Error())
+		}
+		// The credit comes home to the hub's own row, which is the same
+		// movement a redemption makes: value left this ledger, so this
+		// hub's outstanding liability falls by it. Without this the payer
+		// was debited and nothing recorded the drop, so outstanding kept
+		// counting credit that was no longer on any account here.
+		if _, err := tx.Exec(
+			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
+			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
+			hubAID, int64(auth.Amount), int64(auth.Amount)); err != nil {
+			return fail(err.Error())
+		}
 	}
 	// The ledger entries, in the same transaction as the balance move.
 	//
@@ -221,6 +286,21 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 		{auth.Payer, -int64(auth.Amount)},
 		{auth.PayTo, int64(auth.Amount)},
 	} {
+		// A foreign payee has no account here, so it gets no entry here.
+		// Its entry is written by its own hub when that hub clears this
+		// settlement. An entry for an account that does not exist would
+		// read as credit held here that is not.
+		if e.aid == auth.PayTo && !local {
+			// The foreign payee gets no entry here; the hub's own row does,
+			// because that is where the credit went. Supply is counted off
+			// this row, so the entry is what makes the liability fall.
+			if _, err := tx.Exec(
+				`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
+				hubAID, int64(auth.Amount), id, at); err != nil {
+				return fail(err.Error())
+			}
+			continue
+		}
 		if _, err := tx.Exec(
 			`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
 			e.aid, e.delta, id, at); err != nil {
@@ -229,6 +309,21 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 	}
 	if err := tx.Commit(); err != nil {
 		return fail(err.Error())
+	}
+	// Credit that left this ledger goes on the signed chain, for the same
+	// reason a redemption does: the chain must account for every supply
+	// change or chain_outstanding stops equalling outstanding. Paying a
+	// foreign payee destroys credit here exactly as a redemption does.
+	//
+	// After the commit, and logged rather than failed, matching the
+	// redemption path: the credit is already gone, and reporting a failure
+	// would have the payer believe it still held the balance.
+	if !local {
+		if err := s.appendIssuance(EvCreditRetired, auth.Payer, int64(auth.Amount),
+			"cross-hub settlement "+id+" to "+auth.PayTo); err != nil {
+			log.Printf("hub: cross-hub settlement %s not recorded on the issuance chain: %v",
+				id, err)
+		}
 	}
 	return s.signSettlement(payment.SettlementResponse{Success: true, Payer: auth.Payer,
 		Transaction: id, Network: auth.Network, Amount: payment.Amount(auth.Amount)}, auth, id)
@@ -319,6 +414,21 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
+	// The hub's own row falls by what it just created, because supply is
+	// counted off that row: crediting the payee without it left the ledger
+	// showing more credit on accounts than the hub had ever issued.
+	if _, err := tx.Exec(
+		`INSERT INTO credit_balance(aid, credits) VALUES(?, -?)
+		 ON CONFLICT(aid) DO UPDATE SET credits = credits - ?`,
+		s.hubKey.AID(), int64(rec.Amount), int64(rec.Amount)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
+		s.hubKey.AID(), -int64(rec.Amount), rec.AuthID,
+		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
 	// What the peer owes us, kept as a running total rather than netted
 	// into anyone's balance: it is a claim on another hub, not credit
 	// here, and the two must not be allowed to look alike.
@@ -328,7 +438,71 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 		peerAID, int64(rec.Amount), int64(rec.Amount)); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Credit created here goes on the signed chain.
+	//
+	// This is issuance: the payee's balance rose on this ledger and no
+	// account here fell, because the payer's account is on the peer. It is
+	// backed by a claim on that peer rather than by nothing, and the
+	// reason names the receipt so an auditor can follow it to the peer's
+	// own chain — but it is still new supply here, and a supply change
+	// missing from the chain breaks chain_outstanding == outstanding.
+	//
+	// After the commit and logged rather than failed, matching the
+	// redemption path: the credit is already there, and refusing now would
+	// tell the payee it had not been paid when it had.
+	if err := s.appendIssuance(EvCreditIssued, rec.PayTo, int64(rec.Amount),
+		"cleared from "+peerAID+" "+rec.AuthID); err != nil {
+		log.Printf("hub: clearing %s from %s not recorded on the issuance chain: %v",
+			rec.AuthID, peerAID, err)
+	}
+	return nil
+}
+
+// Due is what this hub owes, by payee: credit that left this ledger to
+// pay an agent that banks on a peer.
+//
+// Reported so an operator can see the obligation before discharging it,
+// and so the two hubs' numbers can be compared — this hub's due to a
+// payee should match that payee's hub's owed from this hub.
+func (s *Store) Due() (map[string]int64, error) {
+	rows, err := s.db.Query(`SELECT payee_aid, amount FROM hub_due WHERE amount > 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var aid string
+		var amt int64
+		if err := rows.Scan(&aid, &amt); err != nil {
+			return nil, err
+		}
+		out[aid] = amt
+	}
+	return out, rows.Err()
+}
+
+// DischargeDue reduces what this hub owes a payee, once the discharge to
+// that payee's hub has been signed and accepted.
+//
+// Separate from signing the statement, because the statement can be
+// signed and the peer can still refuse it — reducing the obligation
+// before the peer accepted would leave this hub believing it had paid
+// something the other hub still shows as owed.
+func (s *Store) DischargeDue(payeeAID string, amount int64) error {
+	res, err := s.db.Exec(
+		`UPDATE hub_due SET amount = amount - ? WHERE payee_aid = ? AND amount >= ?`,
+		amount, payeeAID, amount)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("nothing that size is due to %s", payeeAID)
+	}
+	return nil
 }
 
 // Owed reports what a peer hub owes this one.
@@ -402,12 +576,31 @@ func (s *Store) authSpent(a *payment.Authorization) (bool, error) {
 
 // ---- HTTP: the three endpoints x402 defines for a facilitator ----
 
+// hX402Supported lists every ledger this facilitator will settle on.
+//
+// Its own, and each peer's it will clear against. The second half is what
+// lets an agent priced on this hub be bought by an agent whose credits
+// live on a peer: the seller reads this list, offers those networks in
+// its 402, and the buyer pays on the ledger it actually holds credit on.
+//
+// Before this, /x402/supported named only this hub's own network, so a
+// seller offered exactly one option and a cross-hub buyer could only be
+// told it had insufficient funds. The cross-hub clearing path existed and
+// nothing could reach it.
 func (s *Server) hX402Supported(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, payment.Supported{Kinds: []payment.SupportedKind{{
+	kinds := []payment.SupportedKind{{
 		X402Version: payment.Version,
 		Scheme:      payment.SchemeCredit,
 		Network:     payment.CreditNetwork(s.hubAID),
-	}}})
+	}}
+	for _, aid := range s.store.ClearablePeers() {
+		kinds = append(kinds, payment.SupportedKind{
+			X402Version: payment.Version,
+			Scheme:      payment.SchemeCredit,
+			Network:     payment.CreditNetwork(aid),
+		})
+	}
+	writeJSON(w, http.StatusOK, payment.Supported{Kinds: kinds})
 }
 
 func (s *Server) hX402Verify(w http.ResponseWriter, r *http.Request) {
@@ -530,4 +723,17 @@ func (s *Store) KnowsAgent(aid string) bool {
 	var n int
 	_ = s.db.QueryRow(`SELECT COUNT(1) FROM agent WHERE aid=?`, aid).Scan(&n)
 	return n > 0
+}
+
+// LedgerTotals is how many entries an account has and what they add up
+// to, over the whole account rather than a page.
+//
+// The sum is what a balance must equal. Computing it in SQL rather than
+// by paging keeps a reconciliation to one request no matter how long an
+// account has been running.
+func (s *Store) LedgerTotals(aid string) (count int, sum int64, err error) {
+	err = s.db.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(delta),0) FROM credit_entry WHERE aid=?`, aid).
+		Scan(&count, &sum)
+	return count, sum, err
 }
