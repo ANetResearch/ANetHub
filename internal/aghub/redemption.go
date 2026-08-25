@@ -1,7 +1,9 @@
 package aghub
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -334,13 +336,34 @@ func (s *Store) IssueOwedSettlement(hubAID, peerAID string, amount uint64,
 	if amount == 0 {
 		return nil, fmt.Errorf("nothing to clear")
 	}
+	// The id has to be unique per statement, not per reference.
+	//
+	// It was peer + reference, and a reference is a human's note about
+	// why — "prodtest-clear", "august invoice". Two genuinely different
+	// discharges written with the same note produced the same id, and the
+	// creditor's replay guard swallowed the second one as a repeat of the
+	// first: it answered 200 with the debt unchanged, while the debtor
+	// reduced its own record on the strength of that 200. The two hubs
+	// then disagreed about a debt, which is precisely what the replay
+	// guard exists to prevent.
+	//
+	// Amount and a random nonce, so two statements are the same statement
+	// only when they really are one. A timestamp alone would not do it:
+	// two discharges within the same millisecond are rare and not
+	// impossible, and "rare" is how this class of bug gets shipped.
+	var nonce [8]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return nil, err
+	}
+	now := time.Now().UnixMilli()
 	rec := &payment.Receipt{
-		AuthID:   "clear:" + peerAID + ":" + reference,
+		AuthID: fmt.Sprintf("clear:%s:%s:%d:%d:%s",
+			peerAID, reference, amount, now, hex.EncodeToString(nonce[:])),
 		Payer:    hubAID,
 		PayTo:    peerAID,
 		Amount:   amount,
 		Network:  payment.CreditNetwork(hubAID),
-		SettleAt: time.Now().UnixMilli(),
+		SettleAt: now,
 	}
 	if err := rec.Sign(s.hubKey); err != nil {
 		return nil, err

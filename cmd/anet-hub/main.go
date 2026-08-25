@@ -302,6 +302,28 @@ func clearOwed(dir, peerAID string, amount uint64, reason, endpoint, payeeAID st
 	}
 	store.SetHubKey(id.Ctrl)
 
+	// What the peer says it is owed before we start, so the answer after
+	// can be checked against something rather than taken on faith.
+	owedBefore := int64(-1)
+	if endpoint != "" {
+		if resp, gerr := http.Get(strings.TrimSuffix(endpoint, "/") + "/x402/supply"); gerr == nil {
+			var sup struct {
+				Supply struct {
+					Owed int64 `json:"owed_by_peers"`
+				} `json:"supply"`
+			}
+			if json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&sup) == nil {
+				owedBefore = sup.Supply.Owed
+			}
+			resp.Body.Close()
+		}
+	}
+	if owedBefore < 0 {
+		// Unknown rather than zero. Treating "could not ask" as "owes
+		// nothing" would make the check below pass for the wrong reason.
+		owedBefore = int64(amount)
+	}
+
 	rec, err := store.IssueOwedSettlement(id.AID, peerAID, amount, reason)
 	if err != nil {
 		return err
@@ -334,6 +356,29 @@ func clearOwed(dir, peerAID string, amount uint64, reason, endpoint, payeeAID st
 		return fmt.Errorf("peer answered %s: %s", resp.Status, strings.TrimSpace(string(out)))
 	}
 	fmt.Printf("delivered: %s\n", strings.TrimSpace(string(out)))
+	// A 200 is not "applied".
+	//
+	// The creditor answers 200 on the replay path too — it treats a
+	// repeated statement id as a repeat of one it already applied and
+	// changes nothing. Reading that as success meant this hub reduced its
+	// own record while the peer's stayed where it was, and the two then
+	// disagreed about a debt. The reply carries the peer's remaining
+	// owed; checking it is the difference between believing a status code
+	// and believing the number.
+	var ack struct {
+		Peer string `json:"peer"`
+		Owed int64  `json:"owed"`
+	}
+	if json.Unmarshal(out, &ack) == nil {
+		if ack.Owed > owedBefore-int64(amount) {
+			return fmt.Errorf(
+				"%s still shows %d owed after a discharge of %d (it was %d) — "+
+					"the statement was accepted and not applied, most likely as a repeat "+
+					"of one already on file; nothing was reduced here",
+				peerAID, ack.Owed, amount, owedBefore)
+		}
+		fmt.Printf("peer now owes %d\n", ack.Owed)
+	}
 	// Only now, and only if the operator named which obligation this was.
 	//
 	// After delivery rather than before: a discharge the peer refused is
