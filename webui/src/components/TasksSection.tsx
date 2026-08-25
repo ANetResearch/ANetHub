@@ -61,7 +61,25 @@ export function TasksSection() {
           <div className="mt-8 overflow-x-auto pb-2">
             <div className="flex min-w-max gap-3">
               {cols.map((col) => (
-                <div key={col.key} className="w-60 shrink-0 border border-gray-200 bg-gray-50/60">
+                <Column key={col.key} col={col} lang={lang} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+// Column is one board column, split out so it can be tested.
+//
+// Everything above it is a fetch in an effect, which a static render can
+// only observe as "loading" — so the part that decides whether a card's
+// state, assignee and TaskDoc reach a person had no test. What the board
+// shows is what an outsider judges the hub's activity by.
+export function Column({ col, lang }: { col: BoardColumn; lang: string }) {
+  return (
+    <div className="w-60 shrink-0 border border-gray-200 bg-gray-50/60">
                   <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2">
                     <span className="font-bebas text-[15px] tracking-[0.08em] text-gray-800">
                       {t(lang, colZh[col.key] || col.name, col.name.toUpperCase())}
@@ -95,13 +113,7 @@ export function TasksSection() {
                         +{col.cards.length - 8} {t(lang, "更多", "more")}
                       </div>
                     )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
-    </section>
+    </div>
   );
 }
