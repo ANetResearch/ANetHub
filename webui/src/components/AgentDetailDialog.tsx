@@ -10,7 +10,10 @@ import { Avatar } from "./ui/avatar";
 import { Stars } from "./AgentsSection";
 
 /** 评价附带的对话记录（deliverable 为 JSON 数组时渲染成气泡）。 */
-function Transcript({ s }: { s: string }) {
+// Exported for tests. What a transcript and a review look like on screen
+// is where the evidence surface either reaches a person or does not, and
+// neither had a test.
+export function Transcript({ s }: { s: string }) {
   let arr: { from?: string; body?: string }[] | null = null;
   try {
     const p = JSON.parse(s);
@@ -51,7 +54,7 @@ function Transcript({ s }: { s: string }) {
   );
 }
 
-function Review({ r }: { r: ReviewView }) {
+export function Review({ r }: { r: ReviewView }) {
   return (
     <div className="border border-gray-200 bg-white p-4">
       <div className="flex items-center justify-between gap-2">
