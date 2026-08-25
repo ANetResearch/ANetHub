@@ -110,6 +110,11 @@ func (s *Server) Handler() http.Handler {
 	api("GET "+b+"/api/reviews", s.hReviews)
 	api("GET "+b+"/api/tasks", s.hTasks)
 	api("GET "+b+"/api/audit", s.hAudit)
+	// The other half of a reversible delete. Archiving without a way to
+	// read the archive back made "any delete is reversible" true of the
+	// bytes and false of the operator.
+	api("GET "+b+"/api/deleted", s.hDeleted)
+	api("POST "+b+"/api/deleted/{aid}/restore", s.hRestore)
 	return mux
 }
 
@@ -662,4 +667,47 @@ func WeakToken(tok string) bool {
 		}
 	}
 	return false
+}
+
+// hDeleted lists agents an operator removed, newest first.
+func (s *Server) hDeleted(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.store.DeletedAgents(100)
+	if err != nil {
+		errJSON(w, http.StatusInternalServerError, err)
+		return
+	}
+	if rows == nil {
+		rows = []DeletedAgent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": rows})
+}
+
+// hRestore puts one archived agent back.
+//
+// The most recent archive for that AID: an agent deleted twice has two
+// rows, and the newer one is the state it was last in.
+func (s *Server) hRestore(w http.ResponseWriter, r *http.Request) {
+	aid := r.PathValue("aid")
+	rows, err := s.store.DeletedAgents(500)
+	if err != nil {
+		errJSON(w, http.StatusInternalServerError, err)
+		return
+	}
+	for _, d := range rows {
+		if d.AID != aid {
+			continue
+		}
+		if err := s.hub.RestoreDeletedAgent(d.RowJSON); err != nil {
+			errJSON(w, http.StatusBadRequest, err)
+			return
+		}
+		// The delete recorded a moderation intent; restoring clears it,
+		// or the agent comes back listed as removed.
+		_ = s.store.SetModeration(aid, "", "restored by operator")
+		s.store.Audit("admin", "agent.restore", aid, "from archive "+d.DeletedAt)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "archived_at": d.DeletedAt})
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{
+		"error": "no archived copy of " + aid})
 }

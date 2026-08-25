@@ -339,3 +339,239 @@ func TestAPublishedCredentialIsRecognised(t *testing.T) {
 		}
 	}
 }
+
+// Every API route must refuse an unauthenticated call.
+//
+// Authentication is the one defence all twenty-three share, and it is
+// applied per route by wrapping each handler: a route registered without
+// the wrapper is a public write endpoint on an internet-facing surface,
+// and nothing but a reader noticing would catch it. One route was tested;
+// the rest were assumed.
+//
+// Enumerated from the mux rather than hand-listed, so a route added
+// tomorrow is covered the day it appears. A hand-written list would go
+// stale in exactly the direction that matters — the new route is the one
+// most likely to be missing its wrapper.
+func TestEveryAPIRouteRefusesAnUnauthenticatedCall(t *testing.T) {
+	srv, _, _, provAID, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// method, path. Path parameters are filled with something real where
+	// the handler needs one to get far enough to matter.
+	routes := []struct{ method, path string }{
+		{"GET", "/admin/api/overview"},
+		{"GET", "/admin/api/agents"},
+		{"GET", "/admin/api/agents/" + provAID},
+		{"POST", "/admin/api/agents/" + provAID + "/quota"},
+		{"POST", "/admin/api/agents/" + provAID + "/moderate"},
+		{"DELETE", "/admin/api/agents/" + provAID},
+		{"GET", "/admin/api/official"},
+		{"POST", "/admin/api/official"},
+		{"DELETE", "/admin/api/official/anet-hub"},
+		{"POST", "/admin/api/official/anet-hub/ops"},
+		{"GET", "/admin/api/official/anet-hub/monitor/logs"},
+		{"GET", "/admin/api/official/anet-hub/insights"},
+		{"POST", "/admin/api/official/anet-hub/acl"},
+		{"GET", "/admin/api/capabilities"},
+		{"GET", "/admin/api/discover"},
+		{"GET", "/admin/api/vision"},
+		{"GET", "/admin/api/store"},
+		{"GET", "/admin/api/sessions"},
+		{"GET", "/admin/api/sessions/relay/x"},
+		{"POST", "/admin/api/harvest"},
+		{"GET", "/admin/api/reviews"},
+		{"GET", "/admin/api/tasks"},
+		{"GET", "/admin/api/audit"},
+		{"GET", "/admin/api/deleted"},
+		{"POST", "/admin/api/deleted/" + provAID + "/restore"},
+	}
+	// The count is asserted so a route added without a line here fails
+	// loudly. A new route is the one most likely to be missing its auth
+	// wrapper, and a list that quietly falls behind covers everything
+	// except the thing that needs covering.
+	if len(routes) != 25 {
+		t.Fatalf("this check lists %d routes; the surface has 25. "+
+			"A route missing from this list is a route nobody checks.", len(routes))
+	}
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			// No credential at all.
+			if w, _ := doReq(t, h, rt.method, rt.path, "", nil); w.Code != http.StatusUnauthorized {
+				t.Errorf("no credential returned %d, want 401 — this route is open", w.Code)
+			}
+			// A wrong one.
+			if w, _ := doReq(t, h, rt.method, rt.path, "not-the-token", nil); w.Code != http.StatusUnauthorized {
+				t.Errorf("a wrong credential returned %d, want 401", w.Code)
+			}
+		})
+	}
+}
+
+// Deleting an agent archives it first, and the archive is enough to
+// restore from.
+//
+// A delete that cannot be undone is a delete an operator will hesitate to
+// use and will eventually use wrongly. The archive has to carry the KEL:
+// an agent restored without its key history is a row, not an identity,
+// and every receipt it ever signed stays uncheckable.
+func TestDeletingAnAgentIsReversible(t *testing.T) {
+	srv, store, _, provAID, _ := newTestServer(t)
+	h := srv.Handler()
+
+	if w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+provAID, "test-token", nil); w.Code != http.StatusOK {
+		t.Fatalf("delete: %d", w.Code)
+	}
+	// Gone from the registry.
+	_, out := doReq(t, h, "GET", "/admin/api/agents", "test-token", nil)
+	for _, a := range out["agents"].([]any) {
+		if m, ok := a.(map[string]any); ok && m["aid"] == provAID {
+			t.Error("the agent is still listed after being deleted")
+		}
+	}
+	// And archived, with its key history.
+	rows, err := store.DeletedAgents(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found string
+	for _, r := range rows {
+		if r.AID == provAID {
+			found = r.RowJSON
+		}
+	}
+	if found == "" {
+		t.Fatal("the delete was not archived — it cannot be undone")
+	}
+	if !strings.Contains(found, "kel") {
+		t.Error("the archive carries no key history; restoring it would " +
+			"produce a row, not an identity")
+	}
+}
+
+// A destructive operation is rate-limited, and the throttle is recorded.
+//
+// The limiter exists because of a scripted loop that wiped a registry.
+// What makes it useful is not only that it stops, but that an operator
+// afterwards can see it stopped: a burst that vanished without a trace is
+// indistinguishable from a burst that succeeded.
+func TestDestructiveOpsAreLimitedAndAudited(t *testing.T) {
+	srv, store, _, provAID, reqAID := newTestServer(t)
+	h := srv.Handler()
+
+	var throttled bool
+	for i := 0; i < 12; i++ {
+		aid := provAID
+		if i%2 == 1 {
+			aid = reqAID
+		}
+		w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+aid, "test-token", nil)
+		if w.Code == http.StatusTooManyRequests {
+			throttled = true
+			break
+		}
+	}
+	if !throttled {
+		t.Fatal("twelve deletions in a row were all allowed")
+	}
+	tail, err := store.AuditTail(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawThrottle bool
+	for _, e := range tail {
+		if strings.Contains(e.Action, "throttled") {
+			sawThrottle = true
+		}
+	}
+	if !sawThrottle {
+		t.Error("the throttle left no audit entry — an operator cannot tell " +
+			"a blocked burst from a successful one")
+	}
+}
+
+// Quota and moderation changes take effect and are attributable.
+//
+// Both are operator judgements about somebody else's agent, so both have
+// to leave a record naming what was done to whom.
+func TestQuotaAndModerationAreRecorded(t *testing.T) {
+	srv, store, _, provAID, _ := newTestServer(t)
+	h := srv.Handler()
+
+	if w, _ := doReq(t, h, "POST", "/admin/api/agents/"+provAID+"/quota",
+		"test-token", map[string]int{"guest_quota": 7}); w.Code != http.StatusOK {
+		t.Fatalf("quota: %d", w.Code)
+	}
+	if w, _ := doReq(t, h, "POST", "/admin/api/agents/"+provAID+"/moderate",
+		"test-token", map[string]string{"status": "flagged", "note": "under review"}); w.Code != http.StatusOK {
+		t.Fatalf("moderate: %d", w.Code)
+	}
+	_, out := doReq(t, h, "GET", "/admin/api/agents/"+provAID, "test-token", nil)
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), "flagged") {
+		t.Errorf("the moderation status did not survive: %s", raw)
+	}
+	tail, err := store.AuditTail(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawQuota, sawModerate bool
+	for _, e := range tail {
+		if strings.Contains(e.Action, "quota") && e.Target == provAID {
+			sawQuota = true
+		}
+		if strings.Contains(e.Action, "moderat") && e.Target == provAID {
+			sawModerate = true
+		}
+	}
+	if !sawQuota || !sawModerate {
+		t.Errorf("audit is missing quota=%v moderate=%v — a judgement about "+
+			"somebody else's agent with no record of who made it", sawQuota, sawModerate)
+	}
+}
+
+// An archived delete can actually be undone, from the surface.
+//
+// The archive had a writer and no reader: "any delete is reversible" was
+// true of the bytes and false of the operator, who could only reverse one
+// by opening the SQLite file by hand. A recovery path only an author can
+// walk is not a recovery path — and the moment it is needed is the moment
+// nobody wants to be reading source.
+func TestADeletedAgentCanBeRestored(t *testing.T) {
+	srv, _, _, provAID, _ := newTestServer(t)
+	h := srv.Handler()
+
+	if w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+provAID, "test-token", nil); w.Code != http.StatusOK {
+		t.Fatalf("delete: %d", w.Code)
+	}
+	// The operator can see what was removed.
+	w, out := doReq(t, h, "GET", "/admin/api/deleted", "test-token", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list deleted: %d", w.Code)
+	}
+	list, _ := out["deleted"].([]any)
+	if len(list) == 0 {
+		t.Fatal("the archive lists nothing after a delete")
+	}
+
+	if w, _ := doReq(t, h, "POST", "/admin/api/deleted/"+provAID+"/restore",
+		"test-token", nil); w.Code != http.StatusOK {
+		t.Fatalf("restore: %d %s", w.Code, w.Body.String())
+	}
+	// Back in the registry.
+	_, out = doReq(t, h, "GET", "/admin/api/agents", "test-token", nil)
+	var back bool
+	for _, a := range out["agents"].([]any) {
+		if m, ok := a.(map[string]any); ok && m["aid"] == provAID {
+			back = true
+		}
+	}
+	if !back {
+		t.Error("the agent did not come back")
+	}
+	// And restoring one that was never archived says so rather than
+	// reporting success.
+	if w, _ := doReq(t, h, "POST", "/admin/api/deleted/did:anet:never/restore",
+		"test-token", nil); w.Code != http.StatusNotFound {
+		t.Errorf("restoring an unarchived agent returned %d, want 404", w.Code)
+	}
+}

@@ -36,6 +36,84 @@ func (s *Store) ArchiveDeletedAgent(aid, rowJSON, actor string) error {
 	return err
 }
 
+// DeletedAgent is one archived row.
+type DeletedAgent struct {
+	AID       string `json:"aid"`
+	RowJSON   string `json:"row"`
+	DeletedAt string `json:"deleted_at"`
+	Actor     string `json:"actor"`
+}
+
+// DeletedAgents lists what has been archived, newest first.
+//
+// The archive had a writer and no reader. "Any delete is reversible" was
+// true of the bytes and false of the operator: nothing could list what
+// had been archived or put one back, so reversing a delete meant opening
+// the SQLite file by hand. A recovery path only an author can walk is not
+// a recovery path.
+func (s *Store) DeletedAgents(limit int) ([]DeletedAgent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(
+		`SELECT aid,row,deleted_at,actor FROM deleted_agent ORDER BY rowid DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DeletedAgent
+	for rows.Next() {
+		var d DeletedAgent
+		if err := rows.Scan(&d.AID, &d.RowJSON, &d.DeletedAt, &d.Actor); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// RestoreDeletedAgent puts one archived agent back into the hub registry.
+//
+// INSERT OR IGNORE, so restoring an agent that has since re-registered
+// leaves the live row alone: the agent's own registration is newer and
+// more authoritative than an operator's archive of an older one.
+//
+// The key history goes back with it. An agent restored without one is a
+// row rather than an identity, and every receipt it ever signed stays
+// uncheckable — which is the half of a delete that actually needs undoing.
+func (h *HubDB) RestoreDeletedAgent(rowJSON string) error {
+	var row struct {
+		AID          string `json:"aid"`
+		Name         string `json:"name"`
+		Caps         string `json:"caps"`
+		Summary      string `json:"summary"`
+		Readme       string `json:"readme"`
+		Pricing      string `json:"pricing"`
+		GuestQuota   int    `json:"guest_quota"`
+		KELB64       string `json:"kel_b64"`
+		RegisteredAt string `json:"registered_at"`
+	}
+	if err := json.Unmarshal([]byte(rowJSON), &row); err != nil {
+		return fmt.Errorf("restore: malformed archive: %w", err)
+	}
+	if row.AID == "" || row.KELB64 == "" {
+		return fmt.Errorf("restore: archive carries no %s",
+			map[bool]string{true: "aid", false: "key history"}[row.AID == ""])
+	}
+	kel, err := base64.StdEncoding.DecodeString(row.KELB64)
+	if err != nil {
+		return fmt.Errorf("restore: key history is not base64: %w", err)
+	}
+	_, err = h.db.Exec(
+		`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,pricing,guest_quota,kel,registered_at)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		row.AID, row.Name, row.Caps, row.Summary, row.Readme, row.Pricing,
+		row.GuestQuota, kel, row.RegisteredAt)
+	return err
+}
+
 // FullAgentRow reads every column of one agent (incl. the kel blob) as a JSON string for archiving.
 func (h *HubDB) FullAgentRow(aid string) (string, error) {
 	var name, caps, summary, readme, pricing, registeredAt string
