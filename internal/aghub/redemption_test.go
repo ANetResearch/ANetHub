@@ -651,3 +651,98 @@ func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 			after.ChainIssued, before.ChainIssued+250)
 	}
 }
+
+// Two discharges written with the same operator note must both apply.
+//
+// The statement id was peer + reference, and a reference is a human's
+// note about why — "prodtest-clear", "august invoice". Two genuinely
+// different discharges with the same note produced the same id, and the
+// creditor's replay guard swallowed the second as a repeat of the first:
+// it answered success with the debt unchanged, while the debtor reduced
+// its own record on the strength of that success. The two hubs then
+// disagreed about a debt, which is exactly what the replay guard exists
+// to prevent. Found by prodtest, on the second run that used the same
+// reference.
+func TestTwoDischargesWithTheSameReferenceBothApply(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	hubAID := hubAIDOf(t, srv)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payee, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, payee, "Seller", []string{"work.do"})
+
+	// Two cross-hub settlements, so the peer owes 200.
+	for i, auth := range []string{"bafyauth-x1", "bafyauth-x2"} {
+		rec := &payment.Receipt{
+			AuthID: auth, Payer: "did:anet:their-user", PayTo: payee.AID(),
+			Amount: 100, Network: payment.CreditNetwork(peer.AID()),
+			SettleAt: time.Now().UnixMilli(),
+		}
+		if err := rec.Sign(peer); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.ClearFromPeer(peer.AID(), peer.KEL(), rec); err != nil {
+			t.Fatalf("clearing %d: %v", i, err)
+		}
+	}
+	if owed, _ := store.Owed(peer.AID()); owed != 200 {
+		t.Fatalf("owed = %d, want 200", owed)
+	}
+
+	// The peer discharges 100 twice, writing the same note both times.
+	// A peer store, because IssueOwedSettlement signs with the hub's own
+	// key and the discharge must come from the debtor.
+	peerStore, err := aghub.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peerStore.Close()
+	peerStore.SetHubKey(peer)
+
+	for i := 0; i < 2; i++ {
+		rec, err := peerStore.IssueOwedSettlement(peer.AID(), hubAID, 100, "august invoice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SettleOwed(hubAID, peer.AID(), peer.KEL(), rec); err != nil {
+			t.Fatalf("discharge %d: %v", i, err)
+		}
+	}
+	if owed, _ := store.Owed(peer.AID()); owed != 0 {
+		t.Errorf("owed = %d after two discharges of 100, want 0 — "+
+			"the second was swallowed as a repeat of the first", owed)
+	}
+
+	// And a genuine replay — the SAME statement presented twice — is
+	// still refused, because that is what the guard is for.
+	rec, err := peerStore.IssueOwedSettlement(peer.AID(), hubAID, 50, "again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fund the debt so the discharge is applicable at all.
+	again := &payment.Receipt{
+		AuthID: "bafyauth-x3", Payer: "did:anet:their-user", PayTo: payee.AID(),
+		Amount: 50, Network: payment.CreditNetwork(peer.AID()),
+		SettleAt: time.Now().UnixMilli(),
+	}
+	if err := again.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), again); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SettleOwed(hubAID, peer.AID(), peer.KEL(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SettleOwed(hubAID, peer.AID(), peer.KEL(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if owed, _ := store.Owed(peer.AID()); owed != 0 {
+		t.Errorf("owed = %d — the same statement was applied twice", owed)
+	}
+}
