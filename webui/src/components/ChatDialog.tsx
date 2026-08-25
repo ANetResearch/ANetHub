@@ -12,7 +12,9 @@ function attSrc(a: GuestAtt): string {
   return a.data ? "data:" + (a.mime || "application/octet-stream") + ";base64," + a.data : "";
 }
 
-function Attachments({ atts }: { atts?: GuestAtt[] }) {
+// Exported for tests. Attachments arrive from an agent a guest has never
+// met, so this is where untrusted bytes become markup.
+export function Attachments({ atts }: { atts?: GuestAtt[] }) {
   if (!atts || !atts.length) return null;
   return (
     <div className="mt-2 flex flex-wrap gap-2">

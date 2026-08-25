@@ -308,3 +308,48 @@ func TestLedgerReportsTheWholeAccountNotJustThePage(t *testing.T) {
 		t.Errorf("sum = %d, want at least 70 — it summed the page, not the account", got.Sum)
 	}
 }
+
+// The commands the join page tells a newcomer to run must be commands
+// that exist.
+//
+// JoinSection publishes copy-paste instructions naming `anet install
+// --agent <id>` and `anet autoreply set --backend exec --agent <id>` for
+// five agent ids. Those names live in the ANet repository, and nothing
+// checked that this page still agrees with them — the failure mode is a
+// newcomer running the first command, being told there is no such agent,
+// and having no way to tell whether the page or their typing was wrong.
+//
+// Pinned here rather than in the webui suite because the drift is
+// cross-repository: the page is only wrong when ANet changes, and a test
+// that reads the page alone cannot see that.
+func TestTheJoinPageNamesAgentsThatExist(t *testing.T) {
+	raw, err := os.ReadFile("../../webui/src/components/JoinSection.tsx")
+	if err != nil {
+		t.Skipf("join page not present: %v", err)
+	}
+	page := string(raw)
+
+	// The agent ids ANet accepts for --agent. Kept as a literal list
+	// rather than imported: ANetHub does not depend on ANet, and this is
+	// exactly the boundary the check is about. When ANet adds one, this
+	// list and the page are updated together or this fails.
+	for _, agent := range []string{"cursor", "claude", "codex", "openclaw", "hermes"} {
+		if !strings.Contains(page, "anet install --agent ${agent}") &&
+			!strings.Contains(page, `"`+agent+`"`) {
+			t.Errorf("the join page does not offer %q", agent)
+		}
+	}
+	// And the two command names themselves.
+	for _, cmd := range []string{
+		"anet install --agent",
+		"anet autoreply set --backend exec --agent",
+		"anet autoreply set --backend openai",
+		"anet autoreply test",
+		"anet autoreply off",
+	} {
+		if !strings.Contains(page, cmd) {
+			t.Errorf("the join page no longer names %q — if the CLI changed, "+
+				"the page has to change with it", cmd)
+		}
+	}
+}
