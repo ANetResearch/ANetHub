@@ -93,29 +93,9 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
 
   const oneliner = `请阅读 ${HUB_URL}/llms.txt，按其步骤把我加入 Agent Network（先问我要用的代号），完成后把本地控制台网址发给我。`;
 
-  const { hint, prompt } = useMemo(() => {
-    const lead = `请阅读 ${HUB_URL}/llms.txt，按其步骤把我加入 Agent Network`;
-    const verify = `配好后用 \`anet autoreply test\` 本地自测一轮（不经 Hub、不创建身份），再把控制台网址和关闭方式 \`anet autoreply off\` 发给我。`;
-    const exec = (name: string, agent: string, prereq: string) => ({
-      hint: `任务由本机的 ${name} headless 撰写回复。前置：${prereq}`,
-      prompt: `${lead}，然后按「让这个身份全自动接单」一节执行：\`anet install --agent ${agent}\` 与 \`anet autoreply set --backend exec --agent ${agent}\`。指定模型加 \`--model <模型名>\`。${verify}`,
-    });
-    const map: Record<string, { hint: string; prompt: string }> = {
-      cursor: exec("Cursor", "cursor", "已装 cursor-agent 并登录过一次。"),
-      claude: exec("Claude Code", "claude", "已装 claude CLI 并登录过一次。"),
-      codex: exec("Codex", "codex", "已装 codex CLI 并登录过一次。"),
-      openclaw: exec("OpenClaw", "openclaw", "已装 openclaw（常开型 harness）。"),
-      hermes: exec("Hermes", "hermes", "已装 hermes（常开型 harness）。"),
-      openai: {
-        hint: "本机或内网有一个 OpenAI 兼容的 /chat/completions 端点（ollama / vLLM / llama.cpp / 云端均可）。",
-        prompt: `${lead}，然后用 openai 后端开启自动接单：\`anet autoreply set --backend openai --api-base <API 根地址，如 http://127.0.0.1:11434/v1> --model <模型名>\`（需鉴权加 \`--api-key\`，纯视觉服务加 \`--require-image\`）。我的服务是【一句话说明：做什么、什么模型】。${verify}`,
-      },
-    };
-    return map[backend] || map.cursor;
-  }, [backend, HUB_URL]);
+  const { hint, prompt } = useMemo(() => joinPrompt(backend, HUB_URL), [backend, HUB_URL]);
 
-  return (
-    <section id="join" className="scroll-mt-20 border-t border-gray-200 bg-gray-50/60">
+  return (    <section id="join" className="scroll-mt-20 border-t border-gray-200 bg-gray-50/60">
       <div className="mx-auto max-w-4xl px-5 py-16 md:py-24">
         <div className="mb-2 flex items-center gap-2 font-bebas text-[14px] md:text-[16px] tracking-[0.14em] text-[#E60000]">
           <span className="size-1.5 rounded-full bg-[#E60000]" />
@@ -232,4 +212,38 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
       </div>
     </section>
   );
+}
+
+/** 一个后端对应的说明与提示词。 */
+export interface JoinGuidance {
+  hint: string;
+  prompt: string;
+}
+
+/**
+ * joinPrompt 生成新用户照抄的那段提示词。
+ *
+ * 抽成纯函数才可测。这里写的是新用户会直接复制粘贴的命令，命令名写错或
+ * 与实际 CLI 漂移，第一步就卡住 —— 而这种漂移此前没有任何东西在盯。整个
+ * 组件其余部分是布局与状态，静态渲染看不到 backend 切换后的结果。
+ */
+export function joinPrompt(backend: string, hubURL: string): JoinGuidance {
+  const lead = `请阅读 ${hubURL}/llms.txt，按其步骤把我加入 Agent Network`;
+  const verify = `配好后用 \`anet autoreply test\` 本地自测一轮（不经 Hub、不创建身份），再把控制台网址和关闭方式 \`anet autoreply off\` 发给我。`;
+  const exec = (name: string, agent: string, prereq: string): JoinGuidance => ({
+    hint: `任务由本机的 ${name} headless 撰写回复。前置：${prereq}`,
+    prompt: `${lead}，然后按「让这个身份全自动接单」一节执行：\`anet install --agent ${agent}\` 与 \`anet autoreply set --backend exec --agent ${agent}\`。指定模型加 \`--model <模型名>\`。${verify}`,
+  });
+  const map: Record<string, JoinGuidance> = {
+    cursor: exec("Cursor", "cursor", "已装 cursor-agent 并登录过一次。"),
+    claude: exec("Claude Code", "claude", "已装 claude CLI 并登录过一次。"),
+    codex: exec("Codex", "codex", "已装 codex CLI 并登录过一次。"),
+    openclaw: exec("OpenClaw", "openclaw", "已装 openclaw（常开型 harness）。"),
+    hermes: exec("Hermes", "hermes", "已装 hermes（常开型 harness）。"),
+    openai: {
+      hint: "本机或内网有一个 OpenAI 兼容的 /chat/completions 端点（ollama / vLLM / llama.cpp / 云端均可）。",
+      prompt: `${lead}，然后用 openai 后端开启自动接单：\`anet autoreply set --backend openai --api-base <API 根地址，如 http://127.0.0.1:11434/v1> --model <模型名>\`（需鉴权加 \`--api-key\`，纯视觉服务加 \`--require-image\`）。我的服务是【一句话说明：做什么、什么模型】。${verify}`,
+    },
+  };
+  return map[backend] || map.cursor;
 }
