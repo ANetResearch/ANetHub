@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ANetResearch/ANetHub/internal/version"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/coredet"
@@ -573,5 +575,40 @@ func TestADeletedAgentCanBeRestored(t *testing.T) {
 	if w, _ := doReq(t, h, "POST", "/admin/api/deleted/did:anet:never/restore",
 		"test-token", nil); w.Code != http.StatusNotFound {
 		t.Errorf("restoring an unarchived agent returned %d, want 404", w.Code)
+	}
+}
+
+// The operator surface has to say which build is answering.
+//
+// It is a separate binary from the hub, and healthz reported only
+// {"status":"ok"} — so a deploy that shipped anet-hub and forgot
+// anet-hub-admin left this surface on an old build with nothing anywhere
+// saying so. That is not hypothetical: the recovery endpoints were absent
+// from production for a release while every check reported the surface
+// healthy. A component with no version on the wire cannot be seen to be
+// stale, which is the same reason the embedded webui once sat five
+// deployments behind.
+func TestHealthzNamesTheBuild(t *testing.T) {
+	srv, _, _, _, _ := newTestServer(t)
+	h := srv.Handler()
+
+	// No credential: an operator diagnosing a bad deploy should not need
+	// one to find out what is running.
+	w, out := doReq(t, h, "GET", "/admin/healthz", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("healthz = %d", w.Code)
+	}
+	if out["status"] != "ok" {
+		t.Errorf("status = %v", out["status"])
+	}
+	for _, k := range []string{"version", "commit", "built_at"} {
+		if _, ok := out[k]; !ok {
+			t.Errorf("healthz does not report %q — this surface cannot be "+
+				"seen to be stale", k)
+		}
+	}
+	// The version is the real one, not a placeholder.
+	if out["version"] != version.V {
+		t.Errorf("version = %v, want %q", out["version"], version.V)
 	}
 }

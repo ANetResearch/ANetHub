@@ -59,3 +59,18 @@ CGO_ENABLED=0 go build -trimpath \
   -ldflags "-s -w -X $PKG.Commit=$COMMIT -X $PKG.BuiltAt=$BUILT" \
   -o "$OUT" ./cmd/anet-hub
 echo "built $OUT  commit=$COMMIT  at=$BUILT"
+
+# The operator surface is a SECOND binary, and it was not built here.
+#
+# So a deploy that ran this script shipped the hub and left
+# anet-hub-admin at whatever it was — which is what happened: the
+# recovery endpoints were absent from production for a release while
+# every check reported the surface healthy, because /admin/healthz said
+# "ok" and named no build. Building both from one script is what makes
+# "the deployed pair is this commit" a thing anyone can check.
+ADMIN_OUT=${ADMIN_OUT:-${OUT%/*}/anet-hub-admin}
+case "$OUT" in */*) : ;; *) ADMIN_OUT=${ADMIN_OUT:-./anet-hub-admin} ;; esac
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w -X $PKG.Commit=$COMMIT -X $PKG.BuiltAt=$BUILT" \
+  -o "$ADMIN_OUT" ./cmd/anet-hub-admin
+echo "built $ADMIN_OUT  commit=$COMMIT  at=$BUILT"
