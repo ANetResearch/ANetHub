@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
 // Server is the /admin HTTP surface. Everything is mounted under basePath (default "/admin"):
@@ -72,8 +74,24 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	b := s.base
 
+	// healthz reports which build is answering, not only that one is.
+	//
+	// It returned {"status":"ok"} and nothing else, and this is a
+	// SEPARATE binary from the hub — so a deploy that shipped anet-hub
+	// and forgot anet-hub-admin left the operator surface running an old
+	// build with nothing anywhere saying so. That is what happened: the
+	// recovery endpoints were absent from production for a full release
+	// while every check reported the surface healthy.
+	//
+	// The same shape as the webui that sat five deployments behind: a
+	// component with no version on the wire cannot be seen to be stale.
 	mux.HandleFunc("GET "+b+"/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":   "ok",
+			"version":  version.V,
+			"commit":   version.Commit,
+			"built_at": version.BuiltAt,
+		})
 	})
 	serveSPA := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
