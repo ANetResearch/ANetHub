@@ -153,6 +153,9 @@ func Open(dir string) (*Store, error) {
 		return nil, fmt.Errorf("hub: open db: %w", err)
 	}
 	s := &Store{db: db}
+	if err := s.migrateInvites(); err != nil {
+		return nil, err
+	}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
