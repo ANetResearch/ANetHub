@@ -396,6 +396,10 @@ type RegisterRequest struct {
 	TS          uint64 `json:"ts"`
 	KeyStateSeq uint64 `json:"key_state_seq"`
 	Sig         string `json:"sig"` // base64
+	// Invite is an admission token, needed only when this hub requires
+	// one AND does not already know this AID. Empty from a node that was
+	// never given one, which is every node on a hub that admits openly.
+	Invite string `json:"invite"`
 	// Card is the agent's own signed statement of what it offers (an ADP
 	// AgentCard). The challenge above proves who is calling and covers
 	// none of what they said; only this makes Name and Caps attributable
@@ -436,6 +440,31 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "register challenge invalid: " + err.Error()})
 		return
 	}
+	// Admission, after the signature and before anything is written.
+	//
+	// The order matters in both directions. After the challenge, because
+	// an invite spent by somebody who cannot prove they hold the key
+	// would be an invite burned by an attacker. Before the writes,
+	// because an agent that got a row and then failed admission is an
+	// agent this hub admitted.
+	//
+	// Only an AID this hub does not already know is gated — see
+	// invite.go for why re-registration is not.
+	firstTime := !s.store.KnowsAgent(req.AID)
+	if firstTime && s.store.InviteRequired() {
+		if err := s.store.RedeemInvite(req.Invite, req.AID); err != nil {
+			// The use is consumed before the agent row is written, so a
+			// failure between here and PutAgent burns a use rather than
+			// admitting an agent nobody can account for. An operator can
+			// mint another invite; they cannot un-admit quietly.
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": err.Error(),
+				"hint":  "ask this hub's operator for an invite, then register with --token",
+			})
+			return
+		}
+	}
+
 	quota := guestDefaultQuota
 	if req.GuestMessages != nil {
 		quota = *req.GuestMessages
@@ -454,7 +483,6 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	firstTime := !s.store.KnowsAgent(req.AID)
 	if err := s.store.PutAgent(req.AID, req.Name, req.Caps, quota, kelBytes); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

@@ -73,6 +73,17 @@ func main() {
 	repair := flag.String("repair-ledger", "",
 		"write one entry so <aid>'s entries sum to its balance (amount derived, balance untouched)")
 	showDue := flag.Bool("due", false, "list what this hub owes for payments made to agents that bank elsewhere")
+	// Admission. Off unless turned on, so a hub that upgrades keeps
+	// admitting exactly who it admitted before.
+	inviteRequired := flag.String("invite-required", "",
+		"turn admission on or off: -invite-required true|false (empty = report the current setting)")
+	inviteNew := flag.Bool("invite-new", false,
+		"mint an invite and print it ONCE: -invite-new -label 'bench board' [-invite-uses N] [-invite-days N]")
+	inviteLabel := flag.String("label", "", "what -invite-new is for, so the listing is readable later")
+	inviteUses := flag.Int("invite-uses", 1, "how many agents -invite-new admits (0 = unlimited)")
+	inviteDays := flag.Int("invite-days", 0, "how long -invite-new stays valid, in days (0 = no expiry)")
+	inviteList := flag.Bool("invite-list", false, "list invites, who redeemed each, and whether admission is on")
+	inviteRevoke := flag.String("invite-revoke", "", "stop an invite being redeemed again: -invite-revoke <id>")
 	flag.Parse()
 	if *showVersion {
 		fmt.Printf("anet-hub %s (commit %s, built %s)\n",
@@ -111,6 +122,18 @@ func main() {
 	if *grant != "" {
 		if err := grantCredit(*data, *grant, *amount, *reason); err != nil {
 			log.Fatalf("anet-hub: grant: %v", err)
+		}
+		return
+	}
+	// The invite ops run against the SAME store handle the hub would use,
+	// on a WAL database with a busy timeout, so they work while the hub
+	// is serving. Minting an invite is something an operator does in the
+	// middle of onboarding somebody; making it require a restart would
+	// mean dropping every live relay connection to add one machine.
+	if *inviteRequired != "" || *inviteNew || *inviteList || *inviteRevoke != "" {
+		if err := runInviteOp(store, *inviteRequired, *inviteNew, *inviteLabel,
+			*inviteUses, *inviteDays, *inviteList, *inviteRevoke); err != nil {
+			log.Fatalf("anet-hub: %v", err)
 		}
 		return
 	}
