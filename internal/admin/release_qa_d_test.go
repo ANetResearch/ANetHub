@@ -529,3 +529,43 @@ func TestTheFailureTableIsBounded(t *testing.T) {
 		t.Error("the limiter stopped limiting after its table was swept")
 	}
 }
+
+// A request with no credential is refused, but it is not a guess at the
+// credential — guessing requires sending one. Counting these toward the
+// limiter slows no attacker down, and it does put an address over the
+// limit on traffic that never tried: a browser opening the page, a health
+// probe, a link somebody followed. After that every honest request from
+// that address gets 429 and the operator cannot tell "wrong token" from
+// "throttled".
+//
+// Found by scripts/prodtest.sh against production: it asserts an
+// unauthenticated call is refused with 401 and saw 429, because a
+// rate-limit check from the same address had tripped the counter minutes
+// earlier.
+func TestCredentiallessRequestsDoNotFeedTheGuessLimiter(t *testing.T) {
+	srv, _, _, _, _ := newTestServer(t)
+	h := srv.Handler()
+	captureLog(t)
+
+	const caller = "203.0.113.7"
+	// Well past the threshold, all with no credential at all.
+	for i := 0; i < authMaxFailures*3; i++ {
+		w, _ := doReqFrom(t, h, "GET", "/admin/api/agents", "", nil, caller)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d with no credential: got %d, want 401", i+1, w.Code)
+		}
+	}
+
+	// And a wrong token from the same address still gets throttled, or the
+	// limiter would have been disabled rather than corrected.
+	throttled := false
+	for i := 0; i < authMaxFailures*2; i++ {
+		if w, _ := doReqFrom(t, h, "GET", "/admin/api/agents", "wrong-token", nil, caller); w.Code == http.StatusTooManyRequests {
+			throttled = true
+			break
+		}
+	}
+	if !throttled {
+		t.Error("wrong tokens are no longer rate limited")
+	}
+}

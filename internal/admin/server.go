@@ -325,7 +325,24 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		tok, ok := bearerToken(r.Header.Get("Authorization"))
-		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+		if !ok {
+			// No credential at all. Refused, logged, but NOT counted as a
+			// guess: guessing the token requires sending one, so counting
+			// these slows no attacker down. What it does do is put an IP
+			// over the limit on traffic that never tried — a browser
+			// opening the page, a health probe, a link somebody followed —
+			// after which every honest request from that IP gets 429 and
+			// the operator cannot tell "wrong token" from "throttled".
+			//
+			// Found by scripts/prodtest.sh, which asserts an
+			// unauthenticated call is refused with 401: it saw 429,
+			// because an earlier rate-limit check from the same address
+			// had tripped the counter.
+			s.noteAuthDenial(r, ip, "auth.missing")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
 			s.authFails.record(ip)
 			s.noteAuthDenial(r, ip, "auth.failed")
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
