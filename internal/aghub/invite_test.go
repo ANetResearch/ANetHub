@@ -1,6 +1,7 @@
 package aghub
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -182,5 +183,68 @@ func TestRevokingDoesNotRemoveWhoAlreadyCameIn(t *testing.T) {
 	}
 	if err := s.RevokeInvite("no-such-id"); err != ErrInviteUnknown {
 		t.Fatalf("revoking an unknown id must say so, got %v", err)
+	}
+}
+
+// Revoking twice and revoking a mistyped id are different situations and
+// must not produce the same answer.
+//
+// Both used to return ErrInviteUnknown, so an operator who had been told
+// an invite leaked and ran the command a second time could not tell
+// whether the gate was already shut or whether they had just closed
+// nothing at all — while -invite-list went on showing the code as
+// revoked.
+func TestRevokingTwiceSaysSoRatherThanClaimingTheIdIsUnknown(t *testing.T) {
+	s := inviteStore(t)
+	_, v, err := s.NewInvite("leaked", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeInvite(v.ID); err != nil {
+		t.Fatalf("first revoke: %v", err)
+	}
+	if err := s.RevokeInvite(v.ID); !errors.Is(err, ErrInviteAlreadyRevoked) {
+		t.Fatalf("re-revoking a live id gave %v, want ErrInviteAlreadyRevoked", err)
+	}
+	// The distinction is only worth anything if the other case still
+	// reports the other error.
+	if err := s.RevokeInvite("no-such-id"); !errors.Is(err, ErrInviteUnknown) {
+		t.Fatalf("revoking an unknown id gave %v, want ErrInviteUnknown", err)
+	}
+}
+
+// The first revocation timestamp is the record of when the gate closed.
+// A repeat of the command must not move it forward, or an invite revoked
+// before a redemption would read as having been revoked after it.
+func TestRevokingTwiceKeepsTheFirstTimestamp(t *testing.T) {
+	s := inviteStore(t)
+	_, v, err := s.NewInvite("leaked", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeInvite(v.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Backdated so the assertion can tell "unchanged" from "rewritten
+	// within the same second" — revoked_at has one-second resolution, and
+	// two revocations in the same second would otherwise look identical
+	// whether or not the second one wrote.
+	const closedAt = 1_700_000_000
+	if _, err := s.db.Exec(`UPDATE invite SET revoked_at=? WHERE id=?`, closedAt, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeInvite(v.ID); !errors.Is(err, ErrInviteAlreadyRevoked) {
+		t.Fatalf("re-revoke gave %v, want ErrInviteAlreadyRevoked", err)
+	}
+	list, err := s.Invites()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected one invite, got %d", len(list))
+	}
+	if list[0].RevokedAt != closedAt {
+		t.Errorf("revoked_at moved from %d to %d — the record of when the gate closed was rewritten",
+			closedAt, list[0].RevokedAt)
 	}
 }

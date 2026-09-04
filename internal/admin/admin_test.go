@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -158,6 +159,17 @@ func TestHarvestRelayInteraction(t *testing.T) {
 
 func doReq(t *testing.T, h http.Handler, method, path, token string, body any) (*httptest.ResponseRecorder, map[string]any) {
 	t.Helper()
+	return doReqFrom(t, h, method, path, token, body, "")
+}
+
+// doReqFrom is doReq with the source address the server sees.
+//
+// Failed credential checks are now rate-limited per source IP, so a test that
+// makes many failing calls has to say whether they come from one client or
+// many. nginx sets X-Real-IP from $remote_addr, which is where the server reads
+// it from.
+func doReqFrom(t *testing.T, h http.Handler, method, path, token string, body any, ip string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
 	var rd *bytes.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -168,6 +180,9 @@ func doReq(t *testing.T, h http.Handler, method, path, token string, body any) (
 	r := httptest.NewRequest(method, path, rd)
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	if ip != "" {
+		r.Header.Set("X-Real-Ip", ip)
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -395,14 +410,20 @@ func TestEveryAPIRouteRefusesAnUnauthenticatedCall(t *testing.T) {
 		t.Fatalf("this check lists %d routes; the surface has 25. "+
 			"A route missing from this list is a route nobody checks.", len(routes))
 	}
-	for _, rt := range routes {
+	for i, rt := range routes {
+		// Each route probes from its own source address. Failed credential
+		// checks are rate-limited per IP, and fifty failures from one client is
+		// exactly what that limit exists to stop — sharing an address here
+		// would turn this into a test of the limiter and stop checking whether
+		// the routes are wrapped at all.
+		ip := fmt.Sprintf("198.51.100.%d", i+1)
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			// No credential at all.
-			if w, _ := doReq(t, h, rt.method, rt.path, "", nil); w.Code != http.StatusUnauthorized {
+			if w, _ := doReqFrom(t, h, rt.method, rt.path, "", nil, ip); w.Code != http.StatusUnauthorized {
 				t.Errorf("no credential returned %d, want 401 — this route is open", w.Code)
 			}
 			// A wrong one.
-			if w, _ := doReq(t, h, rt.method, rt.path, "not-the-token", nil); w.Code != http.StatusUnauthorized {
+			if w, _ := doReqFrom(t, h, rt.method, rt.path, "not-the-token", nil, ip); w.Code != http.StatusUnauthorized {
 				t.Errorf("a wrong credential returned %d, want 401", w.Code)
 			}
 		})

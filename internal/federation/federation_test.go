@@ -12,20 +12,94 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
-// fakeLocal is hub B's mailbox: it accepts exactly one agent.
+// fakeLocal is hub B's mailbox. It stands in for the hub kernel behind the
+// LocalDelivery seam, so it has to offer the same three things the kernel
+// does and not just the happy path: membership that changes while
+// federation is running (agents register and deregister), an Enqueue that
+// can fail, and safety under concurrent inbound forwards. A fake pinned to
+// one immutable agent hides every ordering defect that depends on an AID
+// appearing after a forward for it was already refused.
 type fakeLocal struct {
-	agent    string
+	mu       sync.Mutex
+	agents   map[string]bool
 	enqueued []string // payloads received
+	// enqueueErr, when set, makes Enqueue fail — the kernel's mailbox
+	// write can fail (disk, quota), and the caller has to unwind.
+	enqueueErr error
+	// hold, when non-nil, blocks the first Enqueue until it is closed and
+	// reports entry on entered. Lets a test hold one forward inside the
+	// mailbox write while a second forward of the same payload arrives.
+	hold    chan struct{}
+	entered chan struct{}
 }
 
-func (f *fakeLocal) HasAgent(aid string) bool { return aid == f.agent }
+func newFakeLocal(agents ...string) *fakeLocal {
+	f := &fakeLocal{agents: make(map[string]bool, len(agents))}
+	for _, a := range agents {
+		f.agents[a] = true
+	}
+	return f
+}
+
+func (f *fakeLocal) register(aid string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.agents[aid] = true
+}
+
+// setEnqueueErr makes subsequent mailbox writes fail (or succeed again
+// with nil). Guarded because the handler reads it on a server goroutine.
+func (f *fakeLocal) setEnqueueErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.enqueueErr = err
+}
+
+// holdFirstEnqueue parks the next Enqueue until release is called. entered
+// is closed once that call is in flight, so a test can be certain one
+// forward is inside the mailbox write when the next one arrives.
+func (f *fakeLocal) holdFirstEnqueue() (release func(), entered <-chan struct{}) {
+	hold, ent := make(chan struct{}), make(chan struct{})
+	f.mu.Lock()
+	f.hold, f.entered = hold, ent
+	f.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(func() { close(hold) }) }, ent
+}
+
+func (f *fakeLocal) delivered() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.enqueued...)
+}
+
+func (f *fakeLocal) HasAgent(aid string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.agents[aid]
+}
+
 func (f *fakeLocal) Enqueue(_, _, _, _ string, payload []byte) (int64, error) {
+	f.mu.Lock()
+	hold, entered := f.hold, f.entered
+	f.hold, f.entered = nil, nil
+	f.mu.Unlock()
+	if hold != nil {
+		close(entered)
+		<-hold
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.enqueueErr != nil {
+		return 0, f.enqueueErr
+	}
 	f.enqueued = append(f.enqueued, string(payload))
 	return int64(len(f.enqueued)), nil
 }
@@ -49,7 +123,7 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bLocal := &fakeLocal{agent: "aid:bob"}
+	bLocal := newFakeLocal("aid:bob")
 
 	// B's server: federation inbound + /hub/identity for KEL pinning.
 	var bSvc *Service
@@ -66,7 +140,7 @@ func newRig(t *testing.T) *rig {
 	aSrv := httptest.NewServer(muxA)
 	t.Cleanup(aSrv.Close)
 
-	a, err := New(dirA, Config{Delivery: "allowlist", Peers: []Peer{{AID: idB.AID, Endpoint: bSrv.URL}}}, idA, &fakeLocal{})
+	a, err := New(dirA, Config{Delivery: "allowlist", Peers: []Peer{{AID: idB.AID, Endpoint: bSrv.URL}}}, idA, newFakeLocal())
 	if err != nil {
 		t.Fatal(err)
 	}

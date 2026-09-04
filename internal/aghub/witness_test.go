@@ -1,9 +1,11 @@
 package aghub_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"testing"
@@ -478,5 +480,280 @@ func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
 	}
 	if err := a.Verify(kel, witness.AID(), time.Now().UnixMilli()); err != nil {
 		t.Errorf("the key history the hub served does not verify the witness's signature: %v", err)
+	}
+}
+
+// A head below what a witness already signed for is reported, not just
+// left for the reader to notice.
+//
+// Witnessing exists so that a chain which stops covering a pinned
+// position can be caught. Nothing raised that condition: latest_seq and
+// unwitnessed_records were both correct as defined, and neither could
+// express it — a chain that has fallen behind its witnesses has nothing
+// above the high-water mark, so unwitnessed_records reads 0, exactly what
+// a fully pinned chain reports. A reader had to know to compare two
+// numbers, and head_seq was not among the ones published.
+func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+	// Run the chain past seq 0, so head_seq being reported at all is
+	// distinguishable from the field being left at its zero value.
+	for i := 0; i < 2; i++ {
+		if err := store.GrantCredit(agent.AID(), 10, "before anybody looked"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hubAID := hubAIDOf(t, srv)
+	head, seq, ok := store.IssuanceHead()
+	if !ok {
+		t.Fatal("no head")
+	}
+	if seq == 0 {
+		t.Fatal("this test needs a head above seq 0 to tell a reported head_seq from an unset one")
+	}
+
+	// A witness that pinned the head as it stands. Nothing is wrong yet.
+	near, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: seq, HeadID: head,
+		ObservedAt: time.Now().UnixMilli()}
+	if err := a.Sign(near); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreAttestation(a); err != nil {
+		t.Fatal(err)
+	}
+	h, err := store.WitnessHealthOf(hubAID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.RolledBack {
+		t.Fatalf("a chain that covers every pinned position was called rolled back: %+v", h)
+	}
+	if !h.HasHead || h.HeadSeq != seq {
+		t.Errorf("head_seq = %d (has_head %v), want %d — the number rolled_back is judged against "+
+			"has to be published too", h.HeadSeq, h.HasHead, seq)
+	}
+
+	// Now a witness holds an attestation for a position this hub does not
+	// serve. That is what a fork, a rewrite or a restore from an older
+	// copy leaves behind: the witness looked when the chain was longer,
+	// and re-submits what it signed.
+	far, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ahead := &ael.HeadAttestation{ChainDID: hubAID, Seq: seq + 5,
+		HeadID: "bafy-a-head-this-hub-no-longer-serves", ObservedAt: time.Now().UnixMilli()}
+	if err := ahead.Sign(far); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreAttestation(ahead); err != nil {
+		t.Fatal(err)
+	}
+
+	h, err = store.WitnessHealthOf(hubAID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.RolledBack {
+		t.Fatalf("head at seq %d with a witness pinned at seq %d was not reported as rolled back: %+v",
+			seq, seq+5, h)
+	}
+	if h.HeadSeq != seq || h.LatestSeq != seq+5 {
+		t.Errorf("head_seq/latest_seq = %d/%d, want %d/%d — a reader must be able to check "+
+			"rolled_back rather than take this hub's word for it", h.HeadSeq, h.LatestSeq, seq, seq+5)
+	}
+	// The count of records above the high-water mark is still 0, which is
+	// why it could never have carried this.
+	if h.UnwitnessedRecords != 0 {
+		t.Errorf("unwitnessed_records = %d, want 0", h.UnwitnessedRecords)
+	}
+
+	// And the chain catching back up clears it, so the flag reports the
+	// current state rather than latching on the first bad reading.
+	for i := 0; i < 6; i++ {
+		if err := store.GrantCredit(agent.AID(), 10, "chain moves on"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err = store.WitnessHealthOf(hubAID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.RolledBack {
+		t.Errorf("a chain that has caught up is still reported rolled back: %+v", h)
+	}
+}
+
+// The flag is published, because a reader outside the hub is who it is
+// for. An operator reads the log line; anybody else reads this.
+func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+	// Above seq 0, so the published head_seq cannot pass by being zero.
+	if err := store.GrantCredit(agent.AID(), 10, "before anybody looked"); err != nil {
+		t.Fatal(err)
+	}
+	hubAID := hubAIDOf(t, srv)
+	_, seq, ok := store.IssuanceHead()
+	if !ok || seq == 0 {
+		t.Fatalf("head = %d (ok %v); this test needs a head above seq 0", seq, ok)
+	}
+
+	fetch := func() aghub.WitnessHealth {
+		t.Helper()
+		resp, err := http.Get(srv.URL + "/x402/witnesses")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Health aghub.WitnessHealth `json:"health"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Health
+	}
+	if h := fetch(); h.RolledBack {
+		t.Fatalf("an unwitnessed chain is published as rolled back: %+v", h)
+	}
+
+	witness, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: seq + 3, HeadID: "bafy-gone",
+		ObservedAt: time.Now().UnixMilli()}
+	if err := a.Sign(witness); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := a.Marshal()
+	if code, b := post(t, srv.URL+"/x402/witness", map[string]any{
+		"attestation": base64.StdEncoding.EncodeToString(raw)}); code != 200 {
+		t.Fatalf("submit: %d %s", code, b)
+	}
+	h := fetch()
+	if !h.RolledBack {
+		t.Fatalf("rolled_back was not published: %+v", h)
+	}
+	if h.HeadSeq != seq {
+		t.Errorf("head_seq = %d, want %d", h.HeadSeq, seq)
+	}
+}
+
+// The operator finds out. /x402/witnesses is read by whoever thinks to
+// read it; a hub serving a chain that has fallen behind its witnesses has
+// to say so somewhere the person running it will see.
+func TestARolledBackChainIsLogged(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	agent, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, srv, agent, "Agent", nil)
+	hubAID := hubAIDOf(t, srv)
+	_, seq, ok := store.IssuanceHead()
+	if !ok {
+		t.Fatal("no head")
+	}
+	witness, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: seq + 9, HeadID: "bafy-gone",
+		ObservedAt: time.Now().UnixMilli()}
+	if err := a.Sign(witness); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreAttestation(a); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	out, flags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() { log.SetOutput(out); log.SetFlags(flags) }()
+
+	if _, err := store.WitnessHealthOf(hubAID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first := buf.String()
+	if strings.Count(first, "rolled back") != 1 || !strings.Contains(first, hubAID) {
+		t.Fatalf("nothing usable was logged: %q", first)
+	}
+
+	// Repeating the measurement must not repeat the line: the health is
+	// computed on every unauthenticated GET, so an unthrottled line would
+	// let a reader choose this hub's log volume. Counted rather than
+	// requiring an empty buffer, so an unrelated line from elsewhere in
+	// the process does not turn this into a flake.
+	buf.Reset()
+	for i := 0; i < 3; i++ {
+		if _, err := store.WitnessHealthOf(hubAID, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(buf.String(), "rolled back"); n != 0 {
+		t.Errorf("an unchanged rollback was logged %d more times: %q", n, buf.String())
+	}
+}
+
+// No chain at all, while witnesses hold attestations about one, is the
+// same finding in its worst form: every pinned position is gone, not just
+// the ones above some surviving head. Reported as rolled back rather than
+// as an unwitnessed empty chain, and has_head says which of the two a
+// head_seq of 0 means.
+func TestAHubServingNoChainWhileWitnessesHoldOneIsRolledBack(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	hubAID := hubAIDOf(t, srv)
+	if _, _, ok := store.IssuanceHead(); ok {
+		t.Fatal("this test needs a hub that has issued nothing")
+	}
+
+	// Nothing issued and nobody watching is not a rollback: it is a hub
+	// that has not done anything yet.
+	h, err := store.WitnessHealthOf(hubAID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.RolledBack || h.HasHead {
+		t.Fatalf("an empty unwitnessed chain = %+v", h)
+	}
+
+	witness, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: 4, HeadID: "bafy-gone",
+		ObservedAt: time.Now().UnixMilli()}
+	if err := a.Sign(witness); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreAttestation(a); err != nil {
+		t.Fatal(err)
+	}
+	h, err = store.WitnessHealthOf(hubAID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.RolledBack {
+		t.Errorf("a hub serving no chain at all, with an attestation pinning seq 4, "+
+			"was not reported as rolled back: %+v", h)
+	}
+	if h.HasHead {
+		t.Errorf("has_head is true on a hub that has issued nothing: %+v", h)
 	}
 }

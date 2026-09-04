@@ -37,10 +37,39 @@ func (d storeDelivery) Enqueue(to, from, kind, iid string, payload []byte) (int6
 	return d.s.RelayEnqueue(to, from, kind, iid, payload)
 }
 
-func main() {
-	addr := flag.String("addr", ":8088", "HTTP listen address")
-	data := flag.String("data", "./.anet-hub", "data directory (SQLite store)")
-	showVersion := flag.Bool("version", false, "print version and exit")
+// hubFlags is every flag this binary takes.
+//
+// Declared in one function rather than inline in main so a test can
+// register the same set on its own FlagSet and assert against what the
+// binary will actually see. A test that redeclares the flags it wants to
+// check asserts about its own copy, which is how a help string can go on
+// describing behaviour the binary does not have.
+type hubFlags struct {
+	addr           *string
+	data           *string
+	showVersion    *bool
+	grant          *string
+	amount         *int64
+	reason         *string
+	clearPeer      *string
+	peerEndpoint   *string
+	cleared        *string
+	repair         *string
+	showDue        *bool
+	inviteRequired *string
+	inviteNew      *bool
+	inviteLabel    *string
+	inviteUses     *int
+	inviteDays     *int
+	inviteList     *bool
+	inviteRevoke   *string
+}
+
+func defineFlags(fs *flag.FlagSet) *hubFlags {
+	f := &hubFlags{}
+	f.addr = fs.String("addr", ":8088", "HTTP listen address")
+	f.data = fs.String("data", "./.anet-hub", "data directory (SQLite store)")
+	f.showVersion = fs.Bool("version", false, "print version and exit")
 	// Funding an account, which had no way in at all.
 	//
 	// Store.GrantCredit called itself "the operator's way in" and had
@@ -55,9 +84,9 @@ func main() {
 	// the obvious authentication for it does not exist yet. Requiring
 	// shell access to the machine that holds the ledger is a defensible
 	// interim: it is the same trust boundary as the database file.
-	grant := flag.String("grant", "", "credit an account: -grant <aid> -amount <n> (requires the hub to be stopped)")
-	amount := flag.Int64("amount", 0, "amount for -grant")
-	reason := flag.String("reason", "operator grant", "why, recorded on the ledger entry")
+	f.grant = fs.String("grant", "", "credit an account: -grant <aid> -amount <n> (requires the hub to be stopped)")
+	f.amount = fs.Int64("amount", 0, "amount for -grant")
+	f.reason = fs.String("reason", "operator grant", "why, recorded on the ledger entry")
 	// Discharging what this hub owes a peer, which had no way in either.
 	//
 	// Store.IssueOwedSettlement signs the statement and had zero call
@@ -67,31 +96,75 @@ func main() {
 	// standing arrangement — and this does not model it. It signs the
 	// statement that the obligation is discharged, and the peer holds the
 	// signature.
-	clearPeer := flag.String("clear", "", "discharge what this hub owes a peer: -clear <peer-aid> -amount <n> -peer-endpoint <url>")
-	peerEndpoint := flag.String("peer-endpoint", "", "where to deliver the discharge for -clear")
-	cleared := flag.String("payee", "", "which obligation -clear discharges: the payee AID from -due")
-	repair := flag.String("repair-ledger", "",
+	f.clearPeer = fs.String("clear", "", "discharge what this hub owes a peer: -clear <peer-aid> -amount <n> -peer-endpoint <url>")
+	f.peerEndpoint = fs.String("peer-endpoint", "", "where to deliver the discharge for -clear")
+	f.cleared = fs.String("payee", "", "which obligation -clear discharges: the payee AID from -due")
+	f.repair = fs.String("repair-ledger", "",
 		"write one entry so <aid>'s entries sum to its balance (amount derived, balance untouched)")
-	showDue := flag.Bool("due", false, "list what this hub owes for payments made to agents that bank elsewhere")
+	f.showDue = fs.Bool("due", false, "list what this hub owes for payments made to agents that bank elsewhere")
 	// Admission. Off unless turned on, so a hub that upgrades keeps
 	// admitting exactly who it admitted before.
-	inviteRequired := flag.String("invite-required", "",
-		"turn admission on or off: -invite-required true|false (empty = report the current setting)")
-	inviteNew := flag.Bool("invite-new", false,
+	f.inviteRequired = fs.String("invite-required", "",
+		"turn admission on or off: -invite-required true|false (use -invite-list to see the current setting)")
+	f.inviteNew = fs.Bool("invite-new", false,
 		"mint an invite and print it ONCE: -invite-new -label 'bench board' [-invite-uses N] [-invite-days N]")
-	inviteLabel := flag.String("label", "", "what -invite-new is for, so the listing is readable later")
-	inviteUses := flag.Int("invite-uses", 1, "how many agents -invite-new admits (0 = unlimited)")
-	inviteDays := flag.Int("invite-days", 0, "how long -invite-new stays valid, in days (0 = no expiry)")
-	inviteList := flag.Bool("invite-list", false, "list invites, who redeemed each, and whether admission is on")
-	inviteRevoke := flag.String("invite-revoke", "", "stop an invite being redeemed again: -invite-revoke <id>")
+	f.inviteLabel = fs.String("label", "", "what -invite-new is for, so the listing is readable later")
+	f.inviteUses = fs.Int("invite-uses", 1, "how many agents -invite-new admits (0 = unlimited)")
+	f.inviteDays = fs.Int("invite-days", 0, "how long -invite-new stays valid, in days (0 = no expiry)")
+	f.inviteList = fs.Bool("invite-list", false, "list invites, who redeemed each, and whether admission is on")
+	f.inviteRevoke = fs.String("invite-revoke", "", "stop an invite being redeemed again: -invite-revoke <id>")
+	return f
+}
+
+// modeFlags name a thing to act on instead of starting the hub. An empty
+// value names nothing.
+var modeFlags = []string{"invite-required", "invite-revoke", "grant", "clear", "repair-ledger"}
+
+// refuseEmptyModeFlags rejects a mode flag that was given an empty value.
+//
+// flag.Parse cannot distinguish -grant "" from -grant being absent, and
+// the dispatch below branches on *grant != "" — so `anet-hub -grant
+// "$AID"` with AID unset looked exactly like `anet-hub` and started a
+// full hub on the -data directory instead of reporting that no account
+// was named. FlagSet.Visit reports only the flags actually present on the
+// command line, which is the distinction the dispatch cannot make.
+//
+// The cost is that an empty value can no longer mean "ignore this flag"
+// in a wrapper that always passes it. Nothing in this repository does
+// that, and a wrapper that wants to omit a flag can omit it.
+func refuseEmptyModeFlags(fs *flag.FlagSet) error {
+	var bad []string
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Value.String() != "" {
+			return
+		}
+		for _, n := range modeFlags {
+			if fl.Name == n {
+				bad = append(bad, "-"+n)
+			}
+		}
+	})
+	if len(bad) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s given an empty value: these flags name what to act on, "+
+		"and an unset shell variable expands to nothing. Reading that as "+
+		"\"flag not given\" would start the hub instead", strings.Join(bad, ", "))
+}
+
+func main() {
+	f := defineFlags(flag.CommandLine)
 	flag.Parse()
-	if *showVersion {
+	if *f.showVersion {
 		fmt.Printf("anet-hub %s (commit %s, built %s)\n",
 			version.V, version.Commit, version.BuiltAt)
 		return
 	}
+	if err := refuseEmptyModeFlags(flag.CommandLine); err != nil {
+		log.Fatalf("anet-hub: %v", err)
+	}
 
-	store, err := aghub.Open(*data)
+	store, err := aghub.Open(*f.data)
 	if err != nil {
 		log.Fatalf("anet-hub: open store: %v", err)
 	}
@@ -101,26 +174,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if *repair != "" {
-		if err := repairLedger(*data, *repair); err != nil {
+	if *f.repair != "" {
+		if err := repairLedger(*f.data, *f.repair); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
-	if *showDue {
-		if err := listDue(*data); err != nil {
+	if *f.showDue {
+		if err := listDue(*f.data); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
-	if *clearPeer != "" {
-		if err := clearOwed(*data, *clearPeer, uint64(*amount), *reason, *peerEndpoint, *cleared); err != nil {
+	if *f.clearPeer != "" {
+		if err := clearOwed(*f.data, *f.clearPeer, uint64(*f.amount), *f.reason, *f.peerEndpoint, *f.cleared); err != nil {
 			log.Fatalf("anet-hub: clear: %v", err)
 		}
 		return
 	}
-	if *grant != "" {
-		if err := grantCredit(*data, *grant, *amount, *reason); err != nil {
+	if *f.grant != "" {
+		if err := grantCredit(*f.data, *f.grant, *f.amount, *f.reason); err != nil {
 			log.Fatalf("anet-hub: grant: %v", err)
 		}
 		return
@@ -130,15 +203,15 @@ func main() {
 	// is serving. Minting an invite is something an operator does in the
 	// middle of onboarding somebody; making it require a restart would
 	// mean dropping every live relay connection to add one machine.
-	if *inviteRequired != "" || *inviteNew || *inviteList || *inviteRevoke != "" {
-		if err := runInviteOp(store, *inviteRequired, *inviteNew, *inviteLabel,
-			*inviteUses, *inviteDays, *inviteList, *inviteRevoke); err != nil {
+	if *f.inviteRequired != "" || *f.inviteNew || *f.inviteList || *f.inviteRevoke != "" {
+		if err := runInviteOp(store, *f.inviteRequired, *f.inviteNew, *f.inviteLabel,
+			*f.inviteUses, *f.inviteDays, *f.inviteList, *f.inviteRevoke); err != nil {
 			log.Fatalf("anet-hub: %v", err)
 		}
 		return
 	}
 
-	hubID, err := hubid.LoadOrIncept(*data)
+	hubID, err := hubid.LoadOrIncept(*f.data)
 	if err != nil {
 		log.Fatalf("anet-hub: hub identity: %v", err)
 	}
@@ -167,7 +240,7 @@ func main() {
 	}
 	// Guest mode is always on: no-daemon visitors are brokered to any registered agent that accepts guests
 	// (guest_quota > 0, default 5 — each agent opts out via `anet hub-register --guest-messages 0`).
-	if err := srv0.EnableGuestMode(ctx, *data); err != nil {
+	if err := srv0.EnableGuestMode(ctx, *f.data); err != nil {
 		log.Fatalf("anet-hub: enable guest mode: %v", err)
 	}
 
@@ -177,7 +250,7 @@ func main() {
 	root := http.NewServeMux()
 	root.Handle("/hub/identity", hubID.Handler())
 	root.Handle("/", srv0.Handler())
-	deps := &hubDeps{data: *data, store: store, hubID: hubID, srv0: srv0, root: root}
+	deps := &hubDeps{data: *f.data, store: store, hubID: hubID, srv0: srv0, root: root}
 	names := ""
 	for _, m := range mounts {
 		closer, err := m.wire(deps)
@@ -192,14 +265,14 @@ func main() {
 	log.Printf("anet-hub modules:%s", names)
 
 	srv := &http.Server{
-		Addr:              *addr,
+		Addr:              *f.addr,
 		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	go func() {
 		log.Printf("anet-hub %s (commit %s) listening on %s (data: %s)",
-			version.V, version.Commit, *addr, *data)
+			version.V, version.Commit, *f.addr, *f.data)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("anet-hub: serve: %v", err)
 		}

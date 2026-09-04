@@ -332,23 +332,46 @@ func (s *Service) hForward(w http.ResponseWriter, r *http.Request) {
 		fedErr(w, http.StatusUnauthorized, "INVALID_SIGNATURE", err.Error())
 		return
 	}
-	// idempotency: second delivery of the same payload is a success no-op
-	res, err := s.db.Exec(`INSERT OR IGNORE INTO fed_dedupe (payload_cid, ts) VALUES (?,?)`, env.PayloadCID, time.Now().UnixMilli())
-	if err == nil {
-		if n, _ := res.RowsAffected(); n == 0 {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "DUPLICATE"})
-			return
-		}
-	}
-	_, _ = s.db.Exec(`DELETE FROM fed_dedupe WHERE ts < ?`, time.Now().Add(-DedupeWindow).UnixMilli())
+	// The destination check runs before anything is written to
+	// fed_dedupe. UNKNOWN_DESTINATION is a statement about this instant
+	// — the recipient is not registered here right now — not about the
+	// payload, and the recipient may register a moment later. Recording
+	// the CID for a refused forward would make the 7-day window swallow
+	// every subsequent legitimate redelivery of the same bytes as
+	// DUPLICATE, with both hubs seeing a 2xx and no message arriving.
 	if !s.local.HasAgent(env.DestAID) {
 		fedErr(w, http.StatusNotFound, "UNKNOWN_DESTINATION", env.DestAID)
 		return
 	}
+	// Idempotency: second delivery of the same payload is a success
+	// no-op. The claim is taken before the enqueue rather than after,
+	// because INSERT OR IGNORE on the primary key is the only mutual
+	// exclusion available here — two concurrent deliveries of one CID
+	// would otherwise both pass the check and both enqueue. The cost is
+	// that the claim and the enqueue cannot be one transaction (the
+	// mailbox is the hub kernel's store, reached through the
+	// LocalDelivery seam, not this database), so a failed enqueue has to
+	// release the claim explicitly below.
+	res, err := s.db.Exec(`INSERT OR IGNORE INTO fed_dedupe (payload_cid, ts) VALUES (?,?)`, env.PayloadCID, time.Now().UnixMilli())
+	if err != nil {
+		// Accepting without a durable claim would turn the peer's retry
+		// into a second delivery, so refuse and let it retry instead.
+		fedErr(w, http.StatusServiceUnavailable, "POLICY_REFUSED", "dedupe store unavailable: "+err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "DUPLICATE"})
+		return
+	}
 	if _, err := s.local.Enqueue(env.DestAID, env.FromAID, env.Kind, env.InteractionID, payload); err != nil {
+		// Nothing was delivered, so the claim must not outlive the
+		// attempt; otherwise the peer's retry is answered DUPLICATE and
+		// the payload is lost.
+		_, _ = s.db.Exec(`DELETE FROM fed_dedupe WHERE payload_cid=?`, env.PayloadCID)
 		fedErr(w, http.StatusInternalServerError, "MALFORMED", err.Error())
 		return
 	}
+	_, _ = s.db.Exec(`DELETE FROM fed_dedupe WHERE ts < ?`, time.Now().Add(-DedupeWindow).UnixMilli())
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
 }

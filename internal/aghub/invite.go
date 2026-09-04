@@ -45,6 +45,15 @@ var (
 	ErrInviteRevoked  = errors.New("this invite has been revoked")
 	ErrInviteExpired  = errors.New("this invite has expired")
 	ErrInviteUsedUp   = errors.New("this invite has no uses left")
+	// ErrInviteAlreadyRevoked separates "there is no such invite" from
+	// "that invite is already closed". They call for different actions:
+	// the first says the id is wrong and the gate is still open, the
+	// second says the gate is shut and there is nothing to do. Reporting
+	// both as ErrInviteUnknown meant a mistyped id and a repeated
+	// revocation produced the same output, so an operator who had just
+	// been told an invite leaked could not tell whether they had closed
+	// it or typed it wrong.
+	ErrInviteAlreadyRevoked = errors.New("this invite was already revoked")
 )
 
 // InviteView is an invite as an operator reads it back.
@@ -178,16 +187,37 @@ func (s *Store) NewInvite(label string, maxUses int, ttl time.Duration) (token s
 
 // RevokeInvite stops an invite being redeemed again. Agents already
 // admitted on it stay — this is a gate, not a membership list.
+//
+// Revoking an already-revoked invite reports ErrInviteAlreadyRevoked and
+// leaves the first revocation timestamp alone. That timestamp is the only
+// record of when the gate closed, and an operator re-running the command
+// must not be able to move it forward past the moment somebody was let
+// in.
 func (s *Store) RevokeInvite(id string) error {
+	// The WHERE clause excludes rows that are already revoked, which is
+	// what keeps the timestamp stable — and is also why zero rows
+	// affected has two possible causes.
 	res, err := s.db.Exec(
 		`UPDATE invite SET revoked_at=? WHERE id=? AND revoked_at=0`, time.Now().Unix(), id)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	// Second read to tell the two causes apart. The cost is one extra
+	// query, paid only on the path that changed nothing; the happy path
+	// is still a single statement. A row here is necessarily a revoked
+	// row, because the UPDATE above would have taken a live one.
+	var revokedAt int64
+	err = s.db.QueryRow(`SELECT revoked_at FROM invite WHERE id=?`, id).Scan(&revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrInviteUnknown
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+	return ErrInviteAlreadyRevoked
 }
 
 // Invites lists them, newest first, each with who redeemed it.

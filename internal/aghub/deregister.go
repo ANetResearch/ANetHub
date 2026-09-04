@@ -48,8 +48,19 @@ import (
 func (s *Store) Deregister(aid string) (undelivered int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Only what is still queued.
+	//
+	// The count is a warning that somebody is waiting, so it has to mean
+	// waiting. Counting every message the mailbox ever received reported
+	// work that had been collected and acted on months earlier as work
+	// about to be lost, and the number tracked how long the agent had
+	// been here rather than how much it was abandoning — an agent with a
+	// thousand delivered messages and an empty mailbox left with a
+	// warning about a thousand orphans. delivered_at is what the poll and
+	// ack path writes; NULL is the undelivered half of the mailbox index.
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM relay_message WHERE to_aid=?`, aid).Scan(&undelivered); err != nil {
+		`SELECT COUNT(*) FROM relay_message WHERE to_aid=? AND delivered_at IS NULL`,
+		aid).Scan(&undelivered); err != nil {
 		return 0, err
 	}
 	tx, err := s.db.Begin()
@@ -77,7 +88,8 @@ func (s *Store) Deregister(aid string) (undelivered int, err error) {
 	// Keeping routing and keeping proof are separate decisions, and only
 	// the first is what leaving asks for. Found by prodtest 9q.
 	var kel []byte
-	if err := tx.QueryRow(`SELECT kel FROM agent WHERE aid=?`, aid).Scan(&kel); err != nil {
+	var visibility string
+	if err := tx.QueryRow(`SELECT kel, visibility FROM agent WHERE aid=?`, aid).Scan(&kel, &visibility); err != nil {
 		return undelivered, err
 	}
 	if len(kel) > 0 {
@@ -88,9 +100,21 @@ func (s *Store) Deregister(aid string) (undelivered int, err error) {
 			return undelivered, err
 		}
 	}
+	// The card is withdrawn, not dropped.
+	//
+	// DELETE FROM agent_card ended the routing here and said nothing
+	// anywhere else. /fed/v1/cards is an increment keyed on fed_seq, so a
+	// deleted row simply stops appearing and a peer whose cursor is past
+	// it observes no change: every peer that had synced this card kept it
+	// and went on publishing an agent that had left. Withdrawing writes a
+	// row the stream can carry. Read against the visibility BEFORE the
+	// registration goes, because a card no peer was ever offered is
+	// removed rather than announced — see withdrawCard in card.go.
+	if err := withdrawCard(tx, aid, withdrawDeparted, federates(visibility)); err != nil {
+		return undelivered, err
+	}
 	for _, q := range []string{
 		`DELETE FROM agent_cap WHERE aid=?`,
-		`DELETE FROM agent_card WHERE aid=?`,
 		`DELETE FROM agent WHERE aid=?`,
 	} {
 		if _, err := tx.Exec(q, aid); err != nil {

@@ -27,8 +27,10 @@
 
 ## 2. Agent 分层与监管
 
-- **official**：由 ANetAgents 仓的 AGENT.yaml（JSON 镜像存 admin.db `official_agent`，内置 seed 见
-  manifest.go）声明，按 AID 关联注册表。可彻底观测（见 §3）。
+- **official**：由 ANetAgents 仓的 AGENT.yaml（JSON 镜像存 admin.db `official_agent`）声明，按 AID
+  关联注册表。可彻底观测（见 §3）。初始清单从 `<--data>/officials.json` 读，缺省为空 —— 该文件缺席时
+  official 目录就是空的，不是错误。二进制里不再内置任何清单：把生产主机名与 ssh 用户编译进一个会被
+  分发的二进制，等于把基础设施拓扑随产品一起发出去。格式见 `cmd/anet-hub-admin/main.go` 包注释。
 - **community**：其余全部注册身份。admin 看得到**未上架**的纯 requester（公网 API 刻意隐藏，
   hubread.go `AllAgents`）。
 - 监管杠杆（全部落审计 `audit_log`）：

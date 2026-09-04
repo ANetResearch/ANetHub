@@ -3,6 +3,7 @@ package aghub_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -200,6 +201,68 @@ func TestLeavingWarnsAboutMailNobodyWillCollect(t *testing.T) {
 	}
 	if out.Warning == "" {
 		t.Error("mail that will never be delivered left without a word about it")
+	}
+}
+
+// The undelivered count means "still waiting", not "ever received".
+//
+// It was SELECT COUNT(*) FROM relay_message WHERE to_aid=?, with no test
+// on delivered_at, so it returned the agent's whole lifetime of incoming
+// mail. The number is the only warning a departing agent gets about work
+// somebody is still waiting on, and it grew with how long the agent had
+// been here rather than with what it was abandoning.
+func TestLeavingCountsOnlyTheMailStillWaiting(t *testing.T) {
+	srv := newHub(t)
+	provider, sender := twoAgents(t)
+	register(t, srv, provider, "Provider", []string{"work.do"})
+	register(t, srv, sender, "Sender", nil)
+
+	for i := 0; i < 3; i++ {
+		if code, b := post(t, srv.URL+"/relay/send", map[string]any{
+			"to_aid": provider.AID(), "from_aid": sender.AID(), "kind": "delegate",
+			"interaction_id": fmt.Sprintf("ix-%d", i),
+			"payload":        base64.StdEncoding.EncodeToString([]byte("work")),
+		}); code != 200 {
+			t.Fatalf("send %d: %d %s", i, code, b)
+		}
+	}
+
+	// Two of the three are collected and acknowledged, which is what
+	// delivery means on this relay: the ack is what writes delivered_at.
+	code, b := post(t, srv.URL+"/relay/poll", signedRelay(t, "poll", provider))
+	if code != 200 {
+		t.Fatalf("poll: %d %s", code, b)
+	}
+	var polled struct {
+		Messages []struct {
+			ID int64 `json:"id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(b, &polled); err != nil {
+		t.Fatal(err)
+	}
+	if len(polled.Messages) != 3 {
+		t.Fatalf("setup: polled %d messages, want 3", len(polled.Messages))
+	}
+	ack := signedRelay(t, "ack", provider)
+	ack["ids"] = []int64{polled.Messages[0].ID, polled.Messages[1].ID}
+	if code, b := post(t, srv.URL+"/relay/ack", ack); code != 200 {
+		t.Fatalf("ack: %d %s", code, b)
+	}
+
+	code, b = leave(t, srv, provider)
+	if code != 200 {
+		t.Fatalf("deregister: %d %s", code, b)
+	}
+	var out struct {
+		Undelivered int `json:"undelivered"`
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Undelivered != 1 {
+		t.Errorf("undelivered = %d, want 1: two of the three messages had "+
+			"already been collected and acknowledged", out.Undelivered)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/adp"
+	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
 )
 
@@ -31,13 +33,15 @@ import (
 // agent behind a NAT cannot be sold this way, and the endpoint says so
 // rather than issuing a voucher that cannot be spent.
 //
-// What the hub cannot do is worth stating too. It cannot set the price —
-// that comes out of the agent's own signed card, so the worst a hub can
-// do is refuse to sell. It cannot forge a voucher for an agent it does
-// not host, because the agent checks the signature against the hub it
-// registered with. And it cannot spend a voucher twice, because the
-// one-time check belongs to the agent, which is the only party that knows
-// whether the work was done.
+// What the hub cannot do is worth stating too. It cannot set the price
+// and it cannot choose where the buyer goes to collect: both come out of
+// the agent's own signed card, and this file re-checks that signature on
+// every read rather than trusting the row it stored (see verifiedCard).
+// So the worst a hub can do is refuse to sell. It cannot forge a voucher
+// for an agent it does not host, because the agent checks the signature
+// against the hub it registered with. And it cannot spend a voucher
+// twice, because the one-time check belongs to the agent, which is the
+// only party that knows whether the work was done.
 
 // voucherWindow is how long a voucher stays spendable.
 //
@@ -46,35 +50,121 @@ import (
 // that might be slow or far away.
 const voucherWindow = 10 * time.Minute
 
-// gatewayPrice reads what a capability costs out of the agent's own
-// signed card.
+// errUnverifiedCard is the class of failure where this hub holds a card
+// for the agent but cannot show that the agent signed the bytes it holds.
+//
+// Kept distinct from "the agent published no card" because the two say
+// different things about who has to act. No card is the agent's omission
+// and the buyer is told so with a 404. A card that fails its signature is
+// this hub's own copy failing an integrity check — a corrupted row, an
+// edited database, or a key rotation that left the stored card
+// unattributable — and it answers 5xx so that it reaches whoever runs the
+// hub instead of reading to the buyer like a product that is not for
+// sale.
+var errUnverifiedCard = errors.New("the card this hub stores for this agent does not verify against the agent's key history")
+
+// verifiedCard is a stored agent card whose detached signature this hub
+// has re-checked against the agent's own key history.
+//
+// It is a type rather than a convention because the property being
+// protected is negative: nothing in the gateway may read a price or an
+// address off a card this hub has not just re-verified. Holding the
+// parsed card unexported behind this type is what makes that checkable by
+// reading the file — the fields are reachable only through the accessors
+// below, and the only constructor is verifyStoredCard.
+type verifiedCard struct{ card *adp.AgentCard }
+
+// verifyStoredCard loads an agent's card and re-runs the same admission
+// check the card passed when it was registered.
+//
+// The reason for re-verifying on the read path is that everything the
+// gateway quotes — the price, and the address the buyer is sent to —
+// comes out of this row. A hub that read the row without checking it
+// could edit its own agent_card table and quote any price it liked, or
+// point buyers at a machine of its own, and the buyer would have no way
+// to notice: what the buyer receives is the hub's own words about the
+// card, not the card. Re-verifying removes that: the hub does not hold
+// the provider's private key, so an edited card fails the signature and
+// the sale stops here rather than completing on terms the provider never
+// published.
+//
+// The cost is one Ed25519 verification plus a KEL replay per quote and
+// per settlement, on a path that already does a database read and, when
+// paid, a signature verification of its own. It is not cached, because a
+// cache keyed on the row would have to be invalidated by the same code
+// that is being distrusted.
+//
+// Two deviations from the register-time call are deliberate:
+//
+//   - high_water is 0. This is a re-check of a card already admitted, not
+//     the admission of a newer one; passing the stored seq would make
+//     every card fail its own rollback test.
+//   - an adp.DispExpired disposition is accepted. Expiry means the card
+//     is older than ADP_CARD_TTL, not that the provider did not sign it,
+//     and the invariant enforced here is authorship. Refusing on age
+//     would stop selling for every provider that has not re-registered
+//     this week, which is an availability decision this endpoint has no
+//     standing to make. What it does leave open is that a hub can keep
+//     serving an old card the provider has since replaced — a rollback,
+//     not a forgery. That is not fixable here: the hub is the party that
+//     decides when to accept an update.
+func (s *Store) verifyStoredCard(aid string) (verifiedCard, error) {
+	raw, err := s.AgentCard(aid)
+	if err != nil {
+		return verifiedCard{}, err
+	}
+	if len(raw) == 0 {
+		return verifiedCard{}, fmt.Errorf(
+			"%s has published no signed card, so this hub cannot quote for it", aid)
+	}
+	var card adp.AgentCard
+	if err := json.Unmarshal(raw, &card); err != nil {
+		return verifiedCard{}, fmt.Errorf("%w: %s's card is unreadable: %v", errUnverifiedCard, aid, err)
+	}
+	// The card must speak for the agent being sold. A signature that
+	// verifies is not sufficient on its own: ADP's delegated publish
+	// allows signer_aid != subject_did, and its baseline authorization
+	// check accepts any non-empty delegation proof, so a card this agent
+	// signed can describe another agent's prices and address and still
+	// pass the check below. Without this comparison the gateway would
+	// quote those terms while naming this agent as the payee.
+	if card.SubjectDID != aid {
+		return verifiedCard{}, fmt.Errorf("%w: the card filed under %s speaks for %s",
+			errUnverifiedCard, aid, card.SubjectDID)
+	}
+	kelBytes, err := s.AgentKEL(aid)
+	if err != nil {
+		return verifiedCard{}, fmt.Errorf("%w: %v", errUnverifiedCard, err)
+	}
+	kel, err := identity.UnmarshalKEL(kelBytes)
+	if err != nil {
+		return verifiedCard{}, fmt.Errorf("%w: %s's key history is unreadable: %v",
+			errUnverifiedCard, aid, err)
+	}
+	if _, err := adp.AdmitCard(&card, time.Now(), 0, kel, cardMajors, nil); err != nil {
+		return verifiedCard{}, fmt.Errorf("%w: %v", errUnverifiedCard, err)
+	}
+	return verifiedCard{card: &card}, nil
+}
+
+// price reads what a capability costs out of the agent's own signed card.
 //
 // The signature is the point. If the hub set the price, a hub could quote
 // anything and settle it — the buyer would have paid, the agent would be
 // owed less than was taken, and no party could show it. Reading the
 // number from inside the agent's signature means the hub can decline to
 // sell but cannot sell at a price the agent never agreed to.
-func (s *Store) gatewayPrice(aid, capID string) (uint64, error) {
-	raw, err := s.AgentCard(aid)
-	if err != nil {
-		return 0, err
-	}
-	if len(raw) == 0 {
-		return 0, fmt.Errorf("%s has published no signed card, so this hub cannot quote a price for it", aid)
-	}
-	var card adp.AgentCard
-	if err := json.Unmarshal(raw, &card); err != nil {
-		return 0, fmt.Errorf("%s's card is unreadable: %w", aid, err)
-	}
-	prices, ok := card.Extensions[ExtPricing].(map[string]any)
+func (v verifiedCard) price(capID string) (uint64, error) {
+	aid := v.card.SubjectDID
+	prices, ok := v.card.Extensions[ExtPricing].(map[string]any)
 	if !ok || len(prices) == 0 {
 		return 0, fmt.Errorf("%s publishes no prices, so nothing of its can be bought here", aid)
 	}
-	v, ok := prices[capID]
+	p, ok := prices[capID]
 	if !ok {
 		return 0, fmt.Errorf("%s does not sell %q through a gateway", aid, capID)
 	}
-	switch n := v.(type) {
+	switch n := p.(type) {
 	case float64:
 		if n < 0 || n != float64(uint64(n)) {
 			return 0, fmt.Errorf("%s published a price that is not a whole number of credits", aid)
@@ -85,6 +175,24 @@ func (s *Store) gatewayPrice(aid, capID string) (uint64, error) {
 	default:
 		return 0, fmt.Errorf("%s published a price this hub cannot read", aid)
 	}
+}
+
+// redeemEndpoint is where a buyer takes a voucher for this agent.
+//
+// Read from the agent's signed card, like the price, and for the same
+// reason: a hub that could nominate the address would be able to point
+// buyers at a machine of its own choosing, which is the proxying this
+// design exists to avoid. Because the provider still collects the credit,
+// a redirected buyer pays the provider and receives whatever the
+// nominated machine answers, so this field needs the signature as much as
+// the price does.
+func (v verifiedCard) redeemEndpoint() (string, error) {
+	for _, ep := range v.card.Endpoints {
+		if ep.Protocol == EndpointRedeem && ep.URI != "" {
+			return ep.URI, nil
+		}
+	}
+	return "", fmt.Errorf("%s publishes no public address to redeem a voucher at", v.card.SubjectDID)
 }
 
 // ExtPricing is the agent-card extension a provider publishes its price
@@ -115,7 +223,19 @@ func (s *Server) hX402Resource(w http.ResponseWriter, r *http.Request) {
 			"error": "this hub does not host " + aid})
 		return
 	}
-	price, err := s.store.gatewayPrice(aid, capID)
+	// Both terms of the sale come from this one verified card: quoting a
+	// price from a card whose address had not been checked, or the other
+	// way round, would leave half the offer unattributable.
+	card, err := s.store.verifyStoredCard(aid)
+	if err != nil {
+		code := http.StatusNotFound
+		if errors.Is(err, errUnverifiedCard) {
+			code = http.StatusInternalServerError
+		}
+		writeJSON(w, code, map[string]string{"error": err.Error()})
+		return
+	}
+	price, err := card.price(capID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
@@ -123,7 +243,7 @@ func (s *Server) hX402Resource(w http.ResponseWriter, r *http.Request) {
 	// Where the buyer will have to go. A voucher for an agent that has
 	// published no reachable address is one the buyer cannot spend, and
 	// selling it would be taking money for nothing.
-	endpoint, err := s.store.redeemEndpoint(aid)
+	endpoint, err := card.redeemEndpoint()
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{
 			"error": err.Error(),
@@ -261,32 +381,6 @@ func (s *Store) issueVoucher(settled payment.SettlementResponse, payTo, capID st
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(raw), nil
-}
-
-// redeemEndpoint is where a buyer takes a voucher for this agent.
-//
-// Read from the agent's signed card, like the price, and for the same
-// reason: a hub that could nominate the address would be able to point
-// buyers at a machine of its own choosing, which is the proxying this
-// design exists to avoid.
-func (s *Store) redeemEndpoint(aid string) (string, error) {
-	raw, err := s.AgentCard(aid)
-	if err != nil {
-		return "", err
-	}
-	if len(raw) == 0 {
-		return "", fmt.Errorf("%s has published no signed card", aid)
-	}
-	var card adp.AgentCard
-	if err := json.Unmarshal(raw, &card); err != nil {
-		return "", err
-	}
-	for _, ep := range card.Endpoints {
-		if ep.Protocol == EndpointRedeem && ep.URI != "" {
-			return ep.URI, nil
-		}
-	}
-	return "", fmt.Errorf("%s publishes no public address to redeem a voucher at", aid)
 }
 
 // EndpointRedeem is the endpoint protocol name an agent uses to advertise
