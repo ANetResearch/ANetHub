@@ -359,7 +359,8 @@ const WS = [
       {id:'incidents', name:'告警事故', icon:'alert', ph:1}]},
     {label:'安全治理', items:[
       {id:'risk', name:'风险处置', icon:'shield'},
-      {id:'enforcement', name:'违规下架', icon:'trash'}]},
+      {id:'enforcement', name:'违规下架', icon:'trash'},
+      {id:'recycle', name:'回收站', icon:'inbox'}]},
   ]},
   {id:'data', name:'数据智能', icon:'db', def:'overview', sections:[
     {items:[{id:'overview', name:'数据总览', icon:'db'}]},
@@ -739,7 +740,8 @@ async function vEnforcement(){
       <button class="btn sm danger" onclick="delAgent('${esc(a.aid)}')">${ic('trash')} 移除注册</button>
     </div></td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'违规与下架', sub:'监管闭环：标记 → 下架 → 从注册表移除（需二次确认 + 审计）。移除后身份可重新注册，黑名单强制阻断为路线图项。',
+    title:'违规与下架', sub:'监管闭环：标记 → 下架 → 从注册表移除（需二次确认 + 审计）。移除前整行归档，可在回收站恢复；移除后身份可重新注册，黑名单强制阻断为路线图项。',
+    actions:`<button class="btn" onclick="location.hash='#/operations/recycle'">${ic('inbox')} 回收站</button>`,
     body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
       <tr><th>Agent</th><th>状态</th><th>原因</th><th>操作</th></tr>${rows}</table></div></div>`
       : empty('暂无处置对象','没有处于关注或下架状态的 Agent。'),
@@ -752,8 +754,37 @@ async function setQuota(aid){
   try{ await api('/agents/'+encodeURIComponent(aid)+'/quota',{method:'POST',body:JSON.stringify({guest_quota:parseInt($('#mQuota').value)||0})}); toast('已更新访客额度'); refreshCurrent() }catch(e){toast(e.message)}
 }
 async function delAgent(aid){
-  if(!confirm('确认将该 agent 从公共注册表移除？其评价与任务记录会保留，身份可重新注册。')) return;
-  try{ await api('/agents/'+encodeURIComponent(aid),{method:'DELETE'}); toast('已移除'); location.hash='#/operations/enforcement'; }catch(e){toast(e.message)}
+  if(!confirm('确认将该 agent 从公共注册表移除？\n\n移除前整行（含 KEL）会归档，可在「安全治理 › 回收站」恢复。其评价与任务记录会保留，身份也可重新注册。')) return;
+  try{ await api('/agents/'+encodeURIComponent(aid),{method:'DELETE'}); toast('已移除，可在回收站恢复'); location.hash='#/operations/recycle'; }catch(e){toast(e.message)}
+}
+
+/* ---- 回收站 (deleted agents) ----
+   删除前归档的整行一直有写入方而没有读取方：GET /api/deleted 与
+   POST /api/deleted/{aid}/restore 早已可用，界面上却没有入口，误删只能用 curl 撤销。 */
+async function vRecycle(){
+  const d = await api('/deleted');
+  const list = d.deleted||[];
+  const rows = list.map(x=>{
+    let r={}; try{ r=JSON.parse(x.row||'{}') }catch(e){}
+    let caps=[]; try{ caps=JSON.parse(r.caps||'[]')||[] }catch(e){}
+    return `<tr>
+      <td><div style="font-weight:550">${esc(r.name||shortAid(x.aid))}</div><div class="mono faint">${shortAid(x.aid)}</div></td>
+      <td class="wrap">${caps.slice(0,5).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">-</span>'}</td>
+      <td class="muted" style="white-space:nowrap">${fmtTime(x.deleted_at)}</td>
+      <td class="muted">${esc(x.actor||'-')}</td>
+      <td><button class="btn sm" onclick="restoreAgent('${esc(x.aid)}')">${ic('refresh')} 恢复</button></td></tr>`;
+  }).join('');
+  $('#main').innerHTML = shell({
+    title:'回收站', sub:'被运营者移除的 Agent 归档（含 KEL 密钥历史）。恢复后重新进入公共注册表，监管状态复位为正常。',
+    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
+      <tr><th>Agent</th><th>能力</th><th>移除时间</th><th>操作者</th><th>操作</th></tr>${rows}</table></div></div>
+      <div class="note">同一 AID 多次删除会有多条归档，恢复取最新一条。若该身份在删除后已重新注册，现有记录更新更权威，恢复不会覆盖它。</div>`
+      : empty('回收站为空','没有被移除的 Agent。删除操作会在此归档，可随时恢复。'),
+  });
+}
+async function restoreAgent(aid){
+  if(!confirm('确认将该 agent 恢复到公共注册表？')) return;
+  try{ await api('/deleted/'+encodeURIComponent(aid)+'/restore',{method:'POST'}); toast('已恢复'); refreshCurrent() }catch(e){toast(e.message)}
 }
 
 /* ---- 商店目录 ---- */
@@ -1465,6 +1496,7 @@ Object.assign(ROUTES, {
   'operations/incidents': placeholderView('告警与事故','将区分告警（信号）与事故（需跟踪处置的事件），带状态机与影响面。需接入事故管理。'),
   'operations/risk': vRisk,
   'operations/enforcement': vEnforcement,
+  'operations/recycle': vRecycle,
   'data/overview': vDataOverview,
   'data/sessions': vSessions,
   'data/anomalies': vAnomalies,

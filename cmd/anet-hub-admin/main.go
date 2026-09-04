@@ -8,6 +8,11 @@
 //
 // The operator token comes from $ADMIN_TOKEN (default the classic console token). The monitor
 // passthrough token comes from $ADMIN_MONITOR_TOKEN (default: same as the operator token).
+//
+// The official-agent directory is read from <--data>/officials.json, a JSON array of AGENT manifests.
+// It is configuration rather than a compiled-in list because it names production hosts and the ssh user
+// the ops plane connects as. Absent file → no official agents, which is the correct default: an empty
+// directory reaches no host.
 package main
 
 import (
@@ -44,7 +49,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("anet-hub-admin", version.V)
+		fmt.Println(versionLine())
 		return
 	}
 	// One-shot registry recovery (see recovery.go). Additive only — cannot delete/overwrite live agents.
@@ -107,8 +112,18 @@ func main() {
 		log.Fatalf("anet-hub-admin: %v", err)
 	}
 	defer store.Close()
-	if err := store.SeedOfficials(); err != nil {
-		log.Fatalf("anet-hub-admin: seed officials: %v", err)
+	// The official-agent directory comes from the admin plane's own data
+	// directory, not from the binary. It names production hosts and the ssh
+	// user the ops plane connects as; compiling that into a binary shipped the
+	// topology with the product and made a fresh install reach out to hosts it
+	// had never been configured for. Absent file → no official agents.
+	officialsPath := admin.OfficialsConfigPath(*data)
+	added, err := store.SeedOfficialsFromFile(officialsPath)
+	if err != nil {
+		log.Fatalf("anet-hub-admin: officials: %v", err)
+	}
+	if added > 0 {
+		log.Printf("anet-hub-admin: loaded %d official agent(s) from %s", added, officialsPath)
 	}
 	hub, err := admin.OpenHubDB(*hubData)
 	if err != nil {
@@ -144,6 +159,17 @@ func main() {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+}
+
+// versionLine is what --version prints.
+//
+// It printed the release constant alone, which is hand-maintained and identical
+// for every build cut between two releases — so it could not answer "is this
+// artifact the one I just built". deploy-admin.sh greps this line for
+// commit=unknown to refuse shipping a binary that was built without the
+// -ldflags stamp; /admin/healthz reports the same three fields at runtime.
+func versionLine() string {
+	return fmt.Sprintf("anet-hub-admin %s commit=%s built_at=%s", version.V, version.Commit, version.BuiltAt)
 }
 
 func splitComma(s string) []string {

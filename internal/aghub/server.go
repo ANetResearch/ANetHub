@@ -3,6 +3,7 @@ package aghub
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -220,7 +221,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /federation/clear", s.hClear)
 	// Reputation across hub boundaries — the signed evidence, never an
 	// aggregate somebody else computed.
-	mux.HandleFunc("GET /federation/reviews", s.hFedReviews)
+	//
+	// The peer-facing review STREAM is deliberately absent here. It
+	// belongs to the federation plane and is served at GET
+	// /fed/v1/reviews by internal/federation, behind the discovery switch
+	// and the no_federation tag. The kernel served the same stream at GET
+	// /federation/reviews behind neither, so a hub built -tags
+	// no_federation — an organisation's internal hub, which has opted out
+	// of federation entirely — still published every signed review it
+	// held to anyone who asked. Nothing called the kernel copy: peers
+	// sync from /fed/v1/reviews, and no daemon, CLI, script or page in
+	// these repositories names /federation/reviews.
 	mux.HandleFunc("GET /agents/{aid}/reputation", s.hReputation)
 	mux.HandleFunc("POST /x402/verify", s.hX402Verify)
 	mux.HandleFunc("POST /x402/settle", s.hX402Settle)
@@ -408,10 +419,41 @@ type RegisterRequest struct {
 	Card json.RawMessage `json:"card"`
 }
 
+// maxRegisterBody caps a registration, separately from limitBody.
+//
+// The general ceiling is sized for relay payloads carrying inline
+// attachments (1 GiB), and registration inherited it: one unauthenticated
+// POST could hand this hub a multi-megabyte body before anything examined
+// its contents, which is the root of the capability-index amplification
+// the constants in aghub.go bound. A registration carries a KEL, a signed
+// card, profile text and a capability list. The largest plausible one is
+// maxCapsPerAgent ids of maxCapIDLen bytes listed twice — once in caps,
+// once inside the signed card — at roughly 130 KiB, so 1 MiB admits it
+// with room for a long readme. An agent whose registration does not fit
+// is refused with 413 rather than truncated.
+const maxRegisterBody = 1 << 20
+
 func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.AID == "" || req.KEL == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRegisterBody)).Decode(&req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": fmt.Sprintf("registration body exceeds %d bytes", maxRegisterBody)})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "aid + kel required"})
+		return
+	}
+	if req.AID == "" || req.KEL == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "aid + kel required"})
+		return
+	}
+	// The declared capability set is checked before the signature work:
+	// it is the cheapest check, it needs nothing but the request itself,
+	// and an oversized registration is the case worth rejecting cheaply.
+	if err := validateCaps(req.Caps); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	kelBytes, err := base64.StdEncoding.DecodeString(req.KEL)
@@ -453,6 +495,21 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	firstTime := !s.store.KnowsAgent(req.AID)
 	if firstTime && s.store.InviteRequired() {
 		if err := s.store.RedeemInvite(req.Invite, req.AID); err != nil {
+			// A refusal left no trace: no log line, no row, and nothing in
+			// -invite-list, which lists redeemers only. An operator running
+			// a closed hub could not tell whether anyone had been turned
+			// away, or how often, and the admission gate's whole audit
+			// surface was its success side.
+			//
+			// The cost of this line: /register is unauthenticated and
+			// unthrottled, and a fresh AID is one locally generated key
+			// pair, so a single caller can append to this log as fast as it
+			// can send requests. maxRegisterBody bounds each request, not
+			// the rate. An operator exposing this hub needs rate limiting
+			// at the reverse proxy and log rotation regardless of this
+			// line; what changes is that a filled disk is now one of the
+			// things an unthrottled /register can cause.
+			log.Printf("hub: registration refused for %s: %v", req.AID, err)
 			// The use is consumed before the agent row is written, so a
 			// failure between here and PutAgent burns a use rather than
 			// admitting an agent nobody can account for. An operator can
@@ -672,6 +729,7 @@ func goalFromTaskDoc(docBytes []byte) string {
 }
 
 func (s *Server) hAgents(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
 	// ?cap= is answered from the capability index rather than by
 	// post-filtering a prose search. Same parameter, same comma-OR
 	// meaning, two things it can now do that it could not: match a
@@ -681,7 +739,20 @@ func (s *Server) hAgents(w http.ResponseWriter, r *http.Request) {
 	// "who serves cas.put" and "who mentions cas.put" are different
 	// questions, and answering the second when asked the first sends work
 	// to a provider that will refuse it.
-	if capID := strings.TrimSpace(r.URL.Query().Get("cap")); capID != "" {
+	//
+	// Presence of the parameter, not emptiness of its value, decides which
+	// question was asked. Testing the trimmed value merged two of them: a
+	// caller that built ?cap= from an empty variable, or sent whitespace,
+	// was read as having asked for no filter at all and was handed the
+	// whole directory — a plausible-looking answer to a question it did
+	// not ask, with nothing in the response to distinguish it.
+	if query.Has("cap") {
+		capID := strings.TrimSpace(query.Get("cap"))
+		if capID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "cap must name a capability id; omit the parameter to list every agent"})
+			return
+		}
 		agents, err := s.store.FindByCapability(capID)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -691,22 +762,91 @@ func (s *Server) hAgents(w http.ResponseWriter, r *http.Request) {
 		// carry the home hub that says where to reach them. Local first:
 		// an agent this hub can deliver to directly is a better answer
 		// than one behind another hop.
-		agents = append(agents, s.federatedAgents(capID)...)
+		agents = mergeFederated(agents, s.federatedAgents(capID))
 		if agents == nil {
 			agents = []AgentView{}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
 		return
 	}
-	agents, err := s.store.ListAgents(r.URL.Query().Get("q"))
+	q := query.Get("q")
+	agents, err := s.store.ListAgents(q)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// The prose search and the unfiltered listing answer from peer hubs
+	// too. Only ?cap= did, so an agent learned from a peer could be found
+	// by an exact capability id and by nothing else: `anet find <text>`
+	// missed it, and the starfield — which asks with no parameter at all —
+	// never drew it. A hub that federates a directory and then shows it in
+	// one of three views is reporting less than it knows.
+	agents = mergeFederated(agents, federatedMatching(s.federatedAgents(""), q))
 	if agents == nil {
 		agents = []AgentView{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+}
+
+// mergeFederated appends the peer-learned agents the local answer does
+// not already name.
+//
+// Local first, and local wins a collision: an agent registered here is
+// one hop away and its row carries liveness and ratings that a synced
+// card does not. home_hub survives on the federated entries, because that
+// field is what tells a caller where the work actually has to be sent.
+func mergeFederated(local, fed []AgentView) []AgentView {
+	if len(fed) == 0 {
+		return local
+	}
+	seen := make(map[string]bool, len(local)+len(fed))
+	for _, a := range local {
+		seen[a.AID] = true
+	}
+	for _, a := range fed {
+		if a.AID == "" || seen[a.AID] {
+			continue
+		}
+		seen[a.AID] = true
+		local = append(local, a)
+	}
+	return local
+}
+
+// federatedMatching applies to peer-learned agents the filter ListAgents
+// applies locally.
+//
+// The federated directory seam filters by capability id only, so a text
+// query has to be matched here, over what a synced card carries: AID,
+// name and capability ids. Case-insensitively, matching the SQL LIKE the
+// local half uses — a name search is prose, unlike a capability id (see
+// FindByCapability, where the opposite rule applies and why). Unlisted
+// entries are dropped for the reason ListAgents drops them: this is a
+// listing somebody reads, not a routing table.
+func federatedMatching(fed []AgentView, query string) []AgentView {
+	q := strings.ToLower(query)
+	var out []AgentView
+	for _, a := range fed {
+		if !a.Listed || !a.Browsable() {
+			continue
+		}
+		if q != "" && !agentMentions(a, q) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// agentMentions reports whether an already-lowercased query occurs in the
+// fields ListAgents searches: aid, name, caps, summary, readme.
+func agentMentions(a AgentView, lowerQuery string) bool {
+	for _, f := range append([]string{a.AID, a.Name, a.Summary, a.Readme}, a.Caps...) {
+		if strings.Contains(strings.ToLower(f), lowerQuery) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- relay broker handlers ---

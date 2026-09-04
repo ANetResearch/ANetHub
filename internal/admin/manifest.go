@@ -2,7 +2,11 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 )
 
@@ -76,48 +80,61 @@ func ParseManifest(raw []byte) (*Manifest, error) {
 	return &m, nil
 }
 
-// seedManifests is the built-in official-agent directory, applied on first boot so a fresh admin plane
-// knows the fleet without manual entry. Source of truth is the ANetAgents repo (one AGENT.yaml per
-// folder); keep this in sync when agents are added there.
-var seedManifests = []string{`{
-  "schema": "anet-agent-manifest/1.0",
-  "id": "ai-studio",
-  "name": "ANetOS AI Studio",
-  "tier": "official",
-  "product_line": "anetos",
-  "aid": "bafyreicyovw3nmfbjd5ky2l7ovcjez4kf7vivhprudcowtmsovmnwzxsim",
-  "hub": "https://hub.agentnetwork.org.cn",
-  "caps": ["chat", "image-generation", "image-edit", "photo-restore", "video-generation", "tts", "asr", "vision", "embedding", "translate", "ai-art", "smart-frame"],
-  "summary": "AI generation service agent on AgentNetwork — v2 exposes the FULL Gravitex + Bailian surface (any LLM chat, t2i/i2i, t2v/i2v, TTS/ASR, vision, embedding) as universal services with per-call model selection, plus 25 curated ANetOS frame services. Authorized access only (ACL allowlist).",
-  "maintainer": "anet-core",
-  "runtime": {
-    "host": "bmax.chatchat.space",
-    "ssh_user": "root",
-    "workdir": "/data/projs/anet-ai-srv",
-    "units": ["anet-ai-daemon.service", "anet-ai-srv.service"],
-    "history_jsonl": "/data/projs/anet-ai-srv/history.jsonl"
-  },
-  "monitor": {"url": "http://bmax.chatchat.space:8791", "auth": "token"},
-  "ops": {
-    "allowed": ["status", "logs", "start", "stop", "restart", "update"],
-    "update": "systemctl restart anet-ai-srv"
-  },
-  "datasets": {"harvest": true, "intent_source": "service_id"}
-}`}
+// OfficialsFileName is the operator-supplied official-agent directory, read
+// from the admin plane's own data directory.
+const OfficialsFileName = "officials.json"
 
-// SeedOfficials inserts the built-in manifests that are not present yet (never overwrites edits).
-func (s *Store) SeedOfficials() error {
-	for _, raw := range seedManifests {
-		m, err := ParseManifest([]byte(raw))
+// OfficialsConfigPath is where SeedOfficialsFromFile looks inside dataDir.
+func OfficialsConfigPath(dataDir string) string { return filepath.Join(dataDir, OfficialsFileName) }
+
+// SeedOfficialsFromFile loads the official-agent directory from path and
+// inserts the manifests that are not present yet. Manifests already in the
+// store are left alone, including operator edits. It returns how many were
+// added.
+//
+// This list used to be a Go literal compiled into the binary, naming a
+// production host, its ssh user, its working directory, its systemd units and
+// its monitor URL. Two consequences, both of them real:
+//
+//   - The binary carried the infrastructure topology wherever it was
+//     distributed. Anyone holding a copy could read where the fleet runs and
+//     which account it runs as.
+//   - Every fresh admin.db was seeded with that entry, which made a read-only
+//     endpoint (GET /api/official/{id}/monitor/{what}, and the probe behind
+//     /api/overview) open an ssh connection to a production machine and run
+//     commands there. A deployment that had never been configured for that host
+//     still reached out to it.
+//
+// A missing file therefore means "no official agents" and is not an error: the
+// default build knows about no hosts at all, and an operator declares the fleet
+// in their own data directory. The cost is that a new deployment has an empty
+// ops plane until that file is written, which is the intended trade — an empty
+// list reaches nothing.
+func (s *Store) SeedOfficialsFromFile(path string) (int, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("admin: officials %s: %w", path, err)
+	}
+	var docs []json.RawMessage
+	if err := json.Unmarshal(raw, &docs); err != nil {
+		return 0, fmt.Errorf("admin: officials %s: expected a JSON array of manifests: %w", path, err)
+	}
+	added := 0
+	for i, d := range docs {
+		m, err := ParseManifest(d)
 		if err != nil {
-			return fmt.Errorf("admin: seed: %w", err)
+			return added, fmt.Errorf("admin: officials %s[%d]: %w", path, i, err)
 		}
 		if _, err := s.Official(m.ID); err == nil {
 			continue // already present (possibly operator-edited) — leave it alone
 		}
 		if err := s.PutOfficial(m); err != nil {
-			return err
+			return added, err
 		}
+		added++
 	}
-	return nil
+	return added, nil
 }

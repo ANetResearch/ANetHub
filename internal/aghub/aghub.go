@@ -55,6 +55,15 @@ type AgentView struct {
 	// it lives on, and so where work for it must be sent. Empty means
 	// this hub.
 	HomeHub string `json:"home_hub,omitempty"`
+	// Departed is true on the view returned for an AID that has
+	// deregistered but still has evidence recorded against it. Leaving a
+	// hub removes the routing and keeps the evidence; without this the
+	// evidence had no HTTP surface at all, because every read of it hung
+	// off the registration row that deregistering deletes.
+	//
+	// It is NOT a route: a departed agent is not deliverable, and
+	// nothing here puts it back in a listing.
+	Departed bool `json:"departed,omitempty"`
 	// Registered is false on a graph node reconstructed from a review
 	// whose subject or reviewer is no longer in the registry.
 	//
@@ -438,6 +447,13 @@ func (s *Store) migrate() error {
 // store-and-forward), so nothing about "resident vs intermittent" is recorded. guestQuota is how many
 // guest-mode trial messages a visitor may send this agent (0 = opt out of guest traffic).
 func (s *Store) PutAgent(aid, name string, caps []string, guestQuota int, kel []byte) error {
+	// The bound is enforced here as well as at the HTTP boundary, because
+	// this is where the index is written and it is the invariant the index
+	// depends on. The handler checks first so a caller gets 400 with the
+	// offending id named rather than 500.
+	if err := validateCaps(caps); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	capsJSON, _ := json.Marshal(caps)
@@ -473,6 +489,59 @@ func (s *Store) PutAgent(aid, name string, caps []string, guestQuota int, kel []
 	return tx.Commit()
 }
 
+// Bounds on what one registration may put into the capability index.
+//
+// Neither the length of a capability id nor the number an agent may
+// declare was limited. One anonymous POST /register carried 200,000 ids
+// (a 4.2 MB body), which produced a 55.5 MB hub.db, a 4.0 MB response to
+// every subsequent anonymous GET /agents, and 4.0 MB of work on every
+// directory query. Registering costs a locally generated key pair and
+// nothing else, so any caller could do this repeatedly. Found by writing
+// such a registration against a test hub and measuring what it left
+// behind.
+//
+// The numbers are far above any real id (a structured
+// family.action@vendor/device string) and any real agent's catalogue, so
+// they bound the abuse without constraining use. Bytes rather than
+// characters for the id, because bytes are what is stored and served.
+//
+// Over the bound the whole registration is refused, naming what was over
+// it. Truncating instead would publish an id the node never claimed, or
+// drop one it does serve, and a directory that answers for capabilities
+// nobody offers is exactly what this index exists to prevent. The cost of
+// refusing: an agent with a genuinely larger catalogue cannot register at
+// all, and its operator has to split it or raise these constants.
+const (
+	maxCapIDLen     = 256
+	maxCapsPerAgent = 256
+)
+
+// validateCaps checks a declared capability set against those bounds.
+func validateCaps(caps []string) error {
+	if len(caps) > maxCapsPerAgent {
+		return fmt.Errorf("hub: %d capabilities declared, at most %d are accepted",
+			len(caps), maxCapsPerAgent)
+	}
+	for _, c := range caps {
+		if len(c) > maxCapIDLen {
+			return fmt.Errorf("hub: capability id is %d bytes, at most %d are accepted: %q",
+				len(c), maxCapIDLen, excerpt(c))
+		}
+	}
+	return nil
+}
+
+// excerpt shortens an id for an error message without splitting a rune,
+// so the refusal can quote what was refused without echoing all of it.
+func excerpt(s string) string {
+	const runes = 32
+	r := []rune(s)
+	if len(r) <= runes {
+		return s
+	}
+	return string(r[:runes]) + "\u2026"
+}
+
 // FindByCapability returns agents offering a capability id.
 //
 // Exact by default, prefix when the query ends in "*". A capability id is
@@ -489,13 +558,28 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 			continue
 		}
 		if strings.HasSuffix(term, "*") {
-			// LIKE's own wildcards must not leak in from a capability id,
-			// or "cas.%" would quietly become a broader query than asked.
-			stem := strings.NewReplacer("%", `\%`, "_", `\_`).Replace(strings.TrimSuffix(term, "*"))
-			preds = append(preds, "c.cap LIKE ? ESCAPE '\\'")
-			args = append(args, stem+"%")
+			// Prefix by substring comparison, not LIKE. SQLite's LIKE is
+			// ASCII case-insensitive while "=" is not, so one query string
+			// got two answers depending on the trailing "*": an agent
+			// registered under "Text.Digest" was absent from
+			// ?cap=text.digest and present in ?cap=text.*. A capability id
+			// is a structured identifier that a provider dispatches on, not
+			// prose — "Text.Digest" and "text.digest" name two different
+			// capabilities, and only one of them will be answered — so both
+			// forms compare bytes. This also matches cardServes(), which is
+			// how the same question is answered for a peer-learned agent.
+			//
+			// substr has no pattern language of its own, so the escaping
+			// LIKE needed for "%" and "_" goes away with it. The cost is
+			// unchanged: neither form can use idx_agent_cap (SQLite's LIKE
+			// range optimisation needs a NOCASE column, which this is not),
+			// so both scan.
+			stem := strings.TrimSuffix(term, "*")
+			preds = append(preds, "substr(c.cap,1,length(?)) = ?")
+			args = append(args, stem, stem)
 			continue
 		}
+		// Exact, bytes included — see the prefix branch for why.
 		preds = append(preds, "c.cap = ?")
 		args = append(args, term)
 	}
@@ -699,19 +783,72 @@ func (s *Store) ListAgents(query string) ([]AgentView, error) {
 // to close.
 //
 // Out of the listing is NOT out of the hub: the row, the reviews and the
-// balance all stay, and one poll puts it back. Never true for an agent
-// with no recorded poll — that is every row from before this hub tracked
-// it, and hiding them all on an upgrade would empty the directory for a
-// reason nobody could see.
+// balance all stay, and one poll puts it back.
+//
+// An agent with no recorded poll falls back to its registration time.
+// This used to return true unconditionally, so that "registered and
+// never once collected mail" was a permanent exemption from the thirty
+// day rule — the one shape of row most likely to be abandoned was the
+// one shape that could never be delisted. The original reason for the
+// exemption (rows predating the last_seen_at column would all vanish on
+// upgrade) was real when the column was added and no longer applies:
+// those rows have since either polled or passed AbandonedAfter on their
+// registration date, which is the same judgement this now makes.
+//
+// The fallback deliberately keeps a just-registered agent visible: a
+// node that has registered but not yet polled is unknown, not dead, and
+// AbandonedAfter is the window it gets to prove otherwise. An
+// unparseable or absent timestamp also stays visible, because a
+// timestamp we cannot read says nothing about whether the agent is
+// answering.
 func (av AgentView) Browsable() bool {
-	if av.LastSeen == "" {
+	stamp := av.LastSeen
+	if stamp == "" {
+		stamp = av.RegisteredAt
+	}
+	if stamp == "" {
 		return true
 	}
-	t, err := time.Parse(time.RFC3339, av.LastSeen)
+	t, err := time.Parse(time.RFC3339, stamp)
 	if err != nil {
 		return true
 	}
 	return time.Since(t) <= AbandonedAfter
+}
+
+// departedView builds the view for an AID with no registration row but
+// with reviews recorded against it. Returns nil when the AID has no
+// evidence here either — that is an AID this hub has never seen, not a
+// departure.
+//
+// Name and profile are deliberately absent: those were self-description
+// carried on the registration row, and that row is gone. What survives
+// is what somebody else attested to.
+func (s *Store) departedView(aid string) (*AgentView, error) {
+	var count int
+	var avg float64
+	if err := s.db.QueryRow(
+		`SELECT COUNT(interaction_id), COALESCE(AVG(rating),0) FROM review WHERE subject_aid=?`,
+		aid).Scan(&count, &avg); err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	// If a peer hub now carries this AID, say so. Without this the
+	// departed view would be strictly less informative than the
+	// peer-lookup branch it now takes precedence over in hAgent: a node
+	// that left this hub for another one would lose its forwarding
+	// address at the same moment its evidence gained a surface.
+	return &AgentView{
+		AID:         aid,
+		Departed:    true,
+		Registered:  false,
+		Listed:      false,
+		AvgRating:   avg,
+		ReviewCount: count,
+		HomeHub:     s.HomeHubOf(aid),
+	}, nil
 }
 
 // GetAgent returns one agent's entry + aggregate and its reviews (newest first).
@@ -723,9 +860,25 @@ func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 		 WHERE a.aid=? GROUP BY a.aid`, aid)
 	av, err := scanAgent(row)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, fmt.Errorf("hub: agent %s not found", aid)
-	}
-	if err != nil {
+		// No registration row. If evidence was recorded against this
+		// AID it outlives the routing by design, so answer with a view
+		// marked departed instead of 404 — otherwise the reviews, the
+		// receipts they anchor and the departed KEL are all still in
+		// the database with no way for a third party to read them, and
+		// "removes the routing, keeps the evidence" is true in storage
+		// but false over HTTP.
+		//
+		// An AID with no row and no evidence is genuinely unknown here
+		// and still 404s.
+		dv, derr := s.departedView(aid)
+		if derr != nil {
+			return nil, nil, derr
+		}
+		if dv == nil {
+			return nil, nil, fmt.Errorf("hub: agent %s not found", aid)
+		}
+		av = *dv
+	} else if err != nil {
 		return nil, nil, err
 	}
 	rrows, err := s.db.Query(

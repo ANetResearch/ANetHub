@@ -357,19 +357,5 @@ func (s *Server) hReputation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// hFedReviews serves the reputation sync stream to a peer.
-func (s *Server) hFedReviews(w http.ResponseWriter, r *http.Request) {
-	cursor := int64(0)
-	if v := r.URL.Query().Get("since"); v != "" {
-		_, _ = fmt.Sscanf(v, "%d", &cursor)
-	}
-	revs, next, err := s.store.ReviewsSince(cursor, 0)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"reviews": revs, "next": next})
-}
-
 // FedReviewJSON is the encoding used on the sync wire.
 func (fr FedReview) FedReviewJSON() ([]byte, error) { return json.Marshal(fr) }

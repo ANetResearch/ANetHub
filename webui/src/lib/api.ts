@@ -19,6 +19,11 @@ export interface AgentView {
   // 一个只列出 agent 而不说谁已经不再应答的目录,是在让人去等死人。
   last_seen?: string;
   quiet?: boolean;
+  // true 表示这个 AID 已在本 hub 注销,但仍有记录在案的评价。它不是一条
+  // 路由:注销的 agent 不可投递,页面不应给它任何"发消息"的入口。它出现
+  // 在 /agents/{aid} 上,是为了让第三方仍能读到那些评价 —— 注销删的是路
+  // 由,留的是证据。name 与 profile 会是空的,那些随注册行一起删了。
+  departed?: boolean;
   // 只在 /graph 的节点上有意义:false 表示这个 agent 已不在本 hub 注册
   // —— 它离开了,或长期未取信。它的评价仍在,因为那些记录的是发生过的事。
   registered?: boolean;

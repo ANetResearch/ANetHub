@@ -193,12 +193,23 @@ func (s *Store) PutOfficial(m *Manifest) error {
 	return err
 }
 
-// DeleteOfficial removes an official-agent manifest.
-func (s *Store) DeleteOfficial(id string) error {
+// DeleteOfficial removes an official-agent manifest and reports whether a row
+// existed to remove.
+//
+// found is returned because the HTTP layer used to answer 200 and write an
+// audit row for the delete of an id that was never registered. The delete
+// itself reports it, so there is no window between an existence check and the
+// removal. Rows with enabled=0 count as present: they are hidden from the ops
+// plane, not absent from the store.
+func (s *Store) DeleteOfficial(id string) (found bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM official_agent WHERE id=?`, id)
-	return err
+	res, err := s.db.Exec(`DELETE FROM official_agent WHERE id=?`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // Officials returns all enabled official-agent manifests.

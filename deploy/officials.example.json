@@ -1,0 +1,23 @@
+[
+  {
+    "schema": "anet.agent/1",
+    "id": "example-agent",
+    "name": "Example Agent",
+    "tier": "official",
+    "product_line": "agentnetwork",
+    "aid": "bafyrei...",
+    "hub": "https://hub.example.org",
+    "caps": ["text.summarize"],
+    "summary": "一行自述,显示在运营面的 official 列表里。",
+    "maintainer": "ops@example.org",
+    "runtime": {
+      "host": "agent-host.example.org",
+      "ssh_user": "anet",
+      "workdir": "/data/projs/example-agent",
+      "units": ["example-agent.service"],
+      "history_jsonl": "/data/projs/example-agent/history.jsonl"
+    },
+    "monitor": { "url": "http://127.0.0.1:9101/metrics", "auth": "token" },
+    "ops": { "allowed": ["status", "logs", "restart"] }
+  }
+]

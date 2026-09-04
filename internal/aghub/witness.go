@@ -3,8 +3,10 @@ package aghub
 import (
 	"encoding/base64"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/ael"
@@ -224,6 +226,32 @@ type WitnessHealth struct {
 	// witnessed sequence. These are the ones the hub could still rewrite
 	// without contradicting anybody.
 	UnwitnessedRecords uint64 `json:"unwitnessed_records"`
+	// HeadSeq is where the chain stands now, and HasHead says whether
+	// there is a chain at all. Kept apart because "nothing has been
+	// issued" and "the chain is at seq 0" are different facts, and a bare
+	// zero cannot say which one it means. Publishing HeadSeq beside
+	// LatestSeq is also what lets a reader check RolledBack rather than
+	// take it on this hub's word.
+	HeadSeq uint64 `json:"head_seq"`
+	HasHead bool   `json:"has_head"`
+	// RolledBack is set when the head sits BELOW the highest sequence a
+	// witness has signed for, or when this hub serves no chain at all
+	// while attestations about one are held.
+	//
+	// This is the condition worth raising on its own. Witnessing exists so
+	// that a chain later showing different contents at a pinned position
+	// can be caught, and a head that has moved backwards past a pinned
+	// position is the most direct form of that: the records the witness
+	// signed for are not being served any more. UnwitnessedRecords cannot
+	// express it — there is nothing above the high-water mark to count, so
+	// it reads 0, the same value a fully pinned chain reports — and a
+	// reader would have had to know to compare head_seq with latest_seq
+	// themselves.
+	//
+	// It names no cause. A restore from an older backup, a fork, and a
+	// deliberate rewrite are indistinguishable from here. What it asserts
+	// is only that the chain no longer covers what a witness signed for.
+	RolledBack bool `json:"rolled_back"`
 	// Who has attested, so a reader can judge whether the count means
 	// anything.
 	WitnessAIDs []string `json:"witness_aids,omitempty"`
@@ -266,14 +294,57 @@ func (s *Store) WitnessHealthOf(chainDID string, now time.Time) (WitnessHealth, 
 	if h.LatestAt > 0 {
 		h.StaleFor = now.UnixMilli()/1000 - h.LatestAt/1000
 	}
-	// How far the chain has run past the last thing anybody pinned.
+	// How far the chain has run past the last thing anybody pinned — or
+	// fallen behind it.
 	_, headSeq, ok := s.IssuanceHead()
-	if ok && h.Attestations > 0 && headSeq > highest {
-		h.UnwitnessedRecords = headSeq - highest
-	} else if ok && h.Attestations == 0 {
+	h.HasHead, h.HeadSeq = ok, headSeq
+	switch {
+	case ok && h.Attestations == 0:
 		h.UnwitnessedRecords = headSeq + 1 // nothing pinned, including seq 0
+	case ok && headSeq > highest:
+		h.UnwitnessedRecords = headSeq - highest
+	case h.Attestations > 0 && (!ok || headSeq < highest):
+		h.RolledBack = true
 	}
+	noteRollback(chainDID, h.HeadSeq, highest, h.RolledBack)
 	return h, nil
+}
+
+// rollbackState remembers the last rollback reported per chain.
+//
+// WitnessHealthOf runs on every unauthenticated GET /x402/witnesses, so
+// logging on each call would let a reader choose this hub's log volume;
+// logging only on a change means a hub that stays rolled back says so
+// once. The cost of keeping it here rather than on the Store is that two
+// stores serving the same chain id in one process share the memo, which
+// affects only how often the line is written, not the health that is
+// served.
+var rollbackState struct {
+	mu   sync.Mutex
+	last map[string][2]uint64
+}
+
+// noteRollback writes one line when a chain is first seen below what a
+// witness signed for, and again if the numbers change.
+func noteRollback(chainDID string, headSeq, witnessedSeq uint64, rolledBack bool) {
+	rollbackState.mu.Lock()
+	defer rollbackState.mu.Unlock()
+	if !rolledBack {
+		delete(rollbackState.last, chainDID)
+		return
+	}
+	now := [2]uint64{headSeq, witnessedSeq}
+	if prev, seen := rollbackState.last[chainDID]; seen && prev == now {
+		return
+	}
+	if rollbackState.last == nil {
+		rollbackState.last = map[string][2]uint64{}
+	}
+	rollbackState.last[chainDID] = now
+	log.Printf("hub: issuance chain %s rolled back: head is at seq %d, below seq %d "+
+		"that a witness has already signed for. The records that witness pinned are "+
+		"no longer being served; a fork, a rewrite and a restore from an older copy "+
+		"all look like this from outside", chainDID, headSeq, witnessedSeq)
 }
 
 // ---- HTTP ----
@@ -392,7 +463,10 @@ func (s *Server) hWitnesses(w http.ResponseWriter, _ *http.Request) {
 			"witnesses counts distinct AIDs, which is all this hub can check — two " +
 			"AIDs run by one operator count as two here and are worth one, so read " +
 			"witness_aids rather than the number. unwitnessed_records is how far the " +
-			"chain has run past the last thing anybody pinned."})
+			"chain has run past the last thing anybody pinned, and rolled_back says " +
+			"head_seq is BELOW latest_seq — the chain no longer covers a position a " +
+			"witness signed for, which is what a fork or a restore from an older copy " +
+			"looks like from out here."})
 }
 
 // verifyRecords decodes and verifies a run of chain records.

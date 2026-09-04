@@ -36,8 +36,7 @@ type Server struct {
 	token   string
 	base    string
 
-	loginMu    sync.Mutex
-	loginFails map[string][]time.Time // remote ip → recent failed attempts
+	authFails *authLimiter // failed credential checks per source IP (login AND Bearer)
 
 	harvestMu sync.Mutex // one harvest at a time (ticker + manual button may race)
 
@@ -52,7 +51,7 @@ func NewServer(store *Store, hub *HubDB, ops *Ops, mon *MonitorProxy, hv *Harves
 	return &Server{
 		store: store, hub: hub, ops: ops, mon: mon, harvest: hv, vec: vec,
 		token: token, base: strings.TrimRight(basePath, "/"),
-		loginFails: map[string][]time.Time{},
+		authFails: newAuthLimiter(authMaxFailures, authWindow),
 		// At most 5 registry deletes per minute — a legitimate operator never bulk-deletes; a scripted
 		// loop against the (weak-token, public) admin API is stopped before it can wipe the registry.
 		delLimiter: newDestructiveLimiter(5, time.Minute),
@@ -151,28 +150,154 @@ func remoteIP(r *http.Request) string {
 }
 
 const (
-	loginWindow      = time.Minute
-	loginMaxAttempts = 20
+	authWindow      = time.Minute
+	authMaxFailures = 20
+	throttleMsg     = "尝试过于频繁，请稍后再试"
 )
 
-func (s *Server) hLogin(w http.ResponseWriter, r *http.Request) {
-	ip := remoteIP(r)
-	s.loginMu.Lock()
-	now := time.Now()
-	recent := s.loginFails[ip][:0]
-	for _, t := range s.loginFails[ip] {
-		if now.Sub(t) < loginWindow {
+// authLimiter counts FAILED credential checks per source IP in a rolling window.
+//
+// One budget covers both credential paths. /api/login was rate-limited and the
+// Bearer check was not, so an attacker who simply never called /api/login could
+// guess the token against any protected endpoint at full speed: the limit
+// applied to the one path nobody is obliged to use. The token is the only thing
+// guarding this surface, and the surface deletes agents, changes quotas and
+// runs commands on other hosts over ssh.
+//
+// The cost is a map keyed by source IP. It grows only with IPs that fail, and
+// entries are dropped as their window expires, so an operator who logs in
+// successfully leaves nothing in it. A distributed guesser with many source
+// addresses still gets one budget per address — this bounds a single client,
+// not a botnet — and maxTrackedIPs bounds what that costs in memory.
+type authLimiter struct {
+	mu     sync.Mutex
+	window time.Duration
+	max    int
+	fails  map[string][]time.Time
+	// noted marks IPs whose current over-budget episode has already been
+	// recorded, so a sustained flood produces one log line and one audit row
+	// instead of one per request. Cleared when the window empties.
+	noted map[string]bool
+}
+
+func newAuthLimiter(max int, window time.Duration) *authLimiter {
+	return &authLimiter{
+		window: window, max: max,
+		fails: map[string][]time.Time{}, noted: map[string]bool{},
+	}
+}
+
+// prune drops attempts that fell out of the window and returns what remains.
+// Caller holds mu.
+func (l *authLimiter) prune(ip string, now time.Time) []time.Time {
+	recent := l.fails[ip][:0]
+	for _, t := range l.fails[ip] {
+		if now.Sub(t) < l.window {
 			recent = append(recent, t)
 		}
 	}
-	s.loginFails[ip] = recent
-	if len(recent) >= loginMaxAttempts {
-		s.loginMu.Unlock()
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "尝试过于频繁，请稍后再试"})
+	if len(recent) == 0 {
+		delete(l.fails, ip)
+		delete(l.noted, ip) // window elapsed: the next episode is reported again
+		return nil
+	}
+	l.fails[ip] = recent
+	return recent
+}
+
+// blocked reports whether ip has spent its failure budget. first is true only
+// for the first blocked request of an episode.
+func (l *authLimiter) blocked(ip string) (blocked, first bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.prune(ip, time.Now())) < l.max {
+		return false, false
+	}
+	if l.noted[ip] {
+		return true, false
+	}
+	l.noted[ip] = true
+	return true, true
+}
+
+// maxTrackedIPs bounds how much memory a guesser with many source addresses can
+// make this map take. Entries are otherwise only pruned when the same address
+// is seen again, so addresses that fail once and never return are never
+// collected.
+const maxTrackedIPs = 10000
+
+// sweep prunes every tracked address, and drops the table outright if that was
+// not enough. Losing the counters resets the budget for everyone currently
+// being tracked, which is worse than nothing and better than a map that grows
+// without limit; an attacker able to reach this point holds ten thousand source
+// addresses and is not being stopped by a per-address budget anyway. Caller
+// holds mu.
+func (l *authLimiter) sweep(now time.Time) {
+	for ip := range l.fails {
+		l.prune(ip, now)
+	}
+	if len(l.fails) >= maxTrackedIPs {
+		l.fails = map[string][]time.Time{}
+		l.noted = map[string]bool{}
+	}
+}
+
+// record adds one failed credential check for ip. Successful requests are never
+// recorded, so a working operator is never throttled.
+func (l *authLimiter) record(ip string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	if len(l.fails) >= maxTrackedIPs {
+		l.sweep(now)
+	}
+	l.fails[ip] = append(l.prune(ip, now), now)
+}
+
+// bearerToken extracts the credential from an Authorization header value.
+//
+// The header used to be parsed with strings.TrimPrefix(h, "Bearer "), which
+// returns its input unchanged when the prefix is absent: a bare token with no
+// scheme authenticated, while "bearer <tok>" was rejected. RFC 7235 §2.1 makes
+// the scheme name case-insensitive and leaves the credential case-sensitive, so
+// this accepts any capitalisation of "Bearer" and nothing without a scheme.
+// ok is false for every other shape, an empty credential included.
+func bearerToken(h string) (string, bool) {
+	scheme, cred, found := strings.Cut(h, " ")
+	if !found || !strings.EqualFold(scheme, "bearer") {
+		return "", false
+	}
+	cred = strings.TrimLeft(cred, " ") // RFC 7235 allows 1*SP before the credential
+	if cred == "" {
+		return "", false
+	}
+	return cred, true
+}
+
+// noteAuthDenial records one rejected credential check.
+//
+// The admin plane audited what operators did and nothing about who tried to get
+// in: a failed login and a Bearer probe left no process log line and no
+// audit_log row, so a credential-guessing run against this surface was
+// invisible after the fact. Volume is bounded by authLimiter — past the failure
+// budget only the first request of an episode is recorded, or the record of a
+// flood becomes a second flood. The actor is "anonymous" because the request
+// carried no valid credential; the source IP is the target so an operator can
+// group by it.
+func (s *Server) noteAuthDenial(r *http.Request, ip, action string) {
+	log.Printf("admin: %s ip=%s method=%s path=%s", action, ip, r.Method, r.URL.Path)
+	s.store.Audit("anonymous", action, ip, r.Method+" "+r.URL.Path)
+}
+
+func (s *Server) hLogin(w http.ResponseWriter, r *http.Request) {
+	ip := remoteIP(r)
+	if blocked, first := s.authFails.blocked(ip); blocked {
+		if first {
+			s.noteAuthDenial(r, ip, "auth.throttled")
+		}
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": throttleMsg})
 		return
 	}
-	s.loginMu.Unlock()
-
 	var req struct {
 		Token string `json:"token"`
 	}
@@ -181,9 +306,8 @@ func (s *Server) hLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.token)) != 1 {
-		s.loginMu.Lock()
-		s.loginFails[ip] = append(s.loginFails[ip], now)
-		s.loginMu.Unlock()
+		s.authFails.record(ip)
+		s.noteAuthDenial(r, ip, "auth.failed")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token 不正确"})
 		return
 	}
@@ -192,8 +316,18 @@ func (s *Server) hLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+		ip := remoteIP(r)
+		if blocked, first := s.authFails.blocked(ip); blocked {
+			if first {
+				s.noteAuthDenial(r, ip, "auth.throttled")
+			}
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": throttleMsg})
+			return
+		}
+		tok, ok := bearerToken(r.Header.Get("Authorization"))
+		if !ok || subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+			s.authFails.record(ip)
+			s.noteAuthDenial(r, ip, "auth.failed")
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
@@ -398,8 +532,19 @@ func (s *Server) hPutOfficial(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hDeleteOfficial(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.store.DeleteOfficial(id); err != nil {
+	// A DELETE of an id that was never registered answered 200 and wrote an
+	// audit row indistinguishable from a real delete. An audit trail that
+	// records events which did not happen cannot be used to establish what did,
+	// so the row is written only when a manifest was actually removed. The
+	// store reports that rather than a separate existence query, which would
+	// leave a window between the check and the delete.
+	found, err := s.store.DeleteOfficial(id)
+	if err != nil {
 		errJSON(w, http.StatusBadRequest, err)
+		return
+	}
+	if !found {
+		errJSON(w, http.StatusNotFound, fmt.Errorf("admin: official agent %q not found", id))
 		return
 	}
 	s.store.Audit("admin", "official.delete", id, "")
@@ -719,11 +864,31 @@ func (s *Server) hRestore(w http.ResponseWriter, r *http.Request) {
 			errJSON(w, http.StatusBadRequest, err)
 			return
 		}
-		// The delete recorded a moderation intent; restoring clears it,
-		// or the agent comes back listed as removed.
-		_ = s.store.SetModeration(aid, "", "restored by operator")
 		s.store.Audit("admin", "agent.restore", aid, "from archive "+d.DeletedAt)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "archived_at": d.DeletedAt})
+		// The delete recorded a moderation intent ("delisted"); restoring has to
+		// clear it, or the agent comes back into the registry still shown as
+		// removed by an operator.
+		//
+		// The reset was here from the start and never took effect: it passed an
+		// empty status, SetModeration rejects any status outside
+		// ok|flagged|delisted, and the returned error was discarded. A dropped
+		// error is why a step that exists could be absent for three releases,
+		// so this one is checked. The registry row is already back at this
+		// point, which is why the failure is reported as a partial outcome
+		// rather than as "restore failed" — the operator has to know both that
+		// the agent returned and that its governance state did not.
+		if err := s.store.SetModeration(aid, "ok", "restored by operator"); err != nil {
+			s.store.Audit("admin", "agent.restore.moderation_failed", aid, err.Error())
+			log.Printf("admin: restore %s: moderation not reset: %v", aid, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error":              "已恢复注册表记录，但监管状态未复位：" + err.Error(),
+				"restored":           true,
+				"moderation_cleared": false,
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "archived_at": d.DeletedAt, "moderation": "ok"})
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{

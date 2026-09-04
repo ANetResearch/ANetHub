@@ -9,6 +9,7 @@ package main
 // connection to add one node.
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -72,7 +73,18 @@ func runInviteOp(store *aghub.Store, required string, mint bool, label string,
 	}
 
 	if revoke != "" {
-		if err := store.RevokeInvite(revoke); err != nil {
+		// Revoking twice is not an error to an operator: the gate is shut
+		// either way, and the command is one somebody runs from a runbook
+		// or a second terminal after being told an invite leaked. Reported
+		// as a distinct outcome rather than silently as success, because
+		// "I closed it" and "it was already closed" are different facts
+		// about who could have used it in between.
+		err := store.RevokeInvite(revoke)
+		switch {
+		case errors.Is(err, aghub.ErrInviteAlreadyRevoked):
+			fmt.Printf("invite %s was already revoked — nothing to do\n", revoke)
+			return nil
+		case err != nil:
 			return fmt.Errorf("revoke %s: %w", revoke, err)
 		}
 		fmt.Printf("invite %s revoked — it admits nobody new\n", revoke)
