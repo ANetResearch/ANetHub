@@ -2,6 +2,7 @@ package aghub
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -136,6 +137,24 @@ func (s *Store) entry(aid string, delta int64, reason string) error {
 }
 
 // Redemptions lists what an agent has taken out.
+// RedemptionTotals reports how many withdrawals an account has made and
+// what they sum to, over the whole account rather than one page. It is
+// what lets a caller reconcile without paging, and what lets the endpoint
+// say honestly that the list it returned is not everything.
+func (s *Store) RedemptionTotals(aid string) (total int, sum uint64, err error) {
+	var n int64
+	var amt sql.NullInt64
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*), SUM(amount) FROM credit_redemption WHERE aid=?`, aid,
+	).Scan(&n, &amt); err != nil {
+		return 0, 0, err
+	}
+	if amt.Valid && amt.Int64 > 0 {
+		sum = uint64(amt.Int64)
+	}
+	return int(n), sum, nil
+}
+
 func (s *Store) Redemptions(aid string, limit int) ([]Redemption, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -392,14 +411,46 @@ func (s *Server) hRedeem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// hRedemptions lists an agent's withdrawals.
+// hRedemptions lists an agent's withdrawals, newest first.
+//
+// The same shape hLedger already carries, for the same reason: the page is
+// capped and the response used to say nothing about it. Once an account
+// passed 100 withdrawals the list stopped growing — a new redemption
+// pushed the oldest one out — so a caller counting the list to see whether
+// its withdrawal landed got the same number forever, and had no field to
+// tell it the answer was a page rather than the history.
+//
+// Found by scripts/prodtest.sh: "did the redemption appear in the list"
+// stayed red for sixty seconds of polling while the very next check found
+// the record — because it matched one left by an earlier run.
+//
+// total and sum cover the whole account regardless of the page, so a
+// caller can reconcile without paging and can see when there is more.
 func (s *Server) hRedemptions(w http.ResponseWriter, r *http.Request) {
-	out, err := s.store.Redemptions(r.PathValue("aid"), 0)
+	aid := r.PathValue("aid")
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		_, _ = fmt.Sscanf(v, "%d", &limit)
+	}
+	out, err := s.store.Redemptions(aid, limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"redemptions": out})
+	total, sum, err := s.store.RedemptionTotals(aid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	body := map[string]any{
+		"redemptions": out, "total": total, "sum": sum, "returned": len(out),
+	}
+	if total > len(out) {
+		body["truncated"] = true
+		body["note"] = "redemptions is the newest page; total and sum cover every withdrawal. " +
+			"Reconcile against sum, not against the page."
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // hSupply publishes what this hub owes its users.
