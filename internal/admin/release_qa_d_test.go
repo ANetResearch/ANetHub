@@ -531,33 +531,30 @@ func TestTheFailureTableIsBounded(t *testing.T) {
 }
 
 // A request with no credential is refused, but it is not a guess at the
-// credential — guessing requires sending one. Counting these toward the
-// limiter slows no attacker down, and it does put an address over the
-// limit on traffic that never tried: a browser opening the page, a health
-// probe, a link somebody followed. After that every honest request from
-// that address gets 429 and the operator cannot tell "wrong token" from
-// "throttled".
+// credential — guessing requires sending one. So it neither feeds the
+// guess limiter nor is blocked by it. Counting or throttling these slows
+// no attacker down; what it does do is make an address that once tripped
+// the limiter — a browser opening the page, a health probe, a link
+// somebody followed — unable to get an honest 401 for anything.
 //
-// Found by scripts/prodtest.sh against production: it asserts an
-// unauthenticated call is refused with 401 and saw 429, because a
-// rate-limit check from the same address had tripped the counter minutes
-// earlier.
+// Found by scripts/prodtest.sh against production: it does a rate-limit
+// check and then asserts an unauthenticated call is refused with 401, and
+// saw 429.
+//
+// Order matters here and the first version of this test got it wrong: it
+// ran the credential-less loop BEFORE tripping the limiter, so the
+// address was never blocked while those requests were made and the test
+// could not tell "not counted" from "not blocked". The limiter is tripped
+// first now.
 func TestCredentiallessRequestsDoNotFeedTheGuessLimiter(t *testing.T) {
 	srv, _, _, _, _ := newTestServer(t)
 	h := srv.Handler()
 	captureLog(t)
 
 	const caller = "203.0.113.7"
-	// Well past the threshold, all with no credential at all.
-	for i := 0; i < authMaxFailures*3; i++ {
-		w, _ := doReqFrom(t, h, "GET", "/admin/api/agents", "", nil, caller)
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("request %d with no credential: got %d, want 401", i+1, w.Code)
-		}
-	}
 
-	// And a wrong token from the same address still gets throttled, or the
-	// limiter would have been disabled rather than corrected.
+	// Trip the limiter with real guesses, so the address IS blocked for the
+	// rest of the test.
 	throttled := false
 	for i := 0; i < authMaxFailures*2; i++ {
 		if w, _ := doReqFrom(t, h, "GET", "/admin/api/agents", "wrong-token", nil, caller); w.Code == http.StatusTooManyRequests {
@@ -566,6 +563,22 @@ func TestCredentiallessRequestsDoNotFeedTheGuessLimiter(t *testing.T) {
 		}
 	}
 	if !throttled {
-		t.Error("wrong tokens are no longer rate limited")
+		t.Fatal("setup: wrong tokens are not rate limited at all")
+	}
+
+	// From that same blocked address, a request with no credential must
+	// still be answered 401 — refused, but told why.
+	for i := 0; i < authMaxFailures*3; i++ {
+		w, _ := doReqFrom(t, h, "GET", "/admin/api/agents", "", nil, caller)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d with no credential from a throttled address: got %d, want 401",
+				i+1, w.Code)
+		}
+	}
+
+	// And those never lift or extend the block: a guess from the same
+	// address is still throttled afterwards.
+	if w, _ := doReqFrom(t, h, "GET", "/admin/api/agents", "wrong-token", nil, caller); w.Code != http.StatusTooManyRequests {
+		t.Errorf("after the credential-less requests a guess got %d, want 429 — the block was lifted", w.Code)
 	}
 }
