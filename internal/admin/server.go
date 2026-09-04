@@ -317,18 +317,35 @@ func (s *Server) hLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ip := remoteIP(r)
-		if blocked, first := s.authFails.blocked(ip); blocked {
-			if first {
-				s.noteAuthDenial(r, ip, "auth.throttled")
-			}
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": throttleMsg})
-			return
-		}
 		tok, ok := bearerToken(r.Header.Get("Authorization"))
+		// The throttle is checked only for requests that present a
+		// credential — the same rule as counting them. Checked before this,
+		// a blocked address got 429 for a request that never tried, which
+		// is the same wrong answer arriving one step earlier: it slows no
+		// attacker (guessing requires sending a token) and it makes an
+		// address that once tripped the limiter unable to get an honest 401
+		// for anything.
+		//
+		// Found by scripts/prodtest.sh: the run does a rate-limit check and
+		// then asserts an unauthenticated call is refused with 401 — it saw
+		// 429. The first fix stopped credential-less requests from
+		// INCREMENTING the counter but left them subject to it, and the
+		// unit test happened to run its credential-less loop before the
+		// counter was tripped, so it could not tell the difference.
+		if ok {
+			if blocked, first := s.authFails.blocked(ip); blocked {
+				if first {
+					s.noteAuthDenial(r, ip, "auth.throttled")
+				}
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": throttleMsg})
+				return
+			}
+		}
 		if !ok {
-			// No credential at all. Refused, logged, but NOT counted as a
-			// guess: guessing the token requires sending one, so counting
-			// these slows no attacker down. What it does do is put an IP
+			// No credential at all. Refused and logged, but neither counted
+			// as a guess nor blocked by the guess limiter: guessing the
+			// token requires sending one, so neither counting nor throttling
+			// these slows an attacker down. What it does do is put an IP
 			// over the limit on traffic that never tried — a browser
 			// opening the page, a health probe, a link somebody followed —
 			// after which every honest request from that IP gets 429 and
