@@ -2,12 +2,14 @@ package aghub_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
@@ -299,5 +301,100 @@ func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 	}
 	if st.Federated != 1 {
 		t.Errorf("federated = %d, want 1", st.Federated)
+	}
+}
+
+// A capped list that does not say it is capped is a list that lies by
+// omission. Once an account passes the page size a new withdrawal pushes
+// the oldest one out, so the length stops changing: a caller counting the
+// list to see whether its withdrawal landed gets the same number forever,
+// with no field telling it the answer was a page rather than the history.
+//
+// Found by scripts/prodtest.sh against the live hub: "did the redemption
+// appear in the list" stayed red through sixty seconds of polling while
+// the very next check found a matching record — one left by an earlier run.
+// dmax had exactly 100 rows, the cap, and had had for a while.
+//
+// hLedger already carried this shape; the withdrawals list did not.
+func TestTheRedemptionListSaysWhenItIsOnlyAPage(t *testing.T) {
+	srv := newHub(t)
+	agent, _ := identity.Incept()
+	register(t, srv, agent, "Withdrawer", nil)
+	fundAgent(t, srv, agent.AID(), 400)
+	hubAID := hubAIDOf(t, srv)
+
+	const made = 4
+	for i := 0; i < made; i++ {
+		opt := payment.PaymentOption{
+			Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
+			Amount: "10", Asset: payment.AssetCredit, PayTo: hubAID,
+		}
+		ref := fmt.Sprintf("inv-%02d", i)
+		if code, b := post(t, srv.URL+"/x402/redeem", map[string]any{
+			"x402Version":    payment.Version,
+			"paymentPayload": json.RawMessage(mustPayload(t, agent, opt, "redeem:"+ref)),
+			"reference":      ref,
+		}); code != 200 {
+			t.Fatalf("seed %d: %d %s", i, code, b)
+		}
+	}
+
+	// Ask for fewer than exist, which is what the cap does to a busy
+	// account without being asked.
+	code, body := getJSON(t, srv.URL+"/agents/"+agent.AID()+"/redemptions?limit=2")
+	if code != 200 {
+		t.Fatalf("redemptions: %d", code)
+	}
+	var got struct {
+		Redemptions []struct {
+			Reference string `json:"reference"`
+			Amount    uint64 `json:"amount"`
+		} `json:"redemptions"`
+		Total     int    `json:"total"`
+		Sum       uint64 `json:"sum"`
+		Returned  int    `json:"returned"`
+		Truncated bool   `json:"truncated"`
+		Note      string `json:"note"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Redemptions) >= made {
+		t.Fatalf("the page was not capped (%d of %d) — this test cannot tell the fix from its absence",
+			len(got.Redemptions), made)
+	}
+	if got.Total != made {
+		t.Errorf("total = %d, want %d — the count must cover the account, not the page", got.Total, made)
+	}
+	if want := uint64(made * 10); got.Sum != want {
+		t.Errorf("sum = %d, want %d — sum must cover every withdrawal", got.Sum, want)
+	}
+	if got.Returned != len(got.Redemptions) {
+		t.Errorf("returned = %d but %d entries came back", got.Returned, len(got.Redemptions))
+	}
+	if !got.Truncated {
+		t.Error("the response does not say the list is only a page")
+	}
+	if got.Note == "" {
+		t.Error("truncated with no note saying what to reconcile against")
+	}
+	// Newest first, so the most recent withdrawal is visible even when the
+	// oldest are not — that is what makes "did mine land" answerable.
+	if len(got.Redemptions) == 0 || got.Redemptions[0].Reference != "inv-03" {
+		t.Errorf("newest entry is %+v, want inv-03", got.Redemptions)
+	}
+
+	// And an untruncated answer must not claim to be one.
+	_, body = getJSON(t, srv.URL+"/agents/"+agent.AID()+"/redemptions")
+	var full struct {
+		Truncated bool `json:"truncated"`
+		Total     int  `json:"total"`
+		Returned  int  `json:"returned"`
+	}
+	if err := json.Unmarshal(body, &full); err != nil {
+		t.Fatal(err)
+	}
+	if full.Truncated {
+		t.Errorf("a complete list (%d of %d) reported itself truncated", full.Returned, full.Total)
 	}
 }
