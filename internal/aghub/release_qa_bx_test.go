@@ -2,6 +2,7 @@ package aghub_test
 
 import (
 	"encoding/json"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // rfc3339Ago renders a timestamp d in the past the way the hub stores one.
@@ -188,5 +190,114 @@ func TestCardAdmissionBoundsTheCapabilityList(t *testing.T) {
 	})
 	if err := st.AdmitCard(c.AID(), long, c.KEL()); err == nil {
 		t.Fatal("a card with a 100000-byte capability id was admitted")
+	}
+}
+
+// The landing figure and the directory have to be talking about the same
+// set. GET /agents began merging peer-learned entries and Stats did not,
+// so the hub's own two answers to "how many agents are here" differed by
+// exactly the federated ones. Found by scripts/prodtest.sh against the
+// live hub: /stats said 7 while /agents listed 8.
+//
+// The fix reports them separately rather than adding them together — a
+// peer-learned agent is not registered here, and one number covering both
+// would claim a reach this hub does not have. What must hold is that the
+// two numbers together account for the directory.
+//
+// The federated entry is real, not assumed: an earlier version of this
+// test used a hub with no peers, so the federated count was zero either
+// way and removing the fix left it green.
+func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
+	// A hub that will learn one agent from a peer.
+	home := newFedHub(t)
+	remote, _ := identity.Incept()
+	federate(t, home, remote, "Remote Provider", []string{"work.remote"})
+	cards, _, err := home.store.CardsSince(0, 100, testHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("setup: %d cards on the stream, want 1", len(cards))
+	}
+
+	// The hub under test: two local providers, one pure requester that
+	// stays unlisted, plus the card learned from the peer.
+	//
+	// The federated directory hook has to be installed the way the
+	// federation module installs it in production. Without it both /agents
+	// and /stats simply see no peers, and this test would pass whether or
+	// not the counting is right.
+	store := openPeerStore(t)
+	id, err := hubid.LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetHubKey(id.Ctrl)
+	server := aghub.NewServer(store)
+	server.SetHubAID(id.AID)
+	server.SetFederatedDirectory(store.FederatedAgents)
+	srv := httptest.NewServer(server.Handler())
+	t.Cleanup(srv.Close)
+
+	for _, spec := range []struct {
+		name string
+		caps []string
+	}{{"Local A", []string{"work.a"}}, {"Local B", []string{"work.b"}}, {"Watcher", nil}} {
+		c, _ := identity.Incept()
+		register(t, srv, c, spec.name, spec.caps)
+	}
+	if err := store.AdmitFedCard(homePeerAID, cards[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := getJSON(t, srv.URL+"/agents")
+	if code != 200 {
+		t.Fatalf("agents: %d", code)
+	}
+	var dir struct {
+		Agents []struct {
+			AID     string `json:"aid"`
+			Listed  bool   `json:"listed"`
+			HomeHub string `json:"home_hub"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(body, &dir); err != nil {
+		t.Fatal(err)
+	}
+	listed, fromPeer := 0, 0
+	for _, a := range dir.Agents {
+		if !a.Listed {
+			continue
+		}
+		listed++
+		if a.HomeHub != "" {
+			fromPeer++
+		}
+	}
+	if fromPeer != 1 {
+		t.Fatalf("setup: the directory shows %d peer-learned agents, want 1 — "+
+			"without one this test cannot tell the fix from its absence", fromPeer)
+	}
+
+	code, body = getJSON(t, srv.URL+"/stats")
+	if code != 200 {
+		t.Fatalf("stats: %d", code)
+	}
+	var st struct {
+		Agents    int `json:"agents"`
+		Federated int `json:"federated_agents"`
+	}
+	if err := json.Unmarshal(body, &st); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Agents + st.Federated; got != listed {
+		t.Errorf("/stats accounts for %d listed agents (%d local + %d federated) but /agents lists %d",
+			got, st.Agents, st.Federated, listed)
+	}
+	if st.Agents != 2 {
+		t.Errorf("local listed agents = %d, want 2 (the pure requester is not listed)", st.Agents)
+	}
+	if st.Federated != 1 {
+		t.Errorf("federated = %d, want 1", st.Federated)
 	}
 }
