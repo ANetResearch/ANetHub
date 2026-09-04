@@ -335,6 +335,23 @@ func (s *Server) hStats(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// The peer-learned count goes through the same hook and the same dedupe
+	// hAgents uses, so the two endpoints cannot disagree about the directory
+	// without the merge itself being wrong. Counting it from the store
+	// instead would report agents the directory does not show whenever the
+	// federation module has not installed that hook.
+	local, lerr := s.store.ListAgents("")
+	if lerr == nil {
+		seen := make(map[string]bool, len(local))
+		for _, a := range local {
+			seen[a.AID] = true
+		}
+		for _, a := range s.federatedAgents("") {
+			if !seen[a.AID] && a.Listed && a.Browsable() {
+				st.FederatedAgents++
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, st)
 }
 

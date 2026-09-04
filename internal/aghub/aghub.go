@@ -931,10 +931,21 @@ func (s *Store) RelayEnqueue(toAID, fromAID, kind, interactionID string, payload
 
 // HubStats are the headline metrics shown on the public landing page.
 type HubStats struct {
-	Agents         int     `json:"agents"`          // listed providers (advertise a service)
-	TasksCompleted int     `json:"tasks_completed"` // interactions that reached a delivered result
-	Reviews        int     `json:"reviews"`         // verified reviews (a voluntary subset of completed)
-	AvgRating      float64 `json:"avg_rating"`      // mean rating over all reviews (0 if none)
+	Agents int `json:"agents"` // listed providers registered HERE (advertise a service)
+	// FederatedAgents is how many more the directory shows because a peer
+	// hub published them. Separate from Agents rather than added into it:
+	// the two are different claims — one is "registered with us", the other
+	// is "somebody else told us about this" — and merging them would make
+	// this hub report a reach it does not have.
+	//
+	// It exists because GET /agents started including peer-learned entries
+	// and this count did not, so the landing figure and the directory
+	// disagreed about how many agents there are. Found by scripts/prodtest.sh
+	// against the live hub: /stats said 7, /agents listed 8.
+	FederatedAgents int     `json:"federated_agents"`
+	TasksCompleted  int     `json:"tasks_completed"` // interactions that reached a delivered result
+	Reviews         int     `json:"reviews"`         // verified reviews (a voluntary subset of completed)
+	AvgRating       float64 `json:"avg_rating"`      // mean rating over all reviews (0 if none)
 }
 
 // Stats computes the landing metrics in one pass.

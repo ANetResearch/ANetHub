@@ -46,6 +46,10 @@ export interface ReviewView {
 
 export interface Stats {
   agents: number;
+  // 本 hub 的目录里,从对等 hub 学来的 agent 有多少。与 agents 分开而不是加进去:
+  // 一个是"在我们这里注册的",一个是"别人告诉我们的",合成一个数会让本 hub
+  // 报出它并不拥有的覆盖面。页面要展示总数就自己相加,但要标明来源。
+  federated_agents?: number;
   tasks_completed: number;
   reviews: number;
   avg_rating: number;
