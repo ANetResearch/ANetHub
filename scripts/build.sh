@@ -22,7 +22,18 @@ cd "$(dirname "$0")/.."
 # staleness check below still runs.
 build_webui(){
   if [ "${SKIP_WEBUI:-0}" = 1 ]; then
-    echo "webui: 跳过重建(SKIP_WEBUI=1)"
+    # 跳过重建就意味着没有 dist 可比,所以下面的 cp 与 cmp 都不能走。
+    # 干净克隆里 webui/dist 根本不存在(.gitignore 忽略 dist/),之前这里
+    # 直接落到 cp 上,SKIP_WEBUI=1 在克隆出来的树上必然失败 —— 而"没有
+    # node、没有 docker 网络的机器上做 Go-only 构建"正是它存在的理由。
+    #
+    # 换一个能回答的问题:这次构建有没有动过 webui 源码却不重建。
+    if ! git diff --quiet -- webui 2>/dev/null; then
+      echo "webui: 源码有未提交改动却跳过了重建,嵌入的页面不是它" >&2
+      return 1
+    fi
+    echo "webui: 未重建,嵌入的是本 commit 里的那份(UNVERIFIED: 没有与 dist 比对)"
+    return 0
   elif command -v docker >/dev/null 2>&1; then
     docker run --rm -v "$PWD/webui:/w" -w /w "${NODE_IMAGE:-node:22-alpine}" \
       sh -c "npm run build" >/dev/null 2>&1 \
@@ -42,7 +53,7 @@ build_webui || exit 1
 # The embedded copy must match what was just built. A mismatch here means
 # the copy step failed silently, which is the shape the original problem
 # had.
-if ! cmp -s webui/dist/index.html internal/aghub/web/index.html; then
+if [ "${SKIP_WEBUI:-0}" != 1 ] && ! cmp -s webui/dist/index.html internal/aghub/web/index.html; then
   echo "webui: 嵌入的副本与刚构建的不一致" >&2
   exit 1
 fi
