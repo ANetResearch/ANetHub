@@ -264,6 +264,16 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 	default:
 		return fmt.Errorf("federated A2A card entry in unknown format %q", e.Format)
 	}
+	// A peer's limits are not ours (as for AdmitFedCard): nothing larger
+	// than a registration here could carry is decoded or stored. The key
+	// set is advisory and is dropped; the card is refused.
+	if len(e.KEL) > maxRegisterBody {
+		return fmt.Errorf("federated A2A card refused: kel is %d bytes, at most %d are accepted",
+			len(e.KEL), maxRegisterBody)
+	}
+	if len(e.Keys) > maxRegisterBody {
+		e.Keys = nil
+	}
 	kel, err := identity.UnmarshalKEL(e.KEL)
 	if err != nil {
 		return fmt.Errorf("federated A2A card refused: kel malformed: %w", err)

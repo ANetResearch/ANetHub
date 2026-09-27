@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -173,7 +174,11 @@ func (s *Service) syncA2ACards(ctx context.Context, full bool) (admitted, refuse
 				continue
 			}
 			view := FedA2ACardView{Format: e.Format, Card: e.Card, Home: e.Home, FedSeq: e.FedSeq}
-			if view.Home == "" {
+			if !hubHomeURL(view.Home) {
+				// As on v1, the peer's own endpoint is the honest
+				// fallback for a home it does not name; also for one
+				// that is not a hub URL, since the home is served as
+				// homeHub wherever the card has no relay interface.
 				view.Home = p.Endpoint
 			}
 			if e.KEL != "" {
@@ -217,6 +222,19 @@ func (s *Service) syncA2ACards(ctx context.Context, full bool) (admitted, refuse
 		}
 	}
 	return admitted, refused
+}
+
+// maxHomeURL bounds the home an entry may name.
+const maxHomeURL = 2048
+
+// hubHomeURL reports whether an entry's home is usable as a hub URL: an
+// absolute http(s) URL with a host, no credentials, of bounded length.
+func hubHomeURL(s string) bool {
+	if s == "" || len(s) > maxHomeURL {
+		return false
+	}
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && u.User == nil
 }
 
 // noteA2AStream logs a peer's answer to /fed/v2/cards when it differs

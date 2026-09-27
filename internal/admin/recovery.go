@@ -193,6 +193,11 @@ func PruneAgentsExcept(hubDataDir string, keep []string) (before, after, removed
 		return before, before, 0, err
 	}
 	defer tx.Rollback()
+	// Peers that learned a pruned agent's A2A card are told, as for
+	// DeleteAgent.
+	if err := withdrawA2ACards(tx, `a.aid NOT IN (`+joinComma(ph)+`)`, args...); err != nil {
+		return before, before, 0, err
+	}
 	q := `DELETE FROM agent WHERE aid NOT IN (` + joinComma(ph) + `)`
 	res, err := tx.Exec(q, args...)
 	if err != nil {

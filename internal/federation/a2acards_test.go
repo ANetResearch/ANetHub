@@ -194,3 +194,49 @@ func TestTheA2ACardPageIsBoundedByBytes(t *testing.T) {
 		t.Fatalf("cursor %d, last entry %d", page.Cursor, page.Cards[n-1].FedSeq)
 	}
 }
+
+// An entry's home is taken only when it is an absolute http(s) URL with a
+// host, no credentials and a bounded length; any other home, like none,
+// is replaced by the peer's own endpoint. The home is served as homeHub
+// wherever the card names no relay interface, so it must be a hub URL.
+func TestAnA2ACardEntrysHomeMustBeAHubURL(t *testing.T) {
+	homes := []string{
+		"https://hub-a.example",
+		"",
+		"javascript:alert(1)",
+		"https://user:pw@hub-a.example",
+		"https://hub-a.example/" + strings.Repeat("a", maxHomeURL),
+		"/relative",
+	}
+	var entries []FedA2ACardEntry
+	for i, h := range homes {
+		entries = append(entries, FedA2ACardEntry{Format: FormatA2ACard, Card: json.RawMessage(`{}`),
+			KEL: base64.StdEncoding.EncodeToString([]byte("kel")), Home: h, FedSeq: int64(i + 1)})
+	}
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/fed/v2/cards" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(FedA2ACardPage{Cursor: int64(len(entries)), Cards: entries})
+	}))
+	defer peer.Close()
+	sink := &fakeDirectory{}
+	b := newDiscoveryService(t, filepath.Join(t.TempDir(), "b"), Config{
+		Discovery: "allowlist", Home: "https://hub-b.example",
+		Peers: []Peer{{AID: "did:anet:a", Endpoint: peer.URL}},
+	}, sink)
+	b.SyncOnce(context.Background())
+	if len(sink.gotA2A) != len(homes) {
+		t.Fatalf("admitted %d entries, want %d", len(sink.gotA2A), len(homes))
+	}
+	for i, got := range sink.gotA2A {
+		want := peer.URL
+		if i == 0 {
+			want = homes[0]
+		}
+		if got.Home != want {
+			t.Errorf("entry with home %.40q: handed over with home %.40q, want %q", homes[i], got.Home, want)
+		}
+	}
+}
