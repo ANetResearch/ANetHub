@@ -1,3 +1,6 @@
+# built binaries (never track; scripts/build.sh and the joint scripts build their own)
+/anet-hub
+/anet-hub-admin
 bin/
 dist/
 *.db

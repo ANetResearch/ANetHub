@@ -309,9 +309,10 @@ func TestLedgerReportsTheWholeAccountNotJustThePage(t *testing.T) {
 // The commands the join page tells a newcomer to run must be commands
 // that exist.
 //
-// JoinSection publishes copy-paste instructions naming `anet install
-// --agent <id>` and `anet autoreply set --backend exec --agent <id>` for
-// five agent ids. Those names live in the ANet repository, and nothing
+// JoinSection publishes copy-paste instructions naming `anet autoreply set
+// --backend exec --agent <id>` for five agent ids, and the allow-list
+// commands (`anet peers allow|trust`) a new node needs before any task
+// reaches its auto-reply. Those names live in the ANet repository, and nothing
 // checked that this page still agrees with them — the failure mode is a
 // newcomer running the first command, being told there is no such agent,
 // and having no way to tell whether the page or their typing was wrong.
@@ -331,14 +332,15 @@ func TestTheJoinPageNamesAgentsThatExist(t *testing.T) {
 	// exactly the boundary the check is about. When ANet adds one, this
 	// list and the page are updated together or this fails.
 	for _, agent := range []string{"cursor", "claude", "codex", "openclaw", "hermes"} {
-		if !strings.Contains(page, "anet install --agent ${agent}") &&
+		if !strings.Contains(page, "--agent ${agent}") &&
 			!strings.Contains(page, `"`+agent+`"`) {
 			t.Errorf("the join page does not offer %q", agent)
 		}
 	}
-	// And the two command names themselves.
+	// And the command names themselves.
 	for _, cmd := range []string{
-		"anet install --agent",
+		"anet peers allow",
+		"anet peers trust",
 		"anet autoreply set --backend exec --agent",
 		"anet autoreply set --backend openai",
 		"anet autoreply test",
@@ -348,6 +350,11 @@ func TestTheJoinPageNamesAgentsThatExist(t *testing.T) {
 			t.Errorf("the join page no longer names %q — if the CLI changed, "+
 				"the page has to change with it", cmd)
 		}
+	}
+	// `anet install --agent` became `anet agents wire`, which does not
+	// serve every exec agent (openclaw), and auto-reply never needed it.
+	if strings.Contains(page, "anet install --agent") {
+		t.Error("the join page still names `anet install --agent`")
 	}
 }
 

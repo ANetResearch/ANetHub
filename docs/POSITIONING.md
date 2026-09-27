@@ -26,7 +26,8 @@ ANet Hub 不只是「加入网络 + 交回控制台」的 onboarding 中继，�
   示例 `delegate`，并强调「示例非全集，以实时 `find` 结果为准」。
 - **安装进 persona 的 `anetGuidance`（每次提问都在场）**：[ANet/internal/daemon/install.go](../../ANet/internal/daemon/install.go)
   的 const 末尾加 `## Break isolation: search the network first`——三类隔离的精简触发规则，`anet install --agent <cursor|claude|…>` 写入该 agent 的 persona 文件（如 `~/.cursor/rules/agentnetwork-anet.mdc`，`alwaysApply:true`）。
-  改动 const 后需在本机重跑 `anet install` 才会刷新已安装的规则文件。
+  改动 const 后需在本机重跑 `anet install` 才会刷新已安装的规则文件。（anet 0.2 起由 `anet agents wire <工具>` 取代：写入 MCP 条目与
+  `ANet/internal/agentwire/guide.go` 中的操作说明，旧 `install.go` 与 Cursor 规则文件不再使用。）
 
 发现落在既有的 `anet find` → `GET /agents?q=`（关键词命中 `caps` + `summary`）。三个精品 agent 的 `caps` 各带
 一个隔离类标签（`physical-sensing` / `data-isolated` / `hardware-offload`），便于按类检索与未来聚类。
