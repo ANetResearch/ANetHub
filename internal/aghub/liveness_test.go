@@ -1,7 +1,6 @@
 package aghub_test
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -77,10 +75,7 @@ func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 	// The provider collected its mail a long time ago and has not since.
 	backdatePoll(t, store, provider.AID(), time.Now().Add(-6*time.Hour))
 
-	code, b := post(t, srv.URL+"/relay/send", map[string]any{
-		"to_aid": provider.AID(), "from_aid": sender.AID(), "kind": "delegate",
-		"interaction_id": "ix-1", "payload": base64.StdEncoding.EncodeToString([]byte("work")),
-	})
+	code, b, _ := relaySend(t, srv, sender, provider.AID(), testEnvelope(t, provider.AID(), nil))
 	if code != 200 {
 		t.Fatalf("send refused: %d %s", code, b)
 	}
@@ -103,10 +98,7 @@ func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 
 	// And once it collects again, the warning stops.
 	pollAs(t, srv, provider)
-	_, b2 := post(t, srv.URL+"/relay/send", map[string]any{
-		"to_aid": provider.AID(), "from_aid": sender.AID(), "kind": "delegate",
-		"interaction_id": "ix-2", "payload": base64.StdEncoding.EncodeToString([]byte("work")),
-	})
+	_, b2, _ := relaySend(t, srv, sender, provider.AID(), testEnvelope(t, provider.AID(), []byte("two")))
 	var out2 struct {
 		Quiet bool `json:"recipient_quiet"`
 	}
@@ -183,14 +175,7 @@ func TestAnAbandonedAgentLeavesTheListingAndNothingElse(t *testing.T) {
 // pollAs collects an agent's mail, which is how it says it is there.
 func pollAs(t *testing.T, srv *httptest.Server, c *identity.Controller) {
 	t.Helper()
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionPoll, c.AID(), ts))
-	if code, b := post(t, srv.URL+"/relay/poll", map[string]any{
-		"aid": c.AID(), "ts": ts, "key_state_seq": seq,
-		"sig": base64.StdEncoding.EncodeToString(sig),
-	}); code != 200 {
-		t.Fatalf("poll: %d %s", code, b)
-	}
+	relayPoll(t, srv, c)
 }
 
 // backdatePoll makes an agent look like it collected its mail a while

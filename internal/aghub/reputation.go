@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
@@ -46,11 +47,15 @@ import (
 // history of a stranger's counterparties, and without them the interlock
 // cannot be checked at all — which would reduce this to trusting the
 // peer, the exact thing the evidence model exists to avoid.
+//
+// It carries no interaction content (A2A-DESIGN §3.9, §9). Earlier
+// versions also sent request_doc and deliverable, the raw request and
+// result bytes, and published them to anyone who read this stream. A
+// receiving hub decodes into this type, so those fields, if a peer still
+// sends them, are dropped at decoding and never verified or stored.
 type FedReview struct {
-	Receipt     string `json:"receipt"`     // base64 evidence.Receipt
-	Review      string `json:"review"`      // base64 evidence.Review
-	RequestDoc  string `json:"request_doc"` // base64, hashes to receipt.RequestCID
-	Deliverable string `json:"deliverable"` // base64, hashes to receipt.ResultCID
+	Receipt     string `json:"receipt"` // base64 evidence.Receipt
+	Review      string `json:"review"`  // base64 evidence.Review
 	ProviderKEL string `json:"provider_kel"`
 	ReviewerKEL string `json:"reviewer_kel"`
 	FedSeq      int64  `json:"fed_seq"`
@@ -84,9 +89,7 @@ func (s *Store) ReviewsSince(cursor int64, limit int) ([]FedReview, int64, error
 	// foreign one already did, at its home hub, by federating the card
 	// that is how we know it exists.
 	rows, err := s.db.Query(
-		`SELECT r.rowid, r.interaction_id, r.subject_aid, r.reviewer_aid,
-		        r.rating, r.comment, r.receipt_cid, r.created_at,
-		        r.goal, r.deliverable, r.request_cid, r.result_cid, r.completed_at,
+		`SELECT r.rowid, r.interaction_id,
 		        COALESCE(p.kel, f.kel), q.kel
 		   FROM review r
 		   JOIN agent q ON q.aid = r.reviewer_aid
@@ -104,16 +107,11 @@ func (s *Store) ReviewsSince(cursor int64, limit int) ([]FedReview, int64, error
 	next := cursor
 	for rows.Next() {
 		var (
-			rowid                                  int64
-			ixID, subject, reviewer, comment, rcid string
-			goal, deliverable, reqCID, resCID      string
-			rating                                 int
-			createdAt, completedAt                 uint64
-			provKEL, revKEL                        []byte
+			rowid           int64
+			ixID            string
+			provKEL, revKEL []byte
 		)
-		if err := rows.Scan(&rowid, &ixID, &subject, &reviewer, &rating, &comment, &rcid,
-			&createdAt, &goal, &deliverable, &reqCID, &resCID, &completedAt,
-			&provKEL, &revKEL); err != nil {
+		if err := rows.Scan(&rowid, &ixID, &provKEL, &revKEL); err != nil {
 			return nil, cursor, err
 		}
 		next = rowid
@@ -133,18 +131,18 @@ func (s *Store) ReviewsSince(cursor int64, limit int) ([]FedReview, int64, error
 	return out, next, rows.Err()
 }
 
-// reviewBlob reads back the exact bytes that were verified on upload.
+// reviewBlob reads back the exact signed objects that were verified on
+// upload.
 //
 // Kept because a rating is only as good as the objects behind it, and a
 // hub that stored the conclusion and threw away the evidence could not
 // pass the evidence on — it could only pass on its own say-so, which is
 // what federating reputation must not be.
 func (s *Store) reviewBlob(interactionID string) (*FedReview, error) {
-	var receipt, review, doc, deliv []byte
+	var receipt, review []byte
 	err := s.db.QueryRow(
-		`SELECT receipt_raw, review_raw, request_doc_raw, deliverable_raw
-		   FROM review_blob WHERE interaction_id=?`, interactionID).
-		Scan(&receipt, &review, &doc, &deliv)
+		`SELECT receipt_raw, review_raw FROM review_blob WHERE interaction_id=?`, interactionID).
+		Scan(&receipt, &review)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -152,19 +150,18 @@ func (s *Store) reviewBlob(interactionID string) (*FedReview, error) {
 		return nil, err
 	}
 	return &FedReview{
-		Receipt:     base64.StdEncoding.EncodeToString(receipt),
-		Review:      base64.StdEncoding.EncodeToString(review),
-		RequestDoc:  base64.StdEncoding.EncodeToString(doc),
-		Deliverable: base64.StdEncoding.EncodeToString(deliv),
+		Receipt: base64.StdEncoding.EncodeToString(receipt),
+		Review:  base64.StdEncoding.EncodeToString(review),
 	}, nil
 }
 
-// PutReviewBlob keeps the verified bytes alongside the parsed row.
-func (s *Store) PutReviewBlob(interactionID string, receipt, review, doc, deliv []byte) error {
+// PutReviewBlob keeps the verified receipt and review bytes alongside the
+// parsed row.
+func (s *Store) PutReviewBlob(interactionID string, receipt, review []byte) error {
 	_, err := s.db.Exec(
-		`INSERT INTO review_blob(interaction_id, receipt_raw, review_raw, request_doc_raw, deliverable_raw)
-		 VALUES(?,?,?,?,?) ON CONFLICT(interaction_id) DO NOTHING`,
-		interactionID, receipt, review, doc, deliv)
+		`INSERT INTO review_blob(interaction_id, receipt_raw, review_raw)
+		 VALUES(?,?,?) ON CONFLICT(interaction_id) DO NOTHING`,
+		interactionID, receipt, review)
 	return err
 }
 
@@ -174,6 +171,13 @@ func (s *Store) PutReviewBlob(interactionID string, receipt, review, doc, deliv 
 // "The same way" is load-bearing. A federated review admitted on weaker
 // terms than a local one would make federation the way to get a rating in
 // without evidence, and every attacker would use exactly that door.
+//
+// Content binding is not checked here, as it is not checked on a local
+// upload: the hub holds no content. VerifyInterlock is called with nil for
+// both content arguments. A non-nil empty slice would not do: VerifyInterlock
+// checks the binding for any non-nil argument, and the hash of zero bytes
+// matches no receipt. That is how federated reviews were refused before
+// this change whenever a peer sent the content fields empty (R09 §5 item 9).
 func (s *Store) AdmitFedReview(peerAID string, fr FedReview) error {
 	dec := func(s string) ([]byte, error) { return base64.StdEncoding.DecodeString(s) }
 	rcBytes, err := dec(fr.Receipt)
@@ -183,14 +187,6 @@ func (s *Store) AdmitFedReview(peerAID string, fr FedReview) error {
 	rvBytes, err := dec(fr.Review)
 	if err != nil {
 		return fmt.Errorf("review not base64: %w", err)
-	}
-	docBytes, err := dec(fr.RequestDoc)
-	if err != nil {
-		return fmt.Errorf("request doc not base64: %w", err)
-	}
-	delivBytes, err := dec(fr.Deliverable)
-	if err != nil {
-		return fmt.Errorf("deliverable not base64: %w", err)
 	}
 	provKELBytes, err := dec(fr.ProviderKEL)
 	if err != nil {
@@ -226,7 +222,10 @@ func (s *Store) AdmitFedReview(peerAID string, fr FedReview) error {
 	if err := kelMatches(revKEL, rv.ReviewerAID); err != nil {
 		return fmt.Errorf("reviewer key history: %w", err)
 	}
-	if err := evidence.VerifyInterlock(rc, rv, docBytes, delivBytes, provKEL, revKEL); err != nil {
+	if err := checkReviewComment(rv.Comment); err != nil {
+		return fmt.Errorf("federated review refused: %w", err)
+	}
+	if err := evidence.VerifyInterlock(rc, rv, nil, nil, provKEL, revKEL); err != nil {
 		return fmt.Errorf("federated review refused: %w", err)
 	}
 	// A review of one of OUR agents, arriving from a peer, is kept — and
@@ -251,6 +250,16 @@ func (s *Store) AdmitFedReview(peerAID string, fr FedReview) error {
 		rv.InteractionID, rv.SubjectAID, rv.ReviewerAID, rv.Rating, rv.Comment,
 		rv.ReceiptCID, peerAID, rv.CreatedAt, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// checkReviewComment refuses a comment longer than MaxReviewCommentRunes.
+// Applied to local uploads and federated reviews alike.
+func checkReviewComment(comment string) error {
+	if n := utf8.RuneCountInString(comment); n > MaxReviewCommentRunes {
+		return fmt.Errorf("review comment is %d characters, at most %d are accepted",
+			n, MaxReviewCommentRunes)
+	}
+	return nil
 }
 
 // kelMatches checks a key history actually belongs to the AID claimed.

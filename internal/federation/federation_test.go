@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/seal"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,18 +22,23 @@ import (
 )
 
 // fakeLocal is hub B's mailbox. It stands in for the hub kernel behind the
-// LocalDelivery seam, so it has to offer the same three things the kernel
-// does and not just the happy path: membership that changes while
-// federation is running (agents register and deregister), an Enqueue that
-// can fail, and safety under concurrent inbound forwards. A fake pinned to
-// one immutable agent hides every ordering defect that depends on an AID
-// appearing after a forward for it was already refused.
+// LocalDelivery seam, so it has to offer the same things the kernel does
+// and not just the happy path: membership that changes while federation
+// is running (agents register and deregister), the kernel's refusals (a
+// payload that is not a sealed envelope for the destination is
+// ErrBadEnvelope, a full mailbox is ErrMailboxFull), an Enqueue that can
+// fail for other reasons, and safety under concurrent inbound forwards. A
+// fake pinned to one immutable agent hides every ordering defect that
+// depends on an AID appearing after a forward for it was already refused.
 type fakeLocal struct {
 	mu       sync.Mutex
 	agents   map[string]bool
-	enqueued []string // payloads received
+	enqueued []string // envelopes received
+	// quota, when positive, is how many envelopes the mailbox holds
+	// before Enqueue answers ErrMailboxFull, as the kernel's quota does.
+	quota int
 	// enqueueErr, when set, makes Enqueue fail — the kernel's mailbox
-	// write can fail (disk, quota), and the caller has to unwind.
+	// write can fail (disk), and the caller has to unwind.
 	enqueueErr error
 	// hold, when non-nil, blocks the first Enqueue until it is closed and
 	// reports entry on entered. Lets a test hold one forward inside the
@@ -86,7 +93,7 @@ func (f *fakeLocal) HasAgent(aid string) bool {
 	return f.agents[aid]
 }
 
-func (f *fakeLocal) Enqueue(_, _, _, _ string, payload []byte) (int64, error) {
+func (f *fakeLocal) Enqueue(to string, envelope []byte) (int64, error) {
 	f.mu.Lock()
 	hold, entered := f.hold, f.entered
 	f.hold, f.entered = nil, nil
@@ -100,15 +107,69 @@ func (f *fakeLocal) Enqueue(_, _, _, _ string, payload []byte) (int64, error) {
 	if f.enqueueErr != nil {
 		return 0, f.enqueueErr
 	}
-	f.enqueued = append(f.enqueued, string(payload))
+	outer, err := seal.ParseOuter(envelope)
+	if err != nil || outer.To != to {
+		return 0, fmt.Errorf("%w: %v", ErrBadEnvelope, err)
+	}
+	if f.quota > 0 && len(f.enqueued) >= f.quota {
+		return 0, fmt.Errorf("%w: %d queued", ErrMailboxFull, len(f.enqueued))
+	}
+	f.enqueued = append(f.enqueued, string(envelope))
 	return int64(len(f.enqueued)), nil
+}
+
+// setQuota bounds the fake mailbox.
+func (f *fakeLocal) setQuota(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.quota = n
+}
+
+// fedEnv is a structurally valid sealed envelope for "to". Hubs parse
+// only the outer layer, so the ciphertext need not be real here.
+func fedEnv(t *testing.T, to, ct string) []byte {
+	t.Helper()
+	env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
+		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct)}
+	b, err := env.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 type rig struct {
 	a, b     *Service
 	aid, bid *hubid.Identity
 	bLocal   *fakeLocal
+	bKeys    *fakeKeys
 	bSrv     *httptest.Server
+	// forwards holds the raw bodies B received on /fed/v1/forward, so a
+	// test can inspect exactly what crossed between the hubs.
+	mu       sync.Mutex
+	forwards [][]byte
+}
+
+// fakeKeys is B's key source. It answers like the kernel's: a key set and
+// KEL for a registered AID that published one, ErrNoKeys for any other
+// AID, and a storage error when told to fail.
+type fakeKeys struct {
+	mu   sync.Mutex
+	sets map[string][2][]byte
+	err  error
+}
+
+func (k *fakeKeys) LocalKeys(aid string) ([]byte, []byte, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.err != nil {
+		return nil, nil, k.err
+	}
+	v, ok := k.sets[aid]
+	if !ok {
+		return nil, nil, ErrNoKeys
+	}
+	return v[0], v[1], nil
 }
 
 // newRig builds two federated hubs: A (sender) peers with B (receiver).
@@ -129,7 +190,16 @@ func newRig(t *testing.T) *rig {
 	var bSvc *Service
 	muxB := http.NewServeMux()
 	muxB.Handle("/hub/identity", idB.Handler())
+	r0 := &rig{}
 	muxB.HandleFunc("/fed/v1/forward", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r0.mu.Lock()
+		r0.forwards = append(r0.forwards, body)
+		r0.mu.Unlock()
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		bSvc.Handler().ServeHTTP(w, r)
+	})
+	muxB.HandleFunc("/fed/v2/", func(w http.ResponseWriter, r *http.Request) {
 		bSvc.Handler().ServeHTTP(w, r)
 	})
 	bSrv := httptest.NewServer(muxB)
@@ -150,24 +220,29 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = bSvc.Close() })
-	return &rig{a: a, b: bSvc, aid: idA, bid: idB, bLocal: bLocal, bSrv: bSrv}
+	bKeys := &fakeKeys{sets: map[string][2][]byte{}}
+	bSvc.SetKeySource(bKeys)
+	r0.a, r0.b, r0.aid, r0.bid, r0.bLocal, r0.bKeys, r0.bSrv = a, bSvc, idA, idB, bLocal, bKeys, bSrv
+	return r0
 }
 
 func TestForwardEndToEnd(t *testing.T) {
 	r := newRig(t)
-	ok, peer, err := r.a.TryForward("aid:bob", "aid:alice", "message", "i-1", []byte("hello bob"))
+	env := fedEnv(t, "aid:bob", "hello bob")
+	ok, peer, err := r.a.TryForward("aid:bob", env)
 	if err != nil || !ok || peer != r.bid.AID {
 		t.Fatalf("forward failed: ok=%v peer=%s err=%v", ok, peer, err)
 	}
-	if len(r.bLocal.enqueued) != 1 || r.bLocal.enqueued[0] != "hello bob" {
-		t.Fatalf("payload not enqueued on B: %v", r.bLocal.enqueued)
+	if len(r.bLocal.enqueued) != 1 || r.bLocal.enqueued[0] != string(env) {
+		t.Fatalf("envelope not enqueued on B unchanged: %v", r.bLocal.enqueued)
 	}
 }
 
 func TestIdempotentDuplicate(t *testing.T) {
 	r := newRig(t)
+	env := fedEnv(t, "aid:bob", "same bytes")
 	for i := 0; i < 2; i++ {
-		if ok, _, err := r.a.TryForward("aid:bob", "aid:alice", "message", "i-1", []byte("same bytes")); !ok || err != nil {
+		if ok, _, err := r.a.TryForward("aid:bob", env); !ok || err != nil {
 			t.Fatalf("attempt %d: %v %v", i, ok, err)
 		}
 	}
@@ -178,7 +253,7 @@ func TestIdempotentDuplicate(t *testing.T) {
 
 func TestUnknownDestination(t *testing.T) {
 	r := newRig(t)
-	ok, _, err := r.a.TryForward("aid:nobody", "aid:alice", "message", "", []byte("x"))
+	ok, _, err := r.a.TryForward("aid:nobody", fedEnv(t, "aid:nobody", "x"))
 	if ok {
 		t.Fatal("unknown destination must not be accepted")
 	}
@@ -199,15 +274,26 @@ func postRaw(t *testing.T, r *rig, env Envelope) (int, map[string]string) {
 	return resp.StatusCode, out
 }
 
+// signedEnvelope builds a forward envelope from A to B, lets mutate change
+// it (and return a different payload), and signs the result. A payload
+// the mutation replaced is carried in Payload, and its CID is recomputed
+// unless the mutation set PayloadCID itself.
 func signedEnvelope(t *testing.T, r *rig, mutate func(*Envelope, []byte) []byte) Envelope {
 	t.Helper()
-	payload := []byte("payload-bytes")
+	payload := fedEnv(t, "aid:bob", "payload-bytes")
 	cid, _ := sumRawForTest(payload)
-	env := Envelope{V: 1, OriginHubAID: r.aid.AID, DestAID: "aid:bob", FromAID: "aid:alice",
-		Kind: "message", Payload: base64.StdEncoding.EncodeToString(payload), PayloadCID: cid,
+	env := Envelope{V: ForwardVersion, OriginHubAID: r.aid.AID, DestAID: "aid:bob",
+		Payload: base64.StdEncoding.EncodeToString(payload), PayloadCID: cid,
 		Hop: 1, SeenHubs: []string{r.aid.AID}, TS: nowMillisForTest()}
 	if mutate != nil {
-		payload = mutate(&env, payload)
+		np := mutate(&env, payload)
+		if !bytes.Equal(np, payload) {
+			env.Payload = base64.StdEncoding.EncodeToString(np)
+			if env.PayloadCID == cid {
+				env.PayloadCID, _ = sumRawForTest(np)
+			}
+		}
+		payload = np
 	}
 	pre, err := env.preimage(payload)
 	if err != nil {
@@ -370,7 +456,7 @@ type storedReview struct {
 
 type storedCard struct {
 	peer, home string
-	card       []byte
+	card, keys []byte
 }
 
 func (f *fakeDirectory) CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error) {
@@ -403,7 +489,7 @@ func (f *fakeDirectory) AdmitFedReview(peerAID string, raw json.RawMessage) erro
 	return nil
 }
 
-func (f *fakeDirectory) AdmitFedCard(peerAID string, card, kel []byte, home string) error {
+func (f *fakeDirectory) AdmitFedCard(peerAID string, card, kel, keys []byte, home string) error {
 	var c struct {
 		SubjectDID string `json:"subject_did"`
 	}
@@ -414,7 +500,7 @@ func (f *fakeDirectory) AdmitFedCard(peerAID string, card, kel []byte, home stri
 	if f.rejectForever[c.SubjectDID] {
 		return fmt.Errorf("card is malformed")
 	}
-	f.got = append(f.got, storedCard{peer: peerAID, home: home, card: card})
+	f.got = append(f.got, storedCard{peer: peerAID, home: home, card: card, keys: keys})
 	return nil
 }
 

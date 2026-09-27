@@ -18,7 +18,6 @@ function agent(over: Partial<AgentView> = {}): AgentView {
     name: "Worker",
     caps: ["text.digest"],
     listed: true,
-    guest_quota: 0,
     avg_rating: 0,
     review_count: 0,
     registered_at: "2026-08-23T00:00:00Z",
@@ -82,9 +81,12 @@ describe("the parts that were already on the card", () => {
     expect(render(agent())).not.toContain("4.5");
   });
 
-  it("offers a guest trial only when the agent allows it", () => {
-    expect(render(agent({ guest_quota: 5 }))).toContain("可试聊 5 条");
-    expect(render(agent({ guest_quota: 0 }))).not.toContain("可试聊");
+  // There is no guest mode: the hub no longer relays a visitor's messages,
+  // so the card must not offer a trial chat for any agent.
+  it("offers no guest trial", () => {
+    const html = render(agent({ review_count: 1, avg_rating: 5 }));
+    expect(html).not.toContain("可试聊");
+    expect(html).not.toContain("试玩");
   });
 
   it("survives caps being null, which the hub sends for an agent with none", () => {

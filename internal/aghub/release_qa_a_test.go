@@ -2,7 +2,6 @@ package aghub_test
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
@@ -12,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
@@ -58,14 +56,9 @@ func captureLog(t *testing.T) *bytes.Buffer {
 func registerWithProfile(t *testing.T, srv *httptest.Server, c *identity.Controller,
 	name, readme string) (int, []byte) {
 	t.Helper()
-	kelB, _ := identity.MarshalKEL(c.KEL())
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionRegister, c.AID(), ts))
-	return post(t, srv.URL+"/register", map[string]any{
-		"aid": c.AID(), "name": name, "caps": []string{}, "readme": readme,
-		"kel": base64.StdEncoding.EncodeToString(kelB),
-		"ts":  ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig),
-	})
+	body := registerBody(t, c, name, []string{})
+	body["readme"] = readme
+	return signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
 }
 
 // getAgents runs one directory query and returns the agents in the order
@@ -232,10 +225,10 @@ func TestTheStoreRefusesAnUnboundedCapabilitySet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutAgent(c.AID(), "Greedy", capsOfLength(qaACapIDLimit+1, 1), 5, kel); err == nil {
+	if err := store.PutAgent(c.AID(), "Greedy", capsOfLength(qaACapIDLimit+1, 1), kel); err == nil {
 		t.Error("the store accepted an overlong capability id")
 	}
-	if err := store.PutAgent(c.AID(), "Greedy", capsOfLength(32, qaACapCount+1), 5, kel); err == nil {
+	if err := store.PutAgent(c.AID(), "Greedy", capsOfLength(32, qaACapCount+1), kel); err == nil {
 		t.Error("the store accepted an oversized capability set")
 	}
 	if store.KnowsAgent(c.AID()) {

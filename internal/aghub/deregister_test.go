@@ -18,10 +18,8 @@ import (
 
 func leave(t *testing.T, srv *httptest.Server, c *identity.Controller) (int, []byte) {
 	t.Helper()
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionProfile, c.AID(), ts))
-	return post(t, srv.URL+"/agents/"+c.AID()+"/deregister", map[string]any{
-		"ts": ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig)})
+	return signedDo(t, srv, c, relayauth.ActionDeregister, http.MethodPost,
+		"/agents/"+c.AID()+"/deregister", nil)
 }
 
 // An agent that moved to another hub must be able to stop being
@@ -90,14 +88,20 @@ func TestOnlyTheAgentCanDeregisterItself(t *testing.T) {
 	register(t, srv, agent, "Agent", []string{"work.do"})
 	register(t, srv, thief, "Thief", nil)
 
-	// A real signature over a real challenge — the thief's own. It names
+	// A real signature over a real request — the thief's own. It names
 	// the thief, so it cannot authorise anything about the agent.
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := thief.Sign(relayauth.Preimage(relayauth.ActionProfile, thief.AID(), ts))
-	code, _ := post(t, srv.URL+"/agents/"+agent.AID()+"/deregister", map[string]any{
-		"ts": ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig)})
+	code, _ := signedDo(t, srv, thief, relayauth.ActionDeregister, http.MethodPost,
+		"/agents/"+agent.AID()+"/deregister", nil)
 	if code == 200 {
 		t.Fatal("one agent deregistered another")
+	}
+	// Nor can it claim to be the agent: the signature does not verify
+	// under the agent's KEL.
+	req := newRequest(t, srv, http.MethodPost, "/agents/"+agent.AID()+"/deregister", nil)
+	signV2(t, req, thief, relayauth.ActionDeregister, hubAIDOf(t, srv), nil, time.Now())
+	req.Header.Set(relayauth.HeaderAID, agent.AID())
+	if code, _, _ := send(t, req); code == 200 {
+		t.Fatal("a signature by another key deregistered the agent")
 	}
 	if found := agentsServing(t, srv, "work.do"); found != 1 {
 		t.Error("the victim was removed from the directory")
@@ -179,10 +183,7 @@ func TestLeavingWarnsAboutMailNobodyWillCollect(t *testing.T) {
 	provider, sender := twoAgents(t)
 	register(t, srv, provider, "Provider", []string{"work.do"})
 	register(t, srv, sender, "Sender", nil)
-	if code, b := post(t, srv.URL+"/relay/send", map[string]any{
-		"to_aid": provider.AID(), "from_aid": sender.AID(), "kind": "delegate",
-		"interaction_id": "ix-orphan", "payload": base64.StdEncoding.EncodeToString([]byte("work")),
-	}); code != 200 {
+	if code, b, _ := relaySend(t, srv, sender, provider.AID(), testEnvelope(t, provider.AID(), nil)); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
 	}
 	code, b := leave(t, srv, provider)
@@ -206,11 +207,10 @@ func TestLeavingWarnsAboutMailNobodyWillCollect(t *testing.T) {
 
 // The undelivered count means "still waiting", not "ever received".
 //
-// It was SELECT COUNT(*) FROM relay_message WHERE to_aid=?, with no test
-// on delivered_at, so it returned the agent's whole lifetime of incoming
-// mail. The number is the only warning a departing agent gets about work
-// somebody is still waiting on, and it grew with how long the agent had
-// been here rather than with what it was abandoning.
+// A wire-1 version counted every row addressed to the agent while acked
+// rows were kept, so it returned the agent's whole lifetime of incoming
+// mail. Since wire 2 an ack deletes the row, and the count of rows is the
+// count of messages still waiting; this test pins that.
 func TestLeavingCountsOnlyTheMailStillWaiting(t *testing.T) {
 	srv := newHub(t)
 	provider, sender := twoAgents(t)
@@ -218,39 +218,21 @@ func TestLeavingCountsOnlyTheMailStillWaiting(t *testing.T) {
 	register(t, srv, sender, "Sender", nil)
 
 	for i := 0; i < 3; i++ {
-		if code, b := post(t, srv.URL+"/relay/send", map[string]any{
-			"to_aid": provider.AID(), "from_aid": sender.AID(), "kind": "delegate",
-			"interaction_id": fmt.Sprintf("ix-%d", i),
-			"payload":        base64.StdEncoding.EncodeToString([]byte("work")),
-		}); code != 200 {
+		env := testEnvelope(t, provider.AID(), []byte(fmt.Sprintf("work-%d", i)))
+		if code, b, _ := relaySend(t, srv, sender, provider.AID(), env); code != 200 {
 			t.Fatalf("send %d: %d %s", i, code, b)
 		}
 	}
 
 	// Two of the three are collected and acknowledged, which is what
-	// delivery means on this relay: the ack is what writes delivered_at.
-	code, b := post(t, srv.URL+"/relay/poll", signedRelay(t, "poll", provider))
-	if code != 200 {
-		t.Fatalf("poll: %d %s", code, b)
+	// delivery means on this relay: the ack deletes the row.
+	p := relayPoll(t, srv, provider)
+	if len(p.Messages) != 3 {
+		t.Fatalf("setup: polled %d messages, want 3", len(p.Messages))
 	}
-	var polled struct {
-		Messages []struct {
-			ID int64 `json:"id"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(b, &polled); err != nil {
-		t.Fatal(err)
-	}
-	if len(polled.Messages) != 3 {
-		t.Fatalf("setup: polled %d messages, want 3", len(polled.Messages))
-	}
-	ack := signedRelay(t, "ack", provider)
-	ack["ids"] = []int64{polled.Messages[0].ID, polled.Messages[1].ID}
-	if code, b := post(t, srv.URL+"/relay/ack", ack); code != 200 {
-		t.Fatalf("ack: %d %s", code, b)
-	}
+	relayAck(t, srv, provider, p.Messages[0].ID, p.Messages[1].ID)
 
-	code, b = leave(t, srv, provider)
+	code, b := leave(t, srv, provider)
 	if code != 200 {
 		t.Fatalf("deregister: %d %s", code, b)
 	}

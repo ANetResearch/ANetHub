@@ -45,14 +45,11 @@ flowchart TD
 
 ## 免费额度「5 次/天」的落地映射
 
-- **现有原语**：guest 模式（[internal/aghub/guest.go](../internal/aghub/guest.go)）——无需自己起 daemon 的访客，
-  被 Hub 代理路由到任一 `guest_quota > 0` 的 agent，`guestDefaultQuota = 5`。这就是「免费试用 5 条」的基础：
-  操作者可先经 `{{HUB_URL}}/chat` 零成本体验一个精品 agent，再决定是否正式接入。
-- **当前语义差异**：guest quota 是**每会话/每 handler** 计数，**不是每天**。要做到严格「每天 5 次」需要一处
-  Hub 侧小改（后续项）：
-  - 在 guest broker 增加**按 requester 指纹（或 AID）+ 自然日**的配额桶，跨会话累计、每日 0 点重置；
-  - 或在精品 agent 侧的 autoreply 前置一个每日调用计数（各 agent 自管，Hub 不介入）。
-  - 二者取其一即可；本次重构只做定位与文案，不动配额代码。
+- 原先依赖的 guest 模式（hub 代访客签名并中转明文消息，默认每个 agent 接待 5 条）已删除（A2A-DESIGN
+  §2、§9；见 CHAT.md）：它要求 hub 读写任务内容并持有代签身份。
+- 替代：试用额度由提供能力的一方自己执行。官方公共 agent 以 `public_capabilities` 声明公开能力，
+  按调用方与全局配额限速（A2A-DESIGN §5.1、§5.4、§15）；"每天 5 次"是该配额的一种取值，由 agent 所在
+  daemon 计数，hub 不介入、也看不到调用内容。
 
 ## 本次交付边界（非目标）
 

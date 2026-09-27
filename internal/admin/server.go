@@ -29,8 +29,6 @@ import (
 type Server struct {
 	store   *Store
 	hub     *HubDB
-	ops     *Ops
-	mon     *MonitorProxy
 	harvest *Harvester
 	vec     *VecClient // v2: semantic capability discovery (nil/disabled → lexical fallback)
 	token   string
@@ -44,12 +42,12 @@ type Server struct {
 }
 
 // NewServer wires the admin surface.
-func NewServer(store *Store, hub *HubDB, ops *Ops, mon *MonitorProxy, hv *Harvester, vec *VecClient, token, basePath string) *Server {
+func NewServer(store *Store, hub *HubDB, hv *Harvester, vec *VecClient, token, basePath string) *Server {
 	if basePath == "" {
 		basePath = "/admin"
 	}
 	return &Server{
-		store: store, hub: hub, ops: ops, mon: mon, harvest: hv, vec: vec,
+		store: store, hub: hub, harvest: hv, vec: vec,
 		token: token, base: strings.TrimRight(basePath, "/"),
 		authFails: newAuthLimiter(authMaxFailures, authWindow),
 		// At most 5 registry deletes per minute — a legitimate operator never bulk-deletes; a scripted
@@ -107,16 +105,16 @@ func (s *Server) Handler() http.Handler {
 	api("GET "+b+"/api/overview", s.hOverview)
 	api("GET "+b+"/api/agents", s.hAgents)
 	api("GET "+b+"/api/agents/{aid}", s.hAgent)
-	api("POST "+b+"/api/agents/{aid}/quota", s.hQuota)
 	api("POST "+b+"/api/agents/{aid}/moderate", s.hModerate)
 	api("DELETE "+b+"/api/agents/{aid}", s.hDeleteAgent)
+	// Official agents are registered here and nothing more: id, aid, hub,
+	// caps (A2A-DESIGN §9 row admin 官方 agent). The routes that ran ops
+	// commands over ssh (/ops), proxied the agent's monitor (/monitor/*,
+	// /insights) and changed its ACL (/acl) are removed; a request to one
+	// of them answers 404 from the mux.
 	api("GET "+b+"/api/official", s.hOfficials)
 	api("POST "+b+"/api/official", s.hPutOfficial)
 	api("DELETE "+b+"/api/official/{id}", s.hDeleteOfficial)
-	api("POST "+b+"/api/official/{id}/ops", s.hRunOp)
-	api("GET "+b+"/api/official/{id}/monitor/{what}", s.hMonitor)
-	api("GET "+b+"/api/official/{id}/insights", s.hInsights)
-	api("POST "+b+"/api/official/{id}/acl", s.hOfficialACL)
 	api("GET "+b+"/api/capabilities", s.hCapabilities)
 	api("GET "+b+"/api/discover", s.hDiscover)
 	api("GET "+b+"/api/vision", s.hVision)
@@ -125,13 +123,23 @@ func (s *Server) Handler() http.Handler {
 	api("GET "+b+"/api/sessions/{source}/{id}", s.hSession)
 	api("POST "+b+"/api/harvest", s.hHarvest)
 	api("GET "+b+"/api/reviews", s.hReviews)
-	api("GET "+b+"/api/tasks", s.hTasks)
 	api("GET "+b+"/api/audit", s.hAudit)
 	// The other half of a reversible delete. Archiving without a way to
 	// read the archive back made "any delete is reversible" true of the
 	// bytes and false of the operator.
 	api("GET "+b+"/api/deleted", s.hDeleted)
 	api("POST "+b+"/api/deleted/{aid}/restore", s.hRestore)
+	// Any other path under /api/ answers 404 in JSON, after authentication.
+	// Without this a GET to a removed route (for example
+	// /api/official/{id}/insights) fell through to the SPA route above and
+	// answered 200 with the page's HTML, so "the route is gone" could not
+	// be observed from outside. One pattern per method, because a
+	// method-less pattern would conflict with "GET <base>/".
+	for _, m := range []string{"GET", "POST", "PUT", "PATCH", "DELETE"} {
+		api(m+" "+b+"/api/", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such admin API route"})
+		})
+	}
 	return mux
 }
 
@@ -161,8 +169,7 @@ const (
 // Bearer check was not, so an attacker who simply never called /api/login could
 // guess the token against any protected endpoint at full speed: the limit
 // applied to the one path nobody is obliged to use. The token is the only thing
-// guarding this surface, and the surface deletes agents, changes quotas and
-// runs commands on other hosts over ssh.
+// guarding this surface, and the surface deletes agents from the registry.
 //
 // The cost is a map keyed by source IP. It grows only with IPs that fail, and
 // entries are dropped as their window expires, so an operator who logs in
@@ -381,10 +388,6 @@ func (s *Server) hOverview(w http.ResponseWriter, r *http.Request) {
 	states, _ := s.store.HarvestStates()
 	counts, _ := s.store.SessionCounts()
 	officials, _ := s.store.Officials()
-	probes := make([]Probe, 0, len(officials))
-	for _, m := range officials {
-		probes = append(probes, s.ops.Probe(r.Context(), m, false))
-	}
 	audit, _ := s.store.AuditTail(10)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"totals":       totals,
@@ -393,7 +396,6 @@ func (s *Server) hOverview(w http.ResponseWriter, r *http.Request) {
 		"harvest":      states,
 		"datasets":     counts,
 		"officials":    len(officials),
-		"probes":       probes,
 		"audit":        audit,
 	})
 }
@@ -469,23 +471,6 @@ func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) hQuota(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
-	var req struct {
-		GuestQuota int `json:"guest_quota"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
-		errJSON(w, http.StatusBadRequest, err)
-		return
-	}
-	if err := s.hub.SetGuestQuota(aid, req.GuestQuota); err != nil {
-		errJSON(w, http.StatusBadRequest, err)
-		return
-	}
-	s.store.Audit("admin", "agent.quota", aid, fmt.Sprintf("guest_quota=%d", req.GuestQuota))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
 func (s *Server) hModerate(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	var req struct {
@@ -533,14 +518,12 @@ func (s *Server) hOfficials(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, http.StatusInternalServerError, err)
 		return
 	}
-	force := r.URL.Query().Get("probe") == "force"
 	type row struct {
 		Manifest *Manifest `json:"manifest"`
-		Probe    Probe     `json:"probe"`
 	}
 	out := make([]row, 0, len(officials))
 	for _, m := range officials {
-		out = append(out, row{Manifest: m, Probe: s.ops.Probe(r.Context(), m, force)})
+		out = append(out, row{Manifest: m})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"officials": out})
 }
@@ -585,80 +568,6 @@ func (s *Server) hDeleteOfficial(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) hRunOp(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	m, err := s.store.Official(id)
-	if err != nil {
-		errJSON(w, http.StatusNotFound, err)
-		return
-	}
-	var req struct {
-		Op  string `json:"op"`
-		Arg string `json:"arg"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
-		errJSON(w, http.StatusBadRequest, err)
-		return
-	}
-	res := s.ops.Run(r.Context(), m, req.Op, req.Arg)
-	detail := res.Command
-	if res.Err != "" {
-		detail += " → " + res.Err
-	}
-	s.store.Audit("admin", "official.ops."+req.Op, id, detail)
-	writeJSON(w, http.StatusOK, res)
-}
-
-func (s *Server) hMonitor(w http.ResponseWriter, r *http.Request) {
-	id, what := r.PathValue("id"), r.PathValue("what")
-	m, err := s.store.Official(id)
-	if err != nil {
-		errJSON(w, http.StatusNotFound, err)
-		return
-	}
-	body, err := s.mon.Fetch(r.Context(), m, what)
-	if err != nil {
-		errJSON(w, http.StatusBadGateway, err)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write(body)
-}
-
-// hStore is the Agent Store composition: agents grouped by product line, with tier + capability
-// rollups. Payments are out of scope for v1 (pricing text is display-only, as in the public hub).
-func (s *Server) hInsights(w http.ResponseWriter, r *http.Request) {
-	m, err := s.store.Official(r.PathValue("id"))
-	if err != nil {
-		errJSON(w, http.StatusNotFound, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
-	writeJSON(w, http.StatusOK, s.buildInsights(ctx, m))
-}
-
-func (s *Server) hOfficialACL(w http.ResponseWriter, r *http.Request) {
-	m, err := s.store.Official(r.PathValue("id"))
-	if err != nil {
-		errJSON(w, http.StatusNotFound, err)
-		return
-	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 8192))
-	if err != nil {
-		errJSON(w, http.StatusBadRequest, err)
-		return
-	}
-	body, err := s.mon.PostACL(r.Context(), m, raw)
-	if err != nil {
-		errJSON(w, http.StatusBadGateway, err)
-		return
-	}
-	s.store.Audit("admin", "official.acl", m.ID, string(raw))
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write(body)
-}
-
 func (s *Server) hCapabilities(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -685,6 +594,8 @@ func (s *Server) hVision(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.buildVisionMap(ctx))
 }
 
+// hStore is the Agent Store composition: agents grouped by product line, with tier + capability
+// rollups. Payments are out of scope here (pricing text is display-only, as in the public hub).
 func (s *Server) hStore(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.hub.AllAgents("")
 	if err != nil {
@@ -711,7 +622,7 @@ func (s *Server) hStore(w http.ResponseWriter, r *http.Request) {
 		lines[line] = append(lines[line], map[string]any{
 			"aid": a.AID, "name": a.Name, "caps": a.Caps, "summary": a.Summary,
 			"pricing": a.Pricing, "avg_rating": a.AvgRating, "review_count": a.ReviewCount,
-			"tasks": a.TasksAsProvider, "tier": tier, "official_id": officialID,
+			"tier": tier, "official_id": officialID,
 		})
 		for _, c := range a.Caps {
 			capCount[c]++
@@ -738,9 +649,13 @@ func (s *Server) hSession(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, http.StatusNotFound, fmt.Errorf("session not found"))
 		return
 	}
-	card, _ := s.harvest.ReadSessionCard(source, id)
-	events, _ := s.harvest.ReadSessionData(source, id, 500)
-	writeJSON(w, http.StatusOK, map[string]any{"session": row, "card": card, "events": events})
+	// The index row only. The card and the event file of a harvested
+	// session hold the task content an earlier version copied (goal,
+	// message bodies, deliverable, job prompt); the admin plane does not
+	// serve task content (A2A-DESIGN §9, SI-1), and the production cleanup
+	// deletes the files.
+	writeJSON(w, http.StatusOK, map[string]any{"session": row,
+		"note": "event data and cards of harvested sessions are not served; they are deleted by the production cleanup"})
 }
 
 func (s *Server) hHarvest(w http.ResponseWriter, r *http.Request) {
@@ -762,16 +677,6 @@ func (s *Server) hReviews(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reviews": rows})
 }
 
-func (s *Server) hTasks(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	rows, err := s.hub.RecentTasks(limit)
-	if err != nil {
-		errJSON(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": rows})
-}
-
 func (s *Server) hAudit(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	rows, err := s.store.AuditTail(limit)
@@ -784,7 +689,9 @@ func (s *Server) hAudit(w http.ResponseWriter, r *http.Request) {
 
 // --- background tickers ---
 
-// StartTickers launches the snapshot + harvest loops (stopped via ctx).
+// StartTickers launches the snapshot and harvest loops (stopped via ctx). The harvest loop calls
+// RunAll, which has no sources (see harvest.go); the loop is kept so that the interval flag and a
+// test that shortens it still exercise the call.
 func (s *Server) StartTickers(ctx context.Context, snapshotEvery, harvestEvery time.Duration) {
 	if snapshotEvery > 0 {
 		go func() {
@@ -864,6 +771,58 @@ func WeakToken(tok string) bool {
 		}
 	}
 	return false
+}
+
+// placeholderWords are the values an installer, an example file or a unit
+// template writes where a real credential has to go, compared after
+// PlaceholderToken lower-cases the token and removes every character that
+// is not a letter or a digit. deploy/anet-hub-admin.service ships with
+// ADMIN_TOKEN=CHANGE_ME, which normalises to "changeme".
+var placeholderWords = []string{
+	"changeme", "changemenow", "replaceme", "setme", "fillme", "fillmein",
+	"placeholder", "yourtoken", "yourtokenhere", "yourtokengoeshere", "yoursecret",
+	"yoursecrethere", "token", "secret", "password", "adminpassword", "admintoken",
+	"example", "todo", "tbd", "xxx", "none", "null", "default",
+}
+
+// PlaceholderToken reports whether a credential is a placeholder rather
+// than a chosen value: one of placeholderWords once normalised, a template
+// marker such as <...>, ${...}, {{...}} or %...%, or a single character
+// repeated ("xxxxxxxx", "00000000").
+//
+// Unlike WeakToken, a match stops the admin plane from starting
+// (cmd/anet-hub-admin). A placeholder is never a deliberate choice: a
+// deployment carrying one was installed from the template and never
+// configured, and running it would publish the operator surface under a
+// value anyone can read in this repository. Refusing costs an unconfigured
+// deployment its admin surface until a real token is set, which is the
+// intended outcome.
+func PlaceholderToken(tok string) bool {
+	t := strings.TrimSpace(tok)
+	if t == "" {
+		return true
+	}
+	for _, pair := range [][2]string{{"<", ">"}, {"${", "}"}, {"{{", "}}"}, {"%", "%"}} {
+		if len(t) > len(pair[0])+len(pair[1]) && strings.HasPrefix(t, pair[0]) && strings.HasSuffix(t, pair[1]) {
+			return true
+		}
+	}
+	var norm strings.Builder
+	for _, r := range strings.ToLower(t) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			norm.WriteRune(r)
+		}
+	}
+	n := norm.String()
+	if n == "" {
+		return true
+	}
+	for _, w := range placeholderWords {
+		if n == w {
+			return true
+		}
+	}
+	return strings.Count(n, n[:1]) == len(n)
 }
 
 // hDeleted lists agents an operator removed, newest first.

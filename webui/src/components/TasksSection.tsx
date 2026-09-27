@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchBoard, type BoardColumn } from "../lib/api";
 import { shortAid } from "../lib/utils";
-import { useLang, t } from "../lib/lang";
+import { useLang, t, type Lang } from "../lib/lang";
 
 /** 状态→徽标色：与四色语义一致（进行中红、完成黑、其余灰阶）。 */
 const stateTone: Record<string, string> = {
@@ -47,11 +47,11 @@ export function TasksSection() {
           {t(
             lang,
             total
-              ? `${total} 张卡片在板上 · 卡片是视图，任务的真相是其 TaskDoc · 写操作经 anet 守护进程签名`
-              : "本 Hub 的组织任务板 · 认领与交付由 anet 守护进程签名完成",
+              ? `${total} 张卡片在板上 · 卡片标题与备注对所有访问者公开 · 写操作经 anet 守护进程签名`
+              : "本 Hub 的任务板（可选模块）· 卡片标题与备注对所有访问者公开 · 认领与交付由 anet 守护进程签名完成",
             total
-              ? `${total} cards on the board · a card is a view — the truth is its TaskDoc · writes are signed by anet daemons`
-              : "This hub's task board · claiming and delivery are signed by anet daemons",
+              ? `${total} cards on the board · card titles and notes are public to every visitor · writes are signed by anet daemons`
+              : "This hub's task board (optional module) · card titles and notes are public to every visitor · claiming and delivery are signed by anet daemons",
           )}
         </p>
 
@@ -77,7 +77,7 @@ export function TasksSection() {
 // only observe as "loading" — so the part that decides whether a card's
 // state, assignee and TaskDoc reach a person had no test. What the board
 // shows is what an outsider judges the hub's activity by.
-export function Column({ col, lang }: { col: BoardColumn; lang: string }) {
+export function Column({ col, lang }: { col: BoardColumn; lang: Lang }) {
   return (
     <div className="w-60 shrink-0 border border-gray-200 bg-gray-50/60">
                   <div className="flex items-center justify-between border-b border-gray-200 px-3 py-2">

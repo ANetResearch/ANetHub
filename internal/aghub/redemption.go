@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
+	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
 // Credit that can only go in is not credit, it is a score.
@@ -75,21 +77,42 @@ type Redemption struct {
 // walks away holding a signed statement of exactly what was taken and
 // against what reference, which is the difference between a dispute and
 // a shrug.
+//
+// It settles through settleAuth rather than SettleWithRequirements. The one
+// term of a redemption is that the payee is this hub, checked here;
+// requirements built from the authorization's own amount would only
+// compare the authorization with itself.
 func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference string) (Redemption, error) {
-	auth, err := s.decodeAuth(hubAID, p)
-	if err != nil {
-		return Redemption{}, err
+	auth, id, kel, rf := s.verifiedAuth(hubAID, p)
+	if rf != nil {
+		return Redemption{}, rf
 	}
 	if auth.PayTo != hubAID {
-		return Redemption{}, fmt.Errorf(
+		return Redemption{}, refuse(payment.ReasonPayeeMismatch,
 			"a redemption is signed as a payment to this hub (%s), not to %s", hubAID, auth.PayTo)
 	}
 	if auth.Payer == hubAID {
 		return Redemption{}, fmt.Errorf("the hub cannot redeem its own liability into itself")
 	}
-	settled := s.SettlePayment(hubAID, p)
+	// A redemption already recorded for this authorization is answered with
+	// that record and its receipt, whether or not the window has closed:
+	// the agent resending the authorization is asking what became of it,
+	// the question a repeated settlement asks (A2A-DESIGN §8.5). It used to
+	// reach the insert below, fail on the primary key, and report "credit
+	// was redeemed but the note could not be recorded" for a note that had
+	// been recorded.
+	if prior, found, err := s.redemptionOf(hubAID, id); err != nil {
+		return Redemption{}, refuse(payment.ReasonSettlementFailed, "%v", err)
+	} else if found {
+		return prior, nil
+	}
+	if rf := currentAuth(auth, kel, time.Now().UnixMilli()); rf != nil {
+		return Redemption{}, rf
+	}
+	settled := s.settleAuth(hubAID, auth, id)
 	if !settled.Success {
-		return Redemption{}, fmt.Errorf("%s", settled.ErrorReason)
+		detail, _ := settled.Extensions[payment.ExtErrorDetail].(string)
+		return Redemption{}, &Refusal{Reason: settled.ErrorReason, Detail: detail}
 	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.db.Exec(
@@ -109,7 +132,7 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	// number anyone can compute rather than one it reports.
 	//
 	// The entry is NOT written here. A redemption is a payment whose
-	// payee is the hub, and SettlePayment now writes an entry for both
+	// payee is the hub, and settleAuth writes an entry for both
 	// parties — so adding one here counted the hub's row twice and drove
 	// outstanding negative by the redeemed amount.
 	// And on the signed chain, so the supply is auditable in both
@@ -153,6 +176,29 @@ func (s *Store) RedemptionTotals(aid string) (total int, sum uint64, err error) 
 		sum = uint64(amt.Int64)
 	}
 	return int(n), sum, nil
+}
+
+// redemptionOf is the redemption recorded for an authorization, with the
+// settlement's receipt, if there is one.
+func (s *Store) redemptionOf(hubAID, authID string) (Redemption, bool, error) {
+	var r Redemption
+	var amt int64
+	err := s.db.QueryRow(
+		`SELECT auth_id, aid, amount, reference, at FROM credit_redemption WHERE auth_id=?`, authID).
+		Scan(&r.AuthID, &r.AID, &amt, &r.Reference, &r.At)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Redemption{}, false, nil
+	}
+	if err != nil {
+		return Redemption{}, false, err
+	}
+	r.Amount = uint64(amt)
+	if settled, ok, err := s.settledBefore(hubAID, authID); err != nil {
+		return Redemption{}, false, err
+	} else if ok {
+		r.Receipt, _ = settled.Extensions[payment.ExtReceipt].(string)
+	}
+	return r, true, nil
 }
 
 func (s *Store) Redemptions(aid string, limit int) ([]Redemption, error) {
@@ -426,8 +472,17 @@ func (s *Server) hRedeem(w http.ResponseWriter, r *http.Request) {
 //
 // total and sum cover the whole account regardless of the page, so a
 // caller can reconcile without paging and can see when there is more.
+//
+// Served to the account holder only: the request must be signed by the
+// AID in the path (relayauth v2, action "redemptions"), and the signature
+// covers the query, so ?limit is part of what was signed. Unsigned → 401.
+// See hBalance for why.
 func (s *Server) hRedemptions(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
+	a, ok := s.authSelf(w, r, relayauth.ActionRedemptions, signedBodyLimit)
+	if !ok {
+		return
+	}
+	aid := a.AID
 	limit := 0
 	if v := r.URL.Query().Get("limit"); v != "" {
 		_, _ = fmt.Sscanf(v, "%d", &limit)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
+	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
@@ -167,7 +168,7 @@ func TestCardAdmissionBoundsTheCapabilityList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.PutAgent(c.AID(), "Carder", []string{"work.do"}, 0, kelBytes); err != nil {
+	if err := st.PutAgent(c.AID(), "Carder", []string{"work.do"}, kelBytes); err != nil {
 		t.Fatal(err)
 	}
 
@@ -240,6 +241,8 @@ func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 	server.SetFederatedDirectory(store.FederatedAgents)
 	srv := httptest.NewServer(server.Handler())
 	t.Cleanup(srv.Close)
+	// Registration signs for this hub's AID (relayauth v2).
+	testHubAID.Store(srv.URL, id.AID)
 
 	for _, spec := range []struct {
 		name string
@@ -341,7 +344,7 @@ func TestTheRedemptionListSaysWhenItIsOnlyAPage(t *testing.T) {
 
 	// Ask for fewer than exist, which is what the cap does to a busy
 	// account without being asked.
-	code, body := getJSON(t, srv.URL+"/agents/"+agent.AID()+"/redemptions?limit=2")
+	code, body := ownerGet(t, srv, agent, relayauth.ActionRedemptions, "/agents/"+agent.AID()+"/redemptions?limit=2")
 	if code != 200 {
 		t.Fatalf("redemptions: %d", code)
 	}
@@ -385,7 +388,7 @@ func TestTheRedemptionListSaysWhenItIsOnlyAPage(t *testing.T) {
 	}
 
 	// And an untruncated answer must not claim to be one.
-	_, body = getJSON(t, srv.URL+"/agents/"+agent.AID()+"/redemptions")
+	_, body = ownerGet(t, srv, agent, relayauth.ActionRedemptions, "/agents/"+agent.AID()+"/redemptions")
 	var full struct {
 		Truncated bool `json:"truncated"`
 		Total     int  `json:"total"`

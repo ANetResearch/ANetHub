@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Column } from "../TasksSection";
-import type { BoardColumn } from "../../lib/api";
+import { hasTaskboard, type BoardColumn, type Stats } from "../../lib/api";
 
 // The board is the hub's public evidence that anything is happening. What
 // a column shows — a card's state, who holds it, which document it is
@@ -46,7 +46,7 @@ describe("Column", () => {
     const plain = renderToStaticMarkup(<Column col={col()} lang="zh" />);
     expect(plain).not.toContain("→");
     const held = col();
-    (held.cards[0] as Record<string, unknown>).assignee_aid =
+    held.cards[0].assignee_aid =
       "bafyreigr6jrgrrnu7zlzhk2my7cgjooddncozici2674eckzeuyucaqk5u";
     held.cards[0].state = "claimed";
     const html = renderToStaticMarkup(<Column col={held} lang="zh" />);
@@ -73,5 +73,25 @@ describe("Column", () => {
     const html = renderToStaticMarkup(<Column col={many} lang="zh" />);
     expect(html).toContain("+3");
     expect(html).toContain("11");
+  });
+});
+
+// The board is an opt-in hub module (-tags taskboard); a default hub has
+// none, and the section must not appear there. The page decides from
+// /stats.modules, and an absent list — a hub from before the field
+// existed — reads as "no board", not as "a board that failed to load".
+describe("hasTaskboard", () => {
+  const stats = (modules?: string[]): Stats =>
+    ({ agents: 0, tasks_completed: 0, reviews: 0, avg_rating: 0, modules }) as Stats;
+
+  it("is true only when the hub lists the taskboard module", () => {
+    expect(hasTaskboard(stats(["federation", "taskboard"]))).toBe(true);
+    expect(hasTaskboard(stats(["federation"]))).toBe(false);
+    expect(hasTaskboard(stats([]))).toBe(false);
+  });
+
+  it("is false when the hub does not say, or has not answered yet", () => {
+    expect(hasTaskboard(stats(undefined))).toBe(false);
+    expect(hasTaskboard(null)).toBe(false);
   });
 });

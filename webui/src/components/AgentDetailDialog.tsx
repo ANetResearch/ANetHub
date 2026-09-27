@@ -4,56 +4,25 @@ import { fetchAgent, type AgentView, type ReviewView } from "../lib/api";
 import { renderMd } from "../lib/markdown";
 import { shortAid, fmtTime, copyText } from "../lib/utils";
 import { Dialog } from "./ui/dialog";
-import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Avatar } from "./ui/avatar";
 import { Stars } from "./AgentsSection";
 
-/** 评价附带的对话记录（deliverable 为 JSON 数组时渲染成气泡）。 */
-// Exported for tests. What a transcript and a review look like on screen
-// is where the evidence surface either reaches a person or does not, and
-// neither had a test.
-export function Transcript({ s }: { s: string }) {
-  let arr: { from?: string; body?: string }[] | null = null;
-  try {
-    const p = JSON.parse(s);
-    if (Array.isArray(p)) arr = p;
-  } catch {
-    /* not json */
-  }
-  if (!arr) {
-    return (
-      <pre className="max-h-40 overflow-auto thin-scroll whitespace-pre-wrap break-words border border-gray-200 bg-gray-50 p-2.5 text-[11px] leading-relaxed text-gray-700">
-        {s}
-      </pre>
-    );
-  }
-  if (!arr.length) return <div className="text-xs text-gray-400">（无对话内容）</div>;
-  return (
-    <div className="flex max-h-60 flex-col gap-1.5 overflow-auto thin-scroll">
-      {arr.map((m, i) => {
-        const prov = m && m.from === "provider";
-        return (
-          <div
-            key={i}
-            className={
-              "max-w-[88%] px-2.5 py-1.5 text-[12px] leading-relaxed border " +
-              (prov
-                ? "self-end border-[#E60000]/25 bg-[#E60000]/5"
-                : "self-start border-gray-200 bg-gray-50")
-            }
-          >
-            <span className="mb-0.5 block text-[9px] uppercase tracking-wider text-gray-400">
-              {prov ? "提供方" : "委派方"}
-            </span>
-            <div className="md" dangerouslySetInnerHTML={{ __html: renderMd(String(m?.body || "")) }} />
-          </div>
-        );
-      })}
-    </div>
-  );
+/** 内容绑定的状态文字。hub 不持有交互内容,无法核对回执里的 request_cid / result_cid
+ *  是否对应某份内容;"未核对"必须如实显示,不得显示成"已验证"。 */
+export function contentBindingLabel(state: string | undefined): string {
+  if (state === "UNVERIFIED" || !state) return "内容绑定未核对（hub 不持有交互内容）";
+  return "内容绑定：" + state;
 }
 
+// Exported for tests. What a review looks like on screen is where the
+// evidence surface either reaches a person or does not.
+//
+// A review carries the rating, the reviewer's comment and the receipt it
+// is anchored on. It carries no request and no deliverable: the hub never
+// receives them (A2A-DESIGN §9), so there is nothing to show and nothing
+// the hub could have checked. The two signatures and their interlock are
+// what the hub verified, and that is what the green line says.
 export function Review({ r }: { r: ReviewView }) {
   return (
     <div className="border border-gray-200 bg-white p-4">
@@ -62,45 +31,24 @@ export function Review({ r }: { r: ReviewView }) {
         <span className="font-mono text-[11px] text-gray-400">by {shortAid(r.reviewer_aid)}</span>
       </div>
       {r.comment && <p className="mt-2 text-[13px] italic leading-relaxed text-gray-800">“{r.comment}”</p>}
-      {(r.goal || r.deliverable) && (
-        <div className="mt-3 border-t border-dashed border-gray-200 pt-3">
-          {r.goal && (
-            <>
-              <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-gray-400">
-                请求
-                <Badge variant="soft" className="text-[9px] px-1.5 py-0">✓ 内容已验证</Badge>
-              </div>
-              <p className="mb-2.5 text-[13px] leading-relaxed text-gray-800">{r.goal}</p>
-            </>
-          )}
-          {r.deliverable && (
-            <>
-              <div className="mb-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-gray-400">
-                对话记录
-                <Badge variant="soft" className="text-[9px] px-1.5 py-0">✓ 内容已验证</Badge>
-              </div>
-              <Transcript s={r.deliverable} />
-            </>
-          )}
-          <div className="mt-2.5 space-y-0.5 font-mono text-[10px] leading-relaxed text-gray-400">
-            {r.request_cid && (
-              <div className="truncate">
-                <b className="text-gray-500">request_cid</b> {r.request_cid}
-              </div>
-            )}
-            {r.result_cid && (
-              <div className="truncate">
-                <b className="text-gray-500">result_cid</b> {r.result_cid}
-              </div>
-            )}
-            {r.completed_at ? (
-              <div>
-                <b className="text-gray-500">completed</b> {fmtTime(r.completed_at)}
-              </div>
-            ) : null}
+      <div className="mt-3 space-y-0.5 border-t border-dashed border-gray-200 pt-3 font-mono text-[10px] leading-relaxed text-gray-400">
+        {r.request_cid && (
+          <div className="truncate">
+            <b className="text-gray-500">request_cid</b> {r.request_cid}
           </div>
-        </div>
-      )}
+        )}
+        {r.result_cid && (
+          <div className="truncate">
+            <b className="text-gray-500">result_cid</b> {r.result_cid}
+          </div>
+        )}
+        {r.completed_at ? (
+          <div>
+            <b className="text-gray-500">completed</b> {fmtTime(r.completed_at)}
+          </div>
+        ) : null}
+        <div className="font-body text-[11px] text-gray-500">{contentBindingLabel(r.content_binding)}</div>
+      </div>
       <div className="mt-3 flex items-center gap-1.5 text-[11px] text-[#E60000]">
         <BadgeCheck className="size-3.5" />
         双方签名已验证 · 回执 {shortAid(r.receipt_cid)}
@@ -110,16 +58,14 @@ export function Review({ r }: { r: ReviewView }) {
   );
 }
 
-/** Agent 详情弹窗：GET /agents/{aid} —— 资料 + 可验证评价列表 + 试聊入口。 */
+/** Agent 详情弹窗：GET /agents/{aid} —— 资料 + 可验证评价列表。 */
 export function AgentDetailDialog({
   aid,
   onClose,
-  onChat,
   toast,
 }: {
   aid: string | null;
   onClose: () => void;
-  onChat: (aid: string) => void;
   toast: (msg: string, isErr?: boolean) => void;
 }) {
   const [data, setData] = useState<{ agent: AgentView; reviews: ReviewView[] } | null>(null);
@@ -192,9 +138,6 @@ export function AgentDetailDialog({
                 </div>
               </div>
             </div>
-            <Button variant="brand" className="mt-4 w-full font-bebas tracking-[0.1em] text-base" onClick={() => onChat(a.aid)}>
-              开始聊天（访客试玩）→
-            </Button>
           </div>
 
           <div className="thin-scroll flex-1 overflow-y-auto p-6">
@@ -216,7 +159,7 @@ export function AgentDetailDialog({
 
             <h4 className="mb-3 mt-6 font-bebas text-lg tracking-[0.08em]">
               VERIFIED REVIEWS <span className="text-[#E60000]">·</span>{" "}
-              <span className="text-gray-400 text-sm tracking-normal font-body">附完整交互内容</span>
+              <span className="text-gray-400 text-sm tracking-normal font-body">签名与回执已验证，不含交互内容</span>
             </h4>
             {data!.reviews.length ? (
               <div className="space-y-3">

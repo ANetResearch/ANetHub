@@ -3,6 +3,7 @@ package aghub_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -14,11 +15,8 @@ import (
 
 func publishAddr(t *testing.T, srv *httptest.Server, c *identity.Controller, addr string) (int, []byte) {
 	t.Helper()
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionProfile, c.AID(), ts))
-	return post(t, srv.URL+"/agents/"+c.AID()+"/p2p", map[string]any{
-		"addr": addr, "ts": ts, "key_state_seq": seq,
-		"sig": base64.StdEncoding.EncodeToString(sig)})
+	return signedDo(t, srv, c, relayauth.ActionP2P, http.MethodPost, "/agents/"+c.AID()+"/p2p",
+		map[string]any{"addr": addr})
 }
 
 // Two peers on different machines must be able to find each other.
@@ -173,7 +171,7 @@ func TestALedgerCorrectionIsDerivedAndVisible(t *testing.T) {
 	}
 
 	// The correction is in the ledger, named for what it is.
-	code, body := getJSON(t, srv.URL+"/agents/"+a.AID()+"/ledger?limit=500")
+	code, body := ownerGet(t, srv, a, relayauth.ActionLedger, "/agents/"+a.AID()+"/ledger?limit=500")
 	if code != 200 {
 		t.Fatalf("ledger = %d", code)
 	}

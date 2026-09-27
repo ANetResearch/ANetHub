@@ -2,11 +2,13 @@ package aghub
 
 import (
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -304,15 +306,24 @@ func (s *Server) hX402Resource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The buyer signed some terms. They have to be THESE terms — the
-	// payee this hub is selling for and the amount that agent published.
-	// A settlement that succeeds against a smaller authorization would
-	// have the hub issuing a full voucher for a partial payment.
+	// payee this hub is selling for and at least the amount that agent
+	// published. A settlement that succeeds against a smaller
+	// authorization would have the hub issuing a full voucher for a
+	// partial payment.
+	//
+	// These two checks read only the accepted option, which the buyer
+	// states and does not sign; they answer an obviously wrong request
+	// early and with the price. What is settled is the signed
+	// authorization, and SettleWithRequirements compares that with the
+	// same terms and with the accepted option. Checking the accepted
+	// option alone let a buyer state the price while signing a smaller
+	// amount to somebody else (R06 D2).
 	if pp.Accepted.PayTo != aid {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "this payment is addressed to " + pp.Accepted.PayTo + ", not to " + aid})
 		return
 	}
-	if got, err := payment.ParseAmount(pp.Accepted.Amount); err != nil || got != price {
+	if got, err := payment.ParseAmount(pp.Accepted.Amount); err != nil || got < price {
 		writeJSON(w, http.StatusPaymentRequired, map[string]any{
 			"error":   "the price is " + strconv.FormatUint(price, 10) + " credits",
 			"accepts": required.Accepts,
@@ -320,17 +331,51 @@ func (s *Server) hX402Resource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settled := s.store.SettlePayment(s.hubAID, &pp)
+	// The requirements are the quote itself: this agent, this price, this
+	// hub's ledger. A payment on another ledger is refused here rather
+	// than forwarded, because the voucher is this hub's statement that it
+	// holds the payment.
+	req := required.Accepts[0]
+	settled := s.store.SettleWithRequirements(s.hubAID, &pp, &req)
 	if enc, err := json.Marshal(settled); err == nil {
 		w.Header().Set(payment.HeaderPaymentResponse, base64.StdEncoding.EncodeToString(enc))
 	}
 	if !settled.Success {
 		writeJSON(w, http.StatusPaymentRequired, map[string]any{
-			"error": settled.ErrorReason, "accepts": required.Accepts})
+			"error": settled.ErrorReason, "detail": settled.Extensions[payment.ExtErrorDetail],
+			"accepts": required.Accepts})
+		return
+	}
+	// One settlement buys one voucher. The facilitator answers an
+	// authorization it already settled with the original success, at any
+	// time (A2A-DESIGN §8.5), so a PAYMENT-SIGNATURE header sent again
+	// arrives here again. Signing a new voucher for it would give the buyer
+	// a second voucher with a new nonce, and the provider's one-use check,
+	// which is keyed on the voucher id, would accept it as unspent: one
+	// payment would buy the work once per resend, and buy other
+	// capabilities of the same provider as well. A repeat is answered with
+	// the voucher issued at the settlement, byte for byte, and only for the
+	// capability it bought.
+	if settled.Extensions[payment.ExtReplayed] == true {
+		s.answerRepeatedPurchase(w, settled, aid, capID, endpoint)
+		return
+	}
+	// The voucher states what was settled, not what was quoted. The two
+	// differ when the buyer paid more than the price; a voucher stating
+	// the price would then understate what the buyer holds a claim for.
+	paid, err := payment.ParseAmount(settled.Amount)
+	if err != nil || paid < price {
+		// SettleWithRequirements refuses an amount below the price, so this
+		// is a settlement response this code did not produce. The buyer
+		// has been charged; the transaction id is what it can point at.
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error":       "payment settled for " + settled.Amount + " credits, which does not cover the price; no voucher issued",
+			"transaction": settled.Transaction,
+		})
 		return
 	}
 
-	voucher, err := s.store.issueVoucher(settled, aid, capID, price)
+	voucher, notAfter, err := s.store.issueVoucher(settled, aid, capID, paid)
 	if err != nil {
 		// Settled and cannot issue. Say so plainly with the transaction
 		// id: the buyer has been charged and needs something to point at.
@@ -340,47 +385,142 @@ func (s *Server) hX402Resource(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Recorded so that a repeat of this purchase gets these bytes rather
+	// than a new voucher. A failure to record is logged and the voucher
+	// is still handed over: the buyer has paid for it, and a repeat then
+	// finds no record and is refused, so the failure cannot produce a
+	// second voucher.
+	if err := s.store.recordVoucher(settled.Transaction, aid, capID, voucher, notAfter); err != nil {
+		log.Printf("hub: voucher for settlement %s not recorded: %v", settled.Transaction, err)
+	}
+	writeVoucher(w, voucher, endpoint, capID, aid, settled.Transaction, notAfter)
+}
+
+// writeVoucher is the gateway's 200: the voucher and where to spend it.
+func writeVoucher(w http.ResponseWriter, voucher, endpoint, capID, aid, transaction string, notAfter int64) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"voucher":     voucher,
 		"redeem_at":   endpoint,
 		"capability":  capID,
 		"provider":    aid,
-		"transaction": settled.Transaction,
-		"expires_at":  time.Now().Add(voucherWindow).UnixMilli(),
+		"transaction": transaction,
+		"expires_at":  notAfter,
 		"how": "POST {\"voucher\":\"…\",\"capability\":\"" + capID + "\",\"args\":{…}} to redeem_at. " +
 			"One use, and this hub cannot tell you whether you have spent it — the agent is the only " +
 			"party that knows, which is why the check lives there.",
 	})
 }
 
-// issueVoucher signs the hub's statement that the work is paid for.
+// answerRepeatedPurchase answers a PAYMENT-SIGNATURE whose authorization
+// is already settled.
+//
+// When this gateway issued a voucher for that settlement, and the request
+// names the same provider and capability, the answer is that voucher,
+// unchanged: the buyer whose first response was lost gets what it paid
+// for, and the provider sees one voucher id. Any other repeat is refused
+// with 409 and moves nothing. That covers the same authorization offered
+// for another capability, and an authorization for which no voucher is
+// recorded: one settled through /x402/settle by a merchant on the relay
+// path, one settled here whose voucher could not be recorded, and a
+// concurrent repeat that arrives before the first request has recorded
+// its voucher. The cost of the second case is a buyer who was charged and
+// holds no voucher, with the transaction id to show for it; the
+// alternative, a second voucher, is a second unit of work for one payment.
+func (s *Server) answerRepeatedPurchase(w http.ResponseWriter, settled payment.SettlementResponse,
+	aid, capID, endpoint string) {
+	rec, found, err := s.store.issuedVoucher(settled.Transaction)
+	switch {
+	case err != nil:
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "reading the voucher issued for this payment: " + err.Error(), "transaction": settled.Transaction})
+	case !found:
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "this payment authorization was already settled, and this gateway issued no voucher for " +
+				"that settlement; a voucher is issued only with the settlement that pays for it",
+			"transaction": settled.Transaction})
+	case rec.payTo != aid || rec.capability != capID:
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error": "this payment authorization already bought " + rec.capability + " from " + rec.payTo +
+				"; one payment buys one voucher",
+			"transaction": settled.Transaction})
+	default:
+		writeVoucher(w, rec.voucher, endpoint, capID, aid, settled.Transaction, rec.notAfter)
+	}
+}
+
+// issuedVoucherRow is the voucher this gateway issued for one settlement.
+type issuedVoucherRow struct {
+	payTo, capability, voucher string
+	notAfter                   int64
+}
+
+// migrateGateway creates the record of the voucher issued for each
+// settlement the gateway made, keyed on the authorization id so that one
+// settlement has at most one voucher.
+func (s *Store) migrateGateway() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS gateway_voucher (
+		auth_id    TEXT PRIMARY KEY,
+		pay_to     TEXT NOT NULL,
+		capability TEXT NOT NULL,
+		voucher    TEXT NOT NULL,
+		not_after  INTEGER NOT NULL,
+		at         TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("hub: migrate gateway: %w", err)
+	}
+	return nil
+}
+
+// recordVoucher stores the voucher issued for a settlement. A second
+// voucher for the same authorization is refused by the primary key.
+func (s *Store) recordVoucher(authID, payTo, capID, voucher string, notAfter int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO gateway_voucher(auth_id, pay_to, capability, voucher, not_after, at) VALUES(?,?,?,?,?,?)`,
+		authID, payTo, capID, voucher, notAfter, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// issuedVoucher is the voucher recorded for a settlement, if any.
+func (s *Store) issuedVoucher(authID string) (issuedVoucherRow, bool, error) {
+	var r issuedVoucherRow
+	err := s.db.QueryRow(
+		`SELECT pay_to, capability, voucher, not_after FROM gateway_voucher WHERE auth_id=?`, authID).
+		Scan(&r.payTo, &r.capability, &r.voucher, &r.notAfter)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, false, nil
+	}
+	return r, err == nil, err
+}
+
+// issueVoucher signs the hub's statement that the work is paid for, and
+// returns it with its expiry. amount is the settled amount.
 func (s *Store) issueVoucher(settled payment.SettlementResponse, payTo, capID string,
-	price uint64) (string, error) {
+	amount uint64) (string, int64, error) {
 	if s.hubKey == nil {
-		return "", fmt.Errorf("this hub holds no signing key, so it cannot issue vouchers")
+		return "", 0, fmt.Errorf("this hub holds no signing key, so it cannot issue vouchers")
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	v := &payment.Voucher{
 		AuthID:     settled.Transaction,
 		Payer:      settled.Payer,
 		PayTo:      payTo,
 		Capability: capID,
-		Amount:     price,
+		Amount:     amount,
 		Network:    settled.Network,
 		NotAfter:   time.Now().Add(voucherWindow).UnixMilli(),
 		Nonce:      hex.EncodeToString(nonce[:]),
 	}
 	if err := v.Sign(s.hubKey); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	raw, err := v.Marshal()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return base64.StdEncoding.EncodeToString(raw), nil
+	return base64.StdEncoding.EncodeToString(raw), v.NotAfter, nil
 }
 
 // EndpointRedeem is the endpoint protocol name an agent uses to advertise

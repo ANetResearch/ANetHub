@@ -1,8 +1,10 @@
 // Package federation implements K208 delivery federation (集连, sub-plane A):
-// hub-to-hub forwarding of end-to-end-signed payloads. The hub signs the
+// hub-to-hub forwarding of sealed envelopes. The hub signs the
 // ForwardEnvelope with its own AID (hubid) — that signature means "this flow
-// passed my quota and policy checks", never content endorsement. Agent
-// payloads stay end-to-end verifiable regardless of federation.
+// passed my quota and policy checks", never content endorsement. Since
+// forward v2 (A2A-DESIGN §3.9) the envelope names only the destination:
+// the sender, the message kind and the interaction are inside the sealed
+// payload and are neither forwarded nor stored by either hub.
 package federation
 
 import (
@@ -26,6 +28,8 @@ import (
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
 	_ "modernc.org/sqlite"
+
+	"github.com/ANetResearch/ANetHub/internal/seamerr"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
@@ -99,43 +103,96 @@ func LoadConfig(dir string) (Config, error) {
 
 // LocalDelivery is what federation needs from the hub kernel — wired by the
 // application, so this module never imports the kernel's internals.
+//
+// Enqueue receives only the destination and the sealed envelope. It
+// returns an error wrapping ErrMailboxFull when the destination's quota is
+// reached, and one wrapping ErrBadEnvelope when the bytes are not a sealed
+// envelope for the destination.
 type LocalDelivery interface {
 	HasAgent(aid string) bool
-	Enqueue(toAID, fromAID, kind, interactionID string, payload []byte) (int64, error)
+	Enqueue(toAID string, envelope []byte) (int64, error)
 }
 
-// Envelope is the K208 §4.2 ForwardEnvelope. Hub-visible relay metadata
-// (from/kind/interaction) rides alongside the opaque end-to-end payload —
-// the receiving hub needs it to file the message into a mailbox.
+// ErrMailboxFull reports a destination mailbox at its quota, on this hub
+// (from LocalDelivery.Enqueue, answered 507 MAILBOX_FULL) or at a peer
+// (from TryForward, after the peer answered 507).
+var ErrMailboxFull error = &seamError{msg: "federation: destination mailbox full", kind: seamMailboxFull}
+
+// seamError is a federation sentinel that the hub kernel also recognises
+// as the matching internal/seamerr sentinel, through errors.Is, without
+// referring to this package.
+//
+// The kernel tests the errors its federation hooks return in code that
+// every build links. When it named federation.ErrMailboxFull there, a hub
+// built with -tags no_federation still linked federation symbols, which
+// the subtractive-tag symbol check forbids (A2A-DESIGN §16). The value is
+// a pointer to a constant composite literal so that it is initialised
+// statically: an initialiser that read another package's variable would
+// be run by this package's init function, and a no_federation build would
+// then link that function because the kernel imports this package.
+type seamError struct {
+	msg  string
+	kind int
+}
+
+const (
+	seamMailboxFull = iota + 1
+	seamNoKeys
+)
+
+func (e *seamError) Error() string { return e.msg }
+
+// Is reports the kernel sentinel of the same meaning as equal.
+func (e *seamError) Is(target error) bool {
+	switch e.kind {
+	case seamMailboxFull:
+		return target == seamerr.ErrMailboxFull
+	case seamNoKeys:
+		return target == seamerr.ErrNoKeys
+	}
+	return false
+}
+
+// ErrBadEnvelope reports a payload that is not a sealed envelope for the
+// destination.
+var ErrBadEnvelope = errors.New("federation: payload is not a sealed envelope for the destination")
+
+// ForwardVersion is the /fed/v1/forward envelope version this build
+// speaks. Version 2 removed from_aid, kind and interaction_id from the
+// envelope and from its signature preimage. A version-1 envelope is
+// refused with VERSION_UNSUPPORTED; there is no fallback, because a v1
+// peer forwards plaintext payloads with sender metadata that this hub
+// must not store.
+const ForwardVersion = 2
+
+// Envelope is the K208 §4.2 ForwardEnvelope, version 2: the destination,
+// the sealed envelope and the routing fields that loop and hop checks
+// need. Nothing about the sender is in it.
 type Envelope struct {
-	V             uint64   `json:"v"`
-	OriginHubAID  string   `json:"origin_hub_aid"`
-	DestAID       string   `json:"dest_aid"`
-	FromAID       string   `json:"from_aid"`
-	Kind          string   `json:"kind"`
-	InteractionID string   `json:"interaction_id,omitempty"`
-	Payload       string   `json:"payload"` // base64
-	PayloadCID    string   `json:"payload_cid"`
-	Hop           uint64   `json:"hop"`
-	SeenHubs      []string `json:"seen_hubs"`
-	TS            uint64   `json:"ts"`
-	KeyStateSeq   uint64   `json:"key_state_seq"`
-	Sig           string   `json:"sig"` // base64, origin hub KEL signature
+	V            uint64   `json:"v"`
+	OriginHubAID string   `json:"origin_hub_aid"`
+	DestAID      string   `json:"dest_aid"`
+	Payload      string   `json:"payload"` // base64 of the sealed envelope
+	PayloadCID   string   `json:"payload_cid"`
+	Hop          uint64   `json:"hop"`
+	SeenHubs     []string `json:"seen_hubs"`
+	TS           uint64   `json:"ts"`
+	KeyStateSeq  uint64   `json:"key_state_seq"`
+	Sig          string   `json:"sig"` // base64, origin hub KEL signature
 }
 
 // preimage is the CoreDet-CBOR canonical bytes the hub signature covers
 // (_CONVENTIONS §2/§4: int keys, sig outside, arrays author-ordered).
+// Keys 4, 5 and 6 (from_aid, kind, interaction_id in v1) are retired and
+// not reused.
 func (e *Envelope) preimage(payload []byte) ([]byte, error) {
 	seen := make([]any, 0, len(e.SeenHubs))
 	for _, h := range e.SeenHubs {
 		seen = append(seen, h)
 	}
 	m := map[uint64]any{
-		1: e.V, 2: e.OriginHubAID, 3: e.DestAID, 4: e.FromAID, 5: e.Kind,
+		1: e.V, 2: e.OriginHubAID, 3: e.DestAID,
 		7: payload, 8: e.PayloadCID, 9: e.Hop, 11: e.TS,
-	}
-	if e.InteractionID != "" {
-		m[6] = e.InteractionID
 	}
 	if len(seen) > 0 {
 		m[10] = seen
@@ -149,9 +206,15 @@ type Service struct {
 	id      *hubid.Identity
 	local   LocalDelivery
 	dir     Directory
+	keys    KeySource
 	db      *sql.DB
 	http    *http.Client
 	witness Witness
+	// maxEnvelope bounds a forwarded envelope; the forward body cap is
+	// derived from it. Set by SetMaxEnvelope to the kernel's limit.
+	maxEnvelope int64
+	// replay remembers accepted /fed/v2/keys request signatures.
+	replay *replayGuard
 	// round counts sync passes, so a full re-read can be scheduled
 	// without a second timer. Touched only from the sync loop.
 	round int
@@ -176,7 +239,28 @@ CREATE TABLE IF NOT EXISTS fed_review_cursor (peer_aid TEXT PRIMARY KEY, cursor 
 		db.Close()
 		return nil, err
 	}
-	return &Service{cfg: cfg, id: id, local: local, db: db, http: &http.Client{Timeout: 10 * time.Second}}, nil
+	return &Service{cfg: cfg, id: id, local: local, db: db,
+		http:        &http.Client{Timeout: 10 * time.Second},
+		maxEnvelope: defaultMaxEnvelope, replay: newReplayGuard()}, nil
+}
+
+// defaultMaxEnvelope matches the kernel's default envelope limit
+// (A2A-DESIGN §3.7).
+const defaultMaxEnvelope = 96 << 20
+
+// SetMaxEnvelope aligns the forward body cap with the kernel's envelope
+// limit, so that an envelope this hub's own senders may send is not
+// refused by the peers it is forwarded to, or the reverse.
+func (s *Service) SetMaxEnvelope(n int64) {
+	if n > 0 {
+		s.maxEnvelope = n
+	}
+}
+
+// forwardBodyLimit is the largest forward request: the base64 of the
+// largest envelope plus room for the rest of the JSON.
+func (s *Service) forwardBodyLimit() int64 {
+	return (s.maxEnvelope+2)/3*4 + 64<<10
 }
 
 func (s *Service) Close() error { return s.db.Close() }
@@ -254,12 +338,14 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 
 // ---- inbound ----
 
-// Handler serves POST /fed/v1/forward.
+// Handler serves the federation routes: /fed/v1/forward, /fed/v1/cards,
+// /fed/v1/reviews and /fed/v2/keys/{aid}.
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fed/v1/forward", s.hForward)
 	mux.HandleFunc("GET /fed/v1/cards", s.hCards)
 	mux.HandleFunc("GET /fed/v1/reviews", s.hFedReviewStream)
+	mux.HandleFunc("GET /fed/v2/keys/{aid}", s.hKeys)
 	return mux
 }
 
@@ -274,8 +360,14 @@ func (s *Service) hForward(w http.ResponseWriter, r *http.Request) {
 		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "federation disabled")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 100<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.forwardBodyLimit()))
 	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			fedErr(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
+				fmt.Sprintf("forward body exceeds %d bytes", s.forwardBodyLimit()))
+			return
+		}
 		fedErr(w, http.StatusBadRequest, "MALFORMED", err.Error())
 		return
 	}
@@ -284,8 +376,10 @@ func (s *Service) hForward(w http.ResponseWriter, r *http.Request) {
 		fedErr(w, http.StatusBadRequest, "MALFORMED", err.Error())
 		return
 	}
-	if env.V != 1 {
-		fedErr(w, http.StatusBadRequest, "VERSION_UNSUPPORTED", fmt.Sprintf("v=%d", env.V))
+	if env.V != ForwardVersion {
+		fedErr(w, http.StatusBadRequest, "VERSION_UNSUPPORTED", fmt.Sprintf(
+			"this hub accepts forward envelope v%d only (anet-hub wire 2); the origin hub sent v%d "+
+				"and must be upgraded before it can forward here", ForwardVersion, env.V))
 		return
 	}
 	peer := s.peer(env.OriginHubAID)
@@ -306,6 +400,14 @@ func (s *Service) hForward(w http.ResponseWriter, r *http.Request) {
 	payload, err := base64.StdEncoding.DecodeString(env.Payload)
 	if err != nil {
 		fedErr(w, http.StatusBadRequest, "MALFORMED", "payload not base64")
+		return
+	}
+	// The body cap above leaves room for the JSON around the payload, so
+	// the envelope itself is checked against the exact limit here, the
+	// same limit /relay/send applies to a local sender.
+	if int64(len(payload)) > s.maxEnvelope {
+		fedErr(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
+			fmt.Sprintf("envelope is %d bytes, this hub accepts at most %d", len(payload), s.maxEnvelope))
 		return
 	}
 	cid, err := anetcid.SumRaw(payload)
@@ -363,12 +465,19 @@ func (s *Service) hForward(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "DUPLICATE"})
 		return
 	}
-	if _, err := s.local.Enqueue(env.DestAID, env.FromAID, env.Kind, env.InteractionID, payload); err != nil {
+	if _, err := s.local.Enqueue(env.DestAID, payload); err != nil {
 		// Nothing was delivered, so the claim must not outlive the
 		// attempt; otherwise the peer's retry is answered DUPLICATE and
 		// the payload is lost.
 		_, _ = s.db.Exec(`DELETE FROM fed_dedupe WHERE payload_cid=?`, env.PayloadCID)
-		fedErr(w, http.StatusInternalServerError, "MALFORMED", err.Error())
+		switch {
+		case errors.Is(err, ErrMailboxFull):
+			fedErr(w, http.StatusInsufficientStorage, "MAILBOX_FULL", err.Error())
+		case errors.Is(err, ErrBadEnvelope):
+			fedErr(w, http.StatusBadRequest, "MALFORMED", err.Error())
+		default:
+			fedErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		}
 		return
 	}
 	_, _ = s.db.Exec(`DELETE FROM fed_dedupe WHERE ts < ?`, time.Now().Add(-DedupeWindow).UnixMilli())
@@ -378,19 +487,22 @@ func (s *Service) hForward(w http.ResponseWriter, r *http.Request) {
 
 // ---- egress ----
 
-// TryForward offers a locally-undeliverable message to each peer in order;
-// the first 202 wins. 404 means "not my agent" and the walk continues.
-func (s *Service) TryForward(destAID, fromAID, kind, interactionID string, payload []byte) (bool, string, error) {
+// TryForward offers a locally-undeliverable sealed envelope to each peer
+// in order; the first 202 wins. 404 means "not my agent" and the walk
+// continues. A peer answering 507 ends the walk with an error wrapping
+// ErrMailboxFull: the destination lives there and its mailbox is full.
+func (s *Service) TryForward(destAID string, envelope []byte) (bool, string, error) {
 	if !s.Enabled() {
 		return false, "", nil
 	}
+	payload := envelope
 	cid, err := anetcid.SumRaw(payload)
 	if err != nil {
 		return false, "", err
 	}
 	env := Envelope{
-		V: 1, OriginHubAID: s.id.AID, DestAID: destAID, FromAID: fromAID, Kind: kind,
-		InteractionID: interactionID, Payload: base64.StdEncoding.EncodeToString(payload),
+		V: ForwardVersion, OriginHubAID: s.id.AID, DestAID: destAID,
+		Payload:    base64.StdEncoding.EncodeToString(payload),
 		PayloadCID: cid, Hop: 1, SeenHubs: []string{s.id.AID}, TS: uint64(time.Now().UnixMilli()),
 	}
 	pre, err := env.preimage(payload)
@@ -409,14 +521,20 @@ func (s *Service) TryForward(destAID, fromAID, kind, interactionID string, paylo
 			continue
 		}
 		code := resp.StatusCode
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		resp.Body.Close()
 		switch code {
 		case http.StatusAccepted, http.StatusOK: // queued or idempotent duplicate
 			return true, p.AID, nil
 		case http.StatusNotFound:
 			continue
+		case http.StatusInsufficientStorage:
+			return false, "", fmt.Errorf("%w at peer %s: %s", ErrMailboxFull, p.AID, strings.TrimSpace(string(detail)))
 		default:
-			lastErr = fmt.Errorf("peer %s: HTTP %d", p.AID, code)
+			// The peer's own explanation is kept: a VERSION_UNSUPPORTED
+			// from a peer that has not been upgraded to forward v2 is the
+			// case an operator most needs to read.
+			lastErr = fmt.Errorf("peer %s: HTTP %d: %s", p.AID, code, strings.TrimSpace(string(detail)))
 		}
 	}
 	return false, "", lastErr
@@ -442,10 +560,11 @@ func nowMillisForTest() uint64               { return uint64(time.Now().UnixMill
 type Directory interface {
 	// CardsSince serves this hub's own opted-in cards after a cursor.
 	CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error)
-	// AdmitFedCard verifies and stores a card learned from a peer. An
+	// AdmitFedCard verifies and stores a card learned from a peer, with
+	// the encryption key set the entry carried (nil when none). An
 	// error wrapping ErrRefusedForNow means the refusal may stop
 	// applying, and the cursor must not advance past that card.
-	AdmitFedCard(peerAID string, card, kel []byte, home string) error
+	AdmitFedCard(peerAID string, card, kel, keys []byte, home string) error
 	// ReviewsSince serves this hub's own opted-in reviews after a cursor,
 	// as opaque JSON. Opaque because federation moves the bytes and the
 	// kernel decides what they mean — a module that understood the shape
@@ -466,9 +585,11 @@ type Directory interface {
 var ErrRefusedForNow = errors.New("federation: refused for now")
 
 // FedCardView is one entry of the sync stream, as the kernel hands it over.
+// Keys is the agent's seal.SignedEncKeySet encoding, or nil.
 type FedCardView struct {
 	Card   []byte
 	KEL    []byte
+	Keys   []byte
 	Home   string
 	FedSeq int64
 }
@@ -476,6 +597,7 @@ type FedCardView struct {
 type fedCardWire struct {
 	Card   json.RawMessage `json:"card"`
 	KEL    string          `json:"kel"`
+	Keys   string          `json:"keys,omitempty"` // base64 of the seal.SignedEncKeySet encoding
 	Home   string          `json:"home"`
 	FedSeq int64           `json:"fed_seq"`
 }
@@ -511,10 +633,14 @@ func (s *Service) hCards(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]fedCardWire, 0, len(cards))
 	for _, c := range cards {
-		out = append(out, fedCardWire{
+		cw := fedCardWire{
 			Card: json.RawMessage(c.Card), KEL: base64.StdEncoding.EncodeToString(c.KEL),
 			Home: c.Home, FedSeq: c.FedSeq,
-		})
+		}
+		if len(c.Keys) > 0 {
+			cw.Keys = base64.StdEncoding.EncodeToString(c.Keys)
+		}
+		out = append(out, cw)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"cursor": next, "cards": out})
@@ -672,7 +798,15 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 				// are reachable.
 				home = p.Endpoint
 			}
-			if err := s.dir.AdmitFedCard(p.AID, c.Card, kel, home); err != nil {
+			// The key set is advisory: one that does not decode is passed
+			// as absent and the card is still admitted.
+			var keys []byte
+			if c.Keys != "" {
+				if k, kerr := base64.StdEncoding.DecodeString(c.Keys); kerr == nil {
+					keys = k
+				}
+			}
+			if err := s.dir.AdmitFedCard(p.AID, c.Card, kel, keys, home); err != nil {
 				log.Printf("hub: federation card from %s refused: %v", p.AID, err)
 				refused++
 				// A refusal that may stop applying must not be skipped

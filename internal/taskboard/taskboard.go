@@ -1,8 +1,17 @@
+//go:build taskboard
+
 // Package taskboard is the hub-side task board (K207 A4): the 7-column
 // kanban FSM from AgentNetwork v3, re-homed on the hub with one decisive
 // change (D3): a card is a VIEW — the truth about a task is the TaskDoc the
-// card's taskdoc_cid points to. The board never stores task semantics, only
-// workflow position and an append-only event trail.
+// card's taskdoc_cid points to.
+//
+// The board does store task content: every card has a caller-supplied
+// title, and submit, reject and block store a note on the card and in the
+// event trail. Reads are unauthenticated. A hub that compiles this package
+// in therefore holds and publishes task content, which a default hub must
+// not (A2A-DESIGN §0 decision 2, §2 row taskboard). The package is built
+// only with -tags taskboard; the default build contains none of it, and CI
+// checks that by symbol count in both directions.
 //
 // Columns (v3 DefaultColumnsJSON, faithfully carried):
 //

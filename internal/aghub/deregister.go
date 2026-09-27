@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
@@ -48,18 +47,11 @@ import (
 func (s *Store) Deregister(aid string) (undelivered int, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Only what is still queued.
-	//
-	// The count is a warning that somebody is waiting, so it has to mean
-	// waiting. Counting every message the mailbox ever received reported
-	// work that had been collected and acted on months earlier as work
-	// about to be lost, and the number tracked how long the agent had
-	// been here rather than how much it was abandoning — an agent with a
-	// thousand delivered messages and an empty mailbox left with a
-	// warning about a thousand orphans. delivered_at is what the poll and
-	// ack path writes; NULL is the undelivered half of the mailbox index.
+	// Only what is still queued. Since wire 2 a relay row exists only
+	// while it is undelivered (ack deletes it), so every row addressed
+	// to this AID is a message somebody is waiting on.
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM relay_message WHERE to_aid=? AND delivered_at IS NULL`,
+		`SELECT COUNT(*) FROM relay_message WHERE to_aid=?`,
 		aid).Scan(&undelivered); err != nil {
 		return 0, err
 	}
@@ -113,8 +105,12 @@ func (s *Store) Deregister(aid string) (undelivered int, err error) {
 	if err := withdrawCard(tx, aid, withdrawDeparted, federates(visibility)); err != nil {
 		return undelivered, err
 	}
+	// The encryption key set and the A2A card are routing too: they are
+	// how a sender reaches this agent here, and it has left.
 	for _, q := range []string{
 		`DELETE FROM agent_cap WHERE aid=?`,
+		`DELETE FROM agent_keys WHERE aid=?`,
+		`DELETE FROM agent_a2a_card WHERE aid=?`,
 		`DELETE FROM agent WHERE aid=?`,
 	} {
 		if _, err := tx.Exec(q, aid); err != nil {
@@ -124,32 +120,16 @@ func (s *Store) Deregister(aid string) (undelivered int, err error) {
 	return undelivered, tx.Commit()
 }
 
-// hDeregister lets an agent leave, under its own signature.
+// hDeregister lets an agent leave, under its own signature (relayauth v2,
+// action "deregister"). An agent says who it is by holding its key, here
+// as everywhere.
 func (s *Server) hDeregister(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
-	var req struct {
-		TS          uint64 `json:"ts"`
-		KeyStateSeq uint64 `json:"key_state_seq"`
-		Sig         string `json:"sig"`
-	}
-	if err := readJSONBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
-		return
-	}
-	kelBytes, err := s.store.AgentKEL(aid)
-	if err != nil {
+	if _, err := s.store.AgentKEL(aid); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not registered"})
 		return
 	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	// The same signed challenge every other self-description uses. An
-	// agent says who it is by holding its key, here as everywhere.
-	if err := verifyChallenge(kel, relayauth.ActionProfile, aid, req.TS, req.KeyStateSeq, req.Sig); err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+	if _, ok := s.authSelf(w, r, relayauth.ActionDeregister, signedBodyLimit); !ok {
 		return
 	}
 	undelivered, err := s.store.Deregister(aid)

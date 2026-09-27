@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,20 +12,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/ANetResearch/ANetHub/internal/version"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/coredet"
-	"github.com/ANetResearch/ANetCore/delegation"
+	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/tsir"
+	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
-// buildHubDB seeds a hub store with two agents and one full delegate→message→result interaction, then
-// returns the hub data dir.
+// testCanary is written into the relay envelopes buildHubDB queues. No admin
+// response and no file under the admin data directory may contain it.
+const testCanary = "canary-admin-relay-3e8b51"
+
+// buildHubDB seeds a hub store (current schema, created by aghub.Open) with
+// two agents, three queued sealed envelopes whose ciphertext holds
+// testCanary, and one stored review, then returns the hub data dir.
 func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 	t.Helper()
 	dir = t.TempDir()
@@ -38,36 +42,26 @@ func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 	req, _ := identity.Incept()
 	provKEL, _ := identity.MarshalKEL(prov.KEL())
 	reqKEL, _ := identity.MarshalKEL(req.KEL())
-	if err := hs.PutAgent(prov.AID(), "测试供给方", []string{"echo", "translate"}, 5, provKEL); err != nil {
+	if err := hs.PutAgent(prov.AID(), "测试供给方", []string{"echo", "translate"}, provKEL); err != nil {
 		t.Fatal(err)
 	}
-	if err := hs.PutAgent(req.AID(), "测试需求方", nil, 0, reqKEL); err != nil {
+	if err := hs.PutAgent(req.AID(), "测试需求方", nil, reqKEL); err != nil {
 		t.Fatal(err)
 	}
 
-	// delegate: a signed TaskDoc, exactly as a real daemon relays it.
-	td := &tsir.TaskDoc{Version: tsir.VersionPair{Major: 1},
-		Tasks: []tsir.Task{{Intent: tsir.Intent{Summary: "把这句话翻译成英文", Body: "把这句话翻译成英文：你好世界"}}}}
-	if err := td.Sign(req); err != nil {
-		t.Fatal(err)
+	// Since hub wire 2 the relay holds sealed envelopes only: the
+	// delegate, the reply and the result below are opaque to the hub and
+	// to this admin plane, which is the property these tests pin.
+	for i, to := range []string{prov.AID(), req.AID(), req.AID()} {
+		if _, err := hs.RelayEnqueue(to, sealedForTest(t, to, fmt.Sprintf("%s %d", testCanary, i))); err != nil {
+			t.Fatal(err)
+		}
 	}
-	doc, _ := coredet.Marshal(td)
-	dr := &delegation.DelegateReq{TaskDoc: doc, Envelope: td.Envelope, KEL: reqKEL, InteractionID: "ix-test-1",
-		Attachments: []delegation.Attachment{{Name: "ref.png", Mime: "image/png", Size: 5, CID: "bafyfake", Data: []byte("12345")}}}
-	drb, _ := dr.Marshal()
-	if _, err := hs.RelayEnqueue(prov.AID(), req.AID(), aghub.RelayKindDelegate, "ix-test-1", drb); err != nil {
-		t.Fatal(err)
-	}
-	// message: provider chats back.
-	cm := &delegation.ChatMsg{Kind: delegation.ChatText, Body: "收到，马上翻译。"}
-	cmb, _ := cm.Marshal()
-	if _, err := hs.RelayEnqueue(req.AID(), prov.AID(), aghub.RelayKindMessage, "ix-test-1", cmb); err != nil {
-		t.Fatal(err)
-	}
-	// result: done with a text deliverable.
-	rr := &delegation.ResultResp{Status: delegation.StatusDone, Deliverable: []byte("Hello, world")}
-	rrb, _ := rr.Marshal()
-	if _, err := hs.RelayEnqueue(req.AID(), prov.AID(), aghub.RelayKindResult, "ix-test-1", rrb); err != nil {
+	// One review, stored as the hub stores it: rating, comment and the
+	// receipt anchors, no content.
+	rv := &evidence.Review{InteractionID: "ix-admin-1", SubjectAID: prov.AID(), ReviewerAID: req.AID(),
+		Rating: 4, Comment: "fine", ReceiptCID: "bafy-receipt-admin-1", CreatedAt: 2000}
+	if err := hs.PutReview(rv, aghub.ReviewDetail{RequestCID: "bafy-req", ResultCID: "bafy-res", CompletedAt: 1000}); err != nil {
 		t.Fatal(err)
 	}
 	return dir, prov.AID(), req.AID()
@@ -87,73 +81,149 @@ func newTestServer(t *testing.T) (*Server, *Store, *Harvester, string, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { hub.Close() })
-	proxy := NewMonitorProxy("tok")
-	hv := NewHarvester(store, hub, proxy, filepath.Join(adminDir, "datasets"))
-	srv := NewServer(store, hub, NewOps(0), proxy, hv, NewVecClient(""), "test-token", "/admin")
+	hv := NewHarvester(filepath.Join(adminDir, "datasets"))
+	srv := NewServer(store, hub, hv, NewVecClient(""), "test-token", "/admin")
 	return srv, store, hv, provAID, reqAID
 }
 
-func TestHarvestRelayInteraction(t *testing.T) {
-	_, store, hv, provAID, reqAID := newTestServer(t)
-	results := hv.RunAll(context.Background())
-	if len(results) == 0 || results[0].Source != "hub-relay" {
-		t.Fatalf("unexpected results: %+v", results)
-	}
-	if results[0].Err != "" {
-		t.Fatalf("harvest error: %s", results[0].Err)
-	}
-	if results[0].Events != 3 {
-		t.Fatalf("want 3 events, got %d", results[0].Events)
-	}
-	row, err := store.GetSession("hub-relay", "ix-test-1")
+// sealedForTest is a structurally valid sealed envelope for "to" whose
+// ciphertext is the given text. A real one is encrypted; the point here
+// is that even a ciphertext holding plaintext bytes is not decoded or
+// copied by the admin plane.
+func sealedForTest(t *testing.T, to, ct string) []byte {
+	t.Helper()
+	env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
+		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct)}
+	b, err := env.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.ProviderAID != provAID || row.RequesterAID != reqAID {
-		t.Fatalf("participants wrong: %+v", row)
+	return b
+}
+
+// RunAll touches no source and writes nothing under the datasets root
+// (A2A-DESIGN §9 row admin 采集, [C39]).
+//
+// Independent checks, each of which a re-added source trips: the returned
+// list must be empty, so a source that ran and reported fails; and the
+// datasets root must not exist afterwards, so a source that writes fails.
+// A second pass runs through the HTTP surface of a fully wired admin plane,
+// with an official agent registered and relay envelopes queued in hub.db,
+// and checks that no harvest cursor, no session and no file resulted, so a
+// source that records its cursor or a session index row fails too.
+func TestRunAllTouchesNothing(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "datasets")
+	hv := NewHarvester(root)
+	if got := hv.RunAll(context.Background()); len(got) != 0 {
+		t.Fatalf("RunAll ran %d source(s): %+v", len(got), got)
 	}
-	if row.Status != delegation.StatusDone {
-		t.Fatalf("want status done, got %q", row.Status)
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("RunAll created the datasets root (%v)", err)
 	}
-	if !strings.Contains(row.Goal, "翻译") {
-		t.Fatalf("goal not extracted: %q", row.Goal)
+
+	srv, store, hvFull, _, _ := newTestServer(t)
+	if err := store.PutOfficial(&Manifest{ID: "qa-official", Name: "QA", Tier: "official",
+		ProductLine: "anetos", AID: "did:anet:qa", Caps: []string{"qa.run"}}); err != nil {
+		t.Fatal(err)
 	}
-	// Data file: 3 event lines; attachment bytes must be dropped (metadata kept).
-	events, err := hv.ReadSessionData("hub-relay", "ix-test-1", 10)
+	h := srv.Handler()
+	w, out := doReq(t, h, "POST", "/admin/api/harvest", "test-token", map[string]any{})
+	if w.Code != http.StatusOK {
+		t.Fatalf("harvest: %d %s", w.Code, w.Body.String())
+	}
+	if list, _ := out["results"].([]any); len(list) != 0 {
+		t.Errorf("the harvest endpoint ran sources: %v", list)
+	}
+	states, err := store.HarvestStates()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 3 {
-		t.Fatalf("want 3 event lines, got %d", len(events))
+	if len(states) != 0 {
+		t.Errorf("a harvest cursor was written: %+v", states)
 	}
-	var first relayEvent
-	if err := json.Unmarshal(events[0], &first); err != nil {
-		t.Fatal(err)
-	}
-	if first.Goal == "" || len(first.Attachments) != 1 || first.Attachments[0].Name != "ref.png" {
-		t.Fatalf("delegate event malformed: %+v", first)
-	}
-	if bytes.Contains(events[0], []byte("12345")) {
-		t.Fatal("attachment bytes leaked into dataset")
-	}
-	// Card must exist and carry OKF frontmatter.
-	card, err := hv.ReadSessionCard("hub-relay", "ix-test-1")
+	counts, err := store.SessionCounts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"type: Agent Session", "resource:", "hub:", "status: \"done\""} {
-		if !strings.Contains(card, want) {
-			t.Fatalf("card missing %q:\n%s", want, card)
+	if len(counts) != 0 {
+		t.Errorf("sessions were recorded: %+v", counts)
+	}
+	if _, err := os.Stat(hvFull.Root()); !os.IsNotExist(err) {
+		t.Errorf("the datasets root exists after a harvest (%v)", err)
+	}
+}
+
+// No admin response and no file in the admin data directory holds relay
+// content (SI-1). The relay envelopes in hub.db carry testCanary in their
+// ciphertext; the admin plane must neither decode nor copy it.
+func TestNoAdminSurfaceServesRelayContent(t *testing.T) {
+	srv, store, hv, provAID, _ := newTestServer(t)
+	if err := store.PutOfficial(&Manifest{ID: "qa-official", Name: "QA", Tier: "official",
+		ProductLine: "anetos", AID: provAID, Caps: []string{"echo"}}); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+	doReq(t, h, "POST", "/admin/api/harvest", "test-token", map[string]any{})
+	srv.takeSnapshot()
+	for _, path := range []string{
+		"/admin/api/overview", "/admin/api/agents", "/admin/api/agents/" + provAID,
+		"/admin/api/official", "/admin/api/capabilities", "/admin/api/discover?task=echo",
+		"/admin/api/vision", "/admin/api/store", "/admin/api/sessions",
+		"/admin/api/sessions/hub-relay/x", "/admin/api/reviews", "/admin/api/audit",
+		"/admin/api/deleted",
+	} {
+		w, _ := doReq(t, h, "GET", path, "test-token", nil)
+		if strings.Contains(w.Body.String(), testCanary) {
+			t.Errorf("GET %s serves relay content", path)
 		}
 	}
-	// Re-run must be a no-op (cursor advanced).
-	again := hv.RunAll(context.Background())
-	if again[0].Events != 0 {
-		t.Fatalf("second run should harvest 0, got %d", again[0].Events)
+	adminDir := filepath.Dir(hv.Root())
+	err := filepath.Walk(adminDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return rerr
+		}
+		if bytes.Contains(b, []byte(testCanary)) {
+			t.Errorf("%s holds relay content", p)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Bundle index regenerated at the root.
-	if _, err := os.Stat(filepath.Join(hv.Root(), "hub-relay", "index.md")); err != nil {
-		t.Fatal("bundle root index.md missing")
+}
+
+// The official-agent operations removed by A2A-DESIGN §9 answer 404 to an
+// authenticated operator: ops over ssh, the monitor proxy, insights and
+// the ACL write. SI-1 asserts the same from outside.
+func TestOfficialAgentOperationsAreGone(t *testing.T) {
+	srv, store, _, _, _ := newTestServer(t)
+	if err := store.PutOfficial(&Manifest{ID: "qa-official", Name: "QA", Tier: "official",
+		ProductLine: "anetos"}); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+	for _, rt := range []struct{ method, path string }{
+		{"POST", "/admin/api/official/qa-official/ops"},
+		{"GET", "/admin/api/official/qa-official/monitor/state"},
+		{"GET", "/admin/api/official/qa-official/monitor/catalog"},
+		{"GET", "/admin/api/official/qa-official/insights"},
+		{"POST", "/admin/api/official/qa-official/acl"},
+		{"POST", "/admin/api/agents/did:anet:x/quota"},
+		{"GET", "/admin/api/tasks"},
+	} {
+		w, _ := doReq(t, h, rt.method, rt.path, "test-token", map[string]string{"op": "status"})
+		if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "no such admin API route") {
+			t.Errorf("%s %s = %d %.80s, want the JSON 404", rt.method, rt.path, w.Code, w.Body.String())
+		}
+		// Without a credential the removed route answers like every other
+		// API path: 401, so that route names are not enumerable.
+		if w, _ := doReqFrom(t, h, rt.method, rt.path, "", nil, "192.0.2.77"); w.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without a credential = %d, want 401", rt.method, rt.path, w.Code)
+		}
 	}
 }
 
@@ -217,23 +287,27 @@ func TestServerAuthAndAgents(t *testing.T) {
 		t.Fatalf("want 2 agents (incl. unlisted), got %d", len(agents))
 	}
 
-	// Moderation + quota round-trip and are audited.
-	if w, _ := doReq(t, h, "POST", "/admin/api/agents/"+provAID+"/quota", "test-token", map[string]int{"guest_quota": 0}); w.Code != http.StatusOK {
-		t.Fatalf("quota: %d %s", w.Code, w.Body.String())
-	}
+	// Moderation round-trips and is audited.
 	if w, _ := doReq(t, h, "POST", "/admin/api/agents/"+provAID+"/moderate", "test-token", map[string]string{"status": "flagged", "note": "试运行"}); w.Code != http.StatusOK {
 		t.Fatalf("moderate: %d", w.Code)
 	}
 	_, out = doReq(t, h, "GET", "/admin/api/agents/"+provAID, "test-token", nil)
 	ag := out["agent"].(map[string]any)
-	if int(ag["guest_quota"].(float64)) != 0 {
-		t.Fatalf("quota not applied: %+v", ag)
+	// The agent row carries no guest quota and no task counters: both
+	// columns are gone from the hub store (A2A-DESIGN §9).
+	for _, k := range []string{"guest_quota", "tasks_as_provider", "tasks_as_requester", "last_completed_at"} {
+		if _, ok := ag[k]; ok {
+			t.Errorf("the admin agent view still carries %q: %+v", k, ag)
+		}
+	}
+	if int(ag["review_count"].(float64)) != 1 {
+		t.Errorf("review_count = %v, want 1", ag["review_count"])
 	}
 	if out["moderation"].(map[string]any)["status"] != "flagged" {
 		t.Fatal("moderation not applied")
 	}
 	_, out = doReq(t, h, "GET", "/admin/api/audit", "test-token", nil)
-	if len(out["audit"].([]any)) < 2 {
+	if len(out["audit"].([]any)) < 1 {
 		t.Fatal("audit entries missing")
 	}
 
@@ -242,13 +316,10 @@ func TestServerAuthAndAgents(t *testing.T) {
 	if w.Code != http.StatusOK || out["totals"] == nil {
 		t.Fatalf("overview: %d", w.Code)
 	}
+	// Wire 2: nothing is harvested from the relay, so no relay session exists.
 	_, out = doReq(t, h, "GET", "/admin/api/sessions?source=hub-relay", "test-token", nil)
-	if len(out["sessions"].([]any)) != 1 {
-		t.Fatal("harvested session not listed")
-	}
-	w, _ = doReq(t, h, "GET", "/admin/api/sessions/hub-relay/ix-test-1", "test-token", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("session detail: %d", w.Code)
+	if list, _ := out["sessions"].([]any); len(list) != 0 {
+		t.Fatalf("relay sessions listed: %v", list)
 	}
 	w, out = doReq(t, h, "GET", "/admin/api/store", "test-token", nil)
 	if w.Code != http.StatusOK || out["product_lines"] == nil {
@@ -268,33 +339,43 @@ func TestManifestValidation(t *testing.T) {
 	if _, err := ParseManifest([]byte(`{"id":"ok","name":"x","tier":"boss","product_line":"anetos"}`)); err == nil {
 		t.Fatal("bad tier accepted")
 	}
-	m, err := ParseManifest([]byte(`{"id":"ok","name":"x","tier":"official","product_line":"anetos","runtime":{"host":"h"}}`))
+	m, err := ParseManifest([]byte(`{"id":"ok","name":"x","tier":"official","product_line":"anetos",
+	  "aid":"did:anet:ok","hub":"https://hub.invalid","caps":["a.b","c.d"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Runtime.SSHUser != "root" {
-		t.Fatal("ssh_user default not applied")
+	if m.AID != "did:anet:ok" || m.Hub != "https://hub.invalid" || len(m.Caps) != 2 {
+		t.Fatalf("registry fields not kept: %+v", m)
 	}
 }
 
-func TestOpsWhitelist(t *testing.T) {
-	m, _ := ParseManifest([]byte(`{"id":"x","name":"x","tier":"official","product_line":"anetos",
-	  "runtime":{"host":"nohost.invalid","units":["a.service"]}, "ops":{"allowed":["status"]}}`))
-	o := NewOps(0)
-	// An op outside the manifest's allowed list is refused before any ssh happens.
-	if res := o.Run(context.Background(), m, "restart", ""); res.Err == "" {
-		t.Fatal("disallowed op executed")
+// A manifest that still carries a section the admin plane no longer has —
+// runtime (an ssh host), monitor (a console URL), ops (commands) or datasets
+// (a harvest switch) — is refused with the reason, not reduced silently.
+func TestAManifestWithARemovedSectionIsRefused(t *testing.T) {
+	for _, k := range []string{"runtime", "monitor", "ops", "datasets"} {
+		doc := `{"id":"ok","name":"x","tier":"official","product_line":"anetos","` + k + `":{}}`
+		_, err := ParseManifest([]byte(doc))
+		if err == nil || !strings.Contains(err.Error(), "no longer accepted") {
+			t.Errorf("a manifest with %q: %v, want refused", k, err)
+		}
 	}
-	// Logs arg validation: an undeclared unit is refused.
-	if _, err := buildCommand(m, "logs", "evil.service 100"); err == nil {
-		t.Fatal("undeclared unit accepted")
+	// The same through the API and through the officials file.
+	srv, store, _, _, _ := newTestServer(t)
+	w, _ := doReq(t, srv.Handler(), "POST", "/admin/api/official", "test-token", map[string]any{
+		"id": "qa", "name": "QA", "tier": "official", "product_line": "anetos",
+		"monitor": map[string]string{"url": "http://127.0.0.1:1"},
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("POST /api/official with a monitor section = %d, want 400", w.Code)
 	}
-	if cmd, err := buildCommand(m, "logs", "a.service 100"); err != nil || !strings.Contains(cmd, "journalctl -u 'a.service' -n 100") {
-		t.Fatalf("logs command wrong: %q %v", cmd, err)
+	path := filepath.Join(t.TempDir(), OfficialsFileName)
+	if err := os.WriteFile(path, []byte(`[{"id":"qa","name":"QA","tier":"official","product_line":"anetos",
+	  "datasets":{"harvest":true}}]`), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// Update without a manifest command is refused.
-	if _, err := buildCommand(m, "update", ""); err == nil {
-		t.Fatal("empty update accepted")
+	if _, err := store.SeedOfficialsFromFile(path); err == nil {
+		t.Error("an officials file with a datasets section was loaded")
 	}
 }
 
@@ -332,6 +413,26 @@ func TestDeleteArchivesAndLimits(t *testing.T) {
 	}
 	if !throttled {
 		t.Fatal("destructive rate limit never engaged")
+	}
+}
+
+// A placeholder credential stops the admin plane from starting
+// (cmd/anet-hub-admin calls PlaceholderToken before serving). The unit
+// template ships ADMIN_TOKEN=CHANGE_ME; a deployment that kept it would
+// publish the operator surface under a value readable in this repository.
+func TestAPlaceholderCredentialIsRecognised(t *testing.T) {
+	for _, tok := range []string{
+		"CHANGE_ME", "changeme", "change-me", "Change Me", "REPLACE_ME", "<token>", "${ADMIN_TOKEN}",
+		"{{admin_token}}", "%ADMIN_TOKEN%", "your-token-here", "xxxxxxxx", "00000000", "", "   ", "TODO",
+	} {
+		if !PlaceholderToken(tok) {
+			t.Errorf("%q was not recognised as a placeholder", tok)
+		}
+	}
+	for _, tok := range []string{"k7Qw2mZr9TfLpX4v", "anetpw2077", "change-me-7Qw2mZr9", "xxxxxxxy"} {
+		if PlaceholderToken(tok) {
+			t.Errorf("%q was treated as a placeholder", tok)
+		}
 	}
 }
 
@@ -379,16 +480,11 @@ func TestEveryAPIRouteRefusesAnUnauthenticatedCall(t *testing.T) {
 		{"GET", "/admin/api/overview"},
 		{"GET", "/admin/api/agents"},
 		{"GET", "/admin/api/agents/" + provAID},
-		{"POST", "/admin/api/agents/" + provAID + "/quota"},
 		{"POST", "/admin/api/agents/" + provAID + "/moderate"},
 		{"DELETE", "/admin/api/agents/" + provAID},
 		{"GET", "/admin/api/official"},
 		{"POST", "/admin/api/official"},
 		{"DELETE", "/admin/api/official/anet-hub"},
-		{"POST", "/admin/api/official/anet-hub/ops"},
-		{"GET", "/admin/api/official/anet-hub/monitor/logs"},
-		{"GET", "/admin/api/official/anet-hub/insights"},
-		{"POST", "/admin/api/official/anet-hub/acl"},
 		{"GET", "/admin/api/capabilities"},
 		{"GET", "/admin/api/discover"},
 		{"GET", "/admin/api/vision"},
@@ -397,7 +493,6 @@ func TestEveryAPIRouteRefusesAnUnauthenticatedCall(t *testing.T) {
 		{"GET", "/admin/api/sessions/relay/x"},
 		{"POST", "/admin/api/harvest"},
 		{"GET", "/admin/api/reviews"},
-		{"GET", "/admin/api/tasks"},
 		{"GET", "/admin/api/audit"},
 		{"GET", "/admin/api/deleted"},
 		{"POST", "/admin/api/deleted/" + provAID + "/restore"},
@@ -406,8 +501,8 @@ func TestEveryAPIRouteRefusesAnUnauthenticatedCall(t *testing.T) {
 	// loudly. A new route is the one most likely to be missing its auth
 	// wrapper, and a list that quietly falls behind covers everything
 	// except the thing that needs covering.
-	if len(routes) != 25 {
-		t.Fatalf("this check lists %d routes; the surface has 25. "+
+	if len(routes) != 19 {
+		t.Fatalf("this check lists %d routes; the surface has 19. "+
 			"A route missing from this list is a route nobody checks.", len(routes))
 	}
 	for i, rt := range routes {
@@ -512,18 +607,13 @@ func TestDestructiveOpsAreLimitedAndAudited(t *testing.T) {
 	}
 }
 
-// Quota and moderation changes take effect and are attributable.
-//
-// Both are operator judgements about somebody else's agent, so both have
-// to leave a record naming what was done to whom.
-func TestQuotaAndModerationAreRecorded(t *testing.T) {
+// Moderation changes take effect and are attributable: an operator
+// judgement about somebody else's agent has to leave a record naming what
+// was done to whom.
+func TestModerationIsRecorded(t *testing.T) {
 	srv, store, _, provAID, _ := newTestServer(t)
 	h := srv.Handler()
 
-	if w, _ := doReq(t, h, "POST", "/admin/api/agents/"+provAID+"/quota",
-		"test-token", map[string]int{"guest_quota": 7}); w.Code != http.StatusOK {
-		t.Fatalf("quota: %d", w.Code)
-	}
 	if w, _ := doReq(t, h, "POST", "/admin/api/agents/"+provAID+"/moderate",
 		"test-token", map[string]string{"status": "flagged", "note": "under review"}); w.Code != http.StatusOK {
 		t.Fatalf("moderate: %d", w.Code)
@@ -537,18 +627,15 @@ func TestQuotaAndModerationAreRecorded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawQuota, sawModerate bool
+	var sawModerate bool
 	for _, e := range tail {
-		if strings.Contains(e.Action, "quota") && e.Target == provAID {
-			sawQuota = true
-		}
 		if strings.Contains(e.Action, "moderat") && e.Target == provAID {
 			sawModerate = true
 		}
 	}
-	if !sawQuota || !sawModerate {
-		t.Errorf("audit is missing quota=%v moderate=%v — a judgement about "+
-			"somebody else's agent with no record of who made it", sawQuota, sawModerate)
+	if !sawModerate {
+		t.Error("audit has no moderation entry — a judgement about somebody else's " +
+			"agent with no record of who made it")
 	}
 }
 
@@ -631,5 +718,180 @@ func TestHealthzNamesTheBuild(t *testing.T) {
 	// The version is the real one, not a placeholder.
 	if out["version"] != version.V {
 		t.Errorf("version = %v, want %q", out["version"], version.V)
+	}
+}
+
+// The admin readers work against a hub.db created by the current aghub.Open
+// (no completed_task, no guest_quota, no review content) and report what
+// that store can state [C38].
+func TestAdminReadersOfTheCurrentHubSchema(t *testing.T) {
+	hubDir, provAID, reqAID := buildHubDB(t)
+	hub, err := OpenHubDB(hubDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	agents, err := hub.AllAgents("")
+	if err != nil {
+		t.Fatalf("AllAgents: %v", err)
+	}
+	byAID := map[string]AdminAgentView{}
+	for _, a := range agents {
+		byAID[a.AID] = a
+	}
+	if p := byAID[provAID]; p.ReviewCount != 1 || p.MailboxBacklog != 1 {
+		t.Errorf("provider: reviews=%d backlog=%d, want 1/1", p.ReviewCount, p.MailboxBacklog)
+	}
+	if r := byAID[reqAID]; r.ReviewsWritten != 1 || r.MailboxBacklog != 2 {
+		t.Errorf("requester: written=%d backlog=%d, want 1/2", r.ReviewsWritten, r.MailboxBacklog)
+	}
+	tot, err := hub.Totals()
+	if err != nil {
+		t.Fatalf("Totals: %v", err)
+	}
+	if tot.TasksCompleted != 1 || tot.Reviews != 1 || tot.RelayBacklog != 3 || tot.Agents != 2 {
+		t.Errorf("totals = %+v, want tasks_completed 1 (one published receipt), reviews 1, backlog 3, agents 2", tot)
+	}
+	revs, err := hub.RecentReviews(10)
+	if err != nil {
+		t.Fatalf("RecentReviews: %v", err)
+	}
+	raw, _ := json.Marshal(revs)
+	if len(revs) != 1 || strings.Contains(string(raw), `"goal"`) || strings.Contains(string(raw), `"deliverable"`) {
+		t.Errorf("recent reviews: %s", raw)
+	}
+}
+
+// oldAgentTable is agent as a hub created it before guest mode was
+// removed.
+const oldAgentTable = `CREATE TABLE agent (
+   aid TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', caps TEXT NOT NULL DEFAULT '[]',
+   summary TEXT NOT NULL DEFAULT '', readme TEXT NOT NULL DEFAULT '', pricing TEXT NOT NULL DEFAULT '',
+   guest_quota INTEGER NOT NULL DEFAULT 5, kel BLOB NOT NULL, registered_at TEXT NOT NULL,
+   visibility TEXT NOT NULL DEFAULT 'hub-local', last_seen_at TEXT)`
+
+// A backup written before guest mode was removed still has agent.guest_quota.
+// Restoring it into a hub store of the current schema adds its agents and
+// does not bring the column back ([C38]).
+func TestRestoringFromAnOldSchemaBackup(t *testing.T) {
+	bak := filepath.Join(t.TempDir(), "hub-backup-old.db")
+	db, err := sql.Open("sqlite", bak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(oldAgentTable); err != nil {
+		t.Fatal(err)
+	}
+	var aids []string
+	for i := 0; i < 3; i++ {
+		c, _ := identity.Incept()
+		kel, _ := identity.MarshalKEL(c.KEL())
+		if _, err := db.Exec(`INSERT INTO agent(aid,name,caps,summary,readme,pricing,guest_quota,kel,registered_at)
+		     VALUES(?,?,?,?,?,?,?,?,?)`, c.AID(), fmt.Sprintf("old-%d", i), `["x.y"]`, "s", "", "",
+			5, kel, "2026-07-19T00:00:00Z"); err != nil {
+			t.Fatal(err)
+		}
+		aids = append(aids, c.AID())
+	}
+	db.Close()
+
+	hubDir, _, _ := buildHubDB(t) // current schema, two agents
+	before, after, err := RestoreAgentsFromBackup(hubDir, bak)
+	if err != nil {
+		t.Fatalf("restoring an old-schema backup: %v", err)
+	}
+	if before != 2 || after != 5 {
+		t.Errorf("before=%d after=%d, want 2 and 5", before, after)
+	}
+	hub, err := OpenHubDB(hubDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	var n int
+	if err := hub.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent') WHERE name='guest_quota'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Error("the restore brought agent.guest_quota back")
+	}
+	agents, err := hub.AllAgents("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, a := range agents {
+		have[a.AID] = true
+	}
+	for _, aid := range aids {
+		if !have[aid] {
+			t.Errorf("%s was not restored", aid)
+		}
+	}
+	// An archived row written before the removal carries guest_quota too,
+	// and restores the same way.
+	c, _ := identity.Incept()
+	kel, _ := identity.MarshalKEL(c.KEL())
+	row, _ := json.Marshal(map[string]any{"aid": c.AID(), "name": "archived", "caps": "[]",
+		"guest_quota": 5, "kel_b64": encB64(kel), "registered_at": "2026-07-19T00:00:00Z"})
+	if err := hub.RestoreDeletedAgent(string(row)); err != nil {
+		t.Fatalf("restoring an old archive: %v", err)
+	}
+	if _, err := hub.Agent(c.AID()); err != nil {
+		t.Errorf("the old archive was not restored: %v", err)
+	}
+}
+
+// Sessions an earlier version harvested are still in admin.db and under
+// datasets/ until the production cleanup runs. The admin API lists their
+// index rows but does not serve their content: not the goal column, not the
+// session card, not the event file.
+func TestHistoricalSessionsAreNotServedWithContent(t *testing.T) {
+	srv, store, hv, provAID, reqAID := newTestServer(t)
+	const canary = "canary-admin-session-9d4f20"
+	if _, err := store.db.Exec(`INSERT INTO session(source,session_id,provider_aid,requester_aid,intent,goal,
+	     status,started_at,ended_at,events,bytes,card_path,data_path,updated_at)
+	     VALUES('hub-relay','ix-old-1',?,?,'',?, 'done','','',3,120,'sessions/202609/ix-old-1.md',
+	            'data/sessions/202609/ix-old-1.jsonl','2026-09-01T00:00:00Z')`,
+		provAID, reqAID, canary+" goal"); err != nil {
+		t.Fatal(err)
+	}
+	for rel, body := range map[string]string{
+		"hub-relay/sessions/202609/ix-old-1.md":         "---\ntitle: " + canary + " card\n---\n",
+		"hub-relay/data/sessions/202609/ix-old-1.jsonl": `{"goal":"` + canary + ` event"}` + "\n",
+	} {
+		p := filepath.Join(hv.Root(), rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := srv.Handler()
+	for _, path := range []string{
+		"/admin/api/sessions", "/admin/api/sessions?source=hub-relay", "/admin/api/sessions?q=ix-old",
+		"/admin/api/sessions/hub-relay/ix-old-1", "/admin/api/agents/" + provAID,
+	} {
+		w, _ := doReq(t, h, "GET", path, "test-token", nil)
+		if w.Code != http.StatusOK {
+			t.Errorf("GET %s = %d", path, w.Code)
+		}
+		if strings.Contains(w.Body.String(), canary) {
+			t.Errorf("GET %s serves harvested content: %.200s", path, w.Body.String())
+		}
+	}
+	// The row itself is still listed, so an operator can see what the
+	// cleanup has left to delete.
+	_, out := doReq(t, h, "GET", "/admin/api/sessions", "test-token", nil)
+	if list, _ := out["sessions"].([]any); len(list) != 1 {
+		t.Errorf("sessions listed: %v, want the one historical row", out["sessions"])
+	}
+	// The search does not match the goal column either. A search that
+	// did would not print the goal, but whether a row comes back for a
+	// guessed phrase would still disclose what the goal contains.
+	_, out = doReq(t, h, "GET", "/admin/api/sessions?q="+canary, "test-token", nil)
+	if list, _ := out["sessions"].([]any); len(list) != 0 {
+		t.Errorf("a search for text that occurs only in the goal returned %d session(s)", len(list))
 	}
 }

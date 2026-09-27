@@ -1,12 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Transcript, Review } from "../AgentDetailDialog";
+import { Review, contentBindingLabel } from "../AgentDetailDialog";
 import type { ReviewView } from "../../lib/api";
 
 // The detail dialog is where a stranger decides whether to believe a
-// rating. Everything that makes a review checkable — who signed it, which
-// receipt it anchors on, what was actually asked and answered — arrives
-// here, and 234 lines of it had no test at all.
+// rating. What makes a review checkable — who signed it and which receipt
+// it anchors on — arrives here. What the hub did NOT check has to arrive
+// too: it holds no interaction content, so it cannot say whether the
+// receipt's request_cid and result_cid match anything.
 //
 // Rendered to static markup: the question is "does this fact reach the
 // page", which markup answers exactly, and it needs no DOM.
@@ -19,10 +20,9 @@ function review(over: Partial<ReviewView> = {}): ReviewView {
     rating: 5,
     comment: "answered quickly",
     receipt_cid: "bafyreiez5ziuzobff7qdlcklemjevbwu43sxakol3gydk7ifushu7t4i3u",
-    goal: "summarise the log",
-    deliverable: "a summary",
     request_cid: "bafyreirequest",
     result_cid: "bafyreiresult",
+    content_binding: "UNVERIFIED",
     completed_at: 1787580930527,
     created_at: 1787580960000,
     ...over,
@@ -38,11 +38,36 @@ describe("Review", () => {
     expect(html).toContain("双方签名已验证");
     // Shortened for the screen, but it must be THIS receipt.
     expect(html).toMatch(/bafyreiez5ziu|bafyre/);
+    expect(html).toContain("bafyreirequest");
+    expect(html).toContain("bafyreiresult");
   });
 
-  it("shows what was asked and what came back", () => {
+  // "Not checked" and "checked and fine" are different states. The page
+  // used to show "✓ 内容已验证" next to the goal and the transcript; the
+  // hub no longer receives either, and a badge claiming a check nobody
+  // made would state something false.
+  it("states that the content binding was not checked", () => {
     const html = renderToStaticMarkup(<Review r={review()} />);
-    expect(html).toContain("summarise the log");
+    expect(html).toContain("内容绑定未核对");
+    expect(html).not.toContain("内容已验证");
+  });
+
+  // A hub that has not been upgraded sends no content_binding at all.
+  // Absent is read as not checked, never as checked.
+  it("reads an absent content binding as not checked", () => {
+    const html = renderToStaticMarkup(<Review r={review({ content_binding: "" })} />);
+    expect(html).toContain("内容绑定未核对");
+    expect(contentBindingLabel(undefined)).toContain("未核对");
+  });
+
+  // An older hub may still send goal and deliverable. The page does not
+  // render them: interaction content is not something the directory
+  // shows.
+  it("does not render content an older hub still sends", () => {
+    const legacy = { ...review(), goal: "summarise the log", deliverable: "a summary" } as ReviewView;
+    const html = renderToStaticMarkup(<Review r={legacy} />);
+    expect(html).not.toContain("summarise the log");
+    expect(html).not.toContain("a summary");
   });
 
   // A review with no comment is normal and must still render: the rating
@@ -50,47 +75,5 @@ describe("Review", () => {
   it("renders without a comment", () => {
     const html = renderToStaticMarkup(<Review r={review({ comment: undefined })} />);
     expect(html).toContain("双方签名已验证");
-  });
-});
-
-describe("Transcript", () => {
-  // A multi-turn conversation arrives as JSON. Both sides have to be
-  // distinguishable, or a reader cannot tell who said what — which is the
-  // whole content of a transcript.
-  it("separates the two sides of a conversation", () => {
-    const html = renderToStaticMarkup(
-      <Transcript s={JSON.stringify([
-        { from: "requester", body: "what is a hash?" },
-        { from: "provider", body: "a fixed-length digest" },
-      ])} />,
-    );
-    expect(html).toContain("委派方");
-    expect(html).toContain("提供方");
-    expect(html).toContain("what is a hash?");
-    expect(html).toContain("a fixed-length digest");
-  });
-
-  // Not every result is a conversation. A plain string must render as
-  // itself rather than disappearing because it failed to parse.
-  it("renders a non-JSON result as text", () => {
-    const html = renderToStaticMarkup(<Transcript s="sha256: abc123" />);
-    expect(html).toContain("sha256: abc123");
-  });
-
-  // An empty conversation says so. Rendering nothing would read as a
-  // loading state that never finishes.
-  it("says when there is nothing to show", () => {
-    const html = renderToStaticMarkup(<Transcript s="[]" />);
-    expect(html).toContain("无对话内容");
-  });
-
-  // Markdown in a message is rendered, and the renderer is the one thing
-  // here that touches untrusted text: a message body comes from another
-  // agent. Script tags must not survive it.
-  it("does not let a message inject script", () => {
-    const html = renderToStaticMarkup(
-      <Transcript s={JSON.stringify([{ from: "provider", body: "<script>alert(1)</script>" }])} />,
-    );
-    expect(html).not.toContain("<script>");
   });
 });

@@ -1,3 +1,5 @@
+//go:build taskboard
+
 package taskboard_test
 
 // Real-KEL auth integration: the stub-auth unit tests prove the FSM; this
@@ -37,7 +39,7 @@ func newAgent(t *testing.T, store *aghub.Store, name string) agent {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutAgent(ctrl.AID(), name, nil, 0, kel); err != nil {
+	if err := store.PutAgent(ctrl.AID(), name, nil, kel); err != nil {
 		t.Fatal(err)
 	}
 	return agent{ctrl: ctrl, aid: ctrl.AID()}

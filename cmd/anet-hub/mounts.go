@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -17,8 +18,10 @@ type hubDeps struct {
 	root  *http.ServeMux
 }
 
-// mount is one compiled-in optional module; a `no_<name>` build tag
-// subtracts its file and with it the module (拔插头 in the build).
+// mount is one compiled-in optional module. A subtractive tag
+// (`-tags no_<name>`) removes the file that registers it from the default
+// build; an additive tag (`-tags <name>`, see optin_tags.go) is needed to
+// compile that file in at all.
 type mount struct {
 	name string
 	wire func(*hubDeps) (func() error, error) // returns optional closer
@@ -27,3 +30,27 @@ type mount struct {
 var mounts []mount
 
 func registerMount(m mount) { mounts = append(mounts, m) }
+
+// wireMounts wires every compiled-in module against d, in registration
+// order, and records their names on the kernel server, which reports them
+// as /stats.modules. That list is how a client (the web UI's task board)
+// tells a module this build lacks from one that is present and empty.
+//
+// It returns the names wired and the closers of the modules that have
+// one. On an error the modules wired before the failing one are in the
+// returned lists, so the caller can still close them, and the module list
+// is not recorded.
+func wireMounts(d *hubDeps) (wired []string, closers []func() error, err error) {
+	for _, m := range mounts {
+		closer, err := m.wire(d)
+		if err != nil {
+			return wired, closers, fmt.Errorf("module %s: %w", m.name, err)
+		}
+		if closer != nil {
+			closers = append(closers, closer)
+		}
+		wired = append(wired, m.name)
+	}
+	d.srv0.SetModules(wired)
+	return wired, closers, nil
+}
