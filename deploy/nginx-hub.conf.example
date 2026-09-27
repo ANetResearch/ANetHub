@@ -10,7 +10,7 @@
 # contained. Now one of them does.
 #
 #     daemon control plane   internal/daemon/control_api.go  maxControlBody
-#     hub                    internal/aghub/server.go        maxHubBody
+#     hub                    internal/aghub/limits.go        Limits.sendBodyLimit (~128 MiB by default)
 #     nginx                  this file                       client_max_body_size
 #
 # The number below must be the smallest of the three you actually want,

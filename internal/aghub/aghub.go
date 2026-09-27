@@ -381,6 +381,14 @@ func (s *Store) migrate() error {
 		// The wire-2 relay table; an existing wire-1 table is rebuilt by
 		// migrateRelayV2 below. See relay.go.
 		relayTableV2,
+		// What a one-time migration did, for the operator who asks later:
+		// counts and instants, never row content. Written by
+		// migrateRelayV2 (keys Meta* in relay.go) and read by
+		// deploy/cleanup-content-v0.2.sh.
+		`CREATE TABLE IF NOT EXISTS hub_meta (
+		   key TEXT PRIMARY KEY,
+		   value TEXT NOT NULL
+		 )`,
 		// Each agent's published encryption key set (seal.SignedEncKeySet,
 		// A2A-DESIGN §3.1), as the agent sent it. seq is the set's own
 		// sequence number, kept for the publisher high-water rule. See

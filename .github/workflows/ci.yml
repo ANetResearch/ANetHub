@@ -1,7 +1,10 @@
+# ANetCore 打 tag 后改回 go.mod 版本: until then the Go jobs build through a
+# go.work over an ANetCore checkout (.github/actions/anetcore, from
+# wp/tagsci), because go.mod's ANetCore v0.14.0 has no seal/a2acard.
 name: ci
 on:
   push:
-    branches: [main, "anet4/**"]
+    branches: [main, "anet4/**", a2a-redesign-wip]
   pull_request:
 
 jobs:
@@ -18,7 +21,14 @@ jobs:
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: vet
         run: go vet ./...
+      # The deploy scripts (hub-db-roll.sh, cleanup-content-v0.2.sh) need
+      # the sqlite3 CLI; deploy/scripts_test.go skips without it, and
+      # ANET_HUB_SCRIPT_TESTS=require turns that skip into a failure here.
+      - name: sqlite3 for the deploy script tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3
       - name: tests
+        env:
+          ANET_HUB_SCRIPT_TESTS: require
         run: go test ./...
 
   # Subtractive tags: the module is in the default build and `-tags no_<name>`
@@ -98,6 +108,14 @@ jobs:
           test "$opt" -gt 0 || (echo "-tags ${{ matrix.tag }} did not link $pat in" && exit 1)
           /tmp/hub-default -version >/dev/null
           /tmp/hub-optin -version >/dev/null
+      # internal/aghub/importguard_test.go runs `go list -deps` without
+      # tags, so under `go test -tags ${{ matrix.tag }}` it still checks the
+      # default build. The opt-in binary must not pull the content codecs
+      # into the hub either (A2A-DESIGN §9 静态护栏).
+      - name: the opt-in build links no content codec
+        run: |
+          deps=$(go list -tags "${{ matrix.tag }}" -deps ./cmd/anet-hub ./cmd/anet-hub-admin | grep -E 'ANetCore/(delegation|tsir)$' || true)
+          test -z "$deps" || (echo "-tags ${{ matrix.tag }} links: $deps" && exit 1)
 
   race:
     runs-on: ubuntu-latest
@@ -134,3 +152,8 @@ jobs:
         run: npx tsc --noEmit -p .
       - name: the bundle must still build
         run: npm run build
+      # The hub serves internal/aghub/web/index.html, a committed copy of
+      # this build (scripts/build.sh copies it and compares). A source
+      # change without a rebuilt copy ships the old page.
+      - name: the embedded page is this build
+        run: cmp dist/index.html ../internal/aghub/web/index.html
