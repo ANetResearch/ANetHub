@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
@@ -223,15 +225,80 @@ func (h *HubDB) Totals() (HubTotals, error) {
 // DeleteAgent removes an agent from the public registry (reviews are kept — they are counterparty
 // evidence, not the agent's property). The agent can re-register; recording the
 // delist intent in moderation is the caller's job.
+//
+// The agent's A2A card and its skill and tag index rows go with it: they
+// exist only for an agent on the registry, and the card is re-admitted
+// when the agent registers again. The hub's registry queries join the
+// agent table as well, so a row left behind would not be listed, but it
+// would sit in the database describing an agent the operator removed.
 func (h *HubDB) DeleteAgent(aid string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	res, err := h.db.Exec(`DELETE FROM agent WHERE aid=?`, aid)
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := withdrawA2ACards(tx, `a.aid = ?`, aid); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM agent WHERE aid=?`, aid)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("admin: agent %s not registered", aid)
+	}
+	if err := deleteA2AOrphans(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// withdrawA2ACards puts a withdrawal on the hub's A2A card federation
+// stream (/fed/v2/cards) for every agent matching cond (over agent a)
+// whose A2A card is there to withdraw, before the operator's delete
+// removes the rows, as the hub does when an agent deregisters
+// (aghub.withdrawA2ACard). Without it a peer that learned the card keeps
+// listing an agent the operator removed, and no resync corrects that: a
+// re-read serves what is published, not what stopped being.
+//
+// Only agents whose visibility federates: a withdrawal names the AID, and
+// the stream must not name one no peer was told about. The withdrawals
+// take the next positions of the sequence the cards and withdrawals share
+// (aghub.nextA2AFedSeq), in one statement, so the write lock that
+// statement takes covers reading the head of the stream. The reason is
+// the hub's "deregistered": the registration is gone.
+func withdrawA2ACards(tx *sql.Tx, cond string, args ...any) error {
+	q := `INSERT INTO a2a_card_withdrawal(aid, reason, at, fed_seq)
+	      SELECT c.aid, 'deregistered', ?,
+	             (SELECT MAX((SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
+	                         (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)))
+	             + ROW_NUMBER() OVER (ORDER BY c.aid)
+	        FROM agent_a2a_card c JOIN agent a ON a.aid = c.aid
+	       WHERE a.visibility IN ('federated', 'public') AND ` + cond + `
+	      ON CONFLICT(aid) DO UPDATE SET reason=excluded.reason, at=excluded.at, fed_seq=excluded.fed_seq`
+	_, err := tx.Exec(q, append([]any{time.Now().UTC().Format(time.RFC3339Nano)}, args...)...)
+	if err != nil && strings.Contains(err.Error(), "no such table") {
+		// A hub.db written by a hub that predates the A2A card stream
+		// has published no A2A card.
+		return nil
+	}
+	return err
+}
+
+// deleteA2AOrphans removes A2A card, skill and tag rows whose agent row is
+// gone, in the transaction that removed it. Every operator delete goes
+// through here (DeleteAgent, PruneAgentsExcept), and so do rows an older
+// admin binary left behind.
+func deleteA2AOrphans(tx *sql.Tx) error {
+	for _, table := range []string{"agent_a2a_card", "agent_skill", "agent_tag"} {
+		// A hub.db written by a hub that predates these tables does not
+		// have them, and there is nothing to remove from it.
+		if _, err := tx.Exec(`DELETE FROM ` + table + ` WHERE aid NOT IN (SELECT aid FROM agent)`); err != nil &&
+			!strings.Contains(err.Error(), "no such table") {
+			return err
+		}
 	}
 	return nil
 }
