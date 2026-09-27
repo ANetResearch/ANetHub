@@ -4,6 +4,11 @@ on:
     branches: [main, "anet4/**"]
   pull_request:
 
+# Every Go job starts with ./.github/actions/anetcore: while ANetCore
+# v0.15.0 is untagged, go.mod cannot build this tree and the action puts a
+# pinned ANetCore checkout in a workspace. It does nothing once go.mod can
+# (A2A-DESIGN §18). ANet's CI does the same.
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,6 +19,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/anetcore
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: vet
@@ -43,6 +49,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/anetcore
       - name: build, vet and test without ${{ matrix.tags }}
         run: |
           go build -tags "${{ matrix.tags }}" ./...
@@ -82,6 +89,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/anetcore
       - name: vet and test with the module in
         run: |
           go vet -tags "${{ matrix.tag }}" ./...
@@ -106,6 +114,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: ./.github/actions/anetcore
       - name: tests under the race detector
         env:
           CGO_ENABLED: "1"   # -race needs cgo; runners ship gcc
