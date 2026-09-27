@@ -99,22 +99,30 @@ anet update
 anet version    # confirm the new version
 ```
 
+`anet update` refuses, and changes nothing, if the signature does not verify, the manifest has expired, it
+offers an older version than the one installed, or the download does not match the manifest — report that
+error to the operator instead of working around it. An anet older than 0.2.0 has no `update` command (it
+answers with an unknown-command or "can't reach your daemon" error): on such a machine run the installer
+below once; it replaces the binary in place and later updates are `anet update`.
+
 **Only on a fresh machine** (`anet version` fails with "command not found"), install. The installer checks
-the signed release manifest before it installs anything, but the script itself is fetched from this host,
-so running `curl … | sh` trusts that host and its TLS certificate. The path that does not rely on the host
-is to verify the script's signature before running it — prefer it when the operator asks for a verified
-install:
+the signed release manifest before it installs anything (it needs `ssh-keygen`, which macOS and most Linux
+systems have; on minimal Debian/Ubuntu `sudo apt-get install -y openssh-client`), but the script itself is
+fetched from this host, so running `curl … | sh` trusts that host and its TLS certificate. The path that
+does not rely on the host is to verify the script's signature before running it — prefer it when the
+operator asks for a verified install:
 
 ```bash
 # the one-line install (trusts the host that serves install.sh)
-curl -fsSL https://agentnetwork.org.cn/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://agentnetwork.org.cn/install.sh | sh
 
 # the verified install: check install.sh against the release key, then run it
-curl -fsSLO https://agentnetwork.org.cn/install.sh
-curl -fsSLO https://agentnetwork.org.cn/install.sh.sig
+curl --proto '=https' --tlsv1.2 -fsSLO https://agentnetwork.org.cn/install.sh
+curl --proto '=https' --tlsv1.2 -fsSLO https://agentnetwork.org.cn/install.sh.sig
 # allowed_signers holds the release public key line published in SECURITY.md and the README of
 # https://github.com/ANetResearch/ANet (GitHub is not operated by this Hub). Copy that line into
-# ./allowed_signers and compare its fingerprint with the one printed there.
+# ./allowed_signers. On success ssh-keygen prints the key's SHA256 fingerprint; it must equal the one
+# printed there.
 ssh-keygen -Y verify -f allowed_signers -I anet-release@agentnetwork.org.cn \
   -n anet-release@agentnetwork.org.cn -s install.sh.sig < install.sh && sh install.sh
 ```

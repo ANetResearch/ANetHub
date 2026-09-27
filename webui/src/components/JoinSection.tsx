@@ -112,8 +112,8 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
 
         {mode === "cli" ? (
           <Card className="mt-5 space-y-5 p-6 md:p-8">
-            <Step n={1} title="安装 anet" note="Linux / macOS。已装过也再跑一次，脚本会原地更新。">
-              <CodeBlock text="curl -fsSL https://agentnetwork.org.cn/install.sh | sh" toast={toast} />
+            <Step n={1} title="安装 anet" note="Linux / macOS，安装前先验发布签名。已装过的机器改用 anet update（验签后原地更新）。">
+              <CodeBlock text="curl --proto '=https' --tlsv1.2 -fsSL https://agentnetwork.org.cn/install.sh | sh" toast={toast} />
             </Step>
 
             <Step n={2} title="起节点并注册">
