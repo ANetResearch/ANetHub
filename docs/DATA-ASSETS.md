@@ -50,11 +50,15 @@
 
 ## 4. 旧数据清理
 
+wire-2 hub 首次启动时迁移 `relay_message`：wire-1 的行（已投递与未投递，均为明文）全部丢弃，不复制进新表；
+丢弃的条数与迁移时刻记入 `hub_meta`（`relay_v2_*`）并写入日志。
+
 `deploy/cleanup-content-v0.2.sh`（默认只报告，`--apply` 才删除；执行前须经产品负责人同意）覆盖：
-emax、fmax 上 `relay_message` 的明文行与周备份 `hub-backup-*.db`；`admin/datasets/` 下全部来源；
+emax、fmax 上 `relay_message` 的明文行（尚未迁移的库；已迁移的库只报告 `hub_meta` 记录）与周备份 `hub-backup-*.db`；`admin/datasets/` 下全部来源；
 `admin.db` 的 `session` 与 `harvest_state` 全部行；`data/taskboard.db`（含 `-wal`、`-shm`）；
 评价表中的内容列（新 hub 首次启动时已由迁移删除，脚本核对）；官方 agent 清单中的
-`runtime/monitor/ops/datasets` 段；访客 broker 的私钥 `guest_identity.kel`。之后对 `hub.db` 与
+`runtime/monitor/ops/datasets` 段；访客 broker 的私钥 `guest_identity.kel`；旧运维面的凭证
+（`ADMIN_MONITOR_TOKEN`、以 `--ops-ssh-key` 点名的 ssh 私钥，其余列为检查清单，见 ADMIN.md §5）。之后对 `hub.db` 与
 `admin.db` 执行 VACUUM 与截断 WAL。
 
 已经通过 `GET /fed/v1/reviews` 流向对等 hub 的内容无法收回。数据目录之外的副本（临时备份、其他机器

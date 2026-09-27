@@ -87,3 +87,27 @@ POST /admin/api/deleted/{aid}/restore
 
 旧版本留在 `admin/datasets/`、`admin.db` 的数据由 `deploy/cleanup-content-v0.2.sh` 删除（须经产品
 负责人同意）。
+
+## 5. 旧运维凭证（部署 v0.2 时的检查清单）
+
+删除 ops/monitor 代码不会让它们用过的凭证消失（A2A-DESIGN §9 "admin 官方 agent"、§15、[C39]）。
+旧版 admin 以 root 运行（unit 没有 `User=`），用该账户的默认 ssh 身份（清单 `runtime.ssh_user`，
+缺省 root，不带 `-i`）登录官方 agent 主机；并以 `ADMIN_MONITOR_TOKEN` 登录官方 agent 控制台，
+该变量未设置时取 `ADMIN_TOKEN` 的值。
+
+`deploy/cleanup-content-v0.2.sh` 第 9 步报告这些凭证（默认只报告，不打印任何口令值）：清单里出现过的
+`用户@主机`（在第 7 步剥掉 `runtime/monitor` 之前读取）、`--ssh-dir`（缺省 `/root/.ssh`）下的私钥
+（按文件头识别，不限文件名）及指纹、该目录 ssh `config` 中的 `IdentityFile` 行、admin unit、drop-in 及其
+`EnvironmentFile` 中的 `ADMIN_MONITOR_TOKEN`。`--apply` 时删除单独成行的 `ADMIN_MONITOR_TOKEN` 赋值
+（含注释掉的；与其他变量同行的只报告，需手工改），并删除以 `--ops-ssh-key` 点名的私钥及其 `.pub`
+（点名的文件不是私钥时不删）。默认身份不点名就不删：脚本无法判断该账户是否还用它做别的事。
+
+脚本做不到、需运营者逐项完成（执行前征求产品负责人同意，属阶段 G）：
+
+- [ ] 在报告列出的每台官方 agent 主机上，从对应用户的 `~/.ssh/authorized_keys` 删除本 hub 主机的公钥
+  （按报告中的指纹核对）；hub 主机上若有专用私钥，以 `--ops-ssh-key` 点名删除。
+- [ ] 轮换每个带 `monitor` 段的官方 agent 的控制台令牌。
+- [ ] `ADMIN_MONITOR_TOKEN` 曾未设置或与 `ADMIN_TOKEN` 相同时，`ADMIN_TOKEN` 已发往各官方 agent 控制台：
+  两者都换（新的 `ADMIN_TOKEN` 按 §1 的规则检查）。
+- [ ] 改 unit 后 `systemctl daemon-reload`。
+- [ ] admin 改用非 root 账户运行（调整 `admin/` 目录属主，见 `deploy/anet-hub-admin.service` 注释）。
