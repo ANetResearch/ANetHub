@@ -148,6 +148,14 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 	if err := s.bumpFederatedCard(aid); err != nil {
 		return "", err
 	}
+	// The A2A card stream carries the key set too (/fed/v2/cards).
+	if fed, err := agentFederates(s.db, aid); err != nil {
+		return "", err
+	} else if fed {
+		if err := bumpA2ACard(s.db, aid); err != nil {
+			return "", err
+		}
+	}
 	return KeysStatusOK, nil
 }
 
@@ -225,7 +233,8 @@ func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 // hKeysGet serves GET /agents/{aid}/keys.
 //
 // Sources, in order: an agent registered here; a key set that arrived with
-// a peer's card sync; a /fed/v2/keys lookup at the peer hubs. The last one
+// a peer's card sync (the A2A card stream, then the ADP card stream); a
+// /fed/v2/keys lookup at the peer hubs. The last one
 // covers agents whose card is not federated (the default hub-local
 // visibility), which a cross-hub sender can otherwise never encrypt to
 // ([C32]). Its answer is relayed to this caller and not stored: it does
@@ -244,6 +253,10 @@ func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeKeys(w, aid, keyset, kel)
+		return
+	}
+	if ks, kl, err := s.store.FedA2ACardKeys(aid); err == nil && verifyKeysFor(aid, ks, kl) == nil {
+		writeKeys(w, aid, ks, kl)
 		return
 	}
 	if ks, kl, err := s.store.FedCardKeys(aid); err == nil && verifyKeysFor(aid, ks, kl) == nil {
