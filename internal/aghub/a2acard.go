@@ -100,6 +100,9 @@ func (s *Store) migrateA2ACard() error {
 	if err := s.migrateFedA2ACard(); err != nil {
 		return err
 	}
+	if err := s.migrateA2AFedSeqHead(); err != nil {
+		return err
+	}
 	return s.readmitLegacyA2ACards()
 }
 
@@ -226,7 +229,8 @@ func verifyA2ACardFor(aid string, raw []byte, kel []identity.SignedEvent, now ti
 // RegisterA2ACard settles the A2A card of a registration that has just
 // been written, and returns the card_status and card_error /register
 // reports. raw is the a2a_card field (nil when absent) and kel the KEL the
-// registration stored.
+// registration stored. JSON null withdraws the stored card
+// (a2acard_withdraw.go).
 //
 // A card that is refused leaves the stored one in place. The stored card
 // is then verified again against kel: a registration may carry a rotated
@@ -237,6 +241,13 @@ func verifyA2ACardFor(aid string, raw []byte, kel []identity.SignedEvent, now ti
 // registration is the same as re-verifying on every KEL change.
 func (s *Store) RegisterA2ACard(aid string, raw json.RawMessage, kel []identity.SignedEvent, now time.Time) (status, detail string) {
 	status = CardStatusAbsent
+	if isNullCard(raw) {
+		if err := s.WithdrawA2ACard(aid); err != nil {
+			// Nothing was withdrawn; the card stays listed as it was.
+			return CardStatusInvalid, "not withdrawn: " + err.Error()
+		}
+		return CardStatusWithdrawn, ""
+	}
 	if len(raw) > 0 {
 		status, detail = s.AdmitA2ACard(aid, raw, kel, now)
 		if status == CardStatusOK || status == CardStatusUnchanged {
@@ -483,16 +494,6 @@ func indexA2ACard(tx *sql.Tx, aid string, v *a2acard.Verified) error {
 	}
 	_, err = tx.Exec(`UPDATE agent SET name=?, caps=? WHERE aid=?`, v.Name, string(capsJSON), aid)
 	return err
-}
-
-// nextA2AFedSeq is the next position on the A2A card federation stream,
-// which the cards and their withdrawals share (fed_a2acard.go).
-func nextA2AFedSeq(q rowQuerier) (int64, error) {
-	var next int64
-	err := q.QueryRow(`SELECT MAX(
-	    (SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
-	    (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal))+1`).Scan(&next)
-	return next, err
 }
 
 // skillIDs lists a verified card's skill ids in card order.

@@ -51,9 +51,10 @@ type A2AAgentEntry struct {
 	// VerifiedAt is when the card last verified against the agent's KEL
 	// (RFC 3339): at admission, or at the agent's latest registration.
 	VerifiedAt string `json:"verifiedAt"`
-	// HomeHub is the hub the agent is registered at: the one answering,
-	// or for a card learned from a peer the hub its card's relay
-	// interface names (else the peer's statement of it).
+	// HomeHub is the hub the agent is registered at: the one answering
+	// (its configured public base URL, else the request's origin), or for
+	// a card learned from a peer the hub its card's relay interface names
+	// (else the peer's statement of it).
 	HomeHub string `json:"homeHub"`
 	// LastSeen and Quiet are the liveness of AgentView (liveness.go).
 	LastSeen    string  `json:"lastSeen,omitempty"`
@@ -254,7 +255,7 @@ func (s *Server) hA2AAgents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	home := requestOrigin(r)
+	home := s.origin(r)
 	for i := range entries {
 		if entries[i].HomeHub == "" {
 			entries[i].HomeHub = home
