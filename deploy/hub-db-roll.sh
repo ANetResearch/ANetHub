@@ -1,12 +1,29 @@
 #!/usr/bin/env bash
-# hub-db-roll.sh — rolling retention for /data/projs/anet-hub/data/hub.db
+# hub-db-roll.sh — maintenance for /data/projs/anet-hub/data/hub.db (hub wire 2)
+#
 # Policy:
-#   - DELETE relay_message rows that are delivered (delivered_at NOT NULL) and older than 7 days
-#   - DELETE relay_message rows that are undelivered and older than 14 days (conservative)
-#   - agent / review / completed_task tables are never touched
-#   - PRAGMA wal_checkpoint(TRUNCATE) after deletes
-#   - On Sundays: VACUUM INTO rotating backup (keep newest 2), and VACUUM main db
-#     if freelist exceeds 20% of pages
+#   - Relay retention is not done here. Since wire 2 a relay_message row
+#     exists only while it is undelivered: /relay/ack deletes it, and the
+#     hub process deletes rows older than its -relay-ttl (default 14 days)
+#     every 10 minutes. The hub opens the database with secure_delete=ON,
+#     so deleted rows are overwritten in the file. The only relay figure
+#     this script records is the current backlog, for the log.
+#   - PRAGMA wal_checkpoint(TRUNCATE) on every run, so page images of
+#     deleted rows do not stay in hub.db-wal.
+#   - On Sundays: a rotating backup (keep newest 2) WITHOUT relay_message
+#     rows, and VACUUM of the main db if the freelist exceeds 20% of pages.
+#
+# Backups exclude relay content (A2A-DESIGN §9 row "relay 存储", [C38]).
+# Method: VACUUM INTO a temporary copy in the data directory, delete every
+# relay_message row in that copy with secure_delete=ON (the copy's pages
+# holding them are overwritten), then VACUUM INTO the final backup from the
+# copy, which writes only live pages, and remove the copy. The temporary
+# copy exists only for the duration of the backup, in the same directory
+# and under the same account as hub.db, which already holds those rows.
+# Backups written before wire 2 by earlier versions of this script still
+# contain relay rows; removing those is part of the production cleanup and
+# is not done here.
+#
 # Intended to run as user anet-hub (systemd hub-db-roll.service).
 set -euo pipefail
 
@@ -17,35 +34,36 @@ LOG="$DATA_DIR/roll.log"
 SQL() { sqlite3 "$DB" ".timeout 5000" "$@"; }
 log() { echo "[$(date -Is)] $*" >>"$LOG"; }
 
-CUTOFF_DELIVERED=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)
-CUTOFF_UNDELIVERED=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)
-
 size_before=$(stat -c %s "$DB")
-log "START db=$((size_before/1024/1024))MB cutoff_delivered=$CUTOFF_DELIVERED cutoff_undelivered=$CUTOFF_UNDELIVERED"
-
-# Count before delete (safety: only delete what we counted)
-n_delivered=$(SQL "SELECT COUNT(*) FROM relay_message WHERE delivered_at IS NOT NULL AND created_at < '$CUTOFF_DELIVERED';")
-n_stale=$(SQL "SELECT COUNT(*) FROM relay_message WHERE delivered_at IS NULL AND created_at < '$CUTOFF_UNDELIVERED';")
-log "candidates: delivered>7d=$n_delivered undelivered>14d=$n_stale"
-
-if [ "$n_delivered" -gt 0 ]; then
-    SQL "DELETE FROM relay_message WHERE delivered_at IS NOT NULL AND created_at < '$CUTOFF_DELIVERED';"
-    log "deleted $n_delivered delivered rows"
-fi
-if [ "$n_stale" -gt 0 ]; then
-    SQL "DELETE FROM relay_message WHERE delivered_at IS NULL AND created_at < '$CUTOFF_UNDELIVERED';"
-    log "deleted $n_stale stale undelivered rows"
-fi
+backlog=$(SQL "SELECT COUNT(*) FROM relay_message;")
+log "START db=$((size_before/1024/1024))MB relay_backlog=$backlog"
 
 SQL "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
 log "wal_checkpoint(TRUNCATE) done"
 
-# Sunday: rotating backup (keep 2) + conditional VACUUM
+# Sunday: rotating backup without relay rows (keep 2) + conditional VACUUM
 if [ "$(date +%u)" = "7" ]; then
     backup="$DATA_DIR/hub-backup-$(date +%Y%m%d).db"
     if [ ! -e "$backup" ]; then
-        SQL "VACUUM INTO '$backup';"
-        log "weekly backup: $backup ($(stat -c %s "$backup" | awk '{printf "%dMB", $1/1024/1024}'))"
+        tmp="$DATA_DIR/.hub-backup-$(date +%Y%m%d).tmp.db"
+        rm -f -- "$tmp" "$tmp-journal"
+        # The temporary copy still holds relay rows until the DELETE below
+        # has run; it is removed on every exit path, including a failed
+        # statement under set -e, so that it does not outlive this run.
+        trap 'rm -f -- "$tmp" "$tmp-journal" "$tmp-wal" "$tmp-shm"' EXIT
+        SQL "VACUUM INTO '$tmp';"
+        sqlite3 "$tmp" ".timeout 5000" \
+            "PRAGMA secure_delete=ON;" \
+            "DELETE FROM relay_message;" >/dev/null
+        sqlite3 "$tmp" ".timeout 5000" "VACUUM INTO '$backup';"
+        rm -f -- "$tmp" "$tmp-journal"
+        left=$(sqlite3 "$backup" "SELECT COUNT(*) FROM relay_message;")
+        if [ "$left" != "0" ]; then
+            log "ERROR: backup $backup holds $left relay rows; removing it"
+            rm -f -- "$backup"
+            exit 1
+        fi
+        log "weekly backup: $backup ($(stat -c %s "$backup" | awk '{printf "%dMB", $1/1024/1024}'), relay rows excluded)"
     fi
     # keep newest 2 backups
     ls -1t "$DATA_DIR"/hub-backup-*.db 2>/dev/null | tail -n +3 | while read -r old; do

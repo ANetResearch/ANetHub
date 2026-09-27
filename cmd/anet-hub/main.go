@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,16 +26,26 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
 // storeDelivery adapts the hub kernel store to federation.LocalDelivery.
+// The kernel's relay errors are mapped onto federation's, so that the
+// forward handler can answer 507 and 400 without importing the kernel.
 type storeDelivery struct{ s *aghub.Store }
 
 func (d storeDelivery) HasAgent(aid string) bool { _, err := d.s.AgentKEL(aid); return err == nil }
-func (d storeDelivery) Enqueue(to, from, kind, iid string, payload []byte) (int64, error) {
-	return d.s.RelayEnqueue(to, from, kind, iid, payload)
+func (d storeDelivery) Enqueue(to string, envelope []byte) (int64, error) {
+	id, err := d.s.RelayEnqueue(to, envelope)
+	switch {
+	case errors.Is(err, aghub.ErrMailboxFull):
+		return 0, fmt.Errorf("%w: %v", federation.ErrMailboxFull, err)
+	case errors.Is(err, aghub.ErrBadEnvelope):
+		return 0, fmt.Errorf("%w: %v", federation.ErrBadEnvelope, err)
+	}
+	return id, err
 }
 
 // hubFlags is every flag this binary takes.
@@ -63,6 +74,18 @@ type hubFlags struct {
 	inviteDays     *int
 	inviteList     *bool
 	inviteRevoke   *string
+	// The §3.7 relay limits (A2A-DESIGN). See aghub.Limits.
+	maxEnvelope       *int64
+	sendRate          *float64
+	sendBurst         *int
+	mailboxMessages   *int
+	mailboxBytes      *int64
+	undeliveredTTL    *time.Duration
+	pollBudget        *int64
+	registerPerMinute *float64
+	registerBurst     *int
+	keysLookupRate    *float64
+	keysLookupBurst   *int
 }
 
 func defineFlags(fs *flag.FlagSet) *hubFlags {
@@ -113,7 +136,40 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	f.inviteDays = fs.Int("invite-days", 0, "how long -invite-new stays valid, in days (0 = no expiry)")
 	f.inviteList = fs.Bool("invite-list", false, "list invites, who redeemed each, and whether admission is on")
 	f.inviteRevoke = fs.String("invite-revoke", "", "stop an invite being redeemed again: -invite-revoke <id>")
+	// Relay limits (A2A-DESIGN §3.7). Defaults are aghub.DefaultLimits.
+	def := aghub.DefaultLimits()
+	f.maxEnvelope = fs.Int64("relay-max-envelope", def.MaxEnvelope,
+		"largest sealed envelope /relay/send accepts, in bytes (413 above it); keep the reverse proxy's "+
+			"client_max_body_size at or above 4/3 of this")
+	f.sendRate = fs.Float64("relay-send-rate", def.SendRate, "per-sender /relay/send token refill, per second (429 when empty)")
+	f.sendBurst = fs.Int("relay-send-burst", def.SendBurst, "per-sender /relay/send token bucket size")
+	f.mailboxMessages = fs.Int("relay-mailbox-messages", def.MailboxMessages,
+		"undelivered envelopes one recipient may have queued (507 above it)")
+	f.mailboxBytes = fs.Int64("relay-mailbox-bytes", def.MailboxBytes,
+		"undelivered envelope bytes one recipient may have queued (507 above it)")
+	f.undeliveredTTL = fs.Duration("relay-ttl", def.UndeliveredTTL,
+		"how long an undelivered envelope is kept before it is deleted")
+	f.pollBudget = fs.Int64("relay-poll-budget", def.PollBudget,
+		"cumulative envelope bytes one /relay/poll response returns (the first message always)")
+	f.registerPerMinute = fs.Float64("register-rate", def.RegisterPerMinute,
+		"per-client-IP /register token refill, per minute (429 when empty)")
+	f.registerBurst = fs.Int("register-burst", def.RegisterBurst, "per-client-IP /register token bucket size")
+	f.keysLookupRate = fs.Float64("keys-lookup-rate", def.KeysLookupPerMinute,
+		"per-client-IP token refill, per minute, for GET /agents/{aid}/keys lookups forwarded to peer hubs (429 when empty)")
+	f.keysLookupBurst = fs.Int("keys-lookup-burst", def.KeysLookupBurst,
+		"per-client-IP token bucket size for key lookups forwarded to peer hubs")
 	return f
+}
+
+// limits collects the relay limit flags.
+func (f *hubFlags) limits() aghub.Limits {
+	return aghub.Limits{
+		MaxEnvelope: *f.maxEnvelope, SendRate: *f.sendRate, SendBurst: *f.sendBurst,
+		MailboxMessages: *f.mailboxMessages, MailboxBytes: *f.mailboxBytes,
+		UndeliveredTTL: *f.undeliveredTTL, PollBudget: *f.pollBudget,
+		RegisterPerMinute: *f.registerPerMinute, RegisterBurst: *f.registerBurst,
+		KeysLookupPerMinute: *f.keysLookupRate, KeysLookupBurst: *f.keysLookupBurst,
+	}
 }
 
 // modeFlags name a thing to act on instead of starting the hub. An empty
@@ -170,7 +226,7 @@ func main() {
 	}
 	defer store.Close()
 
-	// ctx is cancelled on SIGINT/SIGTERM; the guest-mode janitor runs under it and stops on shutdown.
+	// ctx is cancelled on SIGINT/SIGTERM; the relay TTL janitor runs under it and stops on shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -218,8 +274,13 @@ func main() {
 	log.Printf("anet-hub identity: %s", hubID.AID)
 
 	srv0 := aghub.NewServer(store)
+	if err := srv0.SetLimits(f.limits()); err != nil {
+		log.Fatalf("anet-hub: relay limits: %v", err)
+	}
 	// This hub's own AID names the ledger it settles on (hub:<aid>), so a
-	// credit here is visibly not a credit somewhere else.
+	// credit here is visibly not a credit somewhere else. It is also bound
+	// into every relayauth v2 signature, so a signature made for this hub
+	// is refused by any other.
 	srv0.SetHubAID(hubID.AID)
 	// The identity settlements are signed with, so a payer holds a receipt
 	// it can show without asking this hub to agree.
@@ -238,11 +299,8 @@ func main() {
 				sup.Outstanding)
 		}
 	}
-	// Guest mode is always on: no-daemon visitors are brokered to any registered agent that accepts guests
-	// (guest_quota > 0, default 5 — each agent opts out via `anet hub-register --guest-messages 0`).
-	if err := srv0.EnableGuestMode(ctx, *f.data); err != nil {
-		log.Fatalf("anet-hub: enable guest mode: %v", err)
-	}
+	// Envelopes nobody collects are deleted after the undelivered TTL.
+	go srv0.RunRelayJanitor(ctx, 10*time.Minute)
 
 	// Root mux: hub modules mount beside the registry/relay kernel. The
 	// taskboard authenticates against the same agent registry (one KEL, one
@@ -251,18 +309,18 @@ func main() {
 	root.Handle("/hub/identity", hubID.Handler())
 	root.Handle("/", srv0.Handler())
 	deps := &hubDeps{data: *f.data, store: store, hubID: hubID, srv0: srv0, root: root}
-	names := ""
-	for _, m := range mounts {
-		closer, err := m.wire(deps)
-		if err != nil {
-			log.Fatalf("anet-hub: module %s: %v", m.name, err)
-		}
-		if closer != nil {
-			defer closer()
-		}
-		names += " " + m.name
+	wired, closers, err := wireMounts(deps)
+	for _, closer := range closers {
+		defer closer()
 	}
-	log.Printf("anet-hub modules:%s", names)
+	if err != nil {
+		log.Fatalf("anet-hub: %v", err)
+	}
+	names := ""
+	for _, n := range wired {
+		names += " " + n
+	}
+	log.Printf("anet-hub modules:%s (opt-in modules not in this build:%s)", names, notBuilt(wired))
 
 	srv := &http.Server{
 		Addr:              *f.addr,

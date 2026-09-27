@@ -6,35 +6,9 @@ import (
 	"testing"
 )
 
-// These render on the operator's dashboard. A wrong amount or a
-// mis-classified capability is not a crash — it is a page stating
-// something untrue, which nothing here was checking.
-
-func TestFormatMilliYuan(t *testing.T) {
-	for _, tc := range []struct {
-		milli int
-		want  string
-	}{
-		{0, "¥0.00"},
-		{1, "¥0.00"}, // a tenth of a fen rounds away; the display has two places
-		{10, "¥0.01"},
-		{999, "¥0.99"},
-		{1000, "¥1.00"},
-		{1050, "¥1.05"},
-		{1005, "¥1.00"}, // half a fen, likewise below the display's resolution
-		{123456, "¥123.45"},
-	} {
-		if got := formatMilliYuan(tc.milli); got != tc.want {
-			t.Errorf("formatMilliYuan(%d) = %q, want %q", tc.milli, got, tc.want)
-		}
-	}
-	// The fractional part must always be two digits. A single digit would
-	// render 1050 milli as "¥1.5", which reads as five jiao rather than
-	// five fen — an order of magnitude, on a money figure.
-	if got := formatMilliYuan(1050); got != "¥1.05" {
-		t.Errorf("the fraction lost its leading zero: %q", got)
-	}
-}
+// These render on the operator's dashboard. A mis-classified capability
+// is not a crash — it is a page stating something untrue, which nothing
+// here was checking.
 
 func TestModalityOfCap(t *testing.T) {
 	for _, tc := range []struct{ cap, want string }{

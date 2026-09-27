@@ -352,7 +352,7 @@ func TestTheOfficialDirectoryIsNotCompiledIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { hub.Close() })
-	srv := NewServer(store, hub, NewOps(0), NewMonitorProxy("tok"), nil, NewVecClient(""), "test-token", "/admin")
+	srv := NewServer(store, hub, nil, NewVecClient(""), "test-token", "/admin")
 	_, out := doReq(t, srv.Handler(), "GET", "/admin/api/official", "test-token", nil)
 	if list, _ := out["officials"].([]any); len(list) != 0 {
 		t.Errorf("/api/official returned %d entries with no config file: %v", len(list), list)
@@ -360,8 +360,7 @@ func TestTheOfficialDirectoryIsNotCompiledIn(t *testing.T) {
 
 	// With a config file the operator's own fleet loads, once.
 	cfg := `[{"id":"qa-agent","name":"QA Agent","tier":"official","product_line":"anetos",
-	          "runtime":{"host":"qa.invalid","units":["qa.service"]},
-	          "ops":{"allowed":["status"]}}]`
+	          "aid":"did:anet:qa","hub":"https://hub.invalid","caps":["qa.run"]}]`
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +371,7 @@ func TestTheOfficialDirectoryIsNotCompiledIn(t *testing.T) {
 		t.Fatalf("a second load must add nothing: added=%d err=%v", added, err)
 	}
 	m, err := store.Official("qa-agent")
-	if err != nil || m.Runtime.Host != "qa.invalid" {
+	if err != nil || m.AID != "did:anet:qa" || len(m.Caps) != 1 {
 		t.Fatalf("the configured manifest did not load: %+v %v", m, err)
 	}
 

@@ -1,3 +1,5 @@
+//go:build taskboard
+
 package taskboard
 
 import (

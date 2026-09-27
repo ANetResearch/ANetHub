@@ -17,9 +17,10 @@ import (
 // never queued — both hubs saw success and the message was lost.
 func TestRefusedForwardLeavesNoIdempotencyTrace(t *testing.T) {
 	r := newRig(t)
+	carolEnv := fedEnv(t, "aid:carol", "payload-bytes")
 	env := signedEnvelope(t, r, func(e *Envelope, payload []byte) []byte {
 		e.DestAID = "aid:carol" // not registered on B yet
-		return payload
+		return carolEnv
 	})
 
 	if code, out := postRaw(t, r, env); code != 404 || out["error"] != "UNKNOWN_DESTINATION" {
@@ -35,7 +36,7 @@ func TestRefusedForwardLeavesNoIdempotencyTrace(t *testing.T) {
 	if code != 202 {
 		t.Fatalf("redelivery after registration must be accepted, got %d %v", code, out)
 	}
-	if got := r.bLocal.delivered(); len(got) != 1 || got[0] != "payload-bytes" {
+	if got := r.bLocal.delivered(); len(got) != 1 || got[0] != string(carolEnv) {
 		t.Fatalf("redelivery must actually reach the mailbox: %v", got)
 	}
 }
@@ -75,7 +76,7 @@ func TestFailedEnqueueReleasesTheIdempotencyClaim(t *testing.T) {
 	if code != 202 {
 		t.Fatalf("retry after a failed enqueue must be accepted, got %d %v", code, out)
 	}
-	if got := r.bLocal.delivered(); len(got) != 1 || got[0] != "payload-bytes" {
+	if got := r.bLocal.delivered(); len(got) != 1 || got[0] != string(fedEnv(t, "aid:bob", "payload-bytes")) {
 		t.Fatalf("retry must reach the mailbox: %v", got)
 	}
 }

@@ -8,7 +8,6 @@ export interface AgentView {
   readme?: string;
   pricing?: string;
   listed: boolean;
-  guest_quota: number;
   avg_rating: number;
   review_count: number;
   registered_at: string;
@@ -29,6 +28,10 @@ export interface AgentView {
   registered?: boolean;
 }
 
+// 一条已验证的评价。hub 不持有交互内容(A2A-DESIGN §9):没有 goal、没有
+// deliverable。request_cid / result_cid 是回执里提供方签名的承诺值;hub 没有
+// 内容可以核对它们,所以 content_binding 恒为 "UNVERIFIED" —— "没有核对"与
+// "核对通过"是两种状态,页面不得把前者显示成后者。
 export interface ReviewView {
   interaction_id: string;
   subject_aid: string;
@@ -36,10 +39,9 @@ export interface ReviewView {
   rating: number;
   comment?: string;
   receipt_cid: string;
-  goal: string;
-  deliverable: string;
   request_cid: string;
   result_cid: string;
+  content_binding: string;
   completed_at: number;
   created_at: number;
 }
@@ -50,23 +52,15 @@ export interface Stats {
   // 一个是"在我们这里注册的",一个是"别人告诉我们的",合成一个数会让本 hub
   // 报出它并不拥有的覆盖面。页面要展示总数就自己相加,但要标明来源。
   federated_agents?: number;
+  // 经评价公开到本 hub 的有效回执数(不重复计数)。旧版本统计的是中继看到的
+  // "result" 消息;hub 看不到消息类型之后改为这个可由第三方核验的数,它低于
+  // 网络实际完成的任务数:只有被评价的任务才计入。
   tasks_completed: number;
   reviews: number;
   avg_rating: number;
-}
-
-export interface GuestAtt {
-  name: string;
-  mime: string;
-  size: number;
-  data?: string; // base64（超过内联上限时省略）
-}
-
-export interface GuestPollMsg {
-  body: string;
-  system?: boolean;
-  end?: string; // "proposed" | "accepted"
-  attachments?: GuestAtt[];
+  // 本 hub 编入并启用的可选模块,例如 "federation"、"taskboard"。任务板只在
+  // 含 "taskboard" 时显示。旧 hub 不发这个字段。
+  modules?: string[];
 }
 
 async function j<T>(r: Response): Promise<T> {
@@ -100,60 +94,15 @@ export async function fetchAgent(
   return { agent: d.agent, reviews: d.reviews || [] };
 }
 
-export async function guestStart(aid: string): Promise<{
-  enabled: boolean;
-  session?: string;
-  handler?: string;
-  handler_aid?: string;
-  remaining?: number;
-  reason?: string;
-}> {
-  return j(
-    await fetch("/guest/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ aid }),
-    }),
-  );
-}
-
-export async function guestSend(
-  session: string,
-  body: string,
-  attachments: { name: string; mime: string; data: string }[],
-): Promise<{ remaining?: number; limit_reached?: boolean }> {
-  return j(
-    await fetch("/guest/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, body, attachments }),
-    }),
-  );
-}
-
-export async function guestPoll(
-  session: string,
-): Promise<{ messages?: GuestPollMsg[] }> {
-  return j(
-    await fetch("/guest/poll", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session }),
-    }),
-  );
-}
-
-export async function guestEnd(session: string): Promise<unknown> {
-  return j(
-    await fetch("/guest/end", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session }),
-    }),
-  );
-}
-
 // ---- taskboard (anet4 A4: hub-side 7-column board over TaskDoc CIDs) ----
+//
+// 任务板是加法编译模块(-tags taskboard),默认的 hub 不含它。hasTaskboard
+// 依据 /stats.modules 判断;没有这个字段(旧 hub)或不含 "taskboard" 都视为
+// 不存在,页面不去请求 /tasks/board。
+
+export function hasTaskboard(stats: Stats | null): boolean {
+  return !!stats && Array.isArray(stats.modules) && stats.modules.includes("taskboard");
+}
 
 export interface TaskCard {
   id: string;

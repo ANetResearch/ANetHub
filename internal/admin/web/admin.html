@@ -280,24 +280,6 @@ function spark(vals, w=140, h=36, color='var(--primary)'){
   const pts=vals.map((v,i)=>`${(i/(vals.length-1)*w).toFixed(1)},${(h-3-(v-min)/rng*(h-6)).toFixed(1)}`).join(' ');
   return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
 }
-// 调用曲线柱图：buckets = [{t,calls,done,err,milli}]。done 蓝、err 红叠加。
-function barChart(buckets, w=620, h=120){
-  if(!buckets || !buckets.length) return '<span class="faint">窗口内暂无调用</span>';
-  const max=Math.max(1,...buckets.map(b=>b.calls));
-  const n=buckets.length, gap=2, bw=Math.max(2,(w-(n-1)*gap)/n);
-  const bars=buckets.map((b,i)=>{
-    const x=i*(bw+gap);
-    const hDone=(b.done/max)*(h-18), hErr=(b.err/max)*(h-18);
-    const t=new Date(b.t), lab=t.getHours()+':00';
-    let g=`<rect x="${x.toFixed(1)}" y="${(h-16-hDone).toFixed(1)}" width="${bw.toFixed(1)}" height="${hDone.toFixed(1)}" rx="1.5" fill="var(--primary)"/>`;
-    if(hErr>0) g+=`<rect x="${x.toFixed(1)}" y="${(h-16-hDone-hErr).toFixed(1)}" width="${bw.toFixed(1)}" height="${hErr.toFixed(1)}" rx="1.5" fill="var(--err)"/>`;
-    g+=`<title>${lab} · ${b.calls} 次调用（成功 ${b.done} 失败 ${b.err}）· ${FormatMilli(b.milli)}</title>`;
-    return g;
-  }).join('');
-  const ticks=buckets.map((b,i)=>{ if(i%4)return''; const x=i*(bw+gap)+bw/2; return `<text x="${x.toFixed(1)}" y="${h-3}" font-size="9" fill="var(--fg-faint)" text-anchor="middle">${new Date(b.t).getHours()}</text>`;}).join('');
-  return `<svg width="100%" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="max-width:100%">${bars}${ticks}</svg>`;
-}
-function FormatMilli(m){ if(!m) return '¥0'; return '¥'+(m/1000).toFixed(m<1000?3:2); }
 function modChip(mod){ const map={image:'图像',video:'视频',audio:'音频',text:'文本',mixed:'多模态'}; return map[mod]||mod; }
 function kpi(label,value,sub,iconName){
   return `<div class="tile"><div class="lb">${iconName?ic(iconName):''}${esc(label)}</div><div class="v">${value}</div>${sub?`<div class="s">${sub}</div>`:''}</div>`;
@@ -318,11 +300,6 @@ function flywheel(stages){
       ${(s.lines||[]).map(l=>`<div class="flowsub">${l}</div>`).join('')}
     </div>${i<stages.length-1?`<div class="flowarrow">${ic('chev')}</div>`:''}`).join('')+`</div>`;
 }
-function statusDot(kind){ // g|y|r|gr
-  const map={g:['g','运行正常'],y:['y','部分异常'],r:['r','连接失败'],gr:['gr','未知']};
-  const [c,t]=map[kind]||map.gr; return `<span class="dot8 ${c}"></span> ${t}`;
-}
-
 /* ---------------- login ---------------- */
 async function doLogin(){
   const tok = $('#tokIn').value.trim();
@@ -353,9 +330,8 @@ const WS = [
       {id:'store', name:'商店目录', icon:'store'},
       {id:'capabilities', name:'能力包', icon:'layers'},
       {id:'channels', name:'产品渠道', icon:'compass', ph:1}]},
-    {label:'运行与可靠性', items:[
-      {id:'insights', name:'调用观测', icon:'gauge'},
-      {id:'deployments', name:'部署与实例', icon:'cpu'},
+    {label:'官方与可靠性', items:[
+      {id:'officials', name:'官方 Agent 登记', icon:'cpu'},
       {id:'incidents', name:'告警事故', icon:'alert', ph:1}]},
     {label:'安全治理', items:[
       {id:'risk', name:'风险处置', icon:'shield'},
@@ -364,13 +340,12 @@ const WS = [
   ]},
   {id:'data', name:'数据智能', icon:'db', def:'overview', sections:[
     {items:[{id:'overview', name:'数据总览', icon:'db'}]},
-    {label:'采收与交互', items:[
-      {id:'sessions', name:'OKF 会话浏览', icon:'db'},
+    {label:'历史采收（只读，待清理）', items:[
+      {id:'sessions', name:'历史会话', icon:'db'},
       {id:'anomalies', name:'异常会话', icon:'alert'}]},
     {label:'能力运营', items:[
       {id:'caps', name:'能力总览', icon:'chart'},
       {id:'grounding', name:'Intent Grounding', icon:'compass'},
-      {id:'precognition', name:'Pre-cognition', icon:'gauge'},
       {id:'collab', name:'共脑协同', icon:'share'}]},
     {label:'数据治理', items:[
       {id:'governance', name:'授权与用途', icon:'shield', ph:1}]},
@@ -385,7 +360,6 @@ const WS = [
   {id:'platform', name:'平台管理', icon:'wrench', def:'status', sections:[
     {items:[{id:'status', name:'系统状态', icon:'activity'}]},
     {items:[
-      {id:'models', name:'成本与模型', icon:'cpu'},
       {id:'audit', name:'审计日志', icon:'scroll'},
       {id:'connections', name:'连接与集成', icon:'compass', ph:1}]},
   ]},
@@ -468,10 +442,8 @@ async function vOpsOverview(){
     api('/store').catch(()=>null),
   ]);
   if(ov._err){ $('#main').innerHTML = shell({title:'运营总览', body:errCard(ov._err)}); return; }
-  const t = ov.totals||{}, probes = ov.probes||[], harvest = ov.harvest||[], ds = ov.datasets||{};
+  const t = ov.totals||{}, harvest = ov.harvest||[], ds = ov.datasets||{};
   const offCount = ov.officials||0;
-  const good = p => { const u=p.units||{}; const all=Object.keys(u).length, okU=Object.values(u).filter(v=>v==='active').length; return p.monitor==='ok' || (all>0 && okU===all && p.ssh==='ok'); };
-  const running = probes.filter(good).length;
   const sessTotal = Object.values(ds).reduce((s,c)=>s+(c.sessions||0),0);
   const recTotal = harvest.reduce((s,h)=>s+(h.records||0),0);
   const srcCount = Object.keys(ds).length;
@@ -487,16 +459,15 @@ async function vOpsOverview(){
     {name:'Agent 供给', big:num(t.agents||0), lines:[`官方 ${offCount} · 社区 ${(t.agents||0)-offCount}`,'注册身份总量']},
     {name:'审核发布', big:flagged.length, lines:[`待处理监管 ${flagged.length}`,'审核流水线：数据待接入']},
     {name:'产品分发', big:num(t.listed||0), lines:[`覆盖产品 ${prodLines.length}`,`已下架 ${delisted.length}`]},
-    {name:'在线运行', big:`${running}/${offCount}`, lines:[`异常 ${offCount-running}`,'官方 agent 探活'], flag:true},
-    {name:'OKF 沉淀', big:num(sessTotal), lines:[`交互记录 ${num(recTotal)}`,`采收源 ${srcCount}`]},
-    {name:'训练可用', big:num(recTotal), lines:['授权/质量分级','数据待接入']},
+    {name:'官方登记', big:num(offCount), lines:['只登记 id/aid/hub/caps','不经 hub 观测运行']},
+    {name:'已公开回执', big:num(t.tasks_completed||0), lines:['经评价公开的有效回执','可由第三方核验']},
+    {name:'历史采收', big:num(sessTotal), lines:[`采收已删除 · ${srcCount} 个旧来源`,'待生产清理'], flag:sessTotal>0},
   ];
 
   // action items
   const items=[];
-  probes.forEach(p=>{ if(!good(p)) items.push({sev:0,label:'严重', txt:`官方 agent ${esc(p.id)} 探测异常（monitor ${esc(p.monitor||'-')}）`, aid:null, id:p.id, act:`operations/deployments`}); });
   flagged.forEach(a=>items.push({sev:1,label:'高', txt:`${esc(a.name||shortAid(a.aid))} 已标记关注`, aid:a.aid}));
-  harvest.filter(h=>h.note).forEach(h=>items.push({sev:2,label:'中', txt:`采收源 ${esc(h.source)} 异常：${esc((h.note||'').slice(0,50))}`, act:'data/sessions'}));
+  if(sessTotal>0) items.push({sev:2,label:'中', txt:`admin 数据目录仍有 ${num(sessTotal)} 条历史采收会话，待生产清理（deploy/cleanup-content-v0.2.sh）`, act:'data/sessions'});
   backlog.slice(0,5).forEach(a=>items.push({sev:2,label:'中', txt:`${esc(a.name||shortAid(a.aid))} 信箱积压 ${a.mailbox_backlog}`, aid:a.aid}));
   items.sort((a,b)=>a.sev-b.sev);
   const sevBadge = s => s===0?'<span class="badge err">严重</span>':s===1?'<span class="badge warn">高</span>':'<span class="badge cap">中</span>';
@@ -511,9 +482,8 @@ async function vOpsOverview(){
 
   $('#main').innerHTML = shell({
     title:'运营总览',
-    sub:'接入与治理 Agent，将其分发到 ANet 产品，持续观测运行，并把交互沉淀为可训练的 OKF 数据资产。',
-    actions:`<button class="btn" onclick="location.hash='#/operations/agents'">${ic('bot')} 全部 Agent</button>
-             <button class="btn pri" onclick="location.hash='#/data/sessions'">${ic('db')} OKF 数据资产</button>`,
+    sub:'接入与治理 Agent，将其分发到 ANet 产品。hub 与运营面不持有任务内容：不采收中继流量，不接入官方 agent 的运行数据。',
+    actions:`<button class="btn pri" onclick="location.hash='#/operations/agents'">${ic('bot')} 全部 Agent</button>`,
     body:`
     <div class="sect">${ic('activity')} Agent 运营与数据飞轮</div>
     ${flywheel(stages)}
@@ -522,11 +492,11 @@ async function vOpsOverview(){
         <div class="bd">
           <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
             ${kpi('注册 Agent', num(t.agents||0), `官方 ${offCount} · 社区 ${(t.agents||0)-offCount}`)}
-            ${kpi('完成任务', num(t.tasks_completed||0), spark(tasksSeries,120,26))}
+            ${kpi('已公开回执', num(t.tasks_completed||0), spark(tasksSeries,120,26))}
             ${kpi('可信评价', num(t.reviews||0), `均分 ${(t.avg_rating||0).toFixed(2)}`)}
             ${kpi('Relay 积压', num(t.relay_backlog||0), spark(backlogSeries,120,26, (backlogSeries.at(-1)>backlogSeries[0])?'var(--warn)':'var(--ok)'))}
           </div>
-          <div class="wrap">${probes.map(p=>`<span class="badge ${good(p)?'ok':'err'}"><span class="dot8 ${good(p)?'g':'r'}"></span>${esc(p.id)}${p.monitor?` · ${esc(p.monitor)}`:''}</span>`).join(' ')||'<span class="faint">尚无官方 agent</span>'}</div>
+          <div class="faint" style="font-size:12px">「已公开回执」= 经评价公开到本 hub 的有效回执数（去重），低于网络实际完成的任务数；升级前的快照统计的是中继结果消息，曲线在升级处有台阶。</div>
         </div></div>
       <div class="card"><div class="hd">${ic('alert')} 需要处理 <span class="sp"></span><span class="badge ${items.length?'warn':'ok'}">${items.length}</span></div>
         <div class="bd p0"><div class="tbwrap"><table class="tb">${actionRows}</table></div></div></div>
@@ -537,11 +507,11 @@ async function vOpsOverview(){
         ${hbars([
           {label:'注册在册', value:t.agents||0, sub:'总量'},
           {label:'已上架', value:t.listed||0, sub:'有资料/能力', hash:'#/operations/store'},
-          {label:'官方托管', value:offCount, sub:'可深度观测', hash:'#/operations/deployments'},
+          {label:'官方登记', value:offCount, sub:'仅登记', hash:'#/operations/officials'},
           {label:'标记关注', value:flagged.length, sub:'待处置', hash:'#/operations/risk'},
           {label:'已下架', value:delisted.length, sub:'监管移除', hash:'#/operations/enforcement'},
         ])}
-        <div class="note">生命周期状态机（接入→审核→认证→上架）尚未接入，当前以在册/上架/托管/处置四类近似。</div>
+        <div class="note">生命周期状态机（接入→审核→认证→上架）尚未接入，当前以在册/上架/登记/处置四类近似。</div>
       </div></div>
       <div class="card"><div class="hd">${ic('store')} 产品与渠道</div><div class="bd">
         ${st? hbars(prodLines.map(k=>({label:LINE_NAMES[k]||k, value:(st.product_lines[k]||[]).length, sub:`官方 ${(st.product_lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'}))) : '<div class="faint">商店数据不可用</div>'}
@@ -549,33 +519,22 @@ async function vOpsOverview(){
     </div>
 
     <div class="grid g2c mt14">
-      <div class="card"><div class="hd">${ic('db')} OKF 数据资产 <span class="sp"></span><button class="btn sm pri" onclick="runHarvest(this)">${ic('play')} 立即采收</button></div>
-        <div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>来源</th><th>会话</th><th>累计记录</th><th>上次运行</th><th>状态</th></tr>
-        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td><td>${h.note?`<span class="badge err">异常</span>`:'<span class="badge ok">正常</span>'}</td></tr>`).join('')||'<tr><td colspan="5" class="faint" style="padding:16px;text-align:center">尚未采收</td></tr>'}
+      <div class="card"><div class="hd">${ic('db')} 历史采收（采收已删除，待清理）</div>
+        <div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>旧来源</th><th>会话</th><th>累计记录</th><th>最后运行</th></tr>
+        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td></tr>`).join('')||'<tr><td colspan="4" class="faint" style="padding:16px;text-align:center">无历史采收数据</td></tr>'}
         </table></div></div></div>
       <div class="card"><div class="hd">${ic('layers')} 核心能力供给</div><div class="bd">
-        ${kpi('能力包总数', capCount, '认证 + 社区，见「能力包」', 'layers')}
+        ${kpi('能力包总数', capCount, '官方登记 + 社区，见「能力包」', 'layers')}
         <div style="height:10px"></div>
         <div class="wrap">
-          <a class="badge cap" href="#/data/grounding">Intent Grounding 素材 ›</a>
-          <a class="badge cap" href="#/data/precognition">Pre-cognition 素材 ›</a>
-          <a class="badge cap" href="#/data/collab">共脑协同素材 ›</a>
+          <a class="badge cap" href="#/data/grounding">Intent Grounding ›</a>
+          <a class="badge cap" href="#/data/collab">共脑协同 ›</a>
         </div>
-        <div class="note">三项差异化能力当前以 OKF 会话与官方实测数据作为数据底座，详见「数据智能 › 能力运营」。</div>
+        <div class="note">运营面不再采收交互内容；这两页只读展示历史采收数据与公开评价。</div>
       </div></div>
     </div>`,
   });
 }
-async function runHarvest(btn){
-  if(btn){btn.disabled=true;const svg=btn.querySelector('svg');btn.innerHTML=ic('refresh')+' 采收中…';btn.querySelector('svg').classList.add('spin')}
-  try{
-    const r = await api('/harvest',{method:'POST',body:'{}'});
-    const parts = (r.results||[]).map(x=>`${x.source}: +${x.events}${x.err?' (错误: '+x.err.slice(0,50)+')':''}`);
-    toast('采收完成 — '+parts.join('；'), 5000);
-    refreshCurrent();
-  }catch(e){toast('采收失败：'+e.message);if(btn){btn.disabled=false;btn.innerHTML=ic('play')+' 立即采收'}}
-}
-
 /* ---- 全部 Agent ---- */
 let agentsQ = '', agentsTier = '';
 async function vAgents(){
@@ -583,20 +542,18 @@ async function vAgents(){
   const list = d.agents||[];
   const rows = list.map(a=>{
     const caps = (a.caps||[]).slice(0,4).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')+((a.caps||[]).length>4?`<span class="badge cap">+${a.caps.length-4}</span>`:'');
-    const obs = a.tier==='official'?'<span class="badge official">全链路</span>':'<span class="badge cap">黑盒</span>';
     return `<tr class="click" onclick="goAgent('${esc(a.aid)}')">
       <td><div style="font-weight:550">${esc(a.name||'(未命名)')} ${a.tier==='official'?'<span class="badge official">官方</span>':''} ${a.moderation?`<span class="badge err">${esc(a.moderation)}</span>`:''} ${!a.listed?'<span class="badge community">未上架</span>':''}</div>
           <div class="mono faint">${shortAid(a.aid)}</div></td>
       <td>${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</td>
-      <td>${obs}</td>
       <td><div class="wrap">${caps||'<span class="faint">-</span>'}</div></td>
       <td>${a.review_count?`${a.avg_rating.toFixed(1)} <span class="faint">(${a.review_count})</span>`:'<span class="faint">-</span>'}</td>
-      <td>${a.tasks_as_provider}<span class="faint"> / ${a.tasks_as_requester}</span></td>
+      <td>${a.review_count||0}<span class="faint"> / ${a.reviews_written||0}</span></td>
       <td>${a.mailbox_backlog>0?`<span class="badge warn">${a.mailbox_backlog}</span>`:'<span class="faint">0</span>'}</td>
       <td class="muted" style="white-space:nowrap">${fmtTime(a.registered_at)}</td></tr>`;
   }).join('');
   $('#main').innerHTML = shell({
-    title:'全部 Agent', sub:'全网注册身份（含未上架）· 官方/社区、可观测等级与生命周期统一入口 · 点击进入 Agent 详情',
+    title:'全部 Agent', sub:'全网注册身份（含未上架）· 官方/社区与生命周期统一入口 · 点击进入 Agent 详情',
     body:`
     <div class="pgfilter">
       <div class="gsearch" style="flex:0 1 300px"><span class="gsic">${ic('search')}</span><input id="agq" placeholder="搜索 AID / 名称 / 能力…" value="${esc(agentsQ)}"/></div>
@@ -607,102 +564,35 @@ async function vAgents(){
       </div>
       <span class="sp"></span><span class="muted" style="font-size:12.5px">${list.length} 个</span></div>
     <div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>Agent</th><th>所有权</th><th>可观测</th><th>能力</th><th>评分</th><th>任务 供/求</th><th>积压</th><th>注册时间</th></tr>
-      ${rows||'<tr><td colspan="8" class="faint" style="padding:24px;text-align:center">无结果</td></tr>'}</table></div></div>`,
+      <tr><th>Agent</th><th>所有权</th><th>能力</th><th>评分</th><th>评价 收/写</th><th>积压</th><th>注册时间</th></tr>
+      ${rows||'<tr><td colspan="7" class="faint" style="padding:24px;text-align:center">无结果</td></tr>'}</table></div></div>`,
   });
   const inp=$('#agq'); inp.addEventListener('keydown',e=>{if(e.key==='Enter'){agentsQ=inp.value;vAgents()}});
 }
 
-/* ---- 调用观测 (official insights across agents) ---- */
-async function vInsightsList(){
-  const all = await getAllInsights();
-  let totCalls=0,totDone=0,totErr=0,totMilli=0;
-  const rows = all.map(x=>{
-    const st=(x.d&&x.d.stats)||{}; const by=st.by_service||[];
-    const c=by.reduce((s,e)=>s+(e.calls||0),0), dn=by.reduce((s,e)=>s+(e.done||0),0), er=by.reduce((s,e)=>s+(e.err||0),0);
-    totCalls+=c;totDone+=dn;totErr+=er;totMilli+=(st.total_milli||0);
-    return {...x,c,dn,er};
-  });
-  const succ = (totDone+totErr)>0 ? totDone/(totDone+totErr) : null;
-  const body = all.length? `
-    <div class="grid g4 mb16">
-      ${kpi('官方 agent', all.length, '可深度观测', 'shield')}
-      ${kpi('近窗调用', num(totCalls), '跨 agent 合计', 'activity')}
-      ${kpi('调用成功率', pct(succ), `成功 ${num(totDone)} · 失败 ${num(totErr)}`)}
-      ${kpi('近窗开销', FormatMilli(totMilli), '实测计费', 'coin')}
-    </div>
-    <div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>官方 Agent</th><th>状态</th><th>近窗调用</th><th>成功/失败</th><th>开销</th><th></th></tr>
-      ${rows.map(x=>`<tr>
-        <td><div style="font-weight:550">${esc(x.name)}</div><div class="mono faint">${esc(x.id)}</div></td>
-        <td>${x.ok?'<span class="badge ok">monitor ok</span>':`<span class="badge err">${esc((x.err||x.d&&x.d.error||'不可达').slice(0,40))}</span>`}</td>
-        <td>${num(x.c)}</td><td class="muted">${num(x.dn)} / ${num(x.er)}</td><td class="muted">${x.d&&x.d.cost_yuan||FormatMilli(x.d&&x.d.cost_milli)}</td>
-        <td><button class="btn sm" onclick="goAgent('${esc(x.aid||'')}','insights')" ${x.aid?'':'disabled'}>${ic('gauge')} 洞察</button></td></tr>`).join('')}
-    </table></div></div>
-    <div class="note">数据源为各官方 agent 自身 monitor 的 /api/stats（近 24h 窗口）。点击「洞察」进入该 Agent 的「调用与洞察」页。</div>`
-    : empty('尚无可观测的官方 Agent','官方 agent 需在 manifest 中声明 monitor.url 才能被彻底观测。');
-  $('#main').innerHTML = shell({title:'调用观测', sub:'跨官方 Agent 的调用量、成功率与实测开销汇总 — 单一事实源来自各 agent 的 monitor', body});
-}
-
-/* ---- 部署与实例 (official probes + ops) ---- */
-async function vDeployments(force){
-  const d = await api('/official'+(force?'?probe=force':''));
-  const cards = (d.officials||[]).map(o=>{
-    const m=o.manifest, p=o.probe;
-    const units = Object.entries(p.units||{}).map(([u,stt])=>
-      `<span class="badge ${stt==='active'?'ok':'err'}"><span class="dot8 ${stt==='active'?'g':'r'}"></span>${esc(u.replace('.service',''))}</span>`).join(' ');
-    const ops=(m.ops&&m.ops.allowed)||[];
-    const btn=(op,label,icn,danger)=>ops.includes(op)?`<button class="btn sm ${danger?'danger':''}" onclick="runOp('${esc(m.id)}','${op}')">${ic(icn)} ${label}</button>`:'';
-    const sshBad = p.ssh!=='ok';
-    return `<div class="card">
-      <div class="hd">${ic('cpu')}<a href="javascript:void(0)" onclick="goAgent('${esc(m.aid||'')}','run')" style="color:inherit;font-weight:600">${esc(m.name)}</a>
-        <span class="badge official">官方</span><span class="badge cap">${esc(m.product_line)}</span>
-        <span class="sp"></span>
-        ${m.monitor&&m.monitor.url?`<a class="btn sm" href="${esc(m.monitor.url)}" target="_blank">${ic('term')} 原生监控</a>`:''}
-        <button class="btn sm" onclick="vDeployments(true)">${ic('refresh')} 重新探测</button></div>
-      <div class="bd">
-        <div class="kv" style="grid-template-columns:90px 1fr">
-          <div class="k">主机</div><div class="mono">${esc((m.runtime&&m.runtime.host)||'-')}</div>
-          <div class="k">AID</div><div class="mono" style="word-break:break-all">${esc(m.aid||'-')}</div>
-          <div class="k">单元状态</div><div class="wrap">${units||'<span class="faint">-</span>'} <span class="badge ${p.monitor==='ok'?'ok':'err'}">monitor ${esc(p.monitor||'-')}</span> <span class="faint" style="font-size:11px">探测于 ${fmtTime(p.checked_at)}</span></div>
-          ${sshBad?`<div class="k">运维通道</div><div><span class="badge warn">ssh 不可用</span> <span class="muted" style="font-size:12px">${esc(String(p.ssh).slice(0,120))}</span></div>`:''}
-        </div>
-        <div class="row" style="margin-top:12px;flex-wrap:wrap">
-          <button class="btn sm pri" onclick="goAgent('${esc(m.aid||'')}','insights')">${ic('gauge')} 调用与洞察</button>
-          ${btn('status','状态','activity')}${btn('logs','日志','file')}
-          ${btn('start','启动','play')}${btn('stop','停止','stop',1)}${btn('restart','重启','restart',1)}${btn('update','更新','up',1)}
-          <button class="btn sm" onclick="monView('${esc(m.id)}')">${ic('term')} 调用历史</button>
-        </div>
-        <div id="ops-out-${esc(m.id)}"></div>
-      </div></div>`;
-  }).join('');
+/* ---- 官方 Agent 登记 (registry only) ----
+   官方 agent 在运营面只登记 id / aid / hub / caps（A2A-DESIGN §9、§15）。运行探活、日志、
+   ops 命令、monitor 代理、调用洞察与 ACL 均已删除：hub 主机不持有读取官方 agent 内容或操作其
+   主机的通道，这些运维由 hub 之外的独立工具完成。 */
+async function vOfficials(){
+  const d = await api('/official');
+  const rows = (d.officials||[]).map(o=>{ const m=o.manifest||{}; return `<tr>
+    <td><div style="font-weight:550">${esc(m.name||m.id)}</div><div class="mono faint">${esc(m.id)}</div></td>
+    <td class="mono">${m.aid?`<a href="javascript:goAgent('${esc(m.aid)}')">${shortAid(m.aid)}</a>`:'-'}</td>
+    <td class="mono" style="word-break:break-all">${esc(m.hub||'-')}</td>
+    <td><div class="wrap">${(m.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">-</span>'}</div></td>
+    <td><span class="badge cap">${esc(m.product_line||'-')}</span></td>
+    <td><button class="btn sm danger" onclick="delOfficial('${esc(m.id)}')">${ic('trash')} 删除登记</button></td></tr>`; }).join('');
   $('#main').innerHTML = shell({
-    title:'部署与实例', sub:'官方 agent 运行实例：单元活性、心跳、白名单 ops（状态/日志/上下线/更新，全程审计）',
-    body:`<div class="grid" style="grid-template-columns:1fr">${cards||empty('尚无官方 agent manifest','通过 POST /admin/api/official 上传 manifest 后即可纳管。')}</div>`,
+    title:'官方 Agent 登记', sub:'官方 agent 在运营面只登记 id / AID / hub / 能力。运行、监控、日志与授权不经 hub 主机，由 hub 之外的独立运维工具完成。',
+    body: rows? `<div class="card"><div class="tbwrap"><table class="tb"><tr><th>官方 Agent</th><th>AID</th><th>Hub</th><th>能力</th><th>产品线</th><th>操作</th></tr>${rows}</table></div></div>
+      <div class="note">登记经 POST /admin/api/official 或数据目录下的 officials.json 提交；含 runtime / monitor / ops / datasets 字段的清单会被拒绝。</div>`
+      : empty('尚无官方 agent 登记','经 POST /admin/api/official 提交只含 id / aid / hub / caps 的清单。'),
   });
 }
-async function runOp(id, op){
-  let arg='';
-  if(op==='logs'){ arg = prompt('日志行数（或 "单元名 行数"）','200')||''; if(arg===null)return }
-  if(['stop','restart','update'].includes(op) && !confirm(`确认对 ${id} 执行 ${op}？该操作将被审计。`)) return;
-  const out = $('#ops-out-'+CSS.escape(id));
-  if(out) out.innerHTML = `<pre class="out" style="margin-top:12px">$ ${op} 执行中…</pre>`;
-  try{
-    const r = await api('/official/'+encodeURIComponent(id)+'/ops',{method:'POST',body:JSON.stringify({op,arg})});
-    if(out) out.innerHTML = `<pre class="out" style="margin-top:12px">$ ${esc(r.command||op)}\n${esc(r.output||'')}${r.err?'\n[err] '+esc(r.err):''}\n(exit ${r.exit_code}, ${r.duration_ms}ms)</pre>`;
-  }catch(e){ if(out) out.innerHTML = `<pre class="out" style="margin-top:12px">[失败] ${esc(e.message)}</pre>` }
-}
-async function monView(id){
-  try{
-    const stt = await api('/official/'+encodeURIComponent(id)+'/monitor/state');
-    const jobs = (stt.jobs||stt.recent||[]).slice(0,40).map(j=>
-      `<tr><td class="mono">${esc((j.ix||'').slice(0,14))}</td><td>${esc(j.service||'-')}</td><td class="muted">${esc((j.prompt||'').slice(0,44))}</td>
-       <td>${j.state==='done'?'<span class="badge ok">done</span>':j.state==='error'?'<span class="badge err">error</span>':'<span class="badge warn">'+esc(j.state||'?')+'</span>'}</td>
-       <td class="muted">${j.dur_ms?(j.dur_ms/1000).toFixed(1)+'s':'-'}</td><td class="muted">${j.out_kind?esc(j.out_kind)+' '+fmtBytes(j.out_bytes):'-'}</td></tr>`).join('');
-    openDrawer(id+' · 调用历史（monitor 直连）', `
-      <div class="tbwrap"><table class="tb"><tr><th>IX</th><th>服务</th><th>输入</th><th>状态</th><th>耗时</th><th>产物</th></tr>${jobs||'<tr><td colspan="6" class="faint">monitor 未返回任务记录</td></tr>'}</table></div>
-      <div class="sec">原始 state</div><pre class="md">${esc(JSON.stringify(stt,null,2).slice(0,8000))}</pre>`);
-  }catch(e){ toast('monitor 获取失败：'+e.message) }
+async function delOfficial(id){
+  if(!confirm('确认删除该官方 agent 登记？只删除运营面的登记，不影响 hub 注册表。')) return;
+  try{ await api('/official/'+encodeURIComponent(id),{method:'DELETE'}); toast('已删除登记'); refreshCurrent() }catch(e){toast(e.message)}
 }
 
 /* ---- 风险处置 (moderation queue) ---- */
@@ -750,11 +640,8 @@ async function vEnforcement(){
 async function moderate(aid,status){
   try{ await api('/agents/'+encodeURIComponent(aid)+'/moderate',{method:'POST',body:JSON.stringify({status,note:$('#mNote')?.value||''})}); toast('已更新监管状态'); refreshCurrent() }catch(e){toast(e.message)}
 }
-async function setQuota(aid){
-  try{ await api('/agents/'+encodeURIComponent(aid)+'/quota',{method:'POST',body:JSON.stringify({guest_quota:parseInt($('#mQuota').value)||0})}); toast('已更新访客额度'); refreshCurrent() }catch(e){toast(e.message)}
-}
 async function delAgent(aid){
-  if(!confirm('确认将该 agent 从公共注册表移除？\n\n移除前整行（含 KEL）会归档，可在「安全治理 › 回收站」恢复。其评价与任务记录会保留，身份也可重新注册。')) return;
+  if(!confirm('确认将该 agent 从公共注册表移除？\n\n移除前整行（含 KEL）会归档，可在「安全治理 › 回收站」恢复。其评价会保留，身份也可重新注册。')) return;
   try{ await api('/agents/'+encodeURIComponent(aid),{method:'DELETE'}); toast('已移除，可在回收站恢复'); location.hash='#/operations/recycle'; }catch(e){toast(e.message)}
 }
 
@@ -802,7 +689,7 @@ async function vStore(){
           <div class="muted" style="font-size:12.5px;margin:6px 0;min-height:34px">${esc((a.summary||'').slice(0,80))||'<span class="faint">无简介</span>'}</div>
           <div class="wrap" style="margin-bottom:8px">${(a.caps||[]).slice(0,5).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')}</div>
           <div class="row" style="font-size:12px;color:var(--fg-muted)">
-            <span>${a.review_count?a.avg_rating.toFixed(1)+'★ ('+a.review_count+')':'暂无评价'}</span><span>·</span><span>${a.tasks} 任务</span>
+            <span>${a.review_count?a.avg_rating.toFixed(1)+'★ ('+a.review_count+')':'暂无评价'}</span>
             <span class="sp"></span><a href="javascript:goAgent('${esc(a.aid)}')">详情 ›</a>
           </div>
         </div></div>`).join('');
@@ -834,21 +721,21 @@ function render_caps(caps, subtitle, isSearch, method){
     <div class="card" style="min-width:230px;flex:1;max-width:320px">
       <div class="bd">
         <div class="row"><div style="font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</div>
-          ${c.cert==='certified'?'<span class="badge ok">已认证</span>':'<span class="badge community">社区</span>'}</div>
+          ${c.tier==='official'?'<span class="badge official">官方登记</span>':'<span class="badge community">社区</span>'}</div>
         <div class="wrap" style="margin:6px 0"><span class="badge cap">${modChip(c.modality)}</span>${c.line?`<span class="badge cap">${esc(c.line)}</span>`:''}${c.provider_id?`<span class="badge official">${esc(c.provider_id)}</span>`:''}</div>
         <div class="muted" style="font-size:12px;min-height:32px">${esc((c.desc||'').slice(0,90))}</div>
         ${(c.models&&c.models.length)?`<div class="wrap" style="margin-top:6px">${c.models.slice(0,3).map(m=>`<span class="badge cap" style="font-family:ui-monospace">${esc(m)}</span>`).join('')}</div>`:''}
-        <div class="row faint" style="font-size:11px;margin-top:8px">${c.calls?`${c.calls} 次调用`:'暂无调用'}<span class="sp"></span>${c.provider_aid?`<a class="mono" href="javascript:goAgent('${esc(c.provider_aid)}')">${shortAid(c.provider_aid)}</a>`:''}</div>
+        <div class="row faint" style="font-size:11px;margin-top:8px"><span class="sp"></span>${c.provider_aid?`<a class="mono" href="javascript:goAgent('${esc(c.provider_aid)}')">${shortAid(c.provider_aid)}</a>`:''}</div>
       </div></div>`).join('');
   const methodBadge = method? `<span class="badge ${method==='semantic'?'official':'cap'}">${method==='semantic'?'语义检索':'词法检索'}</span>` : '';
   $('#main').innerHTML = shell({
-    title:'能力包仓库', sub:'愿景「全球能力仓库」— 每个官方服务/社区能力抽象为可发现、可调用、带认证档位的能力包',
+    title:'能力包仓库', sub:'愿景「全球能力仓库」— 官方登记能力与社区能力抽象为可发现的能力包（来源：注册表与官方登记，不含调用数据）',
     body:`
     <div class="pgfilter">
       <div class="gsearch" style="flex:1;max-width:520px"><span class="gsic">${ic('search')}</span><input id="capq" placeholder="按任务描述发现能力（例：把这段语音转成文字 / 生成一段风景视频）…" value="${esc(capsQ)}"/></div>
       ${isSearch?`<button class="btn sm" onclick="capsQ='';vCapabilities()">清除</button>`:''}
       ${methodBadge}
-      <span class="sp"></span><span class="muted" style="font-size:12.5px">${esc(subtitle||'')} · 认证 ${caps.filter(c=>c.cert==='certified').length} · 社区 ${caps.filter(c=>c.cert!=='certified').length}</span></div>
+      <span class="sp"></span><span class="muted" style="font-size:12.5px">${esc(subtitle||'')} · 官方 ${caps.filter(c=>c.tier==='official').length} · 社区 ${caps.filter(c=>c.tier!=='official').length}</span></div>
     <div style="display:flex;flex-wrap:wrap;gap:12px">${cards||empty('无匹配能力包','换一种任务描述再试，或查看全部能力包。')}</div>`,
   });
 }
@@ -872,24 +759,23 @@ async function vDataOverview(){
   (ss&&ss.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;}else unlabeled++; });
   const topIntents = Object.entries(intents).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v,hash:'#/data/grounding'}));
   $('#main').innerHTML = shell({
-    title:'数据总览', sub:'运行交互沉淀了什么、能否训练、质量如何 —— 采用 OKF 格式，落盘于 admin/datasets/',
-    actions:`<button class="btn pri" onclick="runHarvest(this)">${ic('play')} 立即采收</button>`,
+    title:'数据总览', sub:'采收已删除（A2A-DESIGN §9）：hub 与运营面不再从中继或官方 agent 复制任何交互。此处只读展示旧版本留在 admin/datasets/ 的数据，生产清理后为空。',
     body:`
     <div class="grid g4 mb16">
-      ${kpi('OKF 会话', num(sessTotal), `${Object.keys(ds).length} 个来源`, 'db')}
-      ${kpi('交互记录', num(recTotal), `${num(eventTotal)} 事件`, 'activity')}
-      ${kpi('原始载荷', fmtBytes(byteTotal), '已采收', 'layers')}
+      ${kpi('历史会话', num(sessTotal), `${Object.keys(ds).length} 个旧来源`, 'db')}
+      ${kpi('历史交互记录', num(recTotal), `${num(eventTotal)} 事件`, 'activity')}
+      ${kpi('历史原始载荷', fmtBytes(byteTotal), '待清理', 'layers')}
       ${kpi('已标注意图', num(labeled), `未标注 ${num(unlabeled)}`, 'compass')}
     </div>
     <div class="grid g2c">
-      <div class="card"><div class="hd">${ic('db')} 采收管道</div><div class="bd p0"><div class="tbwrap"><table class="tb">
-        <tr><th>来源</th><th>会话</th><th>累计记录</th><th>上次运行</th><th>游标</th><th>状态</th></tr>
-        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td><td class="mono faint">${esc((h.cursor||'').slice(0,16))}</td><td>${h.note?`<span class="badge err" title="${esc(h.note)}">异常</span>`:'<span class="badge ok">正常</span>'}</td></tr>`).join('')||'<tr><td colspan="6" class="faint" style="padding:16px;text-align:center">尚未采收</td></tr>'}
+      <div class="card"><div class="hd">${ic('db')} 旧采收游标（待清理）</div><div class="bd p0"><div class="tbwrap"><table class="tb">
+        <tr><th>旧来源</th><th>会话</th><th>累计记录</th><th>最后运行</th></tr>
+        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td></tr>`).join('')||'<tr><td colspan="4" class="faint" style="padding:16px;text-align:center">无</td></tr>'}
       </table></div></div></div>
       <div class="card"><div class="hd">${ic('compass')} 意图分布 <span class="sp"></span><a href="#/data/grounding" style="font-size:12px">Intent Grounding ›</a></div><div class="bd">
         ${hbars(topIntents)}</div></div>
     </div>
-    <div class="note">训练授权、脱敏状态、质量分级尚未建模 —— 当前展示的是原始 OKF 采收量，可训练资产的授权/质量口径为数据待接入。</div>`,
+    <div class="note">这些数据由旧版本采收，含任务内容；删除步骤见 deploy/cleanup-content-v0.2.sh（执行前须经产品负责人同意）。</div>`,
   });
 }
 
@@ -905,34 +791,28 @@ async function vSessions(){
     <tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
       <td class="mono">${esc(s.session_id.slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
       <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
-      <td class="muted" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.goal||'-')}</td>
       <td>${s.status==='done'?'<span class="badge ok">done</span>':s.status?'<span class="badge warn">'+esc(s.status)+'</span>':'-'}</td>
       <td>${s.events}</td><td class="muted" style="white-space:nowrap">${fmtTime(s.updated_at)}</td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'OKF 会话浏览', sub:'意图对齐 / 预认知 / 共脑协同的数据底座 — 卡片 + 原始 JSONL',
+    title:'历史会话', sub:'旧版本采收的会话（只读）。采收已删除，生产清理后此处为空。',
     body:`
-    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:14px">${tiles||'<div class="tile"><div class="lb">暂无数据</div><div class="s">点击「立即采收」开始</div></div>'}</div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:14px">${tiles||'<div class="tile"><div class="lb">暂无数据</div><div class="s">没有历史采收会话</div></div>'}</div>
     <div class="pgfilter">
       <div class="gsearch" style="flex:0 1 260px"><span class="gsic">${ic('search')}</span><input id="dsq" placeholder="搜索会话 / AID / 意图…" value="${esc(dsQ)}"/></div>
       <select id="dss" class="inp" onchange="dsSource=this.value;vSessions()">
         <option value="">全部来源</option>
         ${Object.keys(counts).map(s=>`<option ${dsSource===s?'selected':''} value="${esc(s)}">${esc(s)}</option>`).join('')}
       </select>
-      <span class="sp"></span>
-      <button class="btn sm pri" onclick="runHarvest(this)">${ic('play')} 立即采收</button></div>
+      <span class="sp"></span></div>
     <div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>会话</th><th>来源</th><th>意图</th><th>目标 / 输入</th><th>状态</th><th>事件</th><th>更新</th></tr>
-      ${rows||'<tr><td colspan="7" class="faint" style="padding:24px;text-align:center">无会话</td></tr>'}</table></div></div>`,
+      <tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>事件</th><th>更新</th></tr>
+      ${rows||'<tr><td colspan="6" class="faint" style="padding:24px;text-align:center">无会话</td></tr>'}</table></div></div>`,
   });
   const inp=$('#dsq'); inp.addEventListener('keydown',e=>{if(e.key==='Enter'){dsQ=inp.value;vSessions()}});
 }
 async function openSession(source,id){
   const d = await api('/sessions/'+encodeURIComponent(source)+'/'+encodeURIComponent(id));
   const s=d.session||{};
-  const evs=(d.events||[]).map(e=>{
-    const j=typeof e==='string'?JSON.parse(e):e;
-    return `<pre class="md" style="margin-bottom:6px">${esc(JSON.stringify(j,null,1).slice(0,2000))}</pre>`;
-  }).join('');
   openDrawer(`${source} / ${id}`, `
     <div class="kv">
       <div class="k">意图</div><div>${esc(s.intent||'-')}</div>
@@ -941,11 +821,8 @@ async function openSession(source,id){
       <div class="k">需求方</div><div class="mono" style="word-break:break-all">${s.requester_aid?`<a href="javascript:goAgent('${esc(s.requester_aid)}')">${esc(s.requester_aid)}</a>`:'-'}</div>
       <div class="k">时间窗</div><div>${fmtTime(s.started_at)} → ${fmtTime(s.ended_at)}</div>
       <div class="k">体量</div><div>${s.events} 事件 · ${fmtBytes(s.bytes)}</div>
-      <div class="k">卡片</div><div class="mono">${esc(s.card_path||'-')}</div>
-      <div class="k">数据</div><div class="mono">${esc(s.data_path||'-')}</div>
     </div>
-    <div class="sec">OKF 概念卡</div><pre class="md">${esc(d.card||'(无)')}</pre>
-    <div class="sec">原始事件（前 ${(d.events||[]).length} 条）</div>${evs||'<div class="faint">无</div>'}`);
+    <div class="note">${esc(d.note||'')}</div>`);
 }
 
 /* ---- 异常会话 ---- */
@@ -957,12 +834,11 @@ async function vAnomalies(){
       <td class="mono">${esc(s.session_id.slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
       <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
       <td><span class="badge warn">${esc(s.status)}</span></td>
-      <td class="muted" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.goal||'-')}</td>
       <td class="muted">${fmtTime(s.updated_at)}</td></tr>`).join('');
   $('#main').innerHTML = shell({
     title:'异常会话', sub:'状态非 done 的会话（未完成 / 失败）— grounding 失败、协同冲突、工具调用失败等的初筛入口',
     body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>目标</th><th>更新</th></tr>${rows}</table></div></div>
+      <tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>更新</th></tr>${rows}</table></div></div>
       <div class="note">失败类型细分（歧义/预判错误/协同冲突/敏感命中）需要 OKF Schema 扩展字段，当前以会话状态近似。</div>`
       : empty('未发现异常会话','采样范围内所有会话状态均为 done 或未标注。'),
   });
@@ -970,19 +846,14 @@ async function vAnomalies(){
 
 /* ---- 能力总览 (differentiator overview) ---- */
 async function vCapOps(){
-  const [ss, all, ov] = await Promise.all([
+  const [ss, ov] = await Promise.all([
     api('/sessions?limit=400').catch(()=>null),
-    getAllInsights().catch(()=>[]),
     api('/overview').catch(()=>null),
   ]);
   // grounding: intents
   let intents={}, labeled=0;
   (ss&&ss.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;} });
   const intentKinds = Object.keys(intents).length;
-  // precog: latency + cost from official stats
-  let totMs=0, msN=0, totMilli=0;
-  all.forEach(x=>{ const st=(x.d&&x.d.stats)||{}; (st.by_service||[]).forEach(s=>{ if(s.avg_ms){totMs+=s.avg_ms*(s.calls||1);msN+=(s.calls||1);} }); totMilli+=(st.total_milli||0); });
-  const avgMs = msN? totMs/msN : 0;
   // collab
   const tc=(ov&&ov.totals&&ov.totals.tasks_completed)||0, rv=(ov&&ov.totals&&ov.totals.reviews)||0, ar=(ov&&ov.totals&&ov.totals.avg_rating)||0;
   const capCard=(title,icn,metric,note,hash,tag)=>`
@@ -993,14 +864,13 @@ async function vCapOps(){
         <a class="btn sm" href="${hash}">进入工作台 ›</a>
       </div></div>`;
   $('#main').innerHTML = shell({
-    title:'能力总览', sub:'三项差异化能力的统一入口 —— 当前均为「数据底座/素材」而非已训练模型，口径如实标注',
+    title:'能力总览', sub:'运营面不采收交互内容；以下只读展示历史采收数据与公开评价，口径如实标注',
     body:`
-    <div class="grid g3">
-      ${capCard('Intent Grounding','compass', `${num(labeled)} 条已标注 · ${intentKinds} 类意图`, '来自 OKF 会话的 intent 字段分布，作为意图对齐的标注数据底座。', '#/data/grounding', '数据底座')}
-      ${capCard('Pre-cognition','gauge', `均时 ${(avgMs/1000).toFixed(2)}s · ${FormatMilli(totMilli)}`, '来自官方 agent 实测 stats 的按服务耗时与开销，作为「耗时/成本预测」的素材。', '#/data/precognition', '预测素材')}
-      ${capCard('共脑协同','share', `${num(tc)} 交付 · ${num(rv)} 评价`, '来自任务交付与可信评价流，作为多 Agent 协同效果的评估底座。', '#/data/collab', '协同底座')}
+    <div class="grid g2">
+      ${capCard('Intent Grounding','compass', `${num(labeled)} 条已标注 · ${intentKinds} 类意图`, '旧版本采收会话的 intent 字段分布（历史数据，待清理）。', '#/data/grounding', '历史数据')}
+      ${capCard('共脑协同','share', `${num(tc)} 已公开回执 · ${num(rv)} 评价`, '来自经评价公开的回执与可信评价，不含交互内容。', '#/data/collab', '公开评价')}
     </div>
-    <div class="faint" style="font-size:11.5px;margin-top:14px">诚实口径：以上均为线上观测/实测数据的聚合，尚未接入固定评测集与人工标签，得分/置信区间为后续阶段目标。</div>`,
+    <div class="faint" style="font-size:11.5px;margin-top:14px">诚实口径：以上为聚合计数，未接入评测集与人工标签。</div>`,
   });
 }
 
@@ -1030,30 +900,6 @@ async function vGrounding(){
   });
 }
 
-/* ---- Pre-cognition ---- */
-async function vPrecog(){
-  const all = await getAllInsights();
-  const cards = all.filter(x=>x.ok).map(x=>{
-    const st=x.d.stats||{};
-    const curve = barChart(st.curve||[]);
-    const svcRows=(st.by_service||[]).slice(0,10).map(s=>`<tr><td>${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${s.avg_ms?(s.avg_ms/1000).toFixed(2)+'s':'-'}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
-    const mdlRows=(st.by_model||[]).slice(0,10).map(s=>`<tr><td class="mono">${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${s.avg_ms?(s.avg_ms/1000).toFixed(2)+'s':'-'}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
-    return `<div class="card" style="margin-bottom:14px"><div class="hd">${ic('gauge')} ${esc(x.name)} <span class="badge cap mono">${esc(x.id)}</span><span class="sp"></span><span class="muted" style="font-size:12px">近窗开销 ${esc(x.d.cost_yuan||FormatMilli(x.d.cost_milli))}</span></div>
-      <div class="bd">
-        <div class="sect" style="margin-top:0">调用曲线（近 24h）</div>${curve}
-        <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:12px">
-          <div><div class="sect" style="margin-top:0">按服务：耗时/成本素材</div><div class="tbwrap"><table class="tb"><tr><th>服务</th><th>调用</th><th>均时</th><th>开销</th></tr>${svcRows||'<tr><td class="faint">无</td></tr>'}</table></div></div>
-          <div><div class="sect" style="margin-top:0">按模型：耗时/成本素材</div><div class="tbwrap"><table class="tb"><tr><th>模型</th><th>调用</th><th>均时</th><th>开销</th></tr>${mdlRows||'<tr><td class="faint">无</td></tr>'}</table></div></div>
-        </div>
-      </div></div>`;
-  }).join('');
-  $('#main').innerHTML = shell({
-    title:'Pre-cognition', sub:'耗时/成本预测素材 —— 来自官方 agent 实测 stats 的按模型/服务延迟与开销',
-    body: cards || empty('尚无实测数据','需要至少一个声明 monitor 且已产生调用的官方 agent。'),
-  });
-  $('#main').innerHTML += `<div class="note">口径：线上实测。预测准确率/召回率/有效提前量/打扰率等需要 OKF precognition.* 字段与介入结果标签，为后续阶段。</div>`;
-}
-
 /* ---- 共脑协同 ---- */
 async function vCollab(){
   const [ov, rv] = await Promise.all([ api('/overview'), api('/reviews?limit=50').catch(()=>({reviews:[]})) ]);
@@ -1061,20 +907,20 @@ async function vCollab(){
   const reviews=(rv.reviews||[]).map(r=>`<tr>
     <td>${'★'.repeat(Math.max(0,Math.min(5,r.rating)))}<span class="faint">${'☆'.repeat(5-Math.max(0,Math.min(5,r.rating)))}</span></td>
     <td class="mono">${r.subject_aid?`<a href="javascript:goAgent('${esc(r.subject_aid)}')">${shortAid(r.subject_aid)}</a>`:'-'}</td>
-    <td class="muted" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc((r.goal||r.comment||'-'))}</td>
+    <td class="muted" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.comment||'-')}</td>
     <td class="muted">${fmtTime(new Date((r.created_at||0)*1000).toISOString())}</td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'共脑协同', sub:'多 Agent 协同与交付评估的数据底座 —— 任务交付、可信评价与在途积压',
+    title:'共脑协同', sub:'多 Agent 协同的公开信号 —— 已公开回执、可信评价与在途积压（不含交互内容）',
     body:`
     <div class="grid g4 mb16">
-      ${kpi('完成任务', num(t.tasks_completed||0), '跨 Agent 交付', 'activity')}
+      ${kpi('已公开回执', num(t.tasks_completed||0), '经评价公开', 'activity')}
       ${kpi('可信评价', num(t.reviews||0), '交付后评价', 'star')}
       ${kpi('平均评分', (t.avg_rating||0).toFixed(2), '满分 5', 'gauge')}
       ${kpi('在途积压', num(t.relay_backlog||0), '未投递 relay', 'inbox')}
     </div>
     <div class="card"><div class="hd">${ic('star')} 最近协同交付评价</div>
       <div class="bd p0"><div class="tbwrap"><table class="tb">
-        <tr><th>评分</th><th>对象</th><th>目标 / 评论</th><th>时间</th></tr>
+        <tr><th>评分</th><th>对象</th><th>评论</th><th>时间</th></tr>
         ${reviews||'<tr><td colspan="4" class="faint tac" style="padding:20px">暂无评价</td></tr>'}</table></div></div></div>
     <div class="note">口径：线上观测。协同 DAG 回放、贡献归因、冲突矩阵、相对单 Agent 提升需要 OKF collaboration.* 字段，为后续阶段。</div>`,
   });
@@ -1095,8 +941,8 @@ async function vEcoOverview(){
     <div class="grid g4 mb16">
       ${kpi('注册 Agent', num(t.agents||0), `官方 ${off} · 社区 ${(t.agents||0)-off}`, 'bot')}
       ${kpi('已上架', num(t.listed||0), `覆盖 ${prodLines.length} 条产品线`, 'store')}
-      ${kpi('能力包供给', capCount, '认证 + 社区', 'layers')}
-      ${kpi('OKF 会话资产', num(sessTotal), `完成任务 ${num(t.tasks_completed||0)}`, 'db')}
+      ${kpi('能力包供给', capCount, '官方登记 + 社区', 'layers')}
+      ${kpi('已公开回执', num(t.tasks_completed||0), `历史采收会话 ${num(sessTotal)}（待清理）`, 'db')}
     </div>
     <div class="grid g2">
       <div class="card"><div class="hd">${ic('store')} 产品线覆盖</div><div class="bd">
@@ -1104,8 +950,8 @@ async function vEcoOverview(){
       </div></div>
       <div class="card"><div class="hd">${ic('share')} 生态构成</div><div class="bd">
         ${hbars([
-          {label:'官方托管 Agent', value:off, sub:'全链路可观测', hash:'#/operations/deployments'},
-          {label:'社区 Agent', value:(t.agents||0)-off, sub:'黑盒', hash:'#/operations/agents'},
+          {label:'官方登记 Agent', value:off, sub:'仅登记', hash:'#/operations/officials'},
+          {label:'社区 Agent', value:(t.agents||0)-off, sub:'注册表', hash:'#/operations/agents'},
           {label:'可信评价', value:t.reviews||0, sub:`均分 ${(t.avg_rating||0).toFixed(2)}`},
         ])}
         <div class="row" style="margin-top:12px"><a class="btn sm" href="#/ecosystem/network">${ic('share')} Agent 网络</a><a class="btn sm" href="#/ecosystem/vision">${ic('up')} 能力跃升</a></div>
@@ -1121,31 +967,30 @@ async function vMatrix(){
   const present=order.filter(k=>lines[k]&&lines[k].length);
   const rows=present.map(k=>{
     const arr=lines[k]; const official=arr.filter(a=>a.tier==='official').length;
-    const tasks=arr.reduce((s,a)=>s+(a.tasks||0),0);
     const rev=arr.reduce((s,a)=>s+(a.review_count||0),0);
-    return `<tr><td style="font-weight:550">${LINE_NAMES[k]||k}</td><td>${arr.length}</td><td>${official}</td><td>${arr.length-official}</td><td>${tasks}</td><td>${rev}</td></tr>`;
+    return `<tr><td style="font-weight:550">${LINE_NAMES[k]||k}</td><td>${arr.length}</td><td>${official}</td><td>${arr.length-official}</td><td>${rev}</td></tr>`;
   }).join('');
   $('#main').innerHTML = shell({
     title:'产品矩阵', sub:'按 ANet 产品线组织的 Agent 供给与活跃度',
     body:`
     <div class="card"><div class="bd">${hbars(present.map(k=>({label:LINE_NAMES[k]||k, value:(lines[k]||[]).length, sub:`官方 ${(lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'})))}</div></div>
     <div class="card mt14"><div class="tbwrap"><table class="tb">
-      <tr><th>产品线</th><th>上架 Agent</th><th>官方</th><th>社区</th><th>任务</th><th>评价</th></tr>
-      ${rows||'<tr><td colspan="6" class="faint tac" style="padding:20px">暂无上架 agent</td></tr>'}</table></div></div>`,
+      <tr><th>产品线</th><th>上架 Agent</th><th>官方</th><th>社区</th><th>评价</th></tr>
+      ${rows||'<tr><td colspan="5" class="faint tac" style="padding:20px">暂无上架 agent</td></tr>'}</table></div></div>`,
   });
 }
 
 /* ---- Agent 网络 ---- */
 async function vNetwork(){
   const d = await api('/agents');
-  const agents = (d.agents||[]).slice().sort((a,b)=>((b.tasks_as_provider+b.tasks_as_requester)-(a.tasks_as_provider+a.tasks_as_requester))).slice(0,40);
+  const agents = (d.agents||[]).slice().sort((a,b)=>(((b.review_count||0)+(b.reviews_written||0))-((a.review_count||0)+(a.reviews_written||0)))).slice(0,40);
   $('#main').innerHTML = shell({
-    title:'Agent 网络', sub:'注册在册 Agent 与 Hub 的连接关系 —— 节点大小按任务量，颜色区分官方/社区/风险；点击进入详情',
+    title:'Agent 网络', sub:'注册在册 Agent 与 Hub 的连接关系 —— 节点大小按评价量（收到+写出），颜色区分官方/社区/风险；点击进入详情',
     body:`
     <div class="card"><div class="bd">${networkSVG(agents)}</div></div>
     <div class="wrap" style="margin-top:10px;font-size:12px">
       <span class="badge official">官方</span><span class="badge community">社区</span><span class="badge err">风险</span>
-      <span class="muted">节点大小 = 任务量（供给+需求）</span></div>
+      <span class="muted">节点大小 = 评价量（收到+写出）</span></div>
     <div class="note">当前边表示与 Hub 的注册/中继关系；Agent↔Agent 协同边需要 OKF collaboration.* 数据，为后续阶段。</div>`,
   });
 }
@@ -1156,11 +1001,11 @@ function networkSVG(agents){
   agents.forEach((a,i)=>{
     const ang=(i/n)*Math.PI*2 - Math.PI/2;
     const x=cx+R*Math.cos(ang), y=cy+R*Math.sin(ang);
-    const tk=(a.tasks_as_provider||0)+(a.tasks_as_requester||0);
+    const tk=(a.review_count||0)+(a.reviews_written||0);
     const r=Math.max(5,Math.min(16,5+Math.sqrt(tk)*1.6));
     const col=a.moderation?'var(--err)':a.tier==='official'?'var(--primary)':'var(--fg-faint)';
     edges+=`<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`;
-    nodes+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${col}" opacity=".85" style="cursor:pointer" onclick="goAgent('${esc(a.aid)}')"><title>${esc(a.name||a.aid)} · ${tk} 任务</title></circle>`;
+    nodes+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${col}" opacity=".85" style="cursor:pointer" onclick="goAgent('${esc(a.aid)}')"><title>${esc(a.name||a.aid)} · ${tk} 条评价</title></circle>`;
   });
   const hub=`<circle cx="${cx}" cy="${cy}" r="22" fill="var(--primary-soft)" stroke="var(--primary)" stroke-width="2"/><text x="${cx}" y="${cy+4}" text-anchor="middle" font-size="11" fill="var(--primary)" font-weight="700">Hub</text>`;
   return `<svg width="100%" viewBox="0 0 ${W} ${H}" style="max-width:100%">${edges}${hub}${nodes}</svg>`;
@@ -1168,7 +1013,7 @@ function networkSVG(agents){
 
 /* ---- 能力跃升 (vision map) ---- */
 const LEAP_STATUS = {live:['ok','已运行'], partial:['warn','建设中'], planned:['community','规划中']};
-const LEAP_DRILL = {backbone:'#/operations/agents', discovery:'#/operations/capabilities', access:'#/operations/deployments', regulation:'#/platform/audit', evolution:'#/data/sessions', demonstration:'#/ecosystem/matrix'};
+const LEAP_DRILL = {backbone:'#/operations/agents', discovery:'#/operations/capabilities', access:'#/operations/officials', regulation:'#/platform/audit', evolution:'#/data/sessions', demonstration:'#/ecosystem/matrix'};
 async function vVision(){
   const d = await api('/vision');
   const cards = (d.leaps||[]).map((l,i)=>{
@@ -1197,47 +1042,20 @@ async function vVision(){
 /* ---- 系统状态 ---- */
 async function vPlatformStatus(){
   const d = await api('/overview');
-  const probes=d.probes||[], harvest=d.harvest||[], snaps=d.snapshots||[];
-  const good = p => { const u=p.units||{}; const all=Object.keys(u).length, okU=Object.values(u).filter(v=>v==='active').length; return p.monitor==='ok' || (all>0 && okU===all && p.ssh==='ok'); };
-  const probeChips=probes.map(p=>`<span class="badge ${good(p)?'ok':'err'}"><span class="dot8 ${good(p)?'g':'r'}"></span>${esc(p.id)}${p.monitor?` · monitor ${esc(p.monitor)}`:''}${p.ssh!=='ok'?' · ssh 异常':''}</span>`).join(' ');
+  const harvest=d.harvest||[], snaps=d.snapshots||[];
   $('#main').innerHTML = shell({
-    title:'系统状态', sub:'anet-hub-admin 服务、公网 hub.db 读取、采收管道与官方 monitor 拉取的健康快照',
+    title:'系统状态', sub:'anet-hub-admin 服务与公网 hub.db 读取的健康快照。运营面不连接任何官方 agent 主机。',
     body:`
     <div class="grid g4 mb16">
       ${kpi('hub.db', fmtBytes(d.hub_db_bytes), '公网存储（只读）', 'db')}
-      ${kpi('官方 agent', d.officials||0, `${probes.filter(good).length} 探活正常`, 'shield')}
-      ${kpi('采收源', harvest.length, `${harvest.filter(h=>h.note).length} 异常`, 'activity')}
+      ${kpi('官方 agent 登记', d.officials||0, '仅登记', 'shield')}
+      ${kpi('采收源', 0, `旧游标 ${harvest.length} 条（待清理）`, 'activity')}
       ${kpi('快照点', snaps.length, '每 5 分钟采样', 'chart')}
     </div>
-    <div class="card"><div class="hd">${ic('shield')} 官方 agent 探活</div><div class="bd wrap">${probeChips||'<span class="faint">尚无官方 agent</span>'}</div></div>
-    <div class="card mt14"><div class="hd">${ic('db')} 采收管道状态</div><div class="bd p0"><div class="tbwrap"><table class="tb">
-      <tr><th>来源</th><th>会话</th><th>累计记录</th><th>上次运行</th><th>状态</th></tr>
-      ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td><td>${h.note?`<span class="badge err" title="${esc(h.note)}">异常</span>`:'<span class="badge ok">正常</span>'}</td></tr>`).join('')||'<tr><td colspan="5" class="faint" style="padding:16px;text-align:center">尚未采收</td></tr>'}
+    <div class="card"><div class="hd">${ic('db')} 旧采收游标（采收已删除，待清理）</div><div class="bd p0"><div class="tbwrap"><table class="tb">
+      <tr><th>旧来源</th><th>会话</th><th>累计记录</th><th>最后运行</th></tr>
+      ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td></tr>`).join('')||'<tr><td colspan="4" class="faint" style="padding:16px;text-align:center">无</td></tr>'}
     </table></div></div></div>`,
-  });
-}
-
-/* ---- 成本与模型 ---- */
-async function vModels(){
-  const all = await getAllInsights();
-  const byModel={}; let totMilli=0, totCalls=0;
-  all.forEach(x=>{ const st=(x.d&&x.d.stats)||{}; totMilli+=(st.total_milli||0);
-    (st.by_model||[]).forEach(m=>{ const k=m.key||'-'; byModel[k]=byModel[k]||{calls:0,milli:0,ms:0,msN:0}; byModel[k].calls+=m.calls||0; byModel[k].milli+=m.milli||0; if(m.avg_ms){byModel[k].ms+=m.avg_ms*(m.calls||1);byModel[k].msN+=(m.calls||1);} totCalls+=m.calls||0; });
-  });
-  const rows=Object.entries(byModel).sort((a,b)=>b[1].milli-a[1].milli).map(([k,v])=>`<tr>
-    <td class="mono">${esc(k)}</td><td>${num(v.calls)}</td><td class="muted">${v.msN?(v.ms/v.msN/1000).toFixed(2)+'s':'-'}</td><td class="muted">${FormatMilli(v.milli)}</td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'成本与模型', sub:'跨官方 agent 的模型目录与实测调用成本（来自各 agent monitor 的 /api/stats）',
-    body:`
-    <div class="grid g3 mb16">
-      ${kpi('近窗总开销', FormatMilli(totMilli), '跨 agent 合计', 'coin')}
-      ${kpi('模型数', Object.keys(byModel).length, '去重', 'cpu')}
-      ${kpi('模型调用', num(totCalls), '近 24h', 'activity')}
-    </div>
-    <div class="card"><div class="hd">${ic('cpu')} 模型调用与成本</div><div class="bd p0"><div class="tbwrap"><table class="tb">
-      <tr><th>模型</th><th>调用</th><th>均时</th><th>开销</th></tr>
-      ${rows||'<tr><td colspan="4" class="faint tac" style="padding:20px">无模型级统计（需官方 agent monitor 支持 by_model）</td></tr>'}</table></div></div></div>
-    <div class="note">预算与配额、预付/后付结算为路线图项；当前仅呈现实测成本。</div>`,
   });
 }
 
@@ -1249,7 +1067,7 @@ async function vAudit(){
     <td class="mono">${esc(a.action)}</td><td class="mono">${a.target?`<a href="javascript:goAgent('${esc(a.target)}')">${shortAid(a.target)}</a>`:'-'}</td>
     <td class="muted" style="max-width:420px;word-break:break-all">${esc((a.detail||'').slice(0,300))}</td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'审计日志', sub:'全部管理操作留痕（ops 命令 / 监管动作 / ACL / 采收）— 亦嵌入各 Agent 详情的「审计」页',
+    title:'审计日志', sub:'全部管理操作留痕（监管动作 / 注册表删除与恢复 / 官方登记）— 亦嵌入各 Agent 详情的「审计」页',
     body:`<div class="card"><div class="tbwrap"><table class="tb"><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr>
     ${rows||'<tr><td colspan="5" class="faint" style="padding:24px;text-align:center">暂无</td></tr>'}</table></div></div>`,
   });
@@ -1269,25 +1087,13 @@ async function renderAgent(aid, tab){
   const a=d.agent||{};
   const mrow = officials.find(o=>o.manifest && o.manifest.aid===aid);
   const isOff = !!mrow;
-  const man = mrow&&mrow.manifest, probe = mrow&&mrow.probe;
-  const hasMon = isOff && man.monitor && man.monitor.url;
+  const man = mrow&&mrow.manifest;
   const mod = d.moderation;
-  // health
-  let health='gr';
-  if(isOff && probe){ const u=probe.units||{}; const all=Object.keys(u).length, okU=Object.values(u).filter(v=>v==='active').length;
-    health = (probe.monitor==='ok'||(all>0&&okU===all&&probe.ssh==='ok'))?'g':(okU>0?'y':'r'); }
-  const obs = hasMon?'<span class="badge official">全链路</span>':'<span class="badge cap">黑盒</span>';
-  const tabs = isOff
-    ? [['overview','概览'],['run','运行'],['insights','调用与洞察'],['caps','能力'],['data','数据'],['gov','权限与治理'],['audit','审计']]
-    : [['overview','概览'],['caps','能力'],['data','数据'],['gov','权限与治理'],['audit','审计']];
+  const tabs = [['overview','概览'],['caps','能力'],['data','数据'],['gov','治理'],['audit','审计']];
   if(!tabs.find(t=>t[0]===tab)) tab='overview';
   CRUMB = `<a href="#/operations/agents">全部 Agent</a> <span>›</span> ${esc(a.name||shortAid(aid))}`;
 
-  const actions = isOff
-    ? `${hasMon?`<a class="btn" href="${esc(man.monitor.url)}" target="_blank">${ic('term')} 原生监控</a>`:''}
-       <button class="btn" onclick="goAgent('${esc(aid)}','run')">${ic('cpu')} 运行控制</button>
-       <button class="btn pri" onclick="goAgent('${esc(aid)}','insights')">${ic('gauge')} 调用与洞察</button>`
-    : `<button class="btn" onclick="goAgent('${esc(aid)}','gov')">${ic('shield')} 治理</button>`;
+  const actions = `<button class="btn" onclick="goAgent('${esc(aid)}','gov')">${ic('shield')} 治理</button>`;
 
   $('#main').innerHTML = `
     <div class="crumb">${CRUMB}</div>
@@ -1295,9 +1101,8 @@ async function renderAgent(aid, tab){
       <div class="ava">${initial(a.name,aid)}</div>
       <div style="flex:1;min-width:0">
         <div class="row" style="flex-wrap:wrap"><div style="font-size:19px;font-weight:650">${esc(a.name||'(未命名)')}</div>
-          ${isOff?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'} ${obs}
+          ${isOff?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}
           ${a.listed?'<span class="badge cap">已上架</span>':'<span class="badge community">未上架</span>'}
-          <span class="badge ${health==='g'?'ok':health==='y'?'warn':health==='r'?'err':'community'}">${statusDot(health)}</span>
           ${mod&&mod.status&&mod.status!=='ok'?`<span class="badge err">${esc(mod.status)}</span>`:''}</div>
         <div class="mono faint" style="margin-top:5px;word-break:break-all">${esc(aid)}</div>
       </div>
@@ -1305,60 +1110,34 @@ async function renderAgent(aid, tab){
     </div>
     <div class="tabs">${tabs.map(t=>`<button class="${t[0]===tab?'on':''}" onclick="goAgent('${esc(aid)}','${t[0]}')">${t[1]}</button>`).join('')}</div>
     <div id="atab"></div>`;
-  renderAgentTab(tab, {aid, d, a, isOff, man, probe, hasMon, mod});
+  renderAgentTab(tab, {aid, d, a, isOff, man, mod});
 }
 
 function renderAgentTab(tab, ctx){
   const el=$('#atab'); if(!el) return;
-  const {aid, d, a, isOff, man, probe, hasMon, mod} = ctx;
+  const {aid, d, a, isOff, man, mod} = ctx;
   if(tab==='overview'){
     el.innerHTML = `
       <div class="grid g4 mb16">
         ${kpi('评分', a.review_count?a.avg_rating.toFixed(2):'-', a.review_count?`${a.review_count} 条评价`:'暂无评价', 'star')}
-        ${kpi('任务 供/求', `${a.tasks_as_provider}/${a.tasks_as_requester}`, '交付 / 发起', 'activity')}
+        ${kpi('评价 收/写', `${a.review_count||0}/${a.reviews_written||0}`, '作为提供方 / 作为请求方', 'activity')}
         ${kpi('信箱积压', a.mailbox_backlog||0, '未投递', 'inbox')}
-        ${kpi('访客额度', a.guest_quota, '免费试用', 'users')}
+        ${kpi('所有权', isOff?'官方':'社区', isOff?'运营面登记':'注册表', 'users')}
       </div>
       <div class="card"><div class="hd">${ic('bot')} 基本信息</div><div class="bd"><div class="kv">
         <div class="k">简介</div><div>${esc(a.summary||'-')}</div>
         <div class="k">能力</div><div class="wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'-'}</div>
         <div class="k">定价</div><div>${esc(a.pricing||'-')}</div>
         <div class="k">所有权</div><div>${isOff?`官方 · ${esc(man.product_line||'-')} · 维护者 ${esc(man.maintainer||'-')}`:'社区'}</div>
-        <div class="k">可观测</div><div>${hasMon?'全链路（monitor + ops）':'黑盒（仅注册面板信息）'}</div>
+        ${isOff?`<div class="k">登记 hub</div><div class="mono">${esc(man.hub||'-')}</div>`:''}
         <div class="k">注册时间</div><div>${fmtTime(a.registered_at)}</div>
       </div></div></div>
       ${a.readme?`<div class="card mt14"><div class="hd">${ic('file')} README</div><div class="bd"><pre class="md">${esc(a.readme.slice(0,6000))}</pre></div></div>`:''}`;
   }
-  else if(tab==='run'){
-    const units = Object.entries((probe&&probe.units)||{}).map(([u,stt])=>`<span class="badge ${stt==='active'?'ok':'err'}"><span class="dot8 ${stt==='active'?'g':'r'}"></span>${esc(u.replace('.service',''))}</span>`).join(' ');
-    const ops=(man.ops&&man.ops.allowed)||[];
-    const btn=(op,label,icn,danger)=>ops.includes(op)?`<button class="btn sm ${danger?'danger':''}" onclick="runOp('${esc(man.id)}','${op}')">${ic(icn)} ${label}</button>`:'';
-    el.innerHTML=`
-      <div class="card"><div class="hd">${ic('cpu')} 运行实例 <span class="sp"></span><button class="btn sm" onclick="reprobeAgent('${esc(aid)}')">${ic('refresh')} 重新探测</button></div>
-        <div class="bd">
-          <div class="kv" style="grid-template-columns:90px 1fr">
-            <div class="k">主机</div><div class="mono">${esc((man.runtime&&man.runtime.host)||'-')}</div>
-            <div class="k">工作目录</div><div class="mono">${esc((man.runtime&&man.runtime.workdir)||'-')}</div>
-            <div class="k">单元状态</div><div class="wrap">${units||'<span class="faint">-</span>'} <span class="badge ${probe&&probe.monitor==='ok'?'ok':'err'}">monitor ${esc((probe&&probe.monitor)||'-')}</span> <span class="faint" style="font-size:11px">探测于 ${fmtTime(probe&&probe.checked_at)}</span></div>
-            ${probe&&probe.ssh!=='ok'?`<div class="k">运维通道</div><div><span class="badge warn">ssh 不可用</span> <span class="muted" style="font-size:12px">${esc(String(probe.ssh).slice(0,120))}</span></div>`:''}
-          </div>
-          <div class="row" style="margin-top:12px;flex-wrap:wrap">
-            ${btn('status','状态','activity')}${btn('logs','日志','file')}
-            ${btn('start','启动','play')}${btn('stop','停止','stop',1)}${btn('restart','重启','restart',1)}${btn('update','更新','up',1)}
-            <button class="btn sm" onclick="monView('${esc(man.id)}')">${ic('term')} 调用历史</button>
-          </div>
-          <div id="ops-out-${esc(man.id)}"></div>
-        </div></div>`;
-  }
-  else if(tab==='insights'){
-    el.innerHTML=`<div id="insbox">${loadingHTML('拉取 monitor…')}</div>`;
-    loadInsights(man.id, '#insbox');
-  }
   else if(tab==='caps'){
     el.innerHTML=`
-      <div class="card"><div class="hd">${ic('layers')} 声明能力</div><div class="bd wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">未声明能力</span>'}</div></div>
-      ${isOff?`<div class="card mt14"><div class="hd">${ic('store')} 能力清单（catalog）</div><div class="bd" id="catbox">${loadingHTML()}</div></div>`:''}`;
-    if(isOff) loadCatalog(man.id, '#catbox');
+      <div class="card"><div class="hd">${ic('layers')} 注册声明的能力</div><div class="bd wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">未声明能力</span>'}</div></div>
+      ${isOff?`<div class="card mt14"><div class="hd">${ic('store')} 官方登记的能力</div><div class="bd wrap">${(man.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">登记未列能力</span>'}</div></div>`:''}`;
   }
   else if(tab==='data'){
     const sessions=(d.sessions||[]).map(s=>`<tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
@@ -1366,29 +1145,24 @@ function renderAgentTab(tab, ctx){
       <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
       <td>${s.status==='done'?'<span class="badge ok">done</span>':s.status?'<span class="badge warn">'+esc(s.status)+'</span>':'-'}</td>
       <td class="muted">${fmtTime(s.updated_at)}</td></tr>`).join('');
-    el.innerHTML=`<div class="card"><div class="hd">${ic('db')} 本 Agent 沉淀的 OKF 会话</div>
+    el.innerHTML=`<div class="card"><div class="hd">${ic('db')} 本 Agent 的历史采收会话（只读，待清理）</div>
       <div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>更新</th></tr>
-      ${sessions||'<tr><td colspan="5" class="faint tac" style="padding:20px">尚无采收会话</td></tr>'}</table></div></div></div>`;
+      ${sessions||'<tr><td colspan="5" class="faint tac" style="padding:20px">无历史采收会话</td></tr>'}</table></div></div></div>`;
   }
   else if(tab==='gov'){
     el.innerHTML=`
-      <div class="card"><div class="hd">${ic('shield')} 监管与配额</div><div class="bd">
+      <div class="card"><div class="hd">${ic('shield')} 监管</div><div class="bd">
         <div class="kv" style="margin-bottom:14px">
           <div class="k">监管状态</div><div>${mod&&mod.status&&mod.status!=='ok'?`<span class="badge err">${esc(mod.status)}</span> ${esc(mod.note||'')}`:'<span class="badge ok">正常</span>'}</div>
         </div>
         <div class="row" style="flex-wrap:wrap">
-          <input id="mQuota" class="inp" type="number" min="0" max="1000" value="${a.guest_quota}" style="width:90px"/>
-          <button class="btn sm" onclick="setQuota('${esc(aid)}')">设置访客额度</button>
           <input id="mNote" class="inp" placeholder="处置备注" style="width:180px"/>
           <button class="btn sm" onclick="moderate('${esc(aid)}','flagged')">标记关注</button>
           <button class="btn sm" onclick="moderate('${esc(aid)}','ok')">恢复正常</button>
           <button class="btn sm danger" onclick="delAgent('${esc(aid)}')">${ic('trash')} 移除注册</button>
         </div>
-        <div class="faint" style="font-size:12px;margin-top:8px">移除后该身份可重新注册（黑名单强制阻断为 hub 侧路线图项）。访客额度设为 0 可将 agent 移出访客流量。</div>
-      </div></div>
-      ${isOff&&hasMon?`<div class="card mt14"><div class="hd">${ic('shield')} 授权门 ACL（monitor 直连）</div><div class="bd" id="aclbox">${loadingHTML()}</div></div>`
-        :`<div class="card mt14"><div class="bd faint">社区/黑盒 Agent 无平台侧 ACL 管理（不可深度观测）。</div></div>`}`;
-    if(isOff&&hasMon) loadACL(man.id, '#aclbox');
+        <div class="faint" style="font-size:12px;margin-top:8px">移除后该身份可重新注册（黑名单强制阻断为 hub 侧路线图项）。运营面不管理任何 agent 的授权名单：谁可以委派给一个 agent 由该 agent 自己的 daemon 决定。</div>
+      </div></div>`;
   }
   else if(tab==='audit'){
     el.innerHTML=`<div id="audbox">${loadingHTML()}</div>`;
@@ -1398,85 +1172,6 @@ function renderAgentTab(tab, ctx){
     }).catch(e=>{ $('#audbox').innerHTML=errCard(e.message); });
   }
 }
-async function reprobeAgent(aid){
-  try{ await api('/official?probe=force'); }catch(e){}
-  renderAgent(aid,'run');
-}
-
-/* ---- insights loaders (shared) ---- */
-async function loadInsights(id, sel){
-  const el=$(sel); if(!el) return;
-  let d; try{ d=await api('/official/'+encodeURIComponent(id)+'/insights'); }
-  catch(e){ el.innerHTML=errCard(e.message); return; }
-  if(!d.ok){ el.innerHTML=`<div class="card"><div class="bd" style="color:var(--warn);display:flex;gap:8px;align-items:center">${ic('alert')} ${esc(d.error||'monitor 不可达')}</div></div>`; return; }
-  el.innerHTML=insightsBody(id, d);
-}
-function aclBlock(id, d){
-  const acl=(d.acl&&d.acl.acl)||{}, rejects=(d.acl&&d.acl.rejects)||{};
-  const allow=(acl.allow||[]).map(x=>`<tr><td class="mono">${shortAid(x)}</td><td class="muted">${esc((acl.notes&&acl.notes[x])||'')}</td><td><button class="btn sm danger" onclick="aclAction('${esc(id)}','revoke','${esc(x)}')">撤销</button></td></tr>`).join('');
-  const rej=Object.entries(rejects).map(([x,n])=>`<tr><td class="mono">${shortAid(x)}</td><td>${n} 次被拒</td><td><button class="btn sm" onclick="aclAction('${esc(id)}','grant','${esc(x)}')">授权</button></td></tr>`).join('');
-  return `<div class="row" style="margin-bottom:8px"><span class="badge cap">模式 ${esc(acl.mode||'-')}</span><input id="aclGrant" class="inp mono sp" placeholder="AID 授权…"/><button class="btn sm pri" onclick="aclAction('${esc(id)}','grant',document.getElementById('aclGrant').value.trim())">授权</button><button class="btn sm" onclick="aclAction('${esc(id)}','mode','','${acl.mode==='open'?'allowlist':'open'}')">${acl.mode==='open'?'切到 allowlist':'切到 open'}</button></div>
-    <div class="tbwrap"><table class="tb"><tr><th>已授权 AID</th><th>备注</th><th></th></tr>${allow||'<tr><td class="faint">无</td></tr>'}</table></div>
-    ${rej?`<div class="sec">被拒请求（可一键授权）</div><div class="tbwrap"><table class="tb">${rej}</table></div>`:''}`;
-}
-function insightsBody(id, d){
-  const stats=d.stats||{}, acl=(d.acl&&d.acl.acl)||{};
-  const curve=barChart(stats.curve||[]);
-  const svcRows=(stats.by_service||[]).slice(0,12).map(s=>`<tr><td>${esc(s.key)}</td><td>${s.calls}</td><td>${s.done}/${s.err}</td><td class="muted">${s.avg_ms?(s.avg_ms/1000).toFixed(1)+'s':'-'}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
-  const mdlRows=(stats.by_model||[]).slice(0,12).map(s=>`<tr><td class="mono">${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
-  const modRows=(stats.by_modality||[]).map(s=>`<span class="badge cap">${modChip(s.key)} · ${s.calls}</span>`).join(' ');
-  const epRows=(stats.endpoints||[]).map(s=>`<tr><td class="mono">${esc(s.key)}</td><td>${s.calls}</td><td class="muted">${FormatMilli(s.milli)}</td></tr>`).join('');
-  return `
-    <div class="grid g3 mb16">
-      ${kpi('近窗开销', esc(d.cost_yuan||FormatMilli(d.cost_milli||0)), '实测计费', 'coin')}
-      ${kpi('授权模式', esc(acl.mode||'-'), `${(acl.allow||[]).length} 个 AID`, 'shield')}
-      ${kpi('模态分布', (stats.by_modality||[]).length+' 类', '按输出类型', 'layers')}
-    </div>
-    <div class="card"><div class="hd">${ic('gauge')} 调用曲线（近 24h）</div><div class="bd">${curve}<div class="wrap" style="margin-top:8px">${modRows||'<span class="faint">无</span>'}</div></div></div>
-    <div class="grid g2 mt14">
-      <div class="card"><div class="hd">${ic('activity')} 按服务</div><div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>服务</th><th>调用</th><th>成/败</th><th>均时</th><th>开销</th></tr>${svcRows||'<tr><td class="faint">无</td></tr>'}</table></div></div></div>
-      <div class="card"><div class="hd">${ic('cpu')} 按模型</div><div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>模型</th><th>调用</th><th>开销</th></tr>${mdlRows||'<tr><td class="faint">无</td></tr>'}</table></div></div></div>
-    </div>
-    <div class="card mt14"><div class="hd">${ic('coin')} API 接口分布</div><div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>端点</th><th>调用</th><th>开销</th></tr>${epRows||'<tr><td class="faint">无</td></tr>'}</table></div></div></div>
-    <div class="card mt14"><div class="hd">${ic('shield')} 授权名单（${(acl.allow||[]).length}）</div><div class="bd">${aclBlock(id,d)}</div></div>`;
-}
-async function loadCatalog(id, sel){
-  const el=$(sel); if(!el) return;
-  try{ const cat=await api('/official/'+encodeURIComponent(id)+'/monitor/catalog');
-    const services=cat.services||[];
-    el.innerHTML = services.length? `<div class="wrap">${services.map(s=>`<span class="badge cap" title="${esc(s.desc||'')}">${esc(s.name||s.id)}${s.out?` · ${modChip(modalityFromOut(s.out))}`:''}</span>`).join('')}</div>`
-      : '<span class="faint">catalog 未返回服务</span>';
-  }catch(e){ el.innerHTML=errCard(e.message); }
-}
-function modalityFromOut(o){o=String(o).toLowerCase();return o==='image'?'image':o==='video'?'video':o==='music'?'audio':o==='album'?'mixed':'text';}
-async function loadACL(id, sel){
-  const el=$(sel); if(!el) return;
-  try{ const d=await api('/official/'+encodeURIComponent(id)+'/insights');
-    if(!d.ok){ el.innerHTML=`<div class="faint">${esc(d.error||'monitor 不可达')}</div>`; return; }
-    el.innerHTML=aclBlock(id, d);
-  }catch(e){ el.innerHTML=errCard(e.message); }
-}
-async function aclAction(id, action, aid, mode){
-  try{
-    const body = action==='mode' ? {action:'mode',mode} : {action, aid, note:action==='grant'?'hub admin 授权':''};
-    await api('/official/'+encodeURIComponent(id)+'/acl',{method:'POST',body:JSON.stringify(body)});
-    toast('已更新授权');
-    // refresh whichever context is open
-    if(CUR_AGENT && parseHash()[0]==='agents'){ const tab=parseHash()[2]||'overview'; renderAgent(CUR_AGENT, tab); }
-    else refreshCurrent();
-  }catch(e){ toast('失败：'+e.message); }
-}
-
-/* ---- shared: fetch all official insights ---- */
-async function getAllInsights(){
-  let offs=[]; try{ offs=(await api('/official')).officials||[]; }catch(e){ return []; }
-  return Promise.all(offs.map(async o=>{
-    const m=o.manifest;
-    try{ const d=await api('/official/'+encodeURIComponent(m.id)+'/insights'); return {id:m.id,name:m.name,aid:m.aid,ok:!!d.ok,d}; }
-    catch(e){ return {id:m.id,name:m.name,aid:m.aid,ok:false,err:e.message,d:{}}; }
-  }));
-}
-
 /* ---- placeholder views ---- */
 function placeholderView(title, note){
   return async ()=>{ $('#main').innerHTML = shell({title, body: empty('模块建设中', note)}); };
@@ -1490,9 +1185,8 @@ Object.assign(ROUTES, {
   'operations/reviews': placeholderView('审核认证','首次发布/官方认证/版本更新审核工作台（资料·能力·权限·版本差异 + 自动检测）。需接入审核流水线。'),
   'operations/store': vStore,
   'operations/capabilities': vCapabilities,
-  'operations/channels': placeholderView('产品渠道','配置 Agent 在各 ANet 产品中的分发策略、曝光范围、访客额度与灰度比例。需接入渠道配置。'),
-  'operations/insights': vInsightsList,
-  'operations/deployments': vDeployments,
+  'operations/channels': placeholderView('产品渠道','配置 Agent 在各 ANet 产品中的分发策略、曝光范围与灰度比例。需接入渠道配置。'),
+  'operations/officials': vOfficials,
   'operations/incidents': placeholderView('告警与事故','将区分告警（信号）与事故（需跟踪处置的事件），带状态机与影响面。需接入事故管理。'),
   'operations/risk': vRisk,
   'operations/enforcement': vEnforcement,
@@ -1502,7 +1196,6 @@ Object.assign(ROUTES, {
   'data/anomalies': vAnomalies,
   'data/caps': vCapOps,
   'data/grounding': vGrounding,
-  'data/precognition': vPrecog,
   'data/collab': vCollab,
   'data/governance': placeholderView('数据治理','授权与用途、脱敏与保留、数据血缘与删除。需 OKF 扩展授权/脱敏/血缘字段。'),
   'ecosystem/overview': vEcoOverview,
@@ -1510,9 +1203,8 @@ Object.assign(ROUTES, {
   'ecosystem/network': vNetwork,
   'ecosystem/vision': vVision,
   'platform/status': vPlatformStatus,
-  'platform/models': vModels,
   'platform/audit': vAudit,
-  'platform/connections': placeholderView('连接与集成','Agent 接入协议、Monitor 连接、采收通道与 Webhook/API 配置总览。'),
+  'platform/connections': placeholderView('连接与集成','Agent 接入协议与 Webhook/API 配置总览。'),
 });
 
 /* ---------------- init ---------------- */

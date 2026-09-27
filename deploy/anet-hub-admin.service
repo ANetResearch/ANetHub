@@ -5,10 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Runs as root: the ops plane needs the host's ssh identity (/root/.ssh) to reach official agents'
-# runtime hosts, and write access to the hub-owned hub.db + its own admin/ tree. It binds loopback
-# only; nginx is the sole public face.
-# ADMIN_TOKEN is REQUIRED (no default): set your own secret before starting.
+# Needs write access to the hub-owned hub.db (registry delete and restore) and its own admin/ tree.
+# It no longer reaches any other host: the ssh ops plane, the monitor proxy and the harvest were
+# removed (A2A-DESIGN §9), so root is not required for ssh any more. Running it as the hub's own
+# account instead of root needs admin/ to be owned by that account; that is a deployment change and
+# is not made by this file.
+# It binds loopback only; nginx is the sole public face.
+# ADMIN_TOKEN is REQUIRED (no default). The value below is a placeholder: anet-hub-admin refuses to
+# start while ADMIN_TOKEN is CHANGE_ME or any other placeholder. Set a random secret before starting.
 Environment=ADMIN_TOKEN=CHANGE_ME
 ExecStart=/data/projs/anet-hub/bin/anet-hub-admin \
   --addr 127.0.0.1:8078 \

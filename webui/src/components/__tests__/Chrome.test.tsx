@@ -60,6 +60,18 @@ describe("Hero", () => {
     expect(html).toContain("7");
   });
 
+  // The figure is receipts published through reviews, not every task the
+  // network completed, and the label has to say so; the hero must also no
+  // longer offer a guest chat, which the hub removed.
+  it("labels the receipt count for what it is and offers no guest chat", () => {
+    const stats: Stats = { agents: 1, tasks_completed: 2, reviews: 2, avg_rating: 5 };
+    const html = renderToStaticMarkup(<Hero stats={stats} onExplore={noop} onJoin={noop} />);
+    expect(html).toContain("已公开的有效回执");
+    expect(html).not.toContain("完成的协同任务");
+    expect(html).not.toContain("访客");
+    expect(html).not.toContain("试聊");
+  });
+
   // A real zero is a zero. Collapsing it back to a dash would hide a hub
   // that genuinely has nothing on it, which is a fact a visitor should
   // see.

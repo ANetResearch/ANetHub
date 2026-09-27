@@ -21,11 +21,21 @@ jobs:
       - name: tests
         run: go test ./...
 
+  # Subtractive tags: the module is in the default build and `-tags no_<name>`
+  # removes it. "Removable" is proved by symbol count in both directions (the
+  # full build contains the module, the lean build contains none of it), and
+  # the tests run in the lean build too. Building alone proved only that the
+  # lean variant compiles; it did not show the module was gone, and the
+  # symbol check is what found the kernel still linking two federation error
+  # values in a no_federation build (see internal/seamerr).
   unplug:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        tags: ["no_taskboard", "no_federation", "no_taskboard,no_federation"]
+        include:
+          - tags: "no_federation"
+            pattern: "internal/federation"
     env:
       CGO_ENABLED: "0"
     steps:
@@ -33,8 +43,61 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: build without ${{ matrix.tags }}
-        run: go build -tags "${{ matrix.tags }}" ./...
+      - name: build, vet and test without ${{ matrix.tags }}
+        run: |
+          go build -tags "${{ matrix.tags }}" ./...
+          go vet -tags "${{ matrix.tags }}" ./...
+          go test -tags "${{ matrix.tags }}" ./...
+      - name: the module is in the full build and absent from the lean one
+        run: |
+          go build -o /tmp/hub-full ./cmd/anet-hub
+          go build -tags "${{ matrix.tags }}" -o /tmp/hub-lean ./cmd/anet-hub
+          pat="${{ matrix.pattern }}"
+          full=$(go tool nm /tmp/hub-full | grep -cE "$pat" || true)
+          lean=$(go tool nm /tmp/hub-lean | grep -cE "$pat" || true)
+          echo "$pat symbols: full=$full lean=$lean"
+          test "$full" -gt 0 || (echo "the full build should contain $pat" && exit 1)
+          test "$lean" -eq 0 || (echo "$pat is still linked into the ${{ matrix.tags }} build" && exit 1)
+          /tmp/hub-lean -version >/dev/null
+
+  # Additive tags: the module is NOT in the default build and `-tags <name>`
+  # adds it. taskboard is additive because a board stores caller-supplied
+  # titles and notes and serves them to anyone (A2A-DESIGN §2, §16), and a
+  # hub must not hold task content by default. The direction of the symbol
+  # check is reversed: the default build must contain none of it, the opt-in
+  # build must contain it. The default `go test ./...` cannot see tagged
+  # code at all, so the module's own tests run only here.
+  optin:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag: "taskboard"
+            pattern: "internal/taskboard"
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet and test with the module in
+        run: |
+          go vet -tags "${{ matrix.tag }}" ./...
+          go test -tags "${{ matrix.tag }}" ./...
+      - name: the module is absent by default and present when asked
+        run: |
+          go build -o /tmp/hub-default ./cmd/anet-hub
+          go build -tags "${{ matrix.tag }}" -o /tmp/hub-optin ./cmd/anet-hub
+          pat="${{ matrix.pattern }}"
+          def=$(go tool nm /tmp/hub-default | grep -cE "$pat" || true)
+          opt=$(go tool nm /tmp/hub-optin | grep -cE "$pat" || true)
+          echo "$pat symbols: default=$def opt-in=$opt"
+          test "$def" -eq 0 || (echo "$pat is linked into the DEFAULT build" && exit 1)
+          test "$opt" -gt 0 || (echo "-tags ${{ matrix.tag }} did not link $pat in" && exit 1)
+          /tmp/hub-default -version >/dev/null
+          /tmp/hub-optin -version >/dev/null
 
   race:
     runs-on: ubuntu-latest
@@ -46,7 +109,9 @@ jobs:
       - name: tests under the race detector
         env:
           CGO_ENABLED: "1"   # -race needs cgo; runners ship gcc
-        run: go test -race ./...
+        run: |
+          go test -race ./...
+          go test -race -tags taskboard ./internal/taskboard/... ./cmd/anet-hub/...
 
   # The web UI is the first thing a person sees when joining, and its
   # markdown renderer feeds dangerouslySetInnerHTML from prose that any
@@ -65,5 +130,7 @@ jobs:
           cache-dependency-path: webui/package-lock.json
       - run: npm ci
       - run: npm test
+      - name: the sources type-check
+        run: npx tsc --noEmit -p .
       - name: the bundle must still build
         run: npm run build

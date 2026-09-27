@@ -83,6 +83,10 @@ func (s *Store) DeletedAgents(limit int) ([]DeletedAgent, error) {
 // The key history goes back with it. An agent restored without one is a
 // row rather than an identity, and every receipt it ever signed stays
 // uncheckable — which is the half of a delete that actually needs undoing.
+//
+// Archives written before guest mode was removed carry guest_quota. The
+// column no longer exists (A2A-DESIGN §9 row 访客模式), so the field is not
+// decoded and the rest of the row is restored.
 func (h *HubDB) RestoreDeletedAgent(rowJSON string) error {
 	var row struct {
 		AID          string `json:"aid"`
@@ -91,7 +95,6 @@ func (h *HubDB) RestoreDeletedAgent(rowJSON string) error {
 		Summary      string `json:"summary"`
 		Readme       string `json:"readme"`
 		Pricing      string `json:"pricing"`
-		GuestQuota   int    `json:"guest_quota"`
 		KELB64       string `json:"kel_b64"`
 		RegisteredAt string `json:"registered_at"`
 	}
@@ -107,27 +110,26 @@ func (h *HubDB) RestoreDeletedAgent(rowJSON string) error {
 		return fmt.Errorf("restore: key history is not base64: %w", err)
 	}
 	_, err = h.db.Exec(
-		`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,pricing,guest_quota,kel,registered_at)
-		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,pricing,kel,registered_at)
+		 VALUES(?,?,?,?,?,?,?,?)`,
 		row.AID, row.Name, row.Caps, row.Summary, row.Readme, row.Pricing,
-		row.GuestQuota, kel, row.RegisteredAt)
+		kel, row.RegisteredAt)
 	return err
 }
 
 // FullAgentRow reads every column of one agent (incl. the kel blob) as a JSON string for archiving.
 func (h *HubDB) FullAgentRow(aid string) (string, error) {
 	var name, caps, summary, readme, pricing, registeredAt string
-	var guestQuota int
 	var kel []byte
 	err := h.db.QueryRow(
-		`SELECT name,caps,summary,readme,pricing,guest_quota,kel,registered_at FROM agent WHERE aid=?`, aid).
-		Scan(&name, &caps, &summary, &readme, &pricing, &guestQuota, &kel, &registeredAt)
+		`SELECT name,caps,summary,readme,pricing,kel,registered_at FROM agent WHERE aid=?`, aid).
+		Scan(&name, &caps, &summary, &readme, &pricing, &kel, &registeredAt)
 	if err != nil {
 		return "", err
 	}
 	row := map[string]any{
 		"aid": aid, "name": name, "caps": caps, "summary": summary, "readme": readme,
-		"pricing": pricing, "guest_quota": guestQuota, "kel_b64": encB64(kel), "registered_at": registeredAt,
+		"pricing": pricing, "kel_b64": encB64(kel), "registered_at": registeredAt,
 	}
 	b, _ := json.Marshal(row)
 	return string(b), nil
@@ -136,6 +138,10 @@ func (h *HubDB) FullAgentRow(aid string) (string, error) {
 // RestoreAgentsFromBackup INSERT-OR-IGNOREs agents from a backup hub.db into the live hub store, run as
 // a one-shot CLI recovery (anet-hub-admin --restore-agents-from <backup.db>). It only ADDS rows whose
 // AID is absent — it can never delete or overwrite a live agent. Returns (before, after, restored).
+//
+// The column list names only columns present in both the current schema and every earlier one, so a
+// backup written before guest mode was removed (which still has agent.guest_quota) restores into the
+// current schema: the extra column is not selected.
 func RestoreAgentsFromBackup(hubDataDir, backupPath string) (before, after int, err error) {
 	hub, err := OpenHubDB(hubDataDir)
 	if err != nil {
@@ -150,8 +156,8 @@ func RestoreAgentsFromBackup(hubDataDir, backupPath string) (before, after int, 
 		return before, before, fmt.Errorf("attach backup: %w", err)
 	}
 	defer hub.db.Exec(`DETACH DATABASE bak`)
-	if _, err = hub.db.Exec(`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,pricing,guest_quota,kel,registered_at)
-	   SELECT aid,name,caps,summary,readme,pricing,guest_quota,kel,registered_at FROM bak.agent`); err != nil {
+	if _, err = hub.db.Exec(`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,pricing,kel,registered_at)
+	   SELECT aid,name,caps,summary,readme,pricing,kel,registered_at FROM bak.agent`); err != nil {
 		return before, before, fmt.Errorf("restore insert: %w", err)
 	}
 	if err = hub.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&after); err != nil {

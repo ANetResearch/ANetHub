@@ -6,13 +6,13 @@
 //	anet-hub-admin [--addr 127.0.0.1:8078] [--hub-data /data/projs/anet-hub/data] \
 //	               [--data /data/projs/anet-hub/admin] [--base /admin]
 //
-// The operator token comes from $ADMIN_TOKEN (default the classic console token). The monitor
-// passthrough token comes from $ADMIN_MONITOR_TOKEN (default: same as the operator token).
+// The operator token comes from $ADMIN_TOKEN and is required. A placeholder value (CHANGE_ME, the
+// value deploy/anet-hub-admin.service ships with, and similar) stops the process from starting.
+// `anet-hub-admin -check-token` applies the same rule to $ADMIN_TOKEN and exits 0 or 1 without
+// starting, which is how deploy/deploy-admin.sh checks a host before restarting the service.
 //
-// The official-agent directory is read from <--data>/officials.json, a JSON array of AGENT manifests.
-// It is configuration rather than a compiled-in list because it names production hosts and the ssh user
-// the ops plane connects as. Absent file → no official agents, which is the correct default: an empty
-// directory reaches no host.
+// The official-agent directory is read from <--data>/officials.json, a JSON array of registry-only
+// manifests (id, aid, hub, caps and descriptive labels). Absent file → no official agents.
 package main
 
 import (
@@ -43,13 +43,24 @@ func main() {
 	data := flag.String("data", "/data/projs/anet-hub/admin", "admin plane data directory (admin.db + datasets/)")
 	base := flag.String("base", "/admin", "URL base path")
 	snapEvery := flag.Duration("snapshot-every", 5*time.Minute, "stats snapshot interval (0 = off)")
-	harvestEvery := flag.Duration("harvest-every", 30*time.Minute, "dataset harvest interval (0 = off)")
+	harvestEvery := flag.Duration("harvest-every", 30*time.Minute,
+		"interval of the harvest run, which has no sources and does nothing (0 = off)")
 	restoreFrom := flag.String("restore-agents-from", "", "one-shot recovery: INSERT-OR-IGNORE agents from this backup hub.db into --hub-data, then exit")
 	keepOnly := flag.String("keep-only-agents", "", "one-shot: delete all agents EXCEPT this comma-separated AID list (undo an over-broad restore), then exit")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	checkToken := flag.Bool("check-token", false, "check $ADMIN_TOKEN against the start-up rules and exit: "+
+		"0 if the admin surface would start with it, 1 if not (deploy/deploy-admin.sh runs this on the host "+
+		"before a restart; the value is not printed)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(versionLine())
+		return
+	}
+	if *checkToken {
+		if msg := tokenRefusal(os.Getenv("ADMIN_TOKEN")); msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+			os.Exit(1)
+		}
 		return
 	}
 	// One-shot registry recovery (see recovery.go). Additive only — cannot delete/overwrite live agents.
@@ -77,8 +88,8 @@ func main() {
 	}
 
 	token := os.Getenv("ADMIN_TOKEN")
-	if token == "" {
-		log.Fatal("ADMIN_TOKEN is required: refusing to start the admin surface with no credential (was: insecure built-in default)")
+	if msg := tokenRefusal(token); msg != "" {
+		log.Fatal(msg)
 	}
 	if admin.WeakToken(token) {
 		// Loud, repeated, and not fatal.
@@ -87,14 +98,13 @@ func main() {
 		// the next deploy of a hub that is working, and an operator who
 		// discovers that from an outage learns it at the worst moment.
 		// Loud because this credential is in a public repository and the
-		// surface it guards can delete agents, change quotas and run ops
-		// — a warning nobody reads is the same as no warning, so it is
-		// printed at start and every hour it keeps running.
+		// surface it guards can delete agents — a warning nobody reads is
+		// the same as no warning, so it is printed at start and every hour
+		// it keeps running.
 		warn := func() {
 			log.Printf("SECURITY: ADMIN_TOKEN is a credential this software published. " +
 				"Anyone who has read the source can log in. Set a new one in the unit " +
-				"file and restart. The admin surface can delete agents, change quotas " +
-				"and run operations.")
+				"file and restart. The admin surface can delete agents from the registry.")
 		}
 		warn()
 		go func() {
@@ -105,18 +115,15 @@ func main() {
 			}
 		}()
 	}
-	monToken := envOr("ADMIN_MONITOR_TOKEN", token)
-
 	store, err := admin.OpenStore(*data)
 	if err != nil {
 		log.Fatalf("anet-hub-admin: %v", err)
 	}
 	defer store.Close()
 	// The official-agent directory comes from the admin plane's own data
-	// directory, not from the binary. It names production hosts and the ssh
-	// user the ops plane connects as; compiling that into a binary shipped the
-	// topology with the product and made a fresh install reach out to hosts it
-	// had never been configured for. Absent file → no official agents.
+	// directory, not from the binary. Absent file → no official agents. A
+	// manifest that still carries runtime, monitor, ops or datasets is
+	// refused and stops the start (see admin.ParseManifest).
 	officialsPath := admin.OfficialsConfigPath(*data)
 	added, err := store.SeedOfficialsFromFile(officialsPath)
 	if err != nil {
@@ -131,12 +138,11 @@ func main() {
 	}
 	defer hub.Close()
 
-	monProxy := admin.NewMonitorProxy(monToken)
-	hv := admin.NewHarvester(store, hub, monProxy, *data+"/datasets")
+	hv := admin.NewHarvester(*data + "/datasets")
 	// Semantic capability discovery via the anet-vec service (ChromaDB + CPU embedder). Disabled if
 	// unreachable — discovery falls back to the lexical matcher.
 	vec := admin.NewVecClient(envOr("ANET_VEC_URL", "http://127.0.0.1:8600"))
-	srv0 := admin.NewServer(store, hub, admin.NewOps(90*time.Second), monProxy, hv, vec, token, *base)
+	srv0 := admin.NewServer(store, hub, hv, vec, token, *base)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -159,6 +165,25 @@ func main() {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+}
+
+// tokenRefusal returns why the admin surface must not start with token, or
+// "" when it may. The start-up path and -check-token both call it, so the
+// deployment check and the service decide the same way.
+//
+// A placeholder is fatal, unlike the published defaults (admin.WeakToken,
+// which only warn): a placeholder was never chosen by anyone, so the
+// deployment was installed from the template and not configured, and the
+// value is readable in this repository.
+func tokenRefusal(token string) string {
+	if token == "" {
+		return "ADMIN_TOKEN is required: refusing to start the admin surface with no credential (was: insecure built-in default)"
+	}
+	if admin.PlaceholderToken(token) {
+		return "ADMIN_TOKEN is a placeholder (for example CHANGE_ME from the unit template): " +
+			"refusing to start the admin surface. Set a random token in the unit's environment and restart."
+	}
+	return ""
 }
 
 // versionLine is what --version prints.

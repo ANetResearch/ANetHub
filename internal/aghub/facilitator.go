@@ -1,15 +1,19 @@
 package aghub
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
+	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
 // This hub is an x402 facilitator for its own credit rail.
@@ -88,37 +92,235 @@ func (s *Store) Balance(aid string) (int64, error) {
 	return n, err
 }
 
-// VerifyPayment answers "would this settle?" without moving anything.
-func (s *Store) VerifyPayment(hubAID string, p *payment.PaymentPayload) payment.VerifyResponse {
-	auth, err := s.decodeAuth(hubAID, p)
-	if err != nil {
-		return payment.VerifyResponse{IsValid: false, InvalidReason: err.Error()}
-	}
-	bal, err := s.Balance(auth.Payer)
-	if err != nil {
-		return payment.VerifyResponse{IsValid: false, InvalidReason: err.Error()}
-	}
-	if bal < int64(auth.Amount) {
-		return payment.VerifyResponse{IsValid: false, Payer: auth.Payer,
-			InvalidReason: fmt.Sprintf("insufficient balance: has %d, needs %d", bal, auth.Amount)}
-	}
-	if spent, _ := s.authSpent(auth); spent {
-		return payment.VerifyResponse{IsValid: false, Payer: auth.Payer,
-			InvalidReason: "authorization already settled"}
-	}
-	return payment.VerifyResponse{IsValid: true, Payer: auth.Payer}
+// ---- settlement: the x402 facilitator ----
+
+// Refusal is a facilitator's answer that a payment will not settle: an
+// x402 errorReason and the detail behind it.
+//
+// Reason is always exactly one of the payment.Reason* constants. It is
+// what a client branches on and what the daemon maps to an a2a-x402
+// x402.payment.error code (A2A-DESIGN §8.5), and that mapping is a lookup
+// on the exact string, so the prose goes in Detail and travels in the
+// response's extensions under payment.ExtErrorDetail.
+type Refusal struct {
+	Reason string
+	Detail string
 }
 
-// SettlePayment moves the credit, once.
+func (r *Refusal) Error() string {
+	if r.Detail == "" {
+		return r.Reason
+	}
+	return r.Reason + ": " + r.Detail
+}
+
+func refuse(reason, format string, args ...any) *Refusal {
+	return &Refusal{Reason: reason, Detail: fmt.Sprintf(format, args...)}
+}
+
+// refusedSettlement is the SettlementResponse for a refusal.
 //
-// Idempotent on the authorization's content id: a settle call repeated
-// because a reply was lost must not charge twice, and the id derives from
-// the signed bytes so a payer cannot make two different authorizations
-// look like one.
+// Payer, Amount and Transaction are filled from the authorization when it
+// could be read, so a caller can tie the refusal to what it sent.
+// Transaction is then the refused authorization's id; on a
+// duplicate_binding refusal the settlement that holds the binding is in
+// the extensions under payment.ExtOriginalTransaction.
+func refusedSettlement(rf *Refusal, auth *payment.Authorization, network string) payment.SettlementResponse {
+	out := payment.SettlementResponse{Success: false, ErrorReason: rf.Reason, Network: network,
+		Extensions: map[string]any{}}
+	if auth != nil {
+		out.Payer = auth.Payer
+		out.Amount = payment.Amount(auth.Amount)
+		if id, err := auth.ID(); err == nil {
+			out.Transaction = id
+		}
+	}
+	if rf.Detail != "" {
+		out.Extensions[payment.ExtErrorDetail] = rf.Detail
+	}
+	return out
+}
+
+// CheckRequirements compares a payment with the terms the resource server
+// requires: payee, amount, network and scheme.
+//
+// Both halves of the payload are compared. The authorization is what the
+// payer signed and what this hub settles; the accepted option is the
+// payer's unsigned statement of which offer it took. The gateway used to
+// check only the accepted option and settle the authorization, so a buyer
+// could state the full price to the seller while signing a smaller amount
+// to somebody else, and receive a full voucher (R06 D2). Here the
+// authorization must meet the requirements, and the accepted option must
+// state the authorization's own payee and amount.
+//
+// It verifies no signature and needs no KEL. That is what lets an entry
+// hub run it on a payment whose ledger, and whose payer's key history,
+// are on another hub, before forwarding it: a payment this hub would
+// refuse is not sent anywhere. The ledger hub runs it again after it has
+// verified the signature.
+//
+// The authorized amount may exceed the required amount; it may not fall
+// short of it.
+func CheckRequirements(p *payment.PaymentPayload, auth *payment.Authorization,
+	req *payment.PaymentRequirements) *Refusal {
+	if req == nil {
+		return refuse(payment.ReasonInvalidRequirements, "paymentRequirements is required")
+	}
+	want, err := payment.ParseAmount(req.Amount)
+	if err != nil {
+		return refuse(payment.ReasonInvalidRequirements, "required amount: %v", err)
+	}
+	if req.PayTo == "" || req.Network == "" {
+		return refuse(payment.ReasonInvalidRequirements, "the requirements name no payee or no network")
+	}
+	if p == nil || auth == nil {
+		return refuse(payment.ReasonMalformed, "no payment")
+	}
+	if req.Scheme != payment.SchemeCredit {
+		return refuse(payment.ReasonUnsupportedScheme,
+			"this facilitator settles %q; the requirements name %q", payment.SchemeCredit, req.Scheme)
+	}
+	if p.Accepted.Scheme != req.Scheme {
+		return refuse(payment.ReasonUnsupportedScheme,
+			"the payment is on scheme %q; the requirements name %q", p.Accepted.Scheme, req.Scheme)
+	}
+	if p.Accepted.Network != req.Network {
+		return refuse(payment.ReasonNetworkMismatch,
+			"the payment is offered on %s; the requirements name %s", p.Accepted.Network, req.Network)
+	}
+	if auth.Network != req.Network {
+		return refuse(payment.ReasonNetworkMismatch,
+			"the authorization is for %s; the requirements name %s", auth.Network, req.Network)
+	}
+	if auth.PayTo != req.PayTo {
+		return refuse(payment.ReasonPayeeMismatch,
+			"the authorization pays %s; the requirements name %s", auth.PayTo, req.PayTo)
+	}
+	if p.Accepted.PayTo != auth.PayTo {
+		return refuse(payment.ReasonPayeeMismatch,
+			"the payload states payee %s; the authorization pays %s", p.Accepted.PayTo, auth.PayTo)
+	}
+	accepted, err := payment.ParseAmount(p.Accepted.Amount)
+	if err != nil || accepted != auth.Amount {
+		return refuse(payment.ReasonInvalidAmount,
+			"the payload states amount %q; the authorization pays %d", p.Accepted.Amount, auth.Amount)
+	}
+	if auth.Amount < want {
+		return refuse(payment.ReasonInvalidAmount,
+			"the authorization pays %d; the requirements ask for %d", auth.Amount, want)
+	}
+	return nil
+}
+
+// parseAuth reads the anet-credit authorization out of a payload. It
+// checks only that there is one to read.
+func parseAuth(p *payment.PaymentPayload) (*payment.Authorization, *Refusal) {
+	if p == nil {
+		return nil, refuse(payment.ReasonMalformed, "no payment payload")
+	}
+	raw, _ := p.Payload["authorization"].(string)
+	if raw == "" {
+		return nil, refuse(payment.ReasonMalformed, "payload has no authorization")
+	}
+	b, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, refuse(payment.ReasonMalformed, "authorization not base64: %v", err)
+	}
+	auth, err := payment.UnmarshalAuthorization(b)
+	if err != nil {
+		return nil, refuse(payment.ReasonMalformed, "authorization malformed: %v", err)
+	}
+	return auth, nil
+}
+
+// verifiedAuth decodes a payment on this hub's own ledger and checks the
+// payer's signature against the payer's registered key history.
+//
+// The signature is checked at the authorization's own time, IssuedAt, and
+// the validity window is not checked here. The split is what lets a
+// settlement already made be answered with its original receipt after the
+// window has closed (SettleWithRequirements): for a repeat, the question is
+// whether the payer signed these bytes, not whether they could still be
+// spent. A new settlement additionally passes currentAuth.
+//
+// The authorization is returned with a refusal when it could be decoded,
+// so the response can name its payer and id.
+func (s *Store) verifiedAuth(hubAID string, p *payment.PaymentPayload) (
+	*payment.Authorization, string, []identity.SignedEvent, *Refusal) {
+	if p == nil {
+		return nil, "", nil, refuse(payment.ReasonMalformed, "no payment payload")
+	}
+	if p.Accepted.Scheme != payment.SchemeCredit {
+		return nil, "", nil, refuse(payment.ReasonUnsupportedScheme,
+			"this facilitator settles %q, not %q", payment.SchemeCredit, p.Accepted.Scheme)
+	}
+	want := payment.CreditNetwork(hubAID)
+	if p.Accepted.Network != want {
+		// A credit on another hub is not a credit here, and settling one
+		// as though it were would mint money. Forwarding it to the hub
+		// that owns that ledger is a different matter, and happens before
+		// this — see SettleWithRequirements.
+		return nil, "", nil, refuse(payment.ReasonNetworkMismatch,
+			"this facilitator settles %q, not %q", want, p.Accepted.Network)
+	}
+	auth, rf := parseAuth(p)
+	if rf != nil {
+		return nil, "", nil, rf
+	}
+	if auth.Network != want {
+		return auth, "", nil, refuse(payment.ReasonNetworkMismatch,
+			"authorization is for %q, not %q", auth.Network, want)
+	}
+	id, err := auth.ID()
+	if err != nil {
+		return auth, "", nil, refuse(payment.ReasonMalformed, "authorization id: %v", err)
+	}
+	// The signature is checked against the payer's own registered key
+	// history, which is what makes this a payment the payer made rather
+	// than one this hub decided they made.
+	kelBytes, err := s.AgentKEL(auth.Payer)
+	if err != nil {
+		return auth, id, nil, refuse(payment.ReasonUnknownPayer, "payer %s not registered here", auth.Payer)
+	}
+	kel, err := identity.UnmarshalKEL(kelBytes)
+	if err != nil {
+		return auth, id, nil, refuse(payment.ReasonSettlementFailed,
+			"the payer's stored key history is unreadable: %v", err)
+	}
+	if err := auth.Verify(kel, auth.IssuedAt); err != nil {
+		return auth, id, nil, refuse(verifyReason(err), "%v", err)
+	}
+	return auth, id, kel, nil
+}
+
+// currentAuth is what a new settlement needs beyond verifiedAuth: the
+// validity window, and the signing key being valid now and not only at
+// IssuedAt. Checking the key at IssuedAt alone would let a key the payer
+// has rotated away sign a spendable authorization by backdating it.
+func currentAuth(auth *payment.Authorization, kel []identity.SignedEvent, now int64) *Refusal {
+	if err := auth.Verify(kel, now); err != nil {
+		return refuse(verifyReason(err), "%v", err)
+	}
+	return nil
+}
+
+// verifyReason classifies a payment.Authorization.Verify failure.
+func verifyReason(err error) string {
+	if errors.Is(err, payment.ErrExpired) || errors.Is(err, payment.ErrBadWindow) {
+		return payment.ReasonExpiredPayment
+	}
+	return payment.ReasonInvalidSignature
+}
+
 // PeerSettler forwards a settlement to the hub that owns the ledger and
 // clears the result locally. Wired by the application, so this package
 // keeps knowing nothing about federation.
-type PeerSettler func(network string, p *payment.PaymentPayload) (payment.SettlementResponse, bool)
+//
+// auth is decoded from p but not verified: its signature is the ledger
+// hub's to check. handled is false when network is not a ledger this hub
+// clears against; the payment is then refused here with network_mismatch.
+type PeerSettler func(network string, p *payment.PaymentPayload, req *payment.PaymentRequirements,
+	auth *payment.Authorization) (out payment.SettlementResponse, handled bool)
 
 // SetPeerSettler installs the cross-hub settlement path.
 func (s *Store) SetPeerSettler(f PeerSettler) { s.peerSettle = f }
@@ -139,78 +341,133 @@ func (s *Store) ClearablePeers() []string {
 	return s.clearable()
 }
 
-func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.SettlementResponse {
+// SettleWithRequirements moves the credit, once, if the payment meets the
+// requirements. /x402/settle and the gateway call it.
+//
+// On this hub's own ledger the order is: decode and verify the payer's
+// signature; compare with the requirements; answer an authorization
+// already settled with its original receipt; check the validity window;
+// settle. The repeat is answered before the window check, so a charged
+// authorization yields its receipt at any time — a merchant whose settle
+// call timed out retries until it learns the outcome (A2A-DESIGN §8.3) —
+// and after the requirements check, so the receipt is returned only to a
+// caller asking on the terms it was settled for.
+//
+// On a peer's ledger this hub is the entry hub. It compares the payment
+// with the requirements, then forwards payload and requirements to the
+// ledger hub, which verifies and compares again. A payment this hub would
+// refuse is not forwarded.
+func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
+	req *payment.PaymentRequirements) payment.SettlementResponse {
+	own := payment.CreditNetwork(hubAID)
+	if req == nil {
+		return refusedSettlement(refuse(payment.ReasonInvalidRequirements,
+			"paymentRequirements is required"), nil, own)
+	}
+	if p == nil {
+		return refusedSettlement(refuse(payment.ReasonMalformed, "no payment payload"), nil, own)
+	}
 	// A payment on another hub's ledger is that hub's to settle. We ask
 	// it, and if it says yes we credit our own payee and record what that
 	// hub now owes us — the two hubs clearing against each other rather
 	// than one of them minting.
-	if p != nil && p.Accepted.Network != payment.CreditNetwork(hubAID) && s.peerSettle != nil {
-		if r, handled := s.peerSettle(p.Accepted.Network, p); handled {
-			return r
+	if p.Accepted.Network != own && s.peerSettle != nil {
+		auth, rf := parseAuth(p)
+		if rf != nil {
+			return refusedSettlement(rf, nil, p.Accepted.Network)
+		}
+		if rf := CheckRequirements(p, auth, req); rf != nil {
+			return refusedSettlement(rf, auth, p.Accepted.Network)
+		}
+		if out, handled := s.peerSettle(p.Accepted.Network, p, req, auth); handled {
+			return out
 		}
 	}
-	auth, err := s.decodeAuth(hubAID, p)
-	if err != nil {
-		return payment.SettlementResponse{Success: false, ErrorReason: err.Error(),
-			Network: payment.CreditNetwork(hubAID)}
+	auth, id, kel, rf := s.verifiedAuth(hubAID, p)
+	if rf != nil {
+		return refusedSettlement(rf, auth, own)
 	}
-	id, err := auth.ID()
-	if err != nil {
-		return payment.SettlementResponse{Success: false, ErrorReason: err.Error(),
-			Network: payment.CreditNetwork(hubAID)}
+	if rf := CheckRequirements(p, auth, req); rf != nil {
+		return refusedSettlement(rf, auth, own)
 	}
-	fail := func(reason string) payment.SettlementResponse {
-		return payment.SettlementResponse{Success: false, ErrorReason: reason, Payer: auth.Payer,
-			Transaction: id, Network: auth.Network, Amount: payment.Amount(auth.Amount)}
+	prior, settled, err := s.settledBefore(hubAID, id)
+	if err != nil {
+		return refusedSettlement(refuse(payment.ReasonSettlementFailed, "%v", err), auth, own)
+	}
+	if settled {
+		return prior
+	}
+	if rf := currentAuth(auth, kel, time.Now().UnixMilli()); rf != nil {
+		return refusedSettlement(rf, auth, own)
+	}
+	return s.settleAuth(hubAID, auth, id)
+}
+
+// settleAuth moves the credit for an authorization whose caller has
+// already done the checks: the signature and the window, and the terms.
+// SettleWithRequirements checks the terms against the requirements;
+// Redeem checks its one term, that the payee is this hub, itself, because
+// requirements built from the authorization's own amount would compare the
+// authorization with itself.
+//
+// Idempotent on the authorization's content id: a settle call repeated
+// because a reply was lost must not charge twice, and the id derives from
+// the signed bytes so a payer cannot make two different authorizations
+// look like one.
+//
+// At most one authorization per (payer, InteractionID) settles, when the
+// InteractionID is not empty. The daemon puts its task binding there
+// (A2A-DESIGN X4), so a second authorization for the same task — signed
+// because the first one's outcome was lost, or because a payer is paying
+// twice — is refused with duplicate_binding and moves nothing.
+// Resending the first authorization is a repeat, not a second one, and is
+// answered with its receipt.
+func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string) payment.SettlementResponse {
+	network := auth.Network
+	fail := func(rf *Refusal) payment.SettlementResponse { return refusedSettlement(rf, auth, network) }
+	now := time.Now().UTC()
+	at := now.Format(time.RFC3339Nano)
+	// Signed before the commit and stored with the row, so a repeat is
+	// answered with these exact bytes.
+	rec, err := s.signReceipt(id, auth.Payer, auth.PayTo, auth.Amount, network, now.UnixMilli())
+	if err != nil {
+		return fail(refuse(payment.ReasonSettlementFailed, "signing the receipt: %v", err))
 	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		return fail(err.Error())
+		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 	}
+	// A failure below rolls the whole settlement back, the settled row
+	// and its binding included, so retrying after a real failure (an
+	// insufficient balance topped up since) is not refused as a duplicate.
 	defer tx.Rollback()
 
-	// The settled table is the idempotency key AND the replay guard: one
-	// row per authorization id, inserted first, so a concurrent second
-	// settle loses on the primary key rather than on a check it raced.
+	// The settled table is the idempotency key, the replay guard and the
+	// binding guard: one row per authorization id, and one bound row per
+	// (payer, interaction_id), inserted first, so a concurrent second
+	// settle loses on a constraint rather than on a check it raced.
 	if _, err := tx.Exec(
-		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at)
-		 VALUES(?,?,?,?,?,?)`,
-		id, auth.Payer, auth.PayTo, int64(auth.Amount), auth.InteractionID,
-		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		// Already settled: report the same success as the first call, so a
-		// retried settle is indistinguishable from the one that worked.
-		//
-		// Including the receipt. A caller whose first response was lost is
-		// the caller most in need of the hub's signed statement, and
-		// answering the retry with a bare success would leave the one
-		// party who has actually been charged holding nothing to show for
-		// it. The flag says it was a replay; the proof is the same proof.
-		replay := s.signSettlement(payment.SettlementResponse{Success: true, Payer: auth.Payer,
-			Transaction: id, Network: auth.Network, Amount: payment.Amount(auth.Amount)}, auth, id)
-		if replay.Extensions == nil {
-			replay.Extensions = map[string]any{}
-		}
-		replay.Extensions["anet.replayed"] = true
-		return replay
+		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at, bound, receipt)
+		 VALUES(?,?,?,?,?,?,1,?)`,
+		id, auth.Payer, auth.PayTo, int64(auth.Amount), auth.InteractionID, at, rec); err != nil {
+		_ = tx.Rollback()
+		return s.settleConflict(hubAID, auth, id, err)
 	}
 
 	var bal int64
 	if err := tx.QueryRow(`SELECT COALESCE(credits,0) FROM credit_balance WHERE aid=?`,
 		auth.Payer).Scan(&bal); err != nil && err.Error() != "sql: no rows in result set" {
-		return fail(err.Error())
+		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 	}
 	if bal < int64(auth.Amount) {
-		// The x402 reason first so a client can branch on a constant, the
-		// numbers after so a person can see how short they were.
-		return fail(fmt.Sprintf("%s: has %d, needs %d",
-			payment.ReasonInsufficientFunds, bal, auth.Amount))
+		return fail(refuse(payment.ReasonInsufficientFunds, "has %d, needs %d", bal, auth.Amount))
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO credit_balance(aid, credits) VALUES(?, -?)
 		 ON CONFLICT(aid) DO UPDATE SET credits = credits - ?`,
 		auth.Payer, int64(auth.Amount), int64(auth.Amount)); err != nil {
-		return fail(err.Error())
+		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 	}
 	// Whether the payee banks here decides where the credit goes.
 	//
@@ -237,7 +494,7 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 	if !local {
 		if err := tx.QueryRow(`SELECT COUNT(1) FROM agent WHERE aid=?`,
 			auth.PayTo).Scan(&local); err != nil {
-			return fail(err.Error())
+			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 		}
 	}
 	if local {
@@ -245,14 +502,14 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
 			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
 			auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
-			return fail(err.Error())
+			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 		}
 	} else {
 		if _, err := tx.Exec(
 			`INSERT INTO hub_due(payee_aid, amount) VALUES(?,?)
 			 ON CONFLICT(payee_aid) DO UPDATE SET amount = amount + ?`,
 			auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
-			return fail(err.Error())
+			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 		}
 		// The credit comes home to the hub's own row, which is the same
 		// movement a redemption makes: value left this ledger, so this
@@ -263,7 +520,7 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
 			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
 			hubAID, int64(auth.Amount), int64(auth.Amount)); err != nil {
-			return fail(err.Error())
+			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 		}
 	}
 	// The ledger entries, in the same transaction as the balance move.
@@ -278,7 +535,6 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 	// The reason column carries the transaction id, which is what the
 	// payer's own evidence chain records. That is what lets the two sides
 	// be matched at all.
-	at := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, e := range []struct {
 		aid   string
 		delta int64
@@ -297,18 +553,18 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 			if _, err := tx.Exec(
 				`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
 				hubAID, int64(auth.Amount), id, at); err != nil {
-				return fail(err.Error())
+				return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 			}
 			continue
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
 			e.aid, e.delta, id, at); err != nil {
-			return fail(err.Error())
+			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fail(err.Error())
+		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 	}
 	// Credit that left this ledger goes on the signed chain, for the same
 	// reason a redemption does: the chain must account for every supply
@@ -325,37 +581,325 @@ func (s *Store) SettlePayment(hubAID string, p *payment.PaymentPayload) payment.
 				id, err)
 		}
 	}
-	return s.signSettlement(payment.SettlementResponse{Success: true, Payer: auth.Payer,
-		Transaction: id, Network: auth.Network, Amount: payment.Amount(auth.Amount)}, auth, id)
+	out := payment.SettlementResponse{Success: true, Payer: auth.Payer,
+		Transaction: id, Network: network, Amount: payment.Amount(auth.Amount)}
+	if rec != nil {
+		out.Extensions = map[string]any{payment.ExtReceipt: base64.StdEncoding.EncodeToString(rec)}
+	}
+	return out
 }
 
-// signSettlement attaches this hub's signed receipt.
+// settleConflict explains an INSERT into credit_settled that failed.
 //
-// Every settlement, not only the cross-hub ones. A payer holding a
-// receipt for its own hub's settlement can show what it was charged
-// without asking the hub to agree, and that is worth more than the one
-// line it costs.
-func (s *Store) signSettlement(r payment.SettlementResponse, auth *payment.Authorization,
-	authID string) payment.SettlementResponse {
-	if s.hubKey == nil {
-		return r
+// Either this authorization is already settled — a concurrent repeat
+// committed first — and the answer is its original receipt; or its
+// (payer, interaction_id) binding is held by another authorization, and
+// nothing moves; or the insert failed for another reason, which is
+// reported as settlement_failed.
+func (s *Store) settleConflict(hubAID string, auth *payment.Authorization, id string,
+	insertErr error) payment.SettlementResponse {
+	if prior, settled, err := s.settledBefore(hubAID, id); err == nil && settled {
+		return prior
 	}
-	rec := &payment.Receipt{
-		AuthID: authID, Payer: auth.Payer, PayTo: auth.PayTo, Amount: auth.Amount,
-		Network: auth.Network, SettleAt: time.Now().UnixMilli(),
+	if auth.InteractionID != "" {
+		holder, err := s.bindingHolder(auth.Payer, auth.InteractionID)
+		if err == nil && holder != "" && holder != id {
+			out := refusedSettlement(refuse(payment.ReasonDuplicateBinding,
+				"payer %s already settled %s with this interaction id; this authorization moved nothing",
+				auth.Payer, holder), auth, auth.Network)
+			out.Extensions[payment.ExtOriginalTransaction] = holder
+			return out
+		}
 	}
-	if err := rec.Sign(s.hubKey); err != nil {
-		return r
+	return refusedSettlement(refuse(payment.ReasonSettlementFailed, "%v", insertErr), auth, auth.Network)
+}
+
+// settledBefore answers a repeated settlement of an authorization this hub
+// already settled: the same success, with the original receipt, flagged
+// payment.ExtReplayed.
+//
+// A caller whose first response was lost is the caller most in need of the
+// hub's signed statement, because it is the party that has been charged.
+// So the answer is the same proof whenever it is asked for, including
+// after the authorization's window has closed.
+func (s *Store) settledBefore(hubAID, id string) (payment.SettlementResponse, bool, error) {
+	var payer, payTo, at string
+	var amount int64
+	var rec []byte
+	err := s.db.QueryRow(
+		`SELECT payer, pay_to, amount, at, receipt FROM credit_settled WHERE auth_id=?`, id).
+		Scan(&payer, &payTo, &amount, &at, &rec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return payment.SettlementResponse{}, false, nil
 	}
-	b, err := rec.Marshal()
 	if err != nil {
+		return payment.SettlementResponse{}, false, err
+	}
+	network := payment.CreditNetwork(hubAID)
+	out := payment.SettlementResponse{Success: true, Payer: payer, Transaction: id,
+		Network: network, Amount: payment.Amount(uint64(amount)),
+		Extensions: map[string]any{payment.ExtReplayed: true}}
+	if len(rec) == 0 {
+		// A row settled before receipts were stored. The receipt is
+		// re-signed from the row, with the row's own time as the
+		// settlement time. Ed25519 signatures are deterministic, so every
+		// later repeat of this row returns the same bytes, as long as the
+		// hub's signing key has not changed.
+		var settleAt int64
+		if t, perr := time.Parse(time.RFC3339Nano, at); perr == nil {
+			settleAt = t.UnixMilli()
+		}
+		if rec, err = s.signReceipt(id, payer, payTo, uint64(amount), network, settleAt); err != nil {
+			log.Printf("hub: re-signing the receipt of settlement %s: %v", id, err)
+		}
+	}
+	if len(rec) > 0 {
+		out.Extensions[payment.ExtReceipt] = base64.StdEncoding.EncodeToString(rec)
+	}
+	return out, true, nil
+}
+
+// authSettled reports whether an authorization id has been settled here.
+func (s *Store) authSettled(id string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM credit_settled WHERE auth_id=?`, id).Scan(&n)
+	return n > 0, err
+}
+
+// bindingHolder is the authorization that holds a payer's binding, or ""
+// when none does.
+func (s *Store) bindingHolder(payer, interactionID string) (string, error) {
+	var id string
+	err := s.db.QueryRow(
+		`SELECT auth_id FROM credit_settled WHERE payer=? AND interaction_id=? AND bound=1`,
+		payer, interactionID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
+// signReceipt is this hub's signed statement of one settlement, marshalled.
+//
+// Every settlement gets one, not only the cross-hub ones. A payer holding
+// a receipt for its own hub's settlement can show what it was charged
+// without asking the hub to agree, and that is worth more than the one
+// line it costs. Nil, with no error, when the store has no signing key:
+// an unsigned settlement is weaker, not broken.
+func (s *Store) signReceipt(authID, payer, payTo string, amount uint64, network string,
+	settleAt int64) ([]byte, error) {
+	if s.hubKey == nil {
+		return nil, nil
+	}
+	rec := &payment.Receipt{AuthID: authID, Payer: payer, PayTo: payTo, Amount: amount,
+		Network: network, SettleAt: settleAt}
+	if err := rec.Sign(s.hubKey); err != nil {
+		return nil, err
+	}
+	return rec.Marshal()
+}
+
+// migrateSettlement adds what settlement needs beyond the original
+// credit_settled table: the stored receipt, and the binding constraint
+// UNIQUE(payer, interaction_id) for non-empty interaction ids
+// (A2A-DESIGN §8.5).
+//
+// The constraint is a partial unique index over rows marked bound = 1,
+// and every new settlement is inserted bound. A hub upgraded with rows
+// already in the table may hold two settlements for one (payer,
+// interaction_id): before this constraint nothing stopped a second one.
+// An index over all rows would then fail to build and the hub would not
+// start. So on the upgrade the earliest settlement of each binding is
+// marked bound, which makes it the holder a later authorization collides
+// with, and the later duplicates stay in the table as the record of what
+// happened. The column, the marking and the index are one transaction,
+// so an interrupted upgrade is repeated whole at the next start.
+func (s *Store) migrateSettlement() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("hub: migrate settlement: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`ALTER TABLE credit_settled ADD COLUMN bound INTEGER NOT NULL DEFAULT 0`)
+	switch {
+	case err == nil:
+		if _, err := tx.Exec(`UPDATE credit_settled SET bound = 1
+			WHERE interaction_id != '' AND rowid IN (
+			  SELECT MIN(rowid) FROM credit_settled WHERE interaction_id != ''
+			  GROUP BY payer, interaction_id)`); err != nil {
+			return fmt.Errorf("hub: migrate settlement: %w", err)
+		}
+	case !strings.Contains(err.Error(), "duplicate column name"):
+		return fmt.Errorf("hub: migrate settlement: %w", err)
+	}
+	if _, err := tx.Exec(`ALTER TABLE credit_settled ADD COLUMN receipt BLOB`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return fmt.Errorf("hub: migrate settlement: %w", err)
+	}
+	if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_settled_binding
+		ON credit_settled(payer, interaction_id) WHERE interaction_id != '' AND bound = 1`); err != nil {
+		return fmt.Errorf("hub: migrate settlement: %w", err)
+	}
+	return tx.Commit()
+}
+
+// VerifyWithRequirements answers "would this settle?" without moving
+// anything, for a payment on this hub's own ledger.
+//
+// A payment on a peer's ledger is refused with network_mismatch rather
+// than forwarded (A2A-DESIGN §8.5). Verify moves nothing, so there is no
+// cross-hub state to keep consistent by asking the peer, and /x402/settle
+// runs the same checks at the entry hub and the ledger hub when it is
+// called.
+func (s *Store) VerifyWithRequirements(hubAID string, p *payment.PaymentPayload,
+	req *payment.PaymentRequirements) payment.VerifyResponse {
+	invalid := func(rf *Refusal, auth *payment.Authorization) payment.VerifyResponse {
+		out := payment.VerifyResponse{IsValid: false, InvalidReason: rf.Reason}
+		if auth != nil {
+			out.Payer = auth.Payer
+		}
+		return out
+	}
+	if req == nil {
+		return invalid(refuse(payment.ReasonInvalidRequirements, "paymentRequirements is required"), nil)
+	}
+	if p == nil {
+		return invalid(refuse(payment.ReasonMalformed, "no payment payload"), nil)
+	}
+	if own := payment.CreditNetwork(hubAID); p.Accepted.Network != own {
+		return invalid(refuse(payment.ReasonNetworkMismatch,
+			"this facilitator verifies payments on %s only", own), nil)
+	}
+	auth, id, kel, rf := s.verifiedAuth(hubAID, p)
+	if rf != nil {
+		return invalid(rf, auth)
+	}
+	if rf := CheckRequirements(p, auth, req); rf != nil {
+		return invalid(rf, auth)
+	}
+	if spent, err := s.authSettled(id); err != nil {
+		return invalid(refuse(payment.ReasonSettlementFailed, "%v", err), auth)
+	} else if spent {
+		return invalid(refuse(payment.ReasonDuplicateNonce, "authorization already settled"), auth)
+	}
+	if auth.InteractionID != "" {
+		holder, err := s.bindingHolder(auth.Payer, auth.InteractionID)
+		if err != nil {
+			return invalid(refuse(payment.ReasonSettlementFailed, "%v", err), auth)
+		}
+		if holder != "" {
+			return invalid(refuse(payment.ReasonDuplicateBinding, "binding held by %s", holder), auth)
+		}
+	}
+	if rf := currentAuth(auth, kel, time.Now().UnixMilli()); rf != nil {
+		return invalid(rf, auth)
+	}
+	bal, err := s.Balance(auth.Payer)
+	if err != nil {
+		return invalid(refuse(payment.ReasonSettlementFailed, "%v", err), auth)
+	}
+	if bal < int64(auth.Amount) {
+		return invalid(refuse(payment.ReasonInsufficientFunds, "has %d, needs %d", bal, auth.Amount), auth)
+	}
+	return payment.VerifyResponse{IsValid: true, Payer: auth.Payer}
+}
+
+// SettlementPending is the entry hub's answer for a forwarded payment
+// whose outcome it does not know: the ledger hub did not answer, answered
+// unreadably, or settled and this hub has not credited the payee.
+//
+// Not final (payment.ReasonSettlementPending). The merchant retries with
+// the same payload: the ledger hub answers an authorization it already
+// settled with the original receipt, whether or not the window has closed,
+// and ClearFromPeer is idempotent on the authorization id, so the retry
+// credits the payee at most once. When the ledger hub's reply carried a
+// receipt it is kept in the extensions, as the evidence that the payer was
+// charged.
+func SettlementPending(auth *payment.Authorization, network, detail string,
+	peer *payment.SettlementResponse) payment.SettlementResponse {
+	out := refusedSettlement(refuse(payment.ReasonSettlementPending, "%s", detail), auth, network)
+	if peer != nil {
+		if rec, ok := peer.Extensions[payment.ExtReceipt]; ok {
+			out.Extensions[payment.ExtReceipt] = rec
+		}
+	}
+	return out
+}
+
+// ClearPeerSettlement is the entry hub's second half of a cross-hub
+// settlement: it checks that the ledger hub settled the required terms and
+// credits the local payee against the ledger hub's receipt.
+//
+// The receipt must name the forwarded authorization and its payer, the
+// ledger it was forwarded to, the required payee and at least the required
+// amount. A receipt for other terms is refused rather than cleared:
+// clearing it would credit whoever the ledger hub named. The refusal
+// carries the receipt, because the ledger hub has moved credit this hub
+// will not match and the receipt is what shows it.
+//
+// A matching receipt that cannot be cleared — the peer's key history
+// cannot be fetched, the receipt does not verify against it, or the write
+// fails — is settlement_pending: the payer has been charged, and the retry
+// described at SettlementPending completes it.
+func (s *Store) ClearPeerSettlement(peerAID string,
+	peerKEL func(string) ([]identity.SignedEvent, error), out payment.SettlementResponse,
+	auth *payment.Authorization, req *payment.PaymentRequirements) payment.SettlementResponse {
+	network := req.Network
+	withReceipt := func(rf *Refusal) payment.SettlementResponse {
+		r := refusedSettlement(rf, auth, network)
+		if rec, ok := out.Extensions[payment.ExtReceipt]; ok {
+			r.Extensions[payment.ExtReceipt] = rec
+		}
+		log.Printf("hub: cross-hub settlement at %s not cleared: %v", peerAID, rf)
 		return r
 	}
-	if r.Extensions == nil {
-		r.Extensions = map[string]any{}
+	b64, _ := out.Extensions[payment.ExtReceipt].(string)
+	if b64 == "" {
+		return withReceipt(refuse(payment.ReasonSettlementFailed,
+			"%s reported success without a settlement receipt; nothing was credited here", peerAID))
 	}
-	r.Extensions[payment.ExtReceipt] = base64.StdEncoding.EncodeToString(b)
-	return r
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return withReceipt(refuse(payment.ReasonSettlementFailed, "%s's receipt is not base64: %v", peerAID, err))
+	}
+	rec, err := payment.UnmarshalReceipt(raw)
+	if err != nil {
+		return withReceipt(refuse(payment.ReasonSettlementFailed, "%s's receipt is unreadable: %v", peerAID, err))
+	}
+	id, err := auth.ID()
+	if err != nil {
+		return withReceipt(refuse(payment.ReasonMalformed, "authorization id: %v", err))
+	}
+	want, err := payment.ParseAmount(req.Amount)
+	if err != nil {
+		return withReceipt(refuse(payment.ReasonInvalidRequirements, "required amount: %v", err))
+	}
+	switch {
+	case rec.AuthID != id || rec.Payer != auth.Payer || rec.Network != network:
+		return withReceipt(refuse(payment.ReasonSettlementFailed,
+			"%s's receipt is for authorization %s by %s on %s, not %s by %s on %s",
+			peerAID, rec.AuthID, rec.Payer, rec.Network, id, auth.Payer, network))
+	case rec.PayTo != req.PayTo:
+		return withReceipt(refuse(payment.ReasonPayeeMismatch,
+			"%s settled a payment to %s; the requirements name %s", peerAID, rec.PayTo, req.PayTo))
+	case rec.Amount < want:
+		return withReceipt(refuse(payment.ReasonInvalidAmount,
+			"%s settled %d; the requirements ask for %d", peerAID, rec.Amount, want))
+	}
+	kel, err := peerKEL(peerAID)
+	if err != nil {
+		return SettlementPending(auth, network,
+			"settled at "+peerAID+" but not cleared here: "+err.Error(), &out)
+	}
+	if err := s.ClearFromPeer(peerAID, kel, rec); err != nil {
+		// The peer moved credit and we could not credit our payee. The
+		// money left one ledger and has not arrived on the other; the
+		// merchant is told the outcome is pending and retries.
+		log.Printf("hub: cross-hub settlement %s at %s not cleared yet: %v", id, peerAID, err)
+		return SettlementPending(auth, network,
+			"settled at "+peerAID+" but not cleared here: "+err.Error(), &out)
+	}
+	return out
 }
 
 // SetHubKey gives the store the identity it signs settlements with, and
@@ -397,7 +941,17 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 		`INSERT INTO credit_cleared(auth_id, peer_aid, pay_to, amount, at) VALUES(?,?,?,?,?)`,
 		rec.AuthID, peerAID, rec.PayTo, int64(rec.Amount),
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return nil // already cleared; the same statement, not a new one
+		// Already cleared is success: the same statement, not a new one.
+		// Any other failure to write the row is returned. Reading every
+		// insert failure as "already cleared" reported a clearing that
+		// had not happened as done, so the entry hub answered success,
+		// the merchant stopped retrying, and the payee was never credited.
+		var n int
+		if qerr := tx.QueryRow(`SELECT COUNT(1) FROM credit_cleared WHERE auth_id=?`,
+			rec.AuthID).Scan(&n); qerr == nil && n > 0 {
+			return nil
+		}
+		return fmt.Errorf("recording the clearing of %s: %w", rec.AuthID, err)
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
@@ -515,65 +1069,6 @@ func (s *Store) Owed(peerAID string) (int64, error) {
 	return n, err
 }
 
-// decodeAuth pulls the anet-credit authorization out of a payload and
-// checks everything that is not a balance.
-func (s *Store) decodeAuth(hubAID string, p *payment.PaymentPayload) (*payment.Authorization, error) {
-	if p == nil {
-		return nil, fmt.Errorf("no payment payload")
-	}
-	if p.Accepted.Scheme != payment.SchemeCredit {
-		return nil, fmt.Errorf("this facilitator settles %q, not %q", payment.SchemeCredit, p.Accepted.Scheme)
-	}
-	want := payment.CreditNetwork(hubAID)
-	if p.Accepted.Network != want {
-		// A credit on another hub is not a credit here, and settling one
-		// as though it were would mint money. Forwarding it to the hub
-		// that owns that ledger is a different matter, and happens above
-		// this — see SettlePayment.
-		return nil, fmt.Errorf("this facilitator settles %q, not %q", want, p.Accepted.Network)
-	}
-	raw, _ := p.Payload["authorization"].(string)
-	if raw == "" {
-		return nil, fmt.Errorf("payload has no authorization")
-	}
-	b, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		return nil, fmt.Errorf("authorization not base64: %w", err)
-	}
-	auth, err := payment.UnmarshalAuthorization(b)
-	if err != nil {
-		return nil, fmt.Errorf("authorization malformed: %w", err)
-	}
-	if auth.Network != want {
-		return nil, fmt.Errorf("authorization is for %q, not %q", auth.Network, want)
-	}
-	// The signature is checked against the payer's own registered key
-	// history, which is what makes this a payment the payer made rather
-	// than one this hub decided they made.
-	kelBytes, err := s.AgentKEL(auth.Payer)
-	if err != nil {
-		return nil, fmt.Errorf("payer %s not registered here", auth.Payer)
-	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
-	if err != nil {
-		return nil, err
-	}
-	if err := auth.Verify(kel, time.Now().UnixMilli()); err != nil {
-		return nil, err
-	}
-	return auth, nil
-}
-
-func (s *Store) authSpent(a *payment.Authorization) (bool, error) {
-	id, err := a.ID()
-	if err != nil {
-		return false, err
-	}
-	var n int
-	err = s.db.QueryRow(`SELECT COUNT(1) FROM credit_settled WHERE auth_id=?`, id).Scan(&n)
-	return n > 0, err
-}
-
 // ---- HTTP: the three endpoints x402 defines for a facilitator ----
 
 // hX402Supported lists every ledger this facilitator will settle on.
@@ -587,59 +1082,99 @@ func (s *Store) authSpent(a *payment.Authorization) (bool, error) {
 // seller offered exactly one option and a cross-hub buyer could only be
 // told it had insufficient funds. The cross-hub clearing path existed and
 // nothing could reach it.
-func (s *Server) hX402Supported(w http.ResponseWriter, _ *http.Request) {
+//
+// x402 v2 also asks for the extensions this facilitator implements and
+// who signs on each network. Every settlement response carries a receipt
+// (payment.ExtReceipt), signed by the hub whose ledger the network names;
+// anet.signer_kel says where each signer's KEL is served, which is what a
+// receipt is verified against.
+func (s *Server) hX402Supported(w http.ResponseWriter, r *http.Request) {
+	own := payment.CreditNetwork(s.hubAID)
 	kinds := []payment.SupportedKind{{
 		X402Version: payment.Version,
 		Scheme:      payment.SchemeCredit,
-		Network:     payment.CreditNetwork(s.hubAID),
+		Network:     own,
 	}}
+	signers := map[string][]string{}
+	kels := map[string]string{}
+	if s.hubAID != "" {
+		signers[own] = []string{s.hubAID}
+		kels[s.hubAID] = requestOrigin(r) + "/hub/identity"
+	}
 	for _, aid := range s.store.ClearablePeers() {
 		kinds = append(kinds, payment.SupportedKind{
 			X402Version: payment.Version,
 			Scheme:      payment.SchemeCredit,
 			Network:     payment.CreditNetwork(aid),
 		})
+		signers[payment.CreditNetwork(aid)] = []string{aid}
+		if ep := s.peerEndpoint(aid); ep != "" {
+			kels[aid] = strings.TrimSuffix(ep, "/") + "/hub/identity"
+		}
 	}
-	writeJSON(w, http.StatusOK, payment.Supported{Kinds: kinds})
+	writeJSON(w, http.StatusOK, payment.Supported{Kinds: kinds,
+		Extensions: []string{payment.ExtReceipt}, Signers: signers, SignerKEL: kels})
+}
+
+// readFacilitatorRequest reads a /verify or /settle body: x402 v2's
+// {x402Version, paymentPayload, paymentRequirements}.
+//
+// paymentRequirements is required. Without it this hub would settle
+// whatever the payer signed, and could not tell a payment of the quoted
+// price to the quoting merchant from a smaller one to somebody else.
+func readFacilitatorRequest(w http.ResponseWriter, r *http.Request) (payment.FacilitatorRequest, *Refusal) {
+	var req payment.FacilitatorRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		return req, refuse(payment.ReasonMalformed, "malformed request: %v", err)
+	}
+	if req.PaymentPayload == nil {
+		return req, refuse(payment.ReasonMalformed, "paymentPayload is required")
+	}
+	if req.PaymentRequirements == nil {
+		return req, refuse(payment.ReasonInvalidRequirements, "paymentRequirements is required (x402 v2)")
+	}
+	return req, nil
 }
 
 func (s *Server) hX402Verify(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		X402Version    int                     `json:"x402Version"`
-		PaymentPayload *payment.PaymentPayload `json:"paymentPayload"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, payment.VerifyResponse{
-			IsValid: false, InvalidReason: "malformed request"})
+	req, rf := readFacilitatorRequest(w, r)
+	if rf != nil {
+		writeJSON(w, http.StatusBadRequest, payment.VerifyResponse{IsValid: false, InvalidReason: rf.Reason})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.VerifyPayment(s.hubAID, req.PaymentPayload))
+	writeJSON(w, http.StatusOK, s.store.VerifyWithRequirements(s.hubAID, req.PaymentPayload, req.PaymentRequirements))
 }
 
 func (s *Server) hX402Settle(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		X402Version    int                     `json:"x402Version"`
-		PaymentPayload *payment.PaymentPayload `json:"paymentPayload"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, payment.SettlementResponse{
-			Success: false, ErrorReason: "malformed request"})
+	req, rf := readFacilitatorRequest(w, r)
+	if rf != nil {
+		writeJSON(w, http.StatusBadRequest, refusedSettlement(rf, nil, payment.CreditNetwork(s.hubAID)))
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.SettlePayment(s.hubAID, req.PaymentPayload))
+	writeJSON(w, http.StatusOK, s.store.SettleWithRequirements(s.hubAID, req.PaymentPayload, req.PaymentRequirements))
 }
 
-// hBalance lets an agent see its own standing. Public, because a balance
-// on a ledger somebody else keeps is exactly the thing its owner must be
-// able to check without asking permission.
+// hBalance serves an account's balance to the account holder only.
+//
+// The request must be signed by the AID in the path (relayauth v2, action
+// "balance", the preimage binding method, path and query); an unsigned
+// request, or one signed by anyone else, gets 401 and no data. The
+// balance, the ledger and the redemption list were public, and between
+// them showed anyone which accounts paid which, how much and when
+// (A2A-DESIGN §3.7). The public issuance chain still shows amounts, times
+// and AIDs of cross-hub payments and redemptions; that is recorded in
+// A2A-DESIGN §21 item 9 and left unchanged in this round.
 func (s *Server) hBalance(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
-	n, err := s.store.Balance(aid)
+	a, ok := s.authSelf(w, r, relayauth.ActionBalance, signedBodyLimit)
+	if !ok {
+		return
+	}
+	n, err := s.store.Balance(a.AID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, Balance{AID: aid, Credits: n})
+	writeJSON(w, http.StatusOK, Balance{AID: a.AID, Credits: n})
 }
 
 // ---- how credit gets into the system ----

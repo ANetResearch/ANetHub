@@ -11,6 +11,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
+	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -93,15 +94,15 @@ func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 	}
 
 	// It is listed where the agent can find it later.
-	resp, err := http.Get(srv.URL + "/agents/" + agent.AID() + "/redemptions")
-	if err != nil {
-		t.Fatal(err)
+	// The account holder's own signed read (A2A-DESIGN §3.7).
+	code, body = ownerGet(t, srv, agent, relayauth.ActionRedemptions, "/agents/"+agent.AID()+"/redemptions")
+	if code != http.StatusOK {
+		t.Fatalf("redemptions: %d %s", code, body)
 	}
-	defer resp.Body.Close()
 	var listed struct {
 		Redemptions []aghub.Redemption `json:"redemptions"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+	if err := json.Unmarshal(body, &listed); err != nil {
 		t.Fatal(err)
 	}
 	if len(listed.Redemptions) != 1 || listed.Redemptions[0].Reference != "inv-77" {
@@ -355,8 +356,9 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 		Amount: "120", Asset: payment.AssetCredit, PayTo: payee.AID(),
 	}
 	code, b := post(t, srv.URL+"/x402/settle", map[string]any{
-		"x402Version":    payment.Version,
-		"paymentPayload": json.RawMessage(mustPayload(t, payer, opt, "ix-ledger")),
+		"x402Version":         payment.Version,
+		"paymentPayload":      json.RawMessage(mustPayload(t, payer, opt, "ix-ledger")),
+		"paymentRequirements": opt,
 	})
 	if code != 200 {
 		t.Fatalf("settle: %d %s", code, b)
@@ -564,7 +566,7 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	if err := json.Unmarshal(mustPayload(t, payer, opt, "cross-1"), &pp); err != nil {
 		t.Fatal(err)
 	}
-	out := store.SettlePayment(hubAID, &pp)
+	out := store.SettleWithRequirements(hubAID, &pp, &opt)
 	if !out.Success {
 		t.Fatalf("settling to a foreign payee: %s", out.ErrorReason)
 	}

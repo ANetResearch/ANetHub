@@ -2,70 +2,9 @@ package admin
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 )
-
-// insights —— 官方 agent 的深度可观测：能力清单、调用曲线、模型/接口统计、实际开销、授权状态。
-// 数据源是官方 agent 自己的 monitor（v2 /api/stats /api/catalog /api/acl /api/state），经
-// MonitorProxy 拉取（token 服务端注入）。这实现「官方提供的 agent 能被彻底观测」。
-
-// Insights 是一个官方 agent 的完整洞察包。
-type Insights struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	OK        bool            `json:"ok"`
-	Error     string          `json:"error,omitempty"`
-	Catalog   json.RawMessage `json:"catalog,omitempty"` // {lines, services} —— 能力清单
-	Stats     json.RawMessage `json:"stats,omitempty"`   // {curve, by_service, by_model, by_modality, endpoints, total_milli}
-	ACL       json.RawMessage `json:"acl,omitempty"`     // {acl:{mode,allow,notes}, rejects, reject_seen}
-	Recent    json.RawMessage `json:"recent,omitempty"`  // /api/state {jobs,logs,stats}
-	CostYuan  string          `json:"cost_yuan,omitempty"`
-	CostMilli int             `json:"cost_milli,omitempty"`
-}
-
-// Insights pulls the four v2 monitor surfaces for an official agent and assembles the insight pack.
-func (s *Server) buildInsights(ctx context.Context, m *Manifest) Insights {
-	out := Insights{ID: m.ID, Name: m.Name}
-	if m.Monitor.URL == "" {
-		out.Error = "该 agent 未声明 monitor"
-		return out
-	}
-	// Each pull is independent; a failure on one (e.g. an older agent without /api/stats) must not
-	// blank the whole pack.
-	if b, err := s.mon.Fetch(ctx, m, "catalog"); err == nil {
-		out.Catalog = json.RawMessage(b)
-	}
-	if b, err := s.mon.Fetch(ctx, m, "stats"); err == nil {
-		out.Stats = json.RawMessage(b)
-		var st struct {
-			TotalMilli int `json:"total_milli"`
-		}
-		if json.Unmarshal(b, &st) == nil {
-			out.CostMilli = st.TotalMilli
-			out.CostYuan = formatMilliYuan(st.TotalMilli)
-		}
-	}
-	if b, err := s.mon.Fetch(ctx, m, "acl"); err == nil {
-		out.ACL = json.RawMessage(b)
-	}
-	if b, err := s.mon.Fetch(ctx, m, "state"); err == nil {
-		out.Recent = json.RawMessage(b)
-	}
-	out.OK = out.Catalog != nil || out.Stats != nil
-	if !out.OK {
-		out.Error = "monitor 不可达或未升级到 v2（/api/stats 缺失）"
-	}
-	return out
-}
-
-func formatMilliYuan(milli int) string {
-	yuan := milli / 1000
-	frac := (milli % 1000) / 10 // 两位小数
-	return fmt.Sprintf("¥%d.%02d", yuan, frac)
-}
 
 // --- capability packages (能力包) ---
 //
@@ -86,68 +25,34 @@ type Capsule struct {
 	Outputs     []string `json:"outputs,omitempty"`
 	Models      []string `json:"models,omitempty"`
 	Desc        string   `json:"desc,omitempty"`
-	Cert        string   `json:"cert"`            // 认证档位：certified(官方实测) | listed(已登记) | community
-	Calls       int      `json:"calls"`           // 近窗调用次数（来自 stats）
+	Cert        string   `json:"cert"`            // 认证档位：listed(官方 manifest 登记) | community；certified(官方实测)已不再产生
+	Calls       int      `json:"calls"`           // 近窗调用次数；来源(官方 agent monitor)已删除，恒为 0
 	Score       float64  `json:"score,omitempty"` // 语义检索相似度（discover 时填充）
 }
 
-// serviceEntry mirrors the AI Studio catalog Service shape (subset we need).
-type serviceEntry struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Line    string   `json:"line"`
-	Out     string   `json:"out"`
-	Desc    string   `json:"desc"`
-	Inputs  []string `json:"inputs"`
-	Outputs []string `json:"outputs"`
-	Models  []string `json:"models"`
-}
-
-// buildCapsules assembles the capability-package catalog: official agents contribute one capsule per
-// catalog service (certified), community listed agents contribute one capsule per cap (community tier).
+// buildCapsules assembles the capability-package catalog from the registry: official agents
+// contribute one capsule per capability their manifest declares, community listed agents one per
+// capability they registered.
+//
+// The official branch used to read each agent's service catalog and call counts through the
+// agent's monitor. That channel is removed (A2A-DESIGN §9 row admin 官方 agent): the admin plane
+// registers official agents by id, AID, hub and capabilities only, and reaches no host. An
+// official capsule is therefore "listed" (declared in the manifest), not "certified" (measured),
+// and carries no call count.
 func (s *Server) buildCapsules(ctx context.Context) []Capsule {
 	var out []Capsule
 	officials, _ := s.store.Officials()
-	callsByService := map[string]int{}
-	for _, m := range officials {
-		// call counts from stats (best-effort)
-		if b, err := s.mon.Fetch(ctx, m, "stats"); err == nil {
-			var st struct {
-				ByService []struct {
-					Key   string `json:"key"`
-					Calls int    `json:"calls"`
-				} `json:"by_service"`
-			}
-			if json.Unmarshal(b, &st) == nil {
-				for _, e := range st.ByService {
-					callsByService[m.ID+"/"+e.Key] = e.Calls
-				}
-			}
-		}
-		b, err := s.mon.Fetch(ctx, m, "catalog")
-		if err != nil {
-			continue
-		}
-		var cat struct {
-			Services []serviceEntry `json:"services"`
-		}
-		if json.Unmarshal(b, &cat) != nil {
-			continue
-		}
-		for _, sv := range cat.Services {
-			out = append(out, Capsule{
-				Key: m.ID + "/" + sv.ID, Name: sv.Name, ProviderID: m.ID, ProviderAID: m.AID,
-				Tier: "official", Line: sv.Line, Modality: modalityOfOut(sv.Out),
-				Inputs: sv.Inputs, Outputs: sv.Outputs, Models: sv.Models, Desc: sv.Desc,
-				Cert: "certified", Calls: callsByService[m.ID+"/"+sv.ID],
-			})
-		}
-	}
-	// community capsules from listed agents' caps
 	officialAIDs := map[string]bool{}
 	for _, m := range officials {
 		if m.AID != "" {
 			officialAIDs[m.AID] = true
+		}
+		for _, c := range m.Caps {
+			out = append(out, Capsule{
+				Key: m.ID + "/" + c, Name: c, ProviderID: m.ID, ProviderAID: m.AID,
+				Tier: "official", Line: m.ProductLine, Modality: modalityOfCap(c),
+				Desc: m.Summary, Cert: "listed",
+			})
 		}
 	}
 	agents, _ := s.hub.AllAgents("")
@@ -163,21 +68,6 @@ func (s *Server) buildCapsules(ctx context.Context) []Capsule {
 		}
 	}
 	return out
-}
-
-func modalityOfOut(out string) string {
-	switch strings.ToLower(out) {
-	case "image":
-		return "image"
-	case "video":
-		return "video"
-	case "music":
-		return "audio"
-	case "album":
-		return "mixed"
-	default:
-		return "text"
-	}
 }
 
 func modalityOfCap(cap string) string {

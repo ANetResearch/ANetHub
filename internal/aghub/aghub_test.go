@@ -137,18 +137,25 @@ func registerLegacy(t *testing.T, srv *httptest.Server, c *identity.Controller, 
 func registerWithCard(t *testing.T, srv *httptest.Server, c *identity.Controller,
 	name string, caps []string, card json.RawMessage) (int, []byte) {
 	t.Helper()
-	kelB, _ := identity.MarshalKEL(c.KEL())
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionRegister, c.AID(), ts))
-	body := map[string]any{
-		"aid": c.AID(), "name": name, "caps": caps,
-		"kel": base64.StdEncoding.EncodeToString(kelB),
-		"ts":  ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig),
-	}
+	body := registerBody(t, c, name, caps)
 	if len(card) > 0 {
 		body["card"] = card
 	}
-	return post(t, srv.URL+"/register", body)
+	return signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+}
+
+// registerBody is a /register body for c, without authentication (that
+// is in the headers since wire 2).
+func registerBody(t *testing.T, c *identity.Controller, name string, caps []string) map[string]any {
+	t.Helper()
+	kelB, err := identity.MarshalKEL(c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]any{
+		"aid": c.AID(), "name": name, "caps": caps,
+		"kel": base64.StdEncoding.EncodeToString(kelB),
+	}
 }
 
 func mintCard(t *testing.T, c *identity.Controller, name string, caps []string) json.RawMessage {
@@ -173,17 +180,25 @@ func mintCard(t *testing.T, c *identity.Controller, name string, caps []string) 
 	return b
 }
 
-// interactionContent is the raw request + deliverable bytes an upload must carry; the Hub re-hashes them
-// against the receipt's anchors. These stand in for the signed TaskDoc + deliverable.
+// testRequestDoc and testDeliverable stand in for an interaction's request and result. They are
+// hashed into the receipt's anchors and never sent to the hub: the tests below check that no path
+// stores or returns them.
 var (
 	testRequestDoc  = []byte("the request: bake sourdough")
 	testDeliverable = []byte("the deliverable: a crusty loaf recipe")
 )
 
 // makeEvidence builds an interlocking provider-signed receipt + requester-signed review for one
-// interaction, with the receipt's content anchors set to the real hashes of testRequestDoc /
-// testDeliverable. Returns everything base64-encoded, ready to POST to /reviews.
+// interaction, with the receipt's content anchors set to the hashes of testRequestDoc /
+// testDeliverable. Returns the two objects base64-encoded, ready to POST to /reviews.
 func makeEvidence(t *testing.T, prov, req *identity.Controller, ixID string, rating int, subjectOverride string) map[string]string {
+	t.Helper()
+	return makeEvidenceWithComment(t, prov, req, ixID, rating, subjectOverride, "")
+}
+
+// makeEvidenceWithComment is makeEvidence with a review comment.
+func makeEvidenceWithComment(t *testing.T, prov, req *identity.Controller, ixID string, rating int,
+	subjectOverride, comment string) map[string]string {
 	t.Helper()
 	reqCID, _ := anetcid.Sum(testRequestDoc)
 	resCID, _ := anetcid.Sum(testDeliverable)
@@ -196,17 +211,16 @@ func makeEvidence(t *testing.T, prov, req *identity.Controller, ixID string, rat
 	if subjectOverride != "" {
 		subject = subjectOverride
 	}
-	rv := &evidence.Review{InteractionID: ixID, SubjectAID: subject, ReviewerAID: req.AID(), Rating: rating, ReceiptCID: rcid, CreatedAt: 2000}
+	rv := &evidence.Review{InteractionID: ixID, SubjectAID: subject, ReviewerAID: req.AID(), Rating: rating,
+		Comment: comment, ReceiptCID: rcid, CreatedAt: 2000}
 	if err := rv.Sign(req); err != nil {
 		t.Fatal(err)
 	}
 	rcB, _ := rc.Marshal()
 	rvB, _ := rv.Marshal()
 	return map[string]string{
-		"receipt":     base64.StdEncoding.EncodeToString(rcB),
-		"review":      base64.StdEncoding.EncodeToString(rvB),
-		"request_doc": base64.StdEncoding.EncodeToString(testRequestDoc),
-		"deliverable": base64.StdEncoding.EncodeToString(testDeliverable),
+		"receipt": base64.StdEncoding.EncodeToString(rcB),
+		"review":  base64.StdEncoding.EncodeToString(rvB),
 	}
 }
 
@@ -239,42 +253,13 @@ func TestUploadReviewHappyPath(t *testing.T) {
 	if len(got.Reviews) != 1 || got.Reviews[0].Rating != 5 {
 		t.Fatalf("reviews = %+v", got.Reviews)
 	}
-	// The stored review must carry the verified interaction content, not just the rating.
-	if got.Reviews[0].Deliverable != string(testDeliverable) {
-		t.Fatalf("review deliverable = %q, want %q", got.Reviews[0].Deliverable, testDeliverable)
-	}
+	// The receipt's anchors are served; whether they match any content is
+	// stated as not checked here.
 	if got.Reviews[0].ResultCID == "" || got.Reviews[0].RequestCID == "" {
-		t.Fatalf("review missing content anchors: %+v", got.Reviews[0])
+		t.Fatalf("review missing the receipt anchors: %+v", got.Reviews[0])
 	}
-}
-
-// A review whose uploaded deliverable does not hash to the receipt's result_cid is rejected — the
-// displayed content is always bound to what the provider signed.
-func TestUploadReviewTamperedContentRejected(t *testing.T) {
-	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
-	register(t, srv, prov, "P", nil)
-	register(t, srv, req, "R", nil)
-	body := makeEvidence(t, prov, req, "ix_tamper", 5, "")
-	body["deliverable"] = base64.StdEncoding.EncodeToString([]byte("a forged, better-sounding deliverable"))
-	if code, b := post(t, srv.URL+"/reviews", body); code == 200 {
-		t.Fatalf("tampered deliverable must be rejected, got %d %s", code, b)
-	}
-}
-
-// A review upload missing its interaction content is rejected (content is mandatory in v0.1).
-func TestUploadReviewMissingContentRejected(t *testing.T) {
-	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
-	register(t, srv, prov, "P", nil)
-	register(t, srv, req, "R", nil)
-	body := makeEvidence(t, prov, req, "ix_nocontent", 5, "")
-	delete(body, "deliverable")
-	delete(body, "request_doc")
-	if code, b := post(t, srv.URL+"/reviews", body); code == 200 {
-		t.Fatalf("missing content must be rejected, got %d %s", code, b)
+	if got.Reviews[0].ContentBinding != aghub.ContentBindingUnverified {
+		t.Fatalf("content_binding = %q, want %q", got.Reviews[0].ContentBinding, aghub.ContentBindingUnverified)
 	}
 }
 
@@ -317,8 +302,9 @@ func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 	}
 }
 
-// The relay broker: a message sent to a registered recipient is queued, pulled by the KEL-signed owner,
-// and acked; a poll signed by the WRONG identity is rejected.
+// The relay: an envelope sent to a registered recipient is queued, pulled
+// by the signed owner, and acked; a poll signed by the WRONG identity is
+// rejected.
 func TestRelayBrokerSendPollAck(t *testing.T) {
 	srv := newHub(t)
 	recip, _ := identity.Incept()
@@ -326,61 +312,37 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 	register(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 
-	// send is open, but the recipient must be registered.
-	payload := base64.StdEncoding.EncodeToString([]byte("hello mailbox"))
-	if code, b := post(t, srv.URL+"/relay/send", map[string]any{
-		"to_aid": recip.AID(), "from_aid": sender.AID(), "kind": aghub.RelayKindDelegate,
-		"interaction_id": "ix_relay", "payload": payload,
-	}); code != 200 {
+	env := testEnvelope(t, recip.AID(), []byte("hello mailbox"))
+	if code, b, _ := relaySend(t, srv, sender, recip.AID(), env); code != 200 {
 		t.Fatalf("relay send: %d %s", code, b)
 	}
 
-	// a poll that CLAIMS the recipient's AID but is signed by another key must be rejected — you can
-	// only read a mailbox you provably control.
-	forged := signedRelay(t, "poll", sender)
-	forged["aid"] = recip.AID()
-	if code, _ := post(t, srv.URL+"/relay/poll", forged); code == 200 {
-		t.Fatal("forged poll (recipient AID, wrong key) must be rejected")
+	// A poll that CLAIMS the recipient's AID but is signed by another key
+	// must be rejected — you can only read a mailbox you provably control.
+	raw := rawBody(t, map[string]any{})
+	req := newRequest(t, srv, http.MethodPost, "/relay/poll", raw)
+	signV2(t, req, sender, relayauth.ActionPoll, hubAIDOf(t, srv), raw, time.Now())
+	req.Header.Set(relayauth.HeaderAID, recip.AID())
+	if code, _, _ := send(t, req); code != http.StatusUnauthorized {
+		t.Fatalf("forged poll (recipient AID, wrong key) must be 401, got %d", code)
 	}
 
-	// the recipient polls its mailbox and gets the message.
-	code, b := post(t, srv.URL+"/relay/poll", signedRelay(t, "poll", recip))
-	if code != 200 {
-		t.Fatalf("relay poll: %d %s", code, b)
+	// The recipient polls its mailbox and gets the exact bytes.
+	p := relayPoll(t, srv, recip)
+	if len(p.Messages) != 1 {
+		t.Fatalf("polled = %+v, want 1 message", p.Messages)
 	}
-	var polled struct {
-		Messages []struct {
-			ID      int64  `json:"id"`
-			Kind    string `json:"kind"`
-			Payload string `json:"payload"`
-		} `json:"messages"`
-	}
-	_ = json.Unmarshal(b, &polled)
-	if len(polled.Messages) != 1 || polled.Messages[0].Kind != aghub.RelayKindDelegate {
-		t.Fatalf("polled = %+v, want 1 delegate message", polled.Messages)
+	got, _ := base64.StdEncoding.DecodeString(p.Messages[0].Envelope)
+	if !bytes.Equal(got, env) {
+		t.Fatal("the envelope changed in the relay")
 	}
 
-	// ack it, then a re-poll returns nothing.
-	ack := signedRelay(t, "ack", recip)
-	ack["ids"] = []int64{polled.Messages[0].ID}
-	if code, b := post(t, srv.URL+"/relay/ack", ack); code != 200 {
-		t.Fatalf("relay ack: %d %s", code, b)
+	// Ack it, then a re-poll returns nothing.
+	if n := relayAck(t, srv, recip, p.Messages[0].ID); n != 1 {
+		t.Fatalf("acked %d, want 1", n)
 	}
-	_, b = post(t, srv.URL+"/relay/poll", signedRelay(t, "poll", recip))
-	_ = json.Unmarshal(b, &polled)
-	if len(polled.Messages) != 0 {
-		t.Fatalf("after ack, mailbox should be empty, got %d", len(polled.Messages))
-	}
-}
-
-// signedRelay builds a KEL-signed relay auth body for the given action + identity.
-func signedRelay(t *testing.T, action string, c *identity.Controller) map[string]any {
-	t.Helper()
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(action, c.AID(), ts))
-	return map[string]any{
-		"aid": c.AID(), "ts": ts, "key_state_seq": seq,
-		"sig": base64.StdEncoding.EncodeToString(sig),
+	if again := relayPoll(t, srv, recip); len(again.Messages) != 0 {
+		t.Fatalf("after ack, mailbox should be empty, got %d", len(again.Messages))
 	}
 }
 
@@ -413,15 +375,14 @@ func TestProfileListingAndAuth(t *testing.T) {
 	}
 
 	// A forged profile update (claims c's AID, signed by other's key) must be rejected.
-	forged := signedProfile(t, other, "hi", "readme", "free")
-	forged["aid"] = c.AID()
-	if code, _ := post(t, srv.URL+"/profile", forged); code == 200 {
+	if code, _ := signedDo(t, srv, other, relayauth.ActionProfile, http.MethodPost, "/profile",
+		profileBody(c.AID(), "hi", "readme", "free")); code == 200 {
 		t.Fatal("forged profile update must be rejected")
 	}
 
 	// The owner publishes a profile → now listed, with content shown.
-	body := signedProfile(t, c, "does translations", "# Bob\nFast + accurate", "¥1 per line")
-	if code, b := post(t, srv.URL+"/profile", body); code != 200 {
+	if code, b := signedDo(t, srv, c, relayauth.ActionProfile, http.MethodPost, "/profile",
+		profileBody(c.AID(), "does translations", "# Bob\nFast + accurate", "¥1 per line")); code != 200 {
 		t.Fatalf("profile update: %d %s", code, b)
 	}
 	if !listedContains(t, srv, c.AID()) {
@@ -444,15 +405,9 @@ func TestProfileListingAndAuth(t *testing.T) {
 	}
 }
 
-// signedProfile builds a KEL-signed /profile body for c.
-func signedProfile(t *testing.T, c *identity.Controller, summary, readme, pricing string) map[string]any {
-	t.Helper()
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionProfile, c.AID(), ts))
-	return map[string]any{
-		"aid": c.AID(), "summary": summary, "readme": readme, "pricing": pricing,
-		"ts": ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig),
-	}
+// profileBody is a /profile body naming aid.
+func profileBody(aid, summary, readme, pricing string) map[string]any {
+	return map[string]any{"aid": aid, "summary": summary, "readme": readme, "pricing": pricing}
 }
 
 // listedContains reports whether aid appears in the public /agents listing.
@@ -475,16 +430,18 @@ func listedContains(t *testing.T, srv *httptest.Server, aid string) bool {
 	return false
 }
 
-// A registration whose KEL does not derive the claimed AID is rejected.
+// A registration whose KEL does not derive the claimed AID is rejected,
+// even when the request is properly signed by the claimed AID.
 func TestRegisterAidKelMismatchRejected(t *testing.T) {
 	srv := newHub(t)
 	a, _ := identity.Incept()
 	b, _ := identity.Incept()
 	kelB, _ := identity.MarshalKEL(b.KEL()) // b's KEL under a's claimed AID
-	if code, _ := post(t, srv.URL+"/register", map[string]any{
+	code, body := signedDo(t, srv, a, relayauth.ActionRegister, http.MethodPost, "/register", map[string]any{
 		"aid": a.AID(), "kel": base64.StdEncoding.EncodeToString(kelB),
-	}); code == 200 {
-		t.Fatal("aid/kel mismatch must be rejected")
+	})
+	if code != http.StatusBadRequest || !strings.Contains(string(body), "does not derive") {
+		t.Fatalf("aid/kel mismatch must be refused as such: %d %s", code, body)
 	}
 }
 
@@ -501,7 +458,7 @@ func TestWireContractVersionIsStated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if got := resp.Header.Get("X-ANet-Wire"); got != "1" {
+	if got := resp.Header.Get("X-ANet-Wire"); got != "2" {
 		t.Fatalf("every response must state the contract version, got %q", got)
 	}
 }
@@ -734,7 +691,7 @@ func TestCapabilitiesAreIndexedForAgentsRegisteredBeforeTheIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PutAgent(c.AID(), "Old", []string{"cas.put"}, 5, kel); err != nil {
+	if err := s.PutAgent(c.AID(), "Old", []string{"cas.put"}, kel); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -976,7 +933,7 @@ func TestAPeerCannotClaimAnAgentRegisteredHere(t *testing.T) {
 	defer s.Close()
 	// Rebuild the same situation in a store we can reach directly.
 	kelB, _ := identity.MarshalKEL(local.KEL())
-	if err := s.PutAgent(local.AID(), "Ours", []string{"cas.put"}, 5, kelB); err != nil {
+	if err := s.PutAgent(local.AID(), "Ours", []string{"cas.put"}, kelB); err != nil {
 		t.Fatal(err)
 	}
 	err = s.AdmitFedCard("did:anet:peer", aghub.FedCard{
@@ -1013,11 +970,14 @@ func TestCreditSettlement(t *testing.T) {
 
 	auth := signedAuth(t, payer, payee.AID(), 120, hubAID, "ix-1")
 	payload := creditPayload(t, auth, payee.AID(), payment.CreditNetwork(hubAID))
+	// What the payee asked for: /verify and /settle refuse a request
+	// without it (A2A-DESIGN §8.5).
+	req := requirementsFor(payee.AID(), 120, payment.CreditNetwork(hubAID))
 
 	// Verify first: it must not move anything.
 	var vr payment.VerifyResponse
 	postJSON(t, srv.URL+"/x402/verify", map[string]any{
-		"x402Version": payment.Version, "paymentPayload": payload}, &vr)
+		"x402Version": payment.Version, "paymentPayload": payload, "paymentRequirements": req}, &vr)
 	if !vr.IsValid {
 		t.Fatalf("a funded, signed authorization must verify: %s", vr.InvalidReason)
 	}
@@ -1027,7 +987,7 @@ func TestCreditSettlement(t *testing.T) {
 
 	var sr payment.SettlementResponse
 	postJSON(t, srv.URL+"/x402/settle", map[string]any{
-		"x402Version": payment.Version, "paymentPayload": payload}, &sr)
+		"x402Version": payment.Version, "paymentPayload": payload, "paymentRequirements": req}, &sr)
 	if !sr.Success {
 		t.Fatalf("settle failed: %s", sr.ErrorReason)
 	}
@@ -1041,7 +1001,7 @@ func TestCreditSettlement(t *testing.T) {
 	// worked.
 	var again payment.SettlementResponse
 	postJSON(t, srv.URL+"/x402/settle", map[string]any{
-		"x402Version": payment.Version, "paymentPayload": payload}, &again)
+		"x402Version": payment.Version, "paymentPayload": payload, "paymentRequirements": req}, &again)
 	if !again.Success {
 		t.Errorf("a retried settle must succeed, got %s", again.ErrorReason)
 	}
@@ -1067,17 +1027,20 @@ func TestPaymentRefusals(t *testing.T) {
 	register(t, srv, payee, "Payee", nil)
 	hubAID := hubAIDOf(t, srv)
 
+	// The requirements are the payload's own accepted option: these cases
+	// are about the payment, not about a mismatch with the terms.
 	settle := func(p *payment.PaymentPayload) payment.SettlementResponse {
 		var sr payment.SettlementResponse
+		req := p.Accepted
 		postJSON(t, srv.URL+"/x402/settle", map[string]any{
-			"x402Version": payment.Version, "paymentPayload": p}, &sr)
+			"x402Version": payment.Version, "paymentPayload": p, "paymentRequirements": &req}, &sr)
 		return sr
 	}
 
 	// More than the registration grant, and nothing else funded.
 	over := uint64(aghub.RegistrationGrant + 1)
 	broke := settle(creditPayload(t, signedAuth(t, payer, payee.AID(), over, hubAID, "ix-a"), payee.AID(), payment.CreditNetwork(hubAID)))
-	if broke.Success || !strings.Contains(broke.ErrorReason, "insufficient") {
+	if broke.Success || broke.ErrorReason != payment.ReasonInsufficientFunds {
 		t.Errorf("an unfunded payment settled: %+v", broke)
 	}
 
@@ -1085,8 +1048,8 @@ func TestPaymentRefusals(t *testing.T) {
 	fundAgent(t, srv, payer.AID(), 500)
 	foreign := signedAuth(t, payer, payee.AID(), 50, "did:anet:another-hub", "ix-b")
 	fr := settle(creditPayload(t, foreign, payee.AID(), payment.CreditNetwork("did:anet:another-hub")))
-	if fr.Success {
-		t.Error("this hub settled another hub's credit")
+	if fr.Success || fr.ErrorReason != payment.ReasonNetworkMismatch {
+		t.Errorf("this hub settled another hub's credit: %+v", fr)
 	}
 
 	// An unregistered payer has no key history here, so nothing can say
@@ -1096,7 +1059,7 @@ func TestPaymentRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	sr := settle(creditPayload(t, signedAuth(t, stranger, payee.AID(), 10, hubAID, "ix-c"), payee.AID(), payment.CreditNetwork(hubAID)))
-	if sr.Success || !strings.Contains(sr.ErrorReason, "not registered") {
+	if sr.Success || sr.ErrorReason != payment.ReasonUnknownPayer {
 		t.Errorf("a stranger's payment settled: %+v", sr)
 	}
 }
@@ -1160,18 +1123,24 @@ func creditPayload(t *testing.T, a *payment.Authorization, payTo, network string
 	}
 }
 
+// balanceOf reads an account's balance from the test hub's store.
+//
+// Not over HTTP: GET /agents/{aid}/balance answers only a request signed
+// by that AID (A2A-DESIGN §3.7), and the callers here check balances of
+// accounts, including the hub's and foreign ones, rather than the
+// endpoint. The endpoint and its refusals are tested in
+// facilitator_test.go (TestLedgerReadsAreForTheAccountHolderOnly).
 func balanceOf(t *testing.T, srv *httptest.Server, aid string) int64 {
 	t.Helper()
-	resp, err := http.Get(srv.URL + "/agents/" + aid + "/balance")
+	v, ok := testHubStores.Load(srv.URL)
+	if !ok {
+		t.Fatal("no store for this hub")
+	}
+	n, err := v.(*aghub.Store).Balance(aid)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	var b aghub.Balance
-	if err := json.NewDecoder(resp.Body).Decode(&b); err != nil {
-		t.Fatal(err)
-	}
-	return b.Credits
+	return n
 }
 
 func postJSON(t *testing.T, url string, body any, out any) {
@@ -1219,15 +1188,15 @@ func TestABalanceCanBeExplained(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(srv.URL + "/agents/" + c.AID() + "/ledger")
-	if err != nil {
-		t.Fatal(err)
+	// The account holder's own signed read (A2A-DESIGN §3.7).
+	code, body := ownerGet(t, srv, c, relayauth.ActionLedger, "/agents/"+c.AID()+"/ledger")
+	if code != http.StatusOK {
+		t.Fatalf("ledger: %d %s", code, body)
 	}
-	defer resp.Body.Close()
 	var out struct {
 		Entries []aghub.LedgerEntry `json:"entries"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatal(err)
 	}
 	if len(out.Entries) != 2 {
@@ -1340,12 +1309,8 @@ func twoAgents(t *testing.T) (*identity.Controller, *identity.Controller) {
 // agent, because that is a decision only the agent makes.
 func setVisibility(t *testing.T, srv *httptest.Server, c *identity.Controller, v string) {
 	t.Helper()
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionProfile, c.AID(), ts))
-	code, b := post(t, srv.URL+"/agents/"+c.AID()+"/visibility", map[string]any{
-		"visibility": v, "ts": ts, "key_state_seq": seq,
-		"sig": base64.StdEncoding.EncodeToString(sig),
-	})
+	code, b := signedDo(t, srv, c, relayauth.ActionVisibility, http.MethodPost,
+		"/agents/"+c.AID()+"/visibility", map[string]any{"visibility": v})
 	if code != 200 {
 		t.Fatalf("visibility: %d %s", code, b)
 	}

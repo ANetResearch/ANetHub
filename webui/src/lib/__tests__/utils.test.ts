@@ -32,8 +32,6 @@ describe("fmtBytes", () => {
     expect(fmtBytes(1023)).toBe("1023 B");
     expect(fmtBytes(1024)).toBe("1.0 KB");
     expect(fmtBytes(1024 * 1024)).toBe("1.0 MB");
-    // The guest attachment cap, which is the number a reader most often
-    // sees this function render.
     expect(fmtBytes(12 * 1024 * 1024)).toBe("12.0 MB");
   });
 

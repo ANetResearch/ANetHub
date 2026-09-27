@@ -1,20 +1,20 @@
 // Package admin is the operator plane of the official Hub — a separate HTTP service (anet-hub-admin)
-// that runs BESIDE the public anet-hub binary and never changes public behavior. It is three things:
+// that runs BESIDE the public anet-hub binary and never changes public behavior. It is:
 //
 //	registry ops — an operator view over the public hub.db registry (ALL agents, listed or not, with
-//	               activity/backlog), plus moderation state and guest-quota control. Official agents
-//	               (tier "official", declared by an AGENT manifest from the ANetAgents repo) are fully
-//	               observable: liveness, monitor passthrough, log query, start/stop/restart/update over
-//	               a WHITELISTED ssh op set — never arbitrary commands.
-//	harvest      — the dataset-asset accumulator: relay interactions (hub.db) and official-agent call
-//	               history are captured into OKF-style bundles (markdown concept cards + JSONL payloads)
-//	               so platform traffic becomes trainable data assets (intent grounding / pre-cognition /
-//	               co-brain research feeds). Raw captures are immutable; cards are regenerable.
+//	               review counts and mailbox backlog), moderation state, and registry delete/restore.
+//	               Official agents are registered by id, AID, hub and capabilities only.
 //	audit        — every mutating admin action is recorded (who/what/when) in admin.db.
 //
+// It holds no task content and has no channel to any (A2A-DESIGN §9, [C39]). Earlier versions
+// harvested relay payloads and official agents' job history into datasets/, proxied official agents'
+// monitors and ran lifecycle commands on their hosts over ssh; all of that is removed. The session
+// browser still reads whatever an earlier version left in admin.db and datasets/, and the production
+// cleanup (deploy/cleanup-content-v0.2.sh) deletes it.
+//
 // admin.db is the admin plane's OWN store; the public hub.db is opened alongside it (same WAL file the
-// hub serves from — busy_timeout guards cross-process writes, which are limited to guest_quota updates
-// and registry deletes).
+// hub serves from — busy_timeout guards cross-process writes, which are limited to registry deletes
+// and restores).
 package admin
 
 import (
@@ -97,8 +97,8 @@ func (s *Store) migrate() error {
 		   relay_backlog INTEGER NOT NULL DEFAULT 0,
 		   hub_db_bytes INTEGER NOT NULL DEFAULT 0
 		 )`,
-		// Harvest cursors: one row per source ("hub-relay" = relay_message rowid cursor;
-		// "ai-studio:<id>" = history.jsonl byte offset).
+		// Harvest cursors written by earlier versions (hub-relay, ai-studio). Nothing writes
+		// them now; they are read for the overview until the production cleanup deletes them.
 		`CREATE TABLE IF NOT EXISTS harvest_state (
 		   source TEXT PRIMARY KEY,
 		   cursor TEXT NOT NULL DEFAULT '',
@@ -107,8 +107,8 @@ func (s *Store) migrate() error {
 		   records INTEGER NOT NULL DEFAULT 0,
 		   note TEXT NOT NULL DEFAULT ''
 		 )`,
-		// UI index of harvested sessions (the OKF bundle on disk stays the source of truth; this table
-		// exists so the sessions browser never scans the filesystem or the 4GB relay table).
+		// Index of sessions harvested by earlier versions. Nothing writes it now; the session
+		// browser reads it until the production cleanup deletes the rows.
 		`CREATE TABLE IF NOT EXISTS session (
 		   source TEXT NOT NULL,
 		   session_id TEXT NOT NULL,
@@ -352,29 +352,6 @@ type HarvestState struct {
 	Note     string `json:"note"`
 }
 
-// GetHarvestState returns the state row for source (zero value if none).
-func (s *Store) GetHarvestState(source string) (HarvestState, error) {
-	st := HarvestState{Source: source}
-	err := s.db.QueryRow(`SELECT cursor,last_run,sessions,records,note FROM harvest_state WHERE source=?`, source).
-		Scan(&st.Cursor, &st.LastRun, &st.Sessions, &st.Records, &st.Note)
-	if err == sql.ErrNoRows {
-		return st, nil
-	}
-	return st, err
-}
-
-// PutHarvestState upserts a harvest cursor row.
-func (s *Store) PutHarvestState(st HarvestState) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec(
-		`INSERT INTO harvest_state(source,cursor,last_run,sessions,records,note) VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(source) DO UPDATE SET cursor=excluded.cursor, last_run=excluded.last_run,
-		   sessions=excluded.sessions, records=excluded.records, note=excluded.note`,
-		st.Source, st.Cursor, st.LastRun, st.Sessions, st.Records, st.Note)
-	return err
-}
-
 // HarvestStates returns all harvest cursor rows.
 func (s *Store) HarvestStates() ([]HarvestState, error) {
 	rows, err := s.db.Query(`SELECT source,cursor,last_run,sessions,records,note FROM harvest_state ORDER BY source`)
@@ -393,14 +370,17 @@ func (s *Store) HarvestStates() ([]HarvestState, error) {
 	return out, rows.Err()
 }
 
-// SessionRow is one harvested-session index row (UI listing).
+// SessionRow is one index row of a session an earlier version harvested (UI listing).
+//
+// The session table also has a goal column, which holds the first request goal of the harvested
+// interaction or job, that is, task content. It is not read: the admin plane does not serve task
+// content (A2A-DESIGN §9, SI-1), and the column is removed with the rows by the production cleanup.
 type SessionRow struct {
 	Source       string `json:"source"`
 	SessionID    string `json:"session_id"`
 	ProviderAID  string `json:"provider_aid"`
 	RequesterAID string `json:"requester_aid"`
 	Intent       string `json:"intent"`
-	Goal         string `json:"goal"`
 	Status       string `json:"status"`
 	StartedAt    string `json:"started_at"`
 	EndedAt      string `json:"ended_at"`
@@ -411,43 +391,25 @@ type SessionRow struct {
 	UpdatedAt    string `json:"updated_at"`
 }
 
-// PutSession upserts one session index row.
-func (s *Store) PutSession(r SessionRow) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.db.Exec(
-		`INSERT INTO session(source,session_id,provider_aid,requester_aid,intent,goal,status,
-		   started_at,ended_at,events,bytes,card_path,data_path,updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		 ON CONFLICT(source,session_id) DO UPDATE SET provider_aid=excluded.provider_aid,
-		   requester_aid=excluded.requester_aid, intent=excluded.intent, goal=excluded.goal,
-		   status=excluded.status, started_at=excluded.started_at, ended_at=excluded.ended_at,
-		   events=excluded.events, bytes=excluded.bytes, card_path=excluded.card_path,
-		   data_path=excluded.data_path, updated_at=excluded.updated_at`,
-		r.Source, r.SessionID, r.ProviderAID, r.RequesterAID, r.Intent, r.Goal, r.Status,
-		r.StartedAt, r.EndedAt, r.Events, r.Bytes, r.CardPath, r.DataPath, r.UpdatedAt)
-	return err
-}
-
 // GetSession returns one session index row.
 func (s *Store) GetSession(source, sessionID string) (SessionRow, error) {
 	var r SessionRow
 	err := s.db.QueryRow(
-		`SELECT source,session_id,provider_aid,requester_aid,intent,goal,status,started_at,ended_at,
+		`SELECT source,session_id,provider_aid,requester_aid,intent,status,started_at,ended_at,
 		        events,bytes,card_path,data_path,updated_at
 		 FROM session WHERE source=? AND session_id=?`, source, sessionID).
-		Scan(&r.Source, &r.SessionID, &r.ProviderAID, &r.RequesterAID, &r.Intent, &r.Goal, &r.Status,
+		Scan(&r.Source, &r.SessionID, &r.ProviderAID, &r.RequesterAID, &r.Intent, &r.Status,
 			&r.StartedAt, &r.EndedAt, &r.Events, &r.Bytes, &r.CardPath, &r.DataPath, &r.UpdatedAt)
 	return r, err
 }
 
-// Sessions lists harvested sessions, newest activity first. source and q are optional filters
-// (q matches session_id, AIDs, intent or goal).
+// Sessions lists sessions earlier versions harvested, newest activity first. source and q are
+// optional filters (q matches session_id, AIDs or intent; not the goal, which is content).
 func (s *Store) Sessions(source, q string, limit int) ([]SessionRow, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	query := `SELECT source,session_id,provider_aid,requester_aid,intent,goal,status,started_at,ended_at,
+	query := `SELECT source,session_id,provider_aid,requester_aid,intent,status,started_at,ended_at,
 	                 events,bytes,card_path,data_path,updated_at FROM session`
 	var conds []string
 	var args []any
@@ -457,8 +419,8 @@ func (s *Store) Sessions(source, q string, limit int) ([]SessionRow, error) {
 	}
 	if q != "" {
 		like := "%" + q + "%"
-		conds = append(conds, `(session_id LIKE ? OR provider_aid LIKE ? OR requester_aid LIKE ? OR intent LIKE ? OR goal LIKE ?)`)
-		args = append(args, like, like, like, like, like)
+		conds = append(conds, `(session_id LIKE ? OR provider_aid LIKE ? OR requester_aid LIKE ? OR intent LIKE ?)`)
+		args = append(args, like, like, like, like)
 	}
 	for i, c := range conds {
 		if i == 0 {
@@ -477,7 +439,7 @@ func (s *Store) Sessions(source, q string, limit int) ([]SessionRow, error) {
 	out := []SessionRow{}
 	for rows.Next() {
 		var r SessionRow
-		if err := rows.Scan(&r.Source, &r.SessionID, &r.ProviderAID, &r.RequesterAID, &r.Intent, &r.Goal,
+		if err := rows.Scan(&r.Source, &r.SessionID, &r.ProviderAID, &r.RequesterAID, &r.Intent,
 			&r.Status, &r.StartedAt, &r.EndedAt, &r.Events, &r.Bytes, &r.CardPath, &r.DataPath, &r.UpdatedAt); err != nil {
 			return nil, err
 		}

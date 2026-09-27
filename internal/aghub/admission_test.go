@@ -1,12 +1,11 @@
 package aghub_test
 
 import (
-	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
@@ -21,18 +20,11 @@ import (
 func registerWithInvite(t *testing.T, srv *httptest.Server, c *identity.Controller,
 	name, invite string) (int, []byte) {
 	t.Helper()
-	kelB, _ := identity.MarshalKEL(c.KEL())
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := c.Sign(relayauth.Preimage(relayauth.ActionRegister, c.AID(), ts))
-	body := map[string]any{
-		"aid": c.AID(), "name": name, "caps": []string{},
-		"kel": base64.StdEncoding.EncodeToString(kelB),
-		"ts":  ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig),
-	}
+	body := registerBody(t, c, name, []string{})
 	if invite != "" {
 		body["invite"] = invite
 	}
-	return post(t, srv.URL+"/register", body)
+	return signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
 }
 
 // The default is open registration, and it stays open. Every hub that
@@ -198,19 +190,13 @@ func TestAnInviteIsNotSpentByACallerWhoCannotSign(t *testing.T) {
 	token, _, _ := store.NewInvite("one board", 1, 0)
 	a, _ := twoAgents(t)
 
-	kelB, _ := identity.MarshalKEL(a.KEL())
-	ts := uint64(time.Now().UnixMilli())
-	// Signed over a different action, so the challenge cannot verify
+	// Signed over a different action, so the signature cannot verify
 	// while everything the earlier checks look at is correct.
-	sig, seq := a.Sign(relayauth.Preimage(relayauth.ActionProfile, a.AID(), ts))
-	code, body := post(t, srv.URL+"/register", map[string]any{
-		"aid": a.AID(), "name": "Forger", "caps": []string{},
-		"kel": base64.StdEncoding.EncodeToString(kelB),
-		"ts":  ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig),
-		"invite": token,
-	})
+	body := registerBody(t, a, "Forger", []string{})
+	body["invite"] = token
+	code, resp := signedDo(t, srv, a, relayauth.ActionProfile, http.MethodPost, "/register", body)
 	if code != 401 {
-		t.Fatalf("an unverifiable challenge must be refused as unauthorized, got %d %s", code, body)
+		t.Fatalf("an unverifiable challenge must be refused as unauthorized, got %d %s", code, resp)
 	}
 	list, _ := store.Invites()
 	if list[0].Uses != 0 {

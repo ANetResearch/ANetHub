@@ -1,6 +1,7 @@
 package aghub
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -10,7 +11,10 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/adp"
+	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/seal"
+
 	"github.com/ANetResearch/ANetHub/internal/federation"
 )
 
@@ -255,11 +259,15 @@ func (s *Store) SetVisibility(aid, v string) error {
 // The KEL travels with the card so a consuming hub can admit it without
 // asking anyone — the same self-contained shape a delegation uses. Home
 // is the routing hint: which hub this agent actually lives on, and so
-// where work for it has to go.
+// where work for it has to go. Keys is the agent's encryption key set
+// (seal.SignedEncKeySet, §3.9), so a sender on the consuming hub can seal
+// to the agent without a round trip to its home hub; it is empty for an
+// agent that has published none, and on a withdrawal.
 type FedCard struct {
 	Card   json.RawMessage `json:"card"`
-	KEL    string          `json:"kel"`  // base64
-	Home   string          `json:"home"` // the agent's home hub endpoint
+	KEL    string          `json:"kel"`            // base64
+	Keys   string          `json:"keys,omitempty"` // base64 of the seal.SignedEncKeySet encoding
+	Home   string          `json:"home"`           // the agent's home hub endpoint
 	FedSeq int64           `json:"fed_seq"`
 }
 
@@ -497,8 +505,9 @@ func (s *Store) CardsSince(cursor int64, limit int, home string) ([]FedCard, int
 	// to start with these bytes is dropped by the visibility test rather
 	// than served as a withdrawal.
 	rows, err := s.db.Query(
-		`SELECT c.card, c.fed_seq, a.kel, COALESCE(a.visibility,'')
+		`SELECT c.card, c.fed_seq, a.kel, COALESCE(a.visibility,''), k.keyset
 		   FROM agent_card c LEFT JOIN agent a ON a.aid = c.aid
+		   LEFT JOIN agent_keys k ON k.aid = c.aid
 		  WHERE c.fed_seq > ?
 		    AND (a.visibility IN (?, ?) OR CAST(c.card AS TEXT) LIKE ?)
 		  ORDER BY c.fed_seq LIMIT ?`,
@@ -510,10 +519,10 @@ func (s *Store) CardsSince(cursor int64, limit int, home string) ([]FedCard, int
 	out := []FedCard{}
 	next := cursor
 	for rows.Next() {
-		var card, kel []byte
+		var card, kel, keys []byte
 		var seq int64
 		var visibility string
-		if err := rows.Scan(&card, &seq, &kel, &visibility); err != nil {
+		if err := rows.Scan(&card, &seq, &kel, &visibility, &keys); err != nil {
 			return nil, cursor, err
 		}
 		// The cursor advances past every row the query returned, whether
@@ -534,10 +543,14 @@ func (s *Store) CardsSince(cursor int64, limit int, home string) ([]FedCard, int
 		if !federates(visibility) {
 			continue
 		}
-		out = append(out, FedCard{
+		fc := FedCard{
 			Card: json.RawMessage(card), KEL: base64.StdEncoding.EncodeToString(kel),
 			Home: home, FedSeq: seq,
-		})
+		}
+		if len(keys) > 0 {
+			fc.Keys = base64.StdEncoding.EncodeToString(keys)
+		}
+		out = append(out, fc)
 	}
 	return out, next, rows.Err()
 }
@@ -596,17 +609,109 @@ func (s *Store) AdmitFedCard(peerAID string, fc FedCard) error {
 		return fmt.Errorf("%w: %s is registered here", federation.ErrRefusedForNow, card.SubjectDID)
 	}
 	var high uint64
-	_ = s.db.QueryRow(`SELECT seq FROM fed_card WHERE aid=?`, card.SubjectDID).Scan(&high)
+	var storedCard, storedKEL, storedKeys []byte
+	var storedPeer string
+	err = s.db.QueryRow(`SELECT seq, card, kel, keys, peer_aid FROM fed_card WHERE aid=?`, card.SubjectDID).
+		Scan(&high, &storedCard, &storedKEL, &storedKeys, &storedPeer)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	// The KEL may only grow (§3.8). A peer serving a shorter KEL than the
+	// one already held, or one that disagrees with it on some event, is
+	// refused: storing it would let the directory, and every signature
+	// checked against it, go back to a key state the agent has rotated
+	// away from. The refusal is permanent for this entry; a later entry
+	// with a KEL that extends the stored one is admitted.
+	if len(storedKEL) > 0 {
+		old, uerr := identity.UnmarshalKEL(storedKEL)
+		if uerr != nil {
+			return fmt.Errorf("stored federated kel for %s undecodable: %w", card.SubjectDID, uerr)
+		}
+		if err := identity.ExtendsKEL(old, kel); err != nil {
+			return fmt.Errorf("federated card refused: its key history does not extend the stored one: %w", err)
+		}
+	}
+	// The card already held, sent again. The home hub re-sends an
+	// unchanged card when the agent publishes a new key set (the entry
+	// carries it) and on every full resync. adp.AdmitCard refuses an
+	// equal seq, so the card is not re-admitted; its KEL (already checked
+	// to extend the stored one) and its key set are updated under the same
+	// rules as for a new card, and only from the peer that taught it.
+	if len(storedCard) > 0 && card.Seq == high && bytes.Equal(storedCard, fc.Card) {
+		if peerAID != storedPeer {
+			return nil
+		}
+		keys := fedKeysToStore(card.SubjectDID, fc.Keys, storedKeys, kel)
+		_, err = s.db.Exec(`UPDATE fed_card SET kel=?, keys=?, stored_at=? WHERE aid=?`,
+			kelBytes, keys, time.Now().UTC().Format(time.RFC3339Nano), card.SubjectDID)
+		return err
+	}
 	if _, err := adp.AdmitCard(&card, time.Now(), high, kel, cardMajors, nil); err != nil {
 		return fmt.Errorf("federated card refused: %w", err)
 	}
+	keys := fedKeysToStore(card.SubjectDID, fc.Keys, storedKeys, kel)
 	_, err = s.db.Exec(
-		`INSERT INTO fed_card(aid, seq, card, kel, home, peer_aid, stored_at) VALUES(?,?,?,?,?,?,?)
+		`INSERT INTO fed_card(aid, seq, card, kel, home, peer_aid, stored_at, keys) VALUES(?,?,?,?,?,?,?,?)
 		 ON CONFLICT(aid) DO UPDATE SET seq=excluded.seq, card=excluded.card, kel=excluded.kel,
-		   home=excluded.home, peer_aid=excluded.peer_aid, stored_at=excluded.stored_at`,
+		   home=excluded.home, peer_aid=excluded.peer_aid, stored_at=excluded.stored_at, keys=excluded.keys`,
 		card.SubjectDID, card.Seq, []byte(fc.Card), kelBytes, fc.Home, peerAID,
-		time.Now().UTC().Format(time.RFC3339Nano))
+		time.Now().UTC().Format(time.RFC3339Nano), keys)
 	return err
+}
+
+// fedKeysToStore decides which key set a fed_card row keeps after a sync
+// entry for aid arrives.
+//
+// The entry's key set is advisory: a card is admitted whether or not its
+// keys verify, and keys that fail are not stored. Accepted keys follow the
+// consumer rule of §3.1: a higher seq replaces the stored set, an equal
+// seq with identical set bytes is the same set, a lower seq or an equal
+// seq with different content is ignored. In every case the set must pass
+// seal.VerifyEncKeySet with expectAID = aid against the entry's KEL, so a
+// peer cannot attach another AID's keys to this card.
+func fedKeysToStore(aid, incomingB64 string, stored []byte, kel []identity.SignedEvent) []byte {
+	if incomingB64 == "" {
+		return stored
+	}
+	raw, err := base64.StdEncoding.DecodeString(incomingB64)
+	if err != nil {
+		return stored
+	}
+	signed, err := seal.UnmarshalSignedEncKeySet(raw)
+	if err != nil {
+		return stored
+	}
+	var seen *seal.Seen
+	if len(stored) > 0 {
+		if prev, perr := seal.UnmarshalSignedEncKeySet(stored); perr == nil {
+			if set, serr := decodeEncKeySet(prev.Set); serr == nil {
+				seen = &seal.Seen{Seq: set.Seq, Set: prev.Set}
+			}
+		}
+	}
+	d, err := seal.DecideHighWaterSigned(seen, signed)
+	if err != nil || (d != seal.Replace && d != seal.Same) {
+		return stored
+	}
+	if _, err := seal.VerifyEncKeySet(signed, aid, kel, uint64(time.Now().UnixMilli())); err != nil {
+		return stored
+	}
+	canon, err := signed.Marshal()
+	if err != nil {
+		return stored
+	}
+	return canon
+}
+
+// decodeEncKeySet reads the seq of a stored set. The encoding is
+// CoreDet-CBOR, which seal decodes; DecideHighWaterSigned exposes only the
+// decision, so the stored seq is read here.
+func decodeEncKeySet(set []byte) (*seal.EncKeySet, error) {
+	var ks seal.EncKeySet
+	if err := coredet.Unmarshal(set, &ks); err != nil {
+		return nil, err
+	}
+	return &ks, nil
 }
 
 // retireFedCard drops a peer-learned card that its home hub has stopped
@@ -643,8 +748,14 @@ func (d FedDirectory) CardsSince(cursor int64, limit int, home string) ([]federa
 		if derr != nil {
 			return nil, cursor, derr
 		}
+		var keys []byte
+		if c.Keys != "" {
+			if keys, derr = base64.StdEncoding.DecodeString(c.Keys); derr != nil {
+				return nil, cursor, derr
+			}
+		}
 		out = append(out, federation.FedCardView{
-			Card: []byte(c.Card), KEL: kel, Home: c.Home, FedSeq: c.FedSeq,
+			Card: []byte(c.Card), KEL: kel, Keys: keys, Home: c.Home, FedSeq: c.FedSeq,
 		})
 	}
 	return out, next, nil
@@ -678,10 +789,12 @@ func (d FedDirectory) AdmitFedReview(peerAID string, raw json.RawMessage) error 
 	return d.S.AdmitFedReview(peerAID, fr)
 }
 
-func (d FedDirectory) AdmitFedCard(peerAID string, card, kel []byte, home string) error {
-	return d.S.AdmitFedCard(peerAID, FedCard{
-		Card: json.RawMessage(card), KEL: base64.StdEncoding.EncodeToString(kel), Home: home,
-	})
+func (d FedDirectory) AdmitFedCard(peerAID string, card, kel, keys []byte, home string) error {
+	fc := FedCard{Card: json.RawMessage(card), KEL: base64.StdEncoding.EncodeToString(kel), Home: home}
+	if len(keys) > 0 {
+		fc.Keys = base64.StdEncoding.EncodeToString(keys)
+	}
+	return d.S.AdmitFedCard(peerAID, fc)
 }
 
 // FederatedAgents returns agents learned from peer hubs, for discovery.

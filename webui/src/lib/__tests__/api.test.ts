@@ -93,7 +93,7 @@ describe("the fields this hub actually sends", () => {
           agents: [
             {
               aid: "a", name: "Remote", caps: ["work.do"], listed: true,
-              guest_quota: 5, avg_rating: 0, review_count: 0,
+              avg_rating: 0, review_count: 0,
               registered_at: "2026-08-23T00:00:00Z",
               home_hub: "https://other.example",
               last_seen: "2026-08-23T00:00:00Z",
@@ -113,7 +113,7 @@ describe("the fields this hub actually sends", () => {
     // omitempty means a healthy agent carries no quiet field at all. A
     // reader that treated absent as unknown would flag everyone.
     vi.stubGlobal("fetch", async () =>
-      respond(JSON.stringify({ agents: [{ aid: "a", name: "Live", caps: [], listed: true, guest_quota: 5, avg_rating: 0, review_count: 0, registered_at: "x" }] })),
+      respond(JSON.stringify({ agents: [{ aid: "a", name: "Live", caps: [], listed: true, avg_rating: 0, review_count: 0, registered_at: "x" }] })),
     );
     const [a] = await fetchAgents("");
     expect(a.quiet).toBeFalsy();

@@ -13,7 +13,7 @@ import (
 
 // vecsvc —— 语义向量服务客户端（anet-vec：fastembed 多语小模型 + ChromaDB，跑在 emax 本地 docker
 // 127.0.0.1:8600）。它把「任务→能力发现」从词法匹配升级为语义检索（愿景 leap 2）。服务不可用时
-// 调用方回退到 insights.go 的词法匹配，功能不中断。
+// 调用方回退到 capsules.go 的词法匹配，功能不中断。
 type VecClient struct {
 	base string
 	hc   *http.Client

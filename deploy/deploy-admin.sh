@@ -61,10 +61,11 @@ echo "==> ship binary"
 scp -q "$BIN" "$HOST":/data/projs/anet-hub/bin/anet-hub-admin.new
 ssh "$HOST" 'mv /data/projs/anet-hub/bin/anet-hub-admin.new /data/projs/anet-hub/bin/anet-hub-admin && chmod 755 /data/projs/anet-hub/bin/anet-hub-admin'
 
-# officials.json is configuration, not code: it names production hosts and the ssh user the ops plane
-# connects as, which is why it is not compiled into a binary that gets distributed. Absent file → no
-# official agents, which is a correct and safe state. Ship it only if the operator has staged one, and
-# never overwrite what is already on the host.
+# officials.json is configuration, not code. It registers official agents by id, aid, hub and caps
+# only; a manifest that still carries runtime, monitor, ops or datasets stops anet-hub-admin from
+# starting (see internal/admin/manifest.go). Absent file → no official agents, which is a correct and
+# safe state. Ship it only if the operator has staged one, and never overwrite what is already on the
+# host.
 echo "==> official-agent directory"
 if [ -f deploy/officials.json ]; then
   scp -q deploy/officials.json "$HOST":/data/projs/anet-hub/admin/officials.json
@@ -72,12 +73,36 @@ if [ -f deploy/officials.json ]; then
 else
   ssh "$HOST" 'test -f /data/projs/anet-hub/admin/officials.json' \
     && echo "    keeping the copy already on $HOST" \
-    || echo "    none here and none on $HOST — the ops plane will list no official agents (see deploy/officials.example.json)"
+    || echo "    none here and none on $HOST — the admin plane will list no official agents (see deploy/officials.example.json)"
 fi
 
 echo "==> systemd unit"
 scp -q deploy/anet-hub-admin.service "$HOST":/etc/systemd/system/anet-hub-admin.service
-ssh "$HOST" 'systemctl daemon-reload && systemctl enable anet-hub-admin >/dev/null 2>&1; systemctl restart anet-hub-admin'
+ssh "$HOST" 'systemctl daemon-reload && systemctl enable anet-hub-admin >/dev/null 2>&1'
+# The unit ships ADMIN_TOKEN=CHANGE_ME, and anet-hub-admin refuses to start with a placeholder
+# token. The real token belongs in a drop-in (systemctl edit anet-hub-admin), whose Environment=
+# line comes after the unit's, so the last ADMIN_TOKEN assignment is the one in effect. Checked on
+# the host before the restart, so that a host without a real token fails this deploy instead of
+# losing its admin surface. The binary shipped above decides (anet-hub-admin -check-token, the same
+# rule the service applies at start), so every placeholder it refuses is caught here, not only the
+# literal CHANGE_ME. The value stays on the host: only "placeholder" / "set" / "envfile" crosses
+# ssh. With an EnvironmentFile= the value is not visible here and the check is skipped (the healthz
+# smoke below still fails if the service does not come up).
+echo "==> credential check"
+TOKSTATE=$(ssh "$HOST" 'if [ -n "$(systemctl show -p EnvironmentFiles --value anet-hub-admin)" ]; then echo envfile;
+  else last=$(systemctl show -p Environment --value anet-hub-admin | tr " " "\n" | grep "^ADMIN_TOKEN=" | tail -n 1);
+  if ADMIN_TOKEN="${last#ADMIN_TOKEN=}" /data/projs/anet-hub/bin/anet-hub-admin -check-token >/dev/null 2>&1;
+  then echo set; else echo placeholder; fi; fi')
+case "$TOKSTATE" in
+  placeholder)
+    echo "ERROR: the effective ADMIN_TOKEN on $HOST is unset or a placeholder (the unit ships CHANGE_ME)." >&2
+    echo "       anet-hub-admin refuses to start with it. Set a real token in a drop-in" >&2
+    echo "       (systemctl edit anet-hub-admin) and deploy again." >&2
+    exit 1 ;;
+  envfile) echo "    ADMIN_TOKEN comes from an EnvironmentFile; not checked here" ;;
+  *) echo "    ADMIN_TOKEN is set by a drop-in" ;;
+esac
+ssh "$HOST" 'systemctl restart anet-hub-admin'
 
 echo "==> nginx /admin location (insert once, before location /)"
 scp -q deploy/nginx-admin.locations "$HOST":/tmp/nginx-admin.locations

@@ -10,9 +10,19 @@ import (
 	"regexp"
 )
 
-// Manifest is the JSON mirror of an ANetAgents AGENT.yaml (schema anet-agent-manifest/1.0). The admin
-// plane stores manifests as JSON (the repo keeps YAML for humans; the two are field-identical). Only
-// what the ops plane needs is modeled — unknown keys are preserved-by-repo, not here.
+// Manifest registers one official agent in the admin plane.
+//
+// It is a registry entry and nothing more: id, AID, hub and capabilities, plus descriptive labels
+// (name, tier, product line, summary, maintainer) used to group and display agents. Earlier versions
+// also carried runtime (an ssh host, user, working directory, systemd units and a job-history path),
+// monitor (a URL and the agent's console token) and ops (lifecycle commands to run over ssh), and
+// datasets (whether to harvest the agent's job history, prompts included). With those the admin
+// plane on the hub host could read an official agent's task content and operate it as root. They
+// are removed (A2A-DESIGN §9 row admin 官方 agent, §15, [C39]); operating an official agent is done
+// with a separate tool that does not run on the hub host.
+//
+// ParseManifest refuses a document that still carries any of the four removed keys, so that an
+// operator's old manifest is reported rather than silently reduced.
 type Manifest struct {
 	Schema      string   `json:"schema,omitempty"`
 	ID          string   `json:"id"`
@@ -24,31 +34,26 @@ type Manifest struct {
 	Caps        []string `json:"caps,omitempty"`
 	Summary     string   `json:"summary,omitempty"`
 	Maintainer  string   `json:"maintainer,omitempty"`
-	Runtime     struct {
-		Host         string   `json:"host,omitempty"`
-		SSHUser      string   `json:"ssh_user,omitempty"`
-		Workdir      string   `json:"workdir,omitempty"`
-		Units        []string `json:"units,omitempty"`
-		HistoryJSONL string   `json:"history_jsonl,omitempty"`
-	} `json:"runtime,omitempty"`
-	Monitor struct {
-		URL  string `json:"url,omitempty"`
-		Auth string `json:"auth,omitempty"` // "token" = classic console token gate (value injected server-side)
-	} `json:"monitor,omitempty"`
-	Ops struct {
-		Allowed []string `json:"allowed,omitempty"` // subset of: status logs start stop restart update
-		Update  string   `json:"update,omitempty"`  // the ONE update command an operator may trigger
-	} `json:"ops,omitempty"`
-	Datasets struct {
-		Harvest      bool   `json:"harvest,omitempty"`
-		IntentSource string `json:"intent_source,omitempty"` // e.g. "service_id" for AI Studio JobRecs
-	} `json:"datasets,omitempty"`
 }
+
+// removedManifestKeys are the manifest sections the admin plane no longer accepts.
+var removedManifestKeys = []string{"runtime", "monitor", "ops", "datasets"}
 
 var manifestIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // ParseManifest decodes + validates a manifest JSON document.
 func ParseManifest(raw []byte) (*Manifest, error) {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return nil, fmt.Errorf("admin: manifest: %w", err)
+	}
+	for _, k := range removedManifestKeys {
+		if _, ok := keys[k]; ok {
+			return nil, fmt.Errorf("admin: manifest: %q is no longer accepted: an official agent is "+
+				"registered by id, aid, hub and caps only (runtime, monitor, ops and datasets were "+
+				"removed); delete the key and submit the manifest again", k)
+		}
+	}
 	var m Manifest
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("admin: manifest: %w", err)
@@ -69,14 +74,6 @@ func ParseManifest(raw []byte) (*Manifest, error) {
 	default:
 		return nil, fmt.Errorf("admin: manifest: unknown product_line %q", m.ProductLine)
 	}
-	for _, op := range m.Ops.Allowed {
-		if !opAllowed(op) {
-			return nil, fmt.Errorf("admin: manifest: unknown op %q", op)
-		}
-	}
-	if m.Tier == "official" && m.Runtime.Host != "" && m.Runtime.SSHUser == "" {
-		m.Runtime.SSHUser = "root"
-	}
 	return &m, nil
 }
 
@@ -94,22 +91,13 @@ func OfficialsConfigPath(dataDir string) string { return filepath.Join(dataDir, 
 //
 // This list used to be a Go literal compiled into the binary, naming a
 // production host, its ssh user, its working directory, its systemd units and
-// its monitor URL. Two consequences, both of them real:
+// its monitor URL, so the binary carried the infrastructure topology wherever
+// it was distributed. It is operator configuration instead, and since the
+// removal of runtime, monitor, ops and datasets it names no host at all.
 //
-//   - The binary carried the infrastructure topology wherever it was
-//     distributed. Anyone holding a copy could read where the fleet runs and
-//     which account it runs as.
-//   - Every fresh admin.db was seeded with that entry, which made a read-only
-//     endpoint (GET /api/official/{id}/monitor/{what}, and the probe behind
-//     /api/overview) open an ssh connection to a production machine and run
-//     commands there. A deployment that had never been configured for that host
-//     still reached out to it.
-//
-// A missing file therefore means "no official agents" and is not an error: the
-// default build knows about no hosts at all, and an operator declares the fleet
-// in their own data directory. The cost is that a new deployment has an empty
-// ops plane until that file is written, which is the intended trade — an empty
-// list reaches nothing.
+// A missing file means "no official agents" and is not an error. A file whose
+// manifests still carry a removed section is an error, which stops the admin
+// plane from starting until the file is corrected.
 func (s *Store) SeedOfficialsFromFile(path string) (int, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {

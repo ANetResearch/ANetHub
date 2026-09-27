@@ -1,9 +1,7 @@
 package aghub_test
 
 import (
-	"encoding/base64"
 	"encoding/json"
-	"github.com/ANetResearch/ANetCore/relayauth"
 	"net/http"
 	"net/http/httptest"
 
@@ -14,9 +12,11 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/ANetResearch/ANetCore/payment"
+	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
@@ -207,10 +207,7 @@ func TestTheGraphHasANodeForEveryEdge(t *testing.T) {
 	uploadInterlockedReview(t, srv, provider, requester, 5, "good")
 
 	// The provider leaves. Its reviews stay, which is the design.
-	ts := uint64(time.Now().UnixMilli())
-	sig, seq := provider.Sign(relayauth.Preimage(relayauth.ActionProfile, provider.AID(), ts))
-	if code, b := post(t, srv.URL+"/agents/"+provider.AID()+"/deregister", map[string]any{
-		"ts": ts, "key_state_seq": seq, "sig": base64.StdEncoding.EncodeToString(sig)}); code != 200 {
+	if code, b := leave(t, srv, provider); code != 200 {
 		t.Fatalf("deregister: %d %s", code, b)
 	}
 
@@ -280,7 +277,7 @@ func TestLedgerReportsTheWholeAccountNotJustThePage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	code, body := getJSON(t, srv.URL+"/agents/"+agent.AID()+"/ledger?limit=3")
+	code, body := ownerGet(t, srv, agent, relayauth.ActionLedger, "/agents/"+agent.AID()+"/ledger?limit=3")
 	if code != 200 {
 		t.Fatalf("ledger returned %d: %s", code, body)
 	}
@@ -351,5 +348,207 @@ func TestTheJoinPageNamesAgentsThatExist(t *testing.T) {
 			t.Errorf("the join page no longer names %q — if the CLI changed, "+
 				"the page has to change with it", cmd)
 		}
+	}
+}
+
+// Wire 2 field names, pinned (A2A-DESIGN §3.7, §3.9).
+//
+// The daemon in ANet declares the same shapes in internal/hubapi and pins
+// them there. Neither build fails when one side renames a field: the JSON
+// still parses and the field arrives as its zero value. A rename is
+// therefore a deliberate edit of both lists.
+func TestTheWire2FieldNamesArePinned(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  []string
+	}{
+		{"RelaySendRequest", aghub.RelaySendRequest{}, []string{"envelope", "to_aid"}},
+		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"id", "recipient_quiet", "status", "via_hub", "warning"}},
+		{"RelayPollRequest", aghub.RelayPollRequest{}, []string{"limit"}},
+		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"messages"}},
+		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"envelope", "id"}},
+		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"ids"}},
+		{"RelayAckResponse", aghub.RelayAckResponse{}, []string{"acked"}},
+		{"RegisterRequest", aghub.RegisterRequest{}, []string{
+			"a2a_card", "aid", "caps", "card", "enc_keys", "invite", "kel", "name", "pricing", "readme", "summary"}},
+		{"RegisterResponse", aghub.RegisterResponse{}, []string{
+			"aid", "card_error", "card_status", "keys_error", "keys_status", "status"}},
+		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "pricing", "readme", "summary"}},
+		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keyset"}},
+		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keyset"}},
+		{"KeysPublishResponse", aghub.KeysPublishResponse{}, []string{"aid", "keys_status"}},
+		{"FedCard", aghub.FedCard{}, []string{"card", "fed_seq", "home", "kel", "keys"}},
+		{"federation.Envelope", federation.Envelope{}, []string{
+			"dest_aid", "hop", "key_state_seq", "origin_hub_aid", "payload", "payload_cid", "seen_hubs", "sig", "ts", "v"}},
+		{"federation.KeysAnswer", federation.KeysAnswer{}, []string{"kel", "keyset"}},
+	} {
+		got := goJSONFields(t, tc.value)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%s fields = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// The per-field status values a daemon branches on.
+	for _, pair := range [][2]string{
+		{aghub.KeysStatusOK, "ok"}, {aghub.KeysStatusUnchanged, "unchanged"}, {aghub.KeysStatusAbsent, "absent"},
+		{aghub.KeysStatusInvalid, "invalid"}, {aghub.KeysStatusConflict, "conflict"},
+		{aghub.CardStatusAbsent, "absent"}, {aghub.CardStatusUnverified, "unverified"}, {aghub.CardStatusInvalid, "invalid"},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("status value %q, want %q", pair[0], pair[1])
+		}
+	}
+}
+
+// The version numbers and the authentication header names are part of the
+// contract too: the daemon sends these exact strings.
+func TestTheWire2VersionsAndHeadersArePinned(t *testing.T) {
+	if aghub.WireVersion != 2 {
+		t.Errorf("hub wire version %d, want 2", aghub.WireVersion)
+	}
+	if federation.ForwardVersion != 2 {
+		t.Errorf("federation forward version %d, want 2", federation.ForwardVersion)
+	}
+	for _, pair := range [][2]string{
+		{relayauth.HeaderAID, "X-ANet-AID"}, {relayauth.HeaderTS, "X-ANet-TS"},
+		{relayauth.HeaderSeq, "X-ANet-Seq"}, {relayauth.HeaderSig, "X-ANet-Sig"},
+		{relayauth.ActionSend, "send"}, {relayauth.ActionPoll, "poll"}, {relayauth.ActionAck, "ack"},
+		{relayauth.ActionRegister, "register"}, {relayauth.ActionProfile, "profile"},
+		{relayauth.ActionVisibility, "visibility"}, {relayauth.ActionDeregister, "deregister"},
+		{relayauth.ActionP2P, "p2p"}, {relayauth.ActionKeys, "keys"},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%q, want %q", pair[0], pair[1])
+		}
+	}
+}
+
+// Every wire-2 route is served, and each signed one answers an unsigned
+// request from its own authentication step (401 with the header names),
+// not from the mux (404/405).
+func TestTheWire2RoutesAreServed(t *testing.T) {
+	srv := newHub(t)
+	c, _ := twoAgents(t)
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/relay/send"}, {http.MethodPost, "/relay/poll"}, {http.MethodPost, "/relay/ack"},
+		{http.MethodPost, "/register"}, {http.MethodPost, "/profile"},
+		{http.MethodPost, "/agents/" + c.AID() + "/keys"},
+	} {
+		req := newRequest(t, srv, tc.method, tc.path, []byte(`{}`))
+		code, body, _ := send(t, req)
+		if code != http.StatusUnauthorized || !strings.Contains(string(body), relayauth.HeaderSig) {
+			t.Errorf("%s %s unsigned: %d %s, want 401 naming the auth headers", tc.method, tc.path, code, body)
+		}
+	}
+	code, body := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
+	var out map[string]string
+	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
+		t.Errorf("GET keys of an unknown AID: %d %s, want the handler's JSON 404", code, body)
+	}
+}
+
+// The facilitator contract (A2A-DESIGN §8.5, §17 契约 row).
+//
+// /x402/verify and /x402/settle take x402 v2's {x402Version,
+// paymentPayload, paymentRequirements}, and paymentRequirements is
+// required. Two bodies carry it: daemon → hub (ANet module/x402, pinned
+// on that side in internal/hubapi) and entry hub → ledger hub
+// (cmd/anet-hub/wire_federation.go, whose forwarded bytes are checked in
+// cmd/anet-hub TestACrossHubPaymentIsCheckedAtBothHubsAndCreditedOnce).
+// Both build payment.FacilitatorRequest, so its field names are pinned
+// here, and the hub is driven with a literal body so that a rename on the
+// hub side fails even if the Go struct were renamed in step.
+func TestTheFacilitatorContractIsPinned(t *testing.T) {
+	if got := goJSONFields(t, payment.FacilitatorRequest{}); strings.Join(got, ",") !=
+		"paymentPayload,paymentRequirements,x402Version" {
+		t.Errorf("FacilitatorRequest fields = %v", got)
+	}
+	if got := goJSONFields(t, payment.Supported{}); strings.Join(got, ",") !=
+		"anet.signer_kel,extensions,kinds,signers" {
+		t.Errorf("Supported fields = %v", got)
+	}
+
+	srv := newHub(t)
+	payer, payee := twoAgents(t)
+	register(t, srv, payer, "Payer", nil)
+	register(t, srv, payee, "Payee", nil)
+	hubAID := hubAIDOf(t, srv)
+	payload := creditPayload(t, signedAuth(t, payer, payee.AID(), 12, hubAID, "contract-1"),
+		payee.AID(), payment.CreditNetwork(hubAID))
+	literal := map[string]any{
+		"x402Version":    2,
+		"paymentPayload": payload,
+	}
+	// Without paymentRequirements: 400 and the x402 reason for it.
+	code, body := post(t, srv.URL+"/x402/settle", literal)
+	if code != http.StatusBadRequest || !strings.Contains(string(body), `"errorReason":"invalid_payment_requirements"`) {
+		t.Errorf("settle without paymentRequirements: %d %s", code, body)
+	}
+	// With it, spelled as the daemon spells it.
+	literal["paymentRequirements"] = map[string]any{
+		"scheme": "anet-credit", "network": "hub:" + hubAID, "amount": "12",
+		"asset": "credit", "payTo": payee.AID(),
+	}
+	code, body = post(t, srv.URL+"/x402/settle", literal)
+	if code != http.StatusOK || !strings.Contains(string(body), `"success":true`) {
+		t.Errorf("settle with paymentRequirements: %d %s", code, body)
+	}
+
+	// The relayauth v2 actions of the three account reads (§3.7).
+	for _, pair := range [][2]string{
+		{relayauth.ActionBalance, "balance"}, {relayauth.ActionLedger, "ledger"},
+		{relayauth.ActionRedemptions, "redemptions"},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%q, want %q", pair[0], pair[1])
+		}
+	}
+}
+
+// Review and stats field names, pinned (A2A-DESIGN §9 rows 评价 and
+// completed_task, §17 contract row "评价无内容字段").
+//
+// The daemon in ANet declares ReviewView and the upload body in
+// internal/hubapi and pins them in hubapi_test.go; that list has to change
+// with this one (ANet task C2): goal and deliverable removed,
+// content_binding added, and guest_quota removed from AgentView. No
+// content field may appear in any of these: the hub does not receive
+// interaction content, so a field that could carry it is a field some
+// client would fill.
+func TestTheReviewFieldNamesArePinned(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  []string
+	}{
+		{"UploadReviewRequest", aghub.UploadReviewRequest{}, []string{"receipt", "review"}},
+		{"ReviewView", aghub.ReviewView{}, []string{
+			"comment", "completed_at", "content_binding", "created_at", "interaction_id", "rating",
+			"receipt_cid", "request_cid", "result_cid", "reviewer_aid", "subject_aid"}},
+		{"FedReview", aghub.FedReview{}, []string{"fed_seq", "provider_kel", "receipt", "review", "reviewer_kel"}},
+		{"HubStats", aghub.HubStats{}, []string{
+			"agents", "avg_rating", "federated_agents", "modules", "reviews", "tasks_completed"}},
+	} {
+		got := goJSONFields(t, tc.value)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%s fields = %v, want %v", tc.name, got, tc.want)
+		}
+		for _, f := range got {
+			switch f {
+			case "goal", "deliverable", "request_doc", "transcript", "body":
+				t.Errorf("%s carries %q, a content field", tc.name, f)
+			}
+		}
+	}
+	for _, f := range goJSONFields(t, aghub.AgentView{}) {
+		if f == "guest_quota" {
+			t.Error("AgentView still carries guest_quota; guest mode is removed")
+		}
+	}
+	if aghub.ContentBindingUnverified != "UNVERIFIED" {
+		t.Errorf("content binding state %q, want %q", aghub.ContentBindingUnverified, "UNVERIFIED")
+	}
+	if aghub.MaxReviewCommentRunes != 280 {
+		t.Errorf("review comment bound %d, want 280", aghub.MaxReviewCommentRunes)
 	}
 }

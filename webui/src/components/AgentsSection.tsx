@@ -1,7 +1,5 @@
-import { Search, Star, MessageCircle, Globe, Moon } from "lucide-react";
+import { Search, Star, Globe, Moon } from "lucide-react";
 import type { AgentView } from "../lib/api";
-import type { GuestSession } from "../lib/guest";
-import { sessionStatus } from "../lib/guest";
 import { shortAid, cn } from "../lib/utils";
 import { Input } from "./ui/input";
 import { Badge } from "./ui/badge";
@@ -51,12 +49,6 @@ export function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) =
             静默
           </Badge>
         )}
-        {a.guest_quota > 0 && (
-          <Badge variant="soft" className="shrink-0">
-            <MessageCircle className="size-3" />
-            可试聊 {a.guest_quota} 条
-          </Badge>
-        )}
       </div>
       <p className="line-clamp-2 min-h-[40px] text-[13px] leading-relaxed text-gray-600">
         {a.summary || "这个 agent 还没有填写简介。"}
@@ -85,24 +77,19 @@ export function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) =
   );
 }
 
-/** Agent 目录：GET /agents?q= 搜索 + 卡片网格；含进行中的试聊会话入口。 */
+/** Agent 目录：GET /agents?q= 搜索 + 卡片网格。 */
 export function AgentsSection({
   agents,
   q,
   onQ,
   onOpen,
-  sessions,
-  onReopenChat,
 }: {
   agents: AgentView[];
   q: string;
   onQ: (q: string) => void;
   onOpen: (aid: string) => void;
-  sessions: Record<string, GuestSession>;
-  onReopenChat: (aid: string) => void;
 }) {
   const listed = agents.filter((a) => a.listed !== false);
-  const sessList = Object.values(sessions);
   return (
     <section id="agents" className="mx-auto max-w-6xl scroll-mt-20 px-5 py-16 md:py-24">
       <div className="mb-2 flex items-center gap-2 font-bebas text-[14px] md:text-[16px] tracking-[0.14em] text-[#E60000]">
@@ -126,24 +113,6 @@ export function AgentsSection({
       <p className="mt-2 text-sm text-gray-500">
         {listed.length ? `${listed.length} 个 agent 已接入 · 点击卡片查看资料与可验证评价` : ""}
       </p>
-
-      {/* 进行中的试聊会话（本页临时，不留存） */}
-      {sessList.length > 0 && (
-        <div className="mt-5 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-gray-400">进行中的试聊：</span>
-          {sessList.map((g) => (
-            <button
-              key={g.aid}
-              onClick={() => onReopenChat(g.aid)}
-              className="inline-flex cursor-pointer items-center gap-1.5 border border-gray-300 bg-white px-2.5 py-1 text-xs text-gray-700 transition-colors hover:border-[#E60000] hover:text-[#E60000]"
-            >
-              <MessageCircle className="size-3" />
-              {g.handlerName || shortAid(g.aid)}
-              <span className="text-gray-400">· {sessionStatus(g)}</span>
-            </button>
-          ))}
-        </div>
-      )}
 
       <div className="mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {listed.length ? (

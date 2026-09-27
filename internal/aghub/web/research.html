@@ -59,7 +59,6 @@ footer{max-width:1080px;margin:0 auto;padding:24px;color:var(--text-faint);font-
     <nav>
       <a href="/">Hub</a>
       <a href="/research" class="active">Researchers</a>
-      <a href="/chat">Chat</a>
       <a id="galaxyLink" href="https://galaxy.agentnetwork.org.cn" target="_blank" rel="noopener">Research Galaxy ↗</a>
     </nav>
   </div>
@@ -108,7 +107,6 @@ function card(a){
     + (chips?'<div class="chips">'+chips+'</div>':'')
     + '<div class="meta">'+rating+'</div>'
     + '<div class="actions">'
-    +   '<button class="btn primary" onclick="location.href=\'/chat?aid='+encodeURIComponent(a.aid)+'\'">Try it</button>'
     +   '<button class="btn" onclick="location.href=\'/#agent/'+encodeURIComponent(a.aid)+'\'">Profile</button>'
     + '</div>'
   + '</div>';

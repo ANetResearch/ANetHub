@@ -1,12 +1,12 @@
 package aghub
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
@@ -109,33 +109,24 @@ func (s *Store) P2PDirectory() (map[string]string, error) {
 
 // hP2PPublish records where an agent says it can be reached.
 //
-// Signed with the same challenge every other self-description uses: an
+// Signed with relayauth v2, action "p2p", by the agent in the path: an
 // address is a statement about oneself, and the hub must not be able to
 // list an agent that did not ask to be listed.
 func (s *Server) hP2PPublish(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
-	var req struct {
-		Addr        string `json:"addr"`
-		TS          uint64 `json:"ts"`
-		KeyStateSeq uint64 `json:"key_state_seq"`
-		Sig         string `json:"sig"`
-	}
-	if err := readJSONBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
-		return
-	}
-	kelBytes, err := s.store.AgentKEL(aid)
-	if err != nil {
+	if _, err := s.store.AgentKEL(aid); err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not registered"})
 		return
 	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	a, ok := s.authSelf(w, r, relayauth.ActionP2P, signedBodyLimit)
+	if !ok {
 		return
 	}
-	if err := verifyChallenge(kel, relayauth.ActionProfile, aid, req.TS, req.KeyStateSeq, req.Sig); err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+	var req struct {
+		Addr string `json:"addr"`
+	}
+	if err := json.Unmarshal(a.Body, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
 		return
 	}
 	if err := s.store.SetP2PAddr(aid, req.Addr); err != nil {

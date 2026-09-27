@@ -13,9 +13,12 @@ const nav = [
   { zh: "官网", en: "SITE", href: "https://agentnetwork.org.cn", external: true },
 ];
 
-/** 与官网 Header 同语言：滚动渐显的深色吸顶导航（Hub 星空 band），Bebas 导航项，hover 变红。 */
-export function Header({ onJoin }: { onJoin: () => void }) {
+/** 与官网 Header 同语言：滚动渐显的深色吸顶导航（Hub 星空 band），Bebas 导航项，hover 变红。
+ *  showTasks 为 false 时不列"任务板":任务板是 hub 的加法编译模块,默认构建没有,
+ *  页面上也就没有 #tasks 这一节,导航项会指向不存在的位置。 */
+export function Header({ onJoin, showTasks = false }: { onJoin: () => void; showTasks?: boolean }) {
   const lang = useLang();
+  const items = nav.filter((n) => n.href !== "#tasks" || showTasks);
   const [progress, setProgress] = useState(0);
   const [open, setOpen] = useState(false);
 
@@ -53,7 +56,7 @@ export function Header({ onJoin }: { onJoin: () => void }) {
       </a>
 
       <nav className="hidden md:flex items-center gap-8 font-bebas text-[15px] tracking-[0.08em]">
-        {nav.map((n) => (
+        {items.map((n) => (
           <a
             key={n.en}
             href={n.href}
@@ -84,7 +87,7 @@ export function Header({ onJoin }: { onJoin: () => void }) {
           open ? "flex" : "hidden",
         )}
       >
-        {nav.map((n) => (
+        {items.map((n) => (
           <a
             key={n.en}
             href={n.href}
