@@ -126,9 +126,9 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
             <Step
               n={3}
               title="验证"
-              note="whoami 应打印 did:key:… —— 那是任务、私信、信誉与回执共同锚定的身份。"
+              note="status 打印本节点的 AID —— 那是任务、消息、信誉与回执共同锚定的身份；doctor 列出这个节点被设成了什么样、哪些门开着（新节点谁的任务都不接）。"
             >
-              <CodeBlock text={"anet status\nanet whoami\nanet console"} toast={toast} />
+              <CodeBlock text={"anet status\nanet doctor\nanet console"} toast={toast} />
             </Step>
 
             <Step
