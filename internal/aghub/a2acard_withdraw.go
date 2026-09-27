@@ -100,14 +100,17 @@ func (s *Store) migrateA2AFedSeqHead() error {
 // returns a position given out before, even when the row that held it has
 // been deleted. The rows are consulted too, for one an older binary (the
 // admin tool) wrote past the stored head.
+//
+// One statement moves the head and reads it back: some callers pass the
+// pool rather than a transaction (SetVisibility, the key set), and the
+// admin tool writes from another process, so an UPDATE and a separate
+// SELECT could both read the position a concurrent writer took.
 func nextA2AFedSeq(x cardStore) (int64, error) {
-	if _, err := x.Exec(`UPDATE a2a_fed_seq SET last = MAX(last,
-	    (SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
-	    (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)) + 1 WHERE id = 1`); err != nil {
-		return 0, err
-	}
 	var next int64
-	err := x.QueryRow(`SELECT last FROM a2a_fed_seq WHERE id = 1`).Scan(&next)
+	err := x.QueryRow(`UPDATE a2a_fed_seq SET last = MAX(last,
+	    (SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
+	    (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)) + 1 WHERE id = 1
+	  RETURNING last`).Scan(&next)
 	return next, err
 }
 
