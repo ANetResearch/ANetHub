@@ -447,6 +447,33 @@ type fakeDirectory struct {
 	rejectForever map[string]bool
 	reviews       []json.RawMessage
 	gotRevs       []storedReview
+	// a2a is the A2A card stream this directory serves; gotA2A what it
+	// admitted from one, and a2aRefuseForNow the FedSeqs it refuses for
+	// now.
+	a2a             []FedA2ACardView
+	gotA2A          []FedA2ACardView
+	a2aRefuseForNow map[int64]bool
+}
+
+func (f *fakeDirectory) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACardView, int64, error) {
+	out := []FedA2ACardView{}
+	next := cursor
+	for _, c := range f.a2a {
+		if c.FedSeq > cursor && len(out) < limit {
+			c.Home = home
+			out = append(out, c)
+			next = c.FedSeq
+		}
+	}
+	return out, next, nil
+}
+
+func (f *fakeDirectory) AdmitFedA2ACard(peerAID string, e FedA2ACardView) error {
+	if f.a2aRefuseForNow[e.FedSeq] {
+		return fmt.Errorf("%w: registered here", ErrRefusedForNow)
+	}
+	f.gotA2A = append(f.gotA2A, e)
+	return nil
 }
 
 type storedReview struct {
