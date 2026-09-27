@@ -267,23 +267,40 @@ func (h *HubDB) DeleteAgent(aid string) error {
 // the stream must not name one no peer was told about. The withdrawals
 // take the next positions of the sequence the cards and withdrawals share
 // (aghub.nextA2AFedSeq), in one statement, so the write lock that
-// statement takes covers reading the head of the stream. The reason is
-// the hub's "deregistered": the registration is gone.
+// statement takes covers reading the head of the stream; the stored head
+// (a2a_fed_seq) is then moved past them, so no position is given out
+// twice. The reason is the hub's "deregistered": the registration is gone.
 func withdrawA2ACards(tx *sql.Tx, cond string, args ...any) error {
-	q := `INSERT INTO a2a_card_withdrawal(aid, reason, at, fed_seq)
-	      SELECT c.aid, 'deregistered', ?,
-	             (SELECT MAX((SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
-	                         (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)))
-	             + ROW_NUMBER() OVER (ORDER BY c.aid)
-	        FROM agent_a2a_card c JOIN agent a ON a.aid = c.aid
-	       WHERE a.visibility IN ('federated', 'public') AND ` + cond + `
-	      ON CONFLICT(aid) DO UPDATE SET reason=excluded.reason, at=excluded.at, fed_seq=excluded.fed_seq`
-	_, err := tx.Exec(q, append([]any{time.Now().UTC().Format(time.RFC3339Nano)}, args...)...)
+	insert := func(head string) error {
+		q := `INSERT INTO a2a_card_withdrawal(aid, reason, at, fed_seq)
+		      SELECT c.aid, 'deregistered', ?,
+		             (SELECT MAX((SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
+		                         (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)` + head + `))
+		             + ROW_NUMBER() OVER (ORDER BY c.aid)
+		        FROM agent_a2a_card c JOIN agent a ON a.aid = c.aid
+		       WHERE a.visibility IN ('federated', 'public') AND ` + cond + `
+		      ON CONFLICT(aid) DO UPDATE SET reason=excluded.reason, at=excluded.at, fed_seq=excluded.fed_seq`
+		_, err := tx.Exec(q, append([]any{time.Now().UTC().Format(time.RFC3339Nano)}, args...)...)
+		return err
+	}
+	err := insert(`, (SELECT COALESCE(MAX(last),0) FROM a2a_fed_seq)`)
+	if err != nil && strings.Contains(err.Error(), "no such table: a2a_fed_seq") {
+		// A hub.db written by a hub that kept no stored head: the rows
+		// are the head, and there is no stored head to move.
+		if err = insert(``); err == nil {
+			return nil
+		}
+	}
 	if err != nil && strings.Contains(err.Error(), "no such table") {
 		// A hub.db written by a hub that predates the A2A card stream
 		// has published no A2A card.
 		return nil
 	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE a2a_fed_seq SET last = MAX(last,
+	    (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)) WHERE id = 1`)
 	return err
 }
 
