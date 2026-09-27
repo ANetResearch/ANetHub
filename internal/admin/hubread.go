@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
@@ -223,15 +224,37 @@ func (h *HubDB) Totals() (HubTotals, error) {
 // DeleteAgent removes an agent from the public registry (reviews are kept — they are counterparty
 // evidence, not the agent's property). The agent can re-register; recording the
 // delist intent in moderation is the caller's job.
+//
+// The agent's A2A card and its skill and tag index rows go with it: they
+// exist only for an agent on the registry, and the card is re-admitted
+// when the agent registers again. The hub's registry queries join the
+// agent table as well, so a row left behind would not be listed, but it
+// would sit in the database describing an agent the operator removed.
 func (h *HubDB) DeleteAgent(aid string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	res, err := h.db.Exec(`DELETE FROM agent WHERE aid=?`, aid)
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM agent WHERE aid=?`, aid)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("admin: agent %s not registered", aid)
 	}
-	return nil
+	for _, q := range []string{
+		`DELETE FROM agent_a2a_card WHERE aid=?`,
+		`DELETE FROM agent_skill WHERE aid=?`,
+		`DELETE FROM agent_tag WHERE aid=?`,
+	} {
+		// A hub.db written by a hub that predates these tables does not
+		// have them, and there is nothing to remove from it.
+		if _, err := tx.Exec(q, aid); err != nil && !strings.Contains(err.Error(), "no such table") {
+			return err
+		}
+	}
+	return tx.Commit()
 }

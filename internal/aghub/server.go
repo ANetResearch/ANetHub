@@ -273,6 +273,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
 	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
+	// The JWKS named by the jku of an agent's A2A card, derived from its
+	// KEL (A2A-DESIGN §10.3, §10.5). See registry.go.
+	mux.HandleFunc("GET /agents/{aid}/jwks.json", s.hJWKS)
 	mux.HandleFunc("GET /agents/{aid}/balance", s.hBalance)
 	mux.HandleFunc("GET /agents/{aid}/ledger", s.hLedger)
 	// Encryption key sets (§3.7). See keys.go.
@@ -318,6 +321,10 @@ func (s *Server) Handler() http.Handler {
 	// The resource server: pay here, work there. See gateway.go for why
 	// this hands back a voucher instead of proxying the call.
 	mux.HandleFunc("GET /x402/resource/{aid}/{capability}", s.hX402Resource)
+	// The A2A registry: verified A2A cards of agents registered here
+	// (A2A-DESIGN §10.5). See registry.go.
+	mux.HandleFunc("GET /a2a/v1/agents", s.hA2AAgents)
+	mux.HandleFunc("GET /a2a/v1/agents/{aid}/card", s.hA2ACard)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay (wire 2): sealed envelopes only. send is authenticated so the
@@ -521,15 +528,17 @@ type RegisterRequest struct {
 	// verify, or does not advance the stored one, is reported in
 	// keys_status and does not fail the registration.
 	EncKeys string `json:"enc_keys,omitempty"`
-	// A2ACard is the agent's signed A2A AgentCard as a JSON object,
-	// stored as the exact bytes received. Optional. Reported in
-	// card_status; it does not fail the registration.
+	// A2ACard is the agent's signed A2A AgentCard as a JSON object.
+	// Optional. It is verified against KEL and the stored card's
+	// params.seq, stored as the exact bytes received when admitted, and
+	// reported in card_status; it does not fail the registration (see
+	// a2acard.go).
 	A2ACard json.RawMessage `json:"a2a_card,omitempty"`
 }
 
 // RegisterResponse is the /register answer. keys_status and card_status
 // report the optional fields individually; keys_error and card_error
-// explain a status other than ok, unchanged, absent or unverified.
+// explain a status other than ok, unchanged or absent.
 type RegisterResponse struct {
 	AID        string `json:"aid"`
 	Status     string `json:"status"`
@@ -538,16 +547,6 @@ type RegisterResponse struct {
 	CardStatus string `json:"card_status"`
 	CardError  string `json:"card_error,omitempty"`
 }
-
-// A2A card statuses reported by /register.
-const (
-	CardStatusAbsent     = "absent"     // no a2a_card in the request
-	CardStatusUnverified = "unverified" // stored as received; not yet verified
-	CardStatusInvalid    = "invalid"    // not a JSON object or over the size bound; not stored
-)
-
-// maxA2ACardBytes bounds a stored A2A card (A2A-DESIGN §10.3).
-const maxA2ACardBytes = 64 << 10
 
 // maxRegisterBody caps a registration, separately from limitBody.
 //
@@ -721,9 +720,10 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 			out.KeysStatus, out.KeysError = keysStatusOf(s.store.PublishKeys(req.AID, raw, kel, time.Now()))
 		}
 	}
-	if len(req.A2ACard) > 0 {
-		out.CardStatus, out.CardError = s.store.putA2ACard(req.AID, req.A2ACard)
-	}
+	// Also when the field is absent: the stored card is re-verified
+	// against the KEL just registered, which may have rotated away from
+	// the key that signed it.
+	out.CardStatus, out.CardError = s.store.RegisterA2ACard(req.AID, req.A2ACard, kel, time.Now())
 	if firstTime {
 		// A grant on arrival, so a new node can try a paid capability
 		// before anyone has funded it. A network where nothing works
