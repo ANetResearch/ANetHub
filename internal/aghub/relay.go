@@ -124,17 +124,29 @@ func (s *Store) RelayEnqueue(toAID string, envelope []byte) (int64, error) {
 	return id, tx.Commit()
 }
 
-// RelayPoll returns undelivered envelopes for toAID, oldest first.
+// RelayPoll returns undelivered envelopes for toAID with an id above
+// afterID, oldest first. afterID 0 is the whole mailbox.
 // limit <= 0 means 100. budget bounds the cumulative envelope bytes of one
 // response; the first message is always returned, even when it alone
 // exceeds the budget, so that one large message is still deliverable.
-func (s *Store) RelayPoll(toAID string, limit int, budget int64) ([]RelayMessage, error) {
+//
+// afterID is the recipient's cursor (A2A-DESIGN §3.7, decision Q1). A
+// daemon leaves an envelope it could not process yet in the mailbox (§3.6,
+// class T), and without a cursor the oldest such envelopes fill every
+// answer: anyone registered could hold back a node's newer mail by sending
+// it a page of messages for interactions it does not know. With afterID
+// the daemon reads on past them and returns to the head later. Ids only
+// grow (AUTOINCREMENT), so "above afterID" is "queued after it".
+func (s *Store) RelayPoll(toAID string, afterID int64, limit int, budget int64) ([]RelayMessage, error) {
 	if limit <= 0 {
 		limit = 100
 	}
+	if afterID < 0 {
+		afterID = 0
+	}
 	rows, err := s.db.Query(
 		`SELECT id, to_aid, size, created_at, payload FROM relay_message
-		  WHERE to_aid=? ORDER BY id LIMIT ?`, toAID, limit)
+		  WHERE to_aid=? AND id>? ORDER BY id LIMIT ?`, toAID, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
