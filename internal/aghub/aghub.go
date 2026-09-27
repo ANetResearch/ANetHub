@@ -392,9 +392,9 @@ func (s *Store) migrate() error {
 		   stored_at TEXT NOT NULL
 		 )`,
 		// The A2A AgentCard an agent submitted at registration, stored as
-		// the raw bytes it sent. Not verified or indexed yet; admission is
-		// added separately (A2A-DESIGN §10.3), and nothing reads this
-		// table into a listing until then.
+		// the raw bytes it sent once it passed admission (A2A-DESIGN
+		// §10.3). The admission columns and the skill and tag indexes are
+		// added by migrateA2ACard; see a2acard.go.
 		`CREATE TABLE IF NOT EXISTS agent_a2a_card (
 		   aid TEXT PRIMARY KEY,
 		   card BLOB NOT NULL,
@@ -451,7 +451,8 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("hub: migrate: %w", err)
 		}
 	}
-	return nil
+	// A2A card admission columns and the skill/tag indexes (a2acard.go).
+	return s.migrateA2ACard()
 }
 
 // PutAgent registers or updates an agent (upsert on AID). The caller has already verified the KEL

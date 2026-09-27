@@ -111,6 +111,8 @@ func (s *Store) Deregister(aid string) (undelivered int, err error) {
 		`DELETE FROM agent_cap WHERE aid=?`,
 		`DELETE FROM agent_keys WHERE aid=?`,
 		`DELETE FROM agent_a2a_card WHERE aid=?`,
+		`DELETE FROM agent_skill WHERE aid=?`,
+		`DELETE FROM agent_tag WHERE aid=?`,
 		`DELETE FROM agent WHERE aid=?`,
 	} {
 		if _, err := tx.Exec(q, aid); err != nil {
