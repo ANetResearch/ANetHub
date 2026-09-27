@@ -365,7 +365,7 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 	}{
 		{"RelaySendRequest", aghub.RelaySendRequest{}, []string{"envelope", "to_aid"}},
 		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"id", "recipient_quiet", "status", "via_hub", "warning"}},
-		{"RelayPollRequest", aghub.RelayPollRequest{}, []string{"limit"}},
+		{"RelayPollRequest", aghub.RelayPollRequest{}, []string{"after_id", "limit"}},
 		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"messages"}},
 		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"envelope", "id"}},
 		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"ids"}},

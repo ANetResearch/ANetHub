@@ -1054,8 +1054,13 @@ type RelaySendResponse struct {
 }
 
 // RelayPollRequest is the /relay/poll body (relayauth v2, action "poll").
+//
+// AfterID is optional: only envelopes with an id above it are returned,
+// still oldest first and under the same limit and byte budget. Absent or 0
+// is the whole mailbox, as before the field existed.
 type RelayPollRequest struct {
-	Limit int `json:"limit,omitempty"`
+	Limit   int   `json:"limit,omitempty"`
+	AfterID int64 `json:"after_id,omitempty"`
 }
 
 // RelayEnvelopeView is one mailbox entry on the wire.
@@ -1181,7 +1186,8 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// hRelayPoll returns the caller's own mailbox.
+// hRelayPoll returns the caller's own mailbox, from after_id on when the
+// request names one.
 func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.authRegistered(w, r, relayauth.ActionPoll, signedBodyLimit)
 	if !ok {
@@ -1194,13 +1200,17 @@ func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.AfterID < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "after_id must not be negative"})
+		return
+	}
 	// Collecting mail is the liveness signal. Recorded here rather than
 	// at a heartbeat endpoint because this is the thing that actually
 	// matters: a node that asks for its mail is a node that will do the
 	// work, and a node that has stopped asking will not, whatever else it
 	// might still be answering.
 	s.store.SeenPolling(a.AID)
-	msgs, err := s.store.RelayPoll(a.AID, req.Limit, s.limits.PollBudget)
+	msgs, err := s.store.RelayPoll(a.AID, req.AfterID, req.Limit, s.limits.PollBudget)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
