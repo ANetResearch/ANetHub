@@ -992,3 +992,121 @@ func TestAForgedSenderHeaderDoesNotDrainTheBucket(t *testing.T) {
 		t.Fatalf("third send with a two-token bucket: %d, want 429", code)
 	}
 }
+
+// /relay/poll with after_id (A2A-DESIGN §3.7, decision Q1): only envelopes
+// queued after the cursor, oldest first, under the same limit and byte
+// budget; no after_id is the whole mailbox, as before. The cursor is what
+// lets a daemon read past envelopes it has to leave in the mailbox for now
+// (§3.6 class T) instead of being handed the same oldest page forever.
+func TestAPollAfterACursorReturnsOnlyLaterEnvelopes(t *testing.T) {
+	srv := newHub(t)
+	recip, sender := twoAgents(t)
+	register(t, srv, recip, "Recipient", nil)
+	register(t, srv, sender, "Sender", nil)
+	for i := 0; i < 5; i++ {
+		env := testEnvelope(t, recip.AID(), []byte{byte('a' + i)})
+		if code, b, _ := relaySend(t, srv, sender, recip.AID(), env); code != 200 {
+			t.Fatalf("send %d: %d %s", i, code, b)
+		}
+	}
+	poll := func(body map[string]any) (int, polled) {
+		t.Helper()
+		code, b := signedDo(t, srv, recip, relayauth.ActionPoll, http.MethodPost, "/relay/poll", body)
+		var p polled
+		if code == http.StatusOK {
+			if err := json.Unmarshal(b, &p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return code, p
+	}
+	idsOf := func(p polled) []int64 {
+		out := make([]int64, 0, len(p.Messages))
+		for _, m := range p.Messages {
+			out = append(out, m.ID)
+		}
+		return out
+	}
+	equal := func(a, b []int64) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// No cursor, and a zero cursor: the whole mailbox, oldest first.
+	all := idsOf(relayPoll(t, srv, recip))
+	if len(all) != 5 {
+		t.Fatalf("a poll without after_id returned %d envelopes, want 5", len(all))
+	}
+	for i := 1; i < len(all); i++ {
+		if all[i] <= all[i-1] {
+			t.Fatalf("ids not ascending: %v", all)
+		}
+	}
+	if _, p := poll(map[string]any{"after_id": 0}); !equal(idsOf(p), all) {
+		t.Fatalf("after_id 0 returned %v, want the whole mailbox %v", idsOf(p), all)
+	}
+
+	// After the second id: the last three, still oldest first.
+	if _, p := poll(map[string]any{"after_id": all[1]}); !equal(idsOf(p), all[2:]) {
+		t.Fatalf("after_id %d returned %v, want %v", all[1], idsOf(p), all[2:])
+	}
+	// The limit counts from the cursor.
+	if _, p := poll(map[string]any{"after_id": all[0], "limit": 2}); !equal(idsOf(p), all[1:3]) {
+		t.Fatalf("after_id %d limit 2 returned %v, want %v", all[0], idsOf(p), all[1:3])
+	}
+	// Past the tail: nothing, and nothing was removed by asking.
+	if code, p := poll(map[string]any{"after_id": all[4]}); code != 200 || len(p.Messages) != 0 {
+		t.Fatalf("after the last id: %d, %d envelopes; want 200 and none", code, len(p.Messages))
+	}
+	// A cursor that names an id already acked still works: ids are never
+	// reused, so "above it" is still "queued after it".
+	if n := relayAck(t, srv, recip, all[2]); n != 1 {
+		t.Fatalf("ack: %d rows", n)
+	}
+	if _, p := poll(map[string]any{"after_id": all[2]}); !equal(idsOf(p), all[3:]) {
+		t.Fatalf("after an acked id returned %v, want %v", idsOf(p), all[3:])
+	}
+	if got := idsOf(relayPoll(t, srv, recip)); !equal(got, []int64{all[0], all[1], all[3], all[4]}) {
+		t.Fatalf("the rows before the cursor were touched: %v", got)
+	}
+	// A negative cursor is a malformed request.
+	if code, _ := poll(map[string]any{"after_id": -1}); code != http.StatusBadRequest {
+		t.Fatalf("after_id -1: %d, want 400", code)
+	}
+
+	// The byte budget counts from the cursor too, and the first envelope
+	// after it is returned even when it alone is over the budget.
+	l := aghub.DefaultLimits()
+	l.PollBudget = 1000
+	if err := serverOf(t, srv).SetLimits(l); err != nil {
+		t.Fatal(err)
+	}
+	var big []int64
+	for i, n := range []int{1500, 300} {
+		env := testEnvelope(t, recip.AID(), bytes.Repeat([]byte{byte('p' + i)}, n))
+		code, b, _ := relaySend(t, srv, sender, recip.AID(), env)
+		if code != 200 {
+			t.Fatalf("send big %d: %d %s", i, code, b)
+		}
+		var out struct {
+			ID int64 `json:"id"`
+		}
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatal(err)
+		}
+		big = append(big, out.ID)
+	}
+	if _, p := poll(map[string]any{"after_id": all[4]}); !equal(idsOf(p), big[:1]) {
+		t.Fatalf("after_id %d under a 1000-byte budget returned %v, want only %v", all[4], idsOf(p), big[:1])
+	}
+	if _, p := poll(map[string]any{"after_id": big[0]}); !equal(idsOf(p), big[1:]) {
+		t.Fatalf("after_id %d returned %v, want %v", big[0], idsOf(p), big[1:])
+	}
+}
