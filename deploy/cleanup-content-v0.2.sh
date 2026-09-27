@@ -19,7 +19,8 @@
 #      copied the undelivered wire-1 rows, has no such record: there --relay-before <unix-ms of the
 #      upgrade> deletes the rows created before the upgrade; without it they are only counted.
 #   2. Weekly backups hub-backup-*.db: every one written before the upgrade holds relay payloads and
-#      review content. All existing ones are deleted; the next weekly run writes a clean backup.
+#      review content. All existing ones are deleted; the next weekly run writes a clean backup. So
+#      is a temporary copy .hub-backup-*.tmp.db that an interrupted hub-db-roll.sh run left behind.
 #   3. Review content: review.goal / review.deliverable and review_blob.request_doc_raw /
 #      review_blob.deliverable_raw. The wire-2 hub removes these columns when it first opens
 #      hub.db; this step verifies that, and on a hub.db not yet migrated it blanks them in place.
@@ -38,12 +39,14 @@
 #      default key (runtime.ssh_user, root by default, no -i), and logged into their consoles with
 #      ADMIN_MONITOR_TOKEN, which defaulted to ADMIN_TOKEN. Deleting that code deleted neither.
 #      Reported: the hosts and ssh users the manifests named (read before step 7 strips them), the
-#      private keys in --ssh-dir with their fingerprints, and every ADMIN_MONITOR_TOKEN assignment
-#      in the admin unit, its drop-ins and their EnvironmentFiles (the value is never printed).
-#      With --apply: those assignments are removed where one stands alone on its line (others are
-#      reported for editing by hand), and the private keys named with --ops-ssh-key are deleted
-#      with their .pub. A default key is never deleted unless named: the script cannot tell whether
-#      the account uses it for anything else. What has to happen on other hosts, or needs a new
+#      private keys in --ssh-dir (any file name) with their fingerprints and the IdentityFile lines
+#      of its ssh config, and every ADMIN_MONITOR_TOKEN assignment in the admin unit, its drop-ins
+#      and their EnvironmentFiles (the value is never printed).
+#      With --apply: those assignments are removed where one stands alone on its line, commented
+#      out or not (others are reported for editing by hand), and the private keys named with
+#      --ops-ssh-key are deleted with their .pub; a named file that is not a private key is left.
+#      A default key is never deleted unless named: the script cannot tell whether the account uses
+#      it for anything else. What has to happen on other hosts, or needs a new
 #      secret, is printed as a checklist and not done here (docs/ADMIN.md §5).
 # After deleting, hub.db and admin.db are vacuumed and their WAL checkpointed and truncated, so the
 # removed bytes are not left in free pages or in -wal files.
@@ -223,9 +226,10 @@ relay_step() {
     return 0
   fi
   if [ -z "$before" ]; then
-    echo "[1] relay_message: migrated by an earlier wire-2 build that copied undelivered wire-1 rows;"
-    echo "    $total queued rows. Pass --relay-before <unix-ms of the upgrade> to delete those created"
-    echo "    before it; without it none are deleted"
+    echo "[1] relay_message: wire-2 table without a migration record in hub_meta: either it never had a"
+    echo "    wire-1 table, or an earlier wire-2 build migrated it and copied the undelivered wire-1 rows."
+    echo "    $total queued rows. In the second case pass --relay-before <unix-ms of the upgrade> to delete"
+    echo "    those created before it; without it none are deleted"
     return 0
   fi
   count "$db" "SELECT COUNT(*) FROM relay_message WHERE created_at < $before;"; local n=$R
@@ -264,7 +268,9 @@ review_step() {
 
 backups_step() {
   local dir=$1 apply=$2 f found=0
-  for f in "$dir"/hub-backup-*.db; do
+  # .hub-backup-*.tmp.db is hub-db-roll.sh's temporary copy, which still holds the relay rows; a
+  # run killed before its EXIT trap left it behind.
+  for f in "$dir"/hub-backup-*.db "$dir"/.hub-backup-*.tmp.db; do
     [ -e "$f" ] || continue
     found=1
     echo "[2] backup $f ($(stat -c %s "$f") bytes)"
@@ -427,25 +433,40 @@ ops_credentials_step() {
     echo "    no official-agent manifest names an ssh host"
   fi
 
-  # Private keys of the account the admin ran as (root by default: the unit had no User=).
+  # Private keys of the account the admin ran as (root by default: the unit had no User=). The old
+  # ops plane ran ssh without -i, so ssh offered the account's default identities and whatever
+  # IdentityFile its ssh config names. A key is recognised by its header, whatever its file name.
   if [ ! -d "$ssh_dir" ]; then
     echo "    $ssh_dir: not present"
   elif [ ! -r "$ssh_dir" ] || [ ! -x "$ssh_dir" ]; then
     echo "    $ssh_dir: not readable by $(id -un); run as root to list its keys"
   else
-    local found=0
-    for f in "$ssh_dir"/id_*; do
-      [ -f "$f" ] || continue
-      case "$f" in *.pub) continue ;; esac
+    local found=0 line
+    for f in "$ssh_dir"/*; do
+      is_private_key "$f" || continue
       found=1
       echo "    private key $f ($(fingerprint "$f"))"
     done
-    if [ "$found" = 0 ]; then echo "    no private key named id_* in $ssh_dir"; fi
+    if [ "$found" = 0 ]; then echo "    no private key in $ssh_dir"; fi
+    if [ -r "$ssh_dir/config" ]; then
+      while IFS= read -r line; do
+        echo "    $ssh_dir/config names a key: $line"
+      done < <(grep -iE '^[[:space:]]*IdentityFile([[:space:]]|=)' -- "$ssh_dir/config" || true)
+    fi
   fi
   local k
   for k in "${OPS_KEYS[@]}"; do
     if [ ! -e "$k" ]; then
       echo "    --ops-ssh-key $k: not found"
+      continue
+    fi
+    # A mistyped path must not delete authorized_keys, a config or a directory.
+    if [ ! -r "$k" ]; then
+      echo "    --ops-ssh-key $k: not readable by $(id -un); not deleted"
+      continue
+    fi
+    if ! is_private_key "$k"; then
+      echo "    --ops-ssh-key $k: not a private key file; not deleted"
       continue
     fi
     echo "    --ops-ssh-key $k ($(fingerprint "$k")): the ops key, to be deleted"
@@ -458,19 +479,27 @@ ops_credentials_step() {
     echo "    no --ops-ssh-key given: no key is deleted (a default key may serve other purposes)"
   fi
 
-  # ADMIN_MONITOR_TOKEN. A line that only assigns it is removed; any other line naming it is left
-  # for the operator. The value is never printed.
-  local re='^[[:space:]]*(Environment[[:space:]]*=[[:space:]]*)?"?(export[[:space:]]+)?ADMIN_MONITOR_TOKEN=("[^"]*"|[^[:space:]"]*)"?[[:space:]]*$'
-  local files n left seen=0 edited=0
+  # ADMIN_MONITOR_TOKEN. A line that only assigns it is removed, commented out or not (a comment
+  # still holds the value); any other line naming it is left for the operator. The value is never
+  # printed.
+  local re='^[[:space:]]*([#;][[:space:]]*)?(Environment[[:space:]]*=[[:space:]]*)?"?(export[[:space:]]+)?ADMIN_MONITOR_TOKEN=("[^"]*"|[^[:space:]"]*)"?[[:space:]]*$'
+  local files n m left seen=0 edited=0 unread=0
   files=$(monitor_token_files "$systemd_dir")
   while read -r f; do
     [ -n "$f" ] || continue
+    if [ ! -r "$f" ]; then
+      echo "    $f: not readable by $(id -un); run as root to check it for ADMIN_MONITOR_TOKEN"
+      unread=1
+      continue
+    fi
     n=$(grep -c 'ADMIN_MONITOR_TOKEN' -- "$f" || true)
     [ "$n" != 0 ] || continue
     seen=1
-    echo "    $f: $n line(s) name ADMIN_MONITOR_TOKEN (value not shown)"
+    m=$(grep -cE "$re" -- "$f" || true)
+    echo "    $f: $n line(s) name ADMIN_MONITOR_TOKEN (value not shown); --apply removes the $m that only set it"
     if [ "$apply" = 1 ]; then
-      sed -i -E "/$re/d" -- "$f"
+      # --follow-symlinks: an EnvironmentFile may be a link; edit its target, keep the link.
+      sed -i --follow-symlinks -E "/$re/d" -- "$f"
       edited=1
       left=$(grep -c 'ADMIN_MONITOR_TOKEN' -- "$f" || true)
       if [ "$left" = 0 ]; then
@@ -482,6 +511,8 @@ ops_credentials_step() {
   done <<<"$files"
   if [ -z "$files" ]; then
     echo "    no anet-hub-admin unit in $systemd_dir"
+  elif [ "$seen" = 0 ] && [ "$unread" = 1 ]; then
+    echo "    ADMIN_MONITOR_TOKEN not found in the files that could be read; the others are unchecked"
   elif [ "$seen" = 0 ] && [ "$OPS_MONITORS" != 0 ]; then
     echo "    ADMIN_MONITOR_TOKEN is not set in the admin unit: the old admin sent ADMIN_TOKEN itself"
     echo "    as the console token of the $OPS_MONITORS manifest(s) with a monitor section"
@@ -499,6 +530,15 @@ ops_credentials_step() {
   return 0
 }
 
+# is_private_key: a regular file whose first line is a PEM private key header (OpenSSH, PKCS#1, PKCS#8).
+is_private_key() {
+  local first=""
+  [ -f "$1" ] || return 1
+  IFS= read -r first 2>/dev/null <"$1" || true
+  case "$first" in "-----BEGIN "*"PRIVATE KEY-----"*) return 0 ;; esac
+  return 1
+}
+
 fingerprint() {
   local f=$1
   command -v ssh-keygen >/dev/null || { echo "no ssh-keygen for a fingerprint"; return 0; }
@@ -509,7 +549,7 @@ other_copies_report() {
   local hub=$1 admin=$2
   local list
   list=$(find "$hub" "$admin" -maxdepth 2 -type f \( -name '*.bak' -o -name '*backup*' -o -name '*.orig' -o -name '*.old' \) \
-    ! -name 'hub-backup-*.db' 2>/dev/null || true)
+    ! -name 'hub-backup-*.db' ! -name '.hub-backup-*.tmp.db' 2>/dev/null || true)
   if [ -n "$list" ]; then
     echo "[report] other files that look like copies (review by hand; not deleted):"
     echo "$list" | sed 's/^/    /'

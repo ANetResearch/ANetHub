@@ -96,10 +96,11 @@ POST /admin/api/deleted/{aid}/restore
 该变量未设置时取 `ADMIN_TOKEN` 的值。
 
 `deploy/cleanup-content-v0.2.sh` 第 9 步报告这些凭证（默认只报告，不打印任何口令值）：清单里出现过的
-`用户@主机`（在第 7 步剥掉 `runtime/monitor` 之前读取）、`--ssh-dir`（缺省 `/root/.ssh`）下的私钥及指纹、
-admin unit、drop-in 及其 `EnvironmentFile` 中的 `ADMIN_MONITOR_TOKEN`。`--apply` 时删除单独成行的
-`ADMIN_MONITOR_TOKEN` 赋值（与其他变量同行的只报告，需手工改），并删除以 `--ops-ssh-key` 点名的私钥
-及其 `.pub`。默认身份不点名就不删：脚本无法判断该账户是否还用它做别的事。
+`用户@主机`（在第 7 步剥掉 `runtime/monitor` 之前读取）、`--ssh-dir`（缺省 `/root/.ssh`）下的私钥
+（按文件头识别，不限文件名）及指纹、该目录 ssh `config` 中的 `IdentityFile` 行、admin unit、drop-in 及其
+`EnvironmentFile` 中的 `ADMIN_MONITOR_TOKEN`。`--apply` 时删除单独成行的 `ADMIN_MONITOR_TOKEN` 赋值
+（含注释掉的；与其他变量同行的只报告，需手工改），并删除以 `--ops-ssh-key` 点名的私钥及其 `.pub`
+（点名的文件不是私钥时不删）。默认身份不点名就不删：脚本无法判断该账户是否还用它做别的事。
 
 脚本做不到、需运营者逐项完成（执行前征求产品负责人同意，属阶段 G）：
 

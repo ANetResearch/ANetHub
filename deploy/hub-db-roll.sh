@@ -19,7 +19,8 @@
 # holding them are overwritten), then VACUUM INTO the final backup from the
 # copy, which writes only live pages, and remove the copy. The temporary
 # copy exists only for the duration of the backup, in the same directory
-# and under the same account as hub.db, which already holds those rows.
+# and under the same account as hub.db, which already holds those rows; one
+# left by a run killed outright is removed at the start of the next run.
 # Backups written before wire 2 by earlier versions of this script still
 # contain relay rows; removing those is part of the production cleanup
 # (deploy/cleanup-content-v0.2.sh) and is not done here.
@@ -46,6 +47,8 @@ command -v sqlite3 >/dev/null || { echo "hub-db-roll: sqlite3 is required" >&2; 
 
 SQL() { sqlite3 "$DB" ".timeout 5000" "$@"; }
 log() { echo "[$(date -Is)] $*" >>"$LOG"; }
+# sqlstr quotes a path as an SQL string literal (HUB_DATA_DIR comes from the caller).
+sqlstr() { printf "'%s'" "${1//\'/\'\'}"; }
 
 size_before=$(stat -c %s "$DB")
 backlog=$(SQL "SELECT COUNT(*) FROM relay_message;")
@@ -53,6 +56,15 @@ log "START db=$((size_before/1024/1024))MB relay_backlog=$backlog"
 
 SQL "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
 log "wal_checkpoint(TRUNCATE) done"
+
+# A temporary backup copy from an earlier run that was killed before its
+# EXIT trap (SIGKILL, power loss) still holds every relay row; it is
+# nobody's backup and would otherwise stay on disk.
+for stale in "$DATA_DIR"/.hub-backup-*.tmp.db; do
+    [ -e "$stale" ] || continue
+    rm -f -- "$stale" "$stale-journal" "$stale-wal" "$stale-shm"
+    log "removed a temporary copy left by an interrupted run: $stale"
+done
 
 # Sunday: rotating backup without relay rows (keep 2) + conditional VACUUM
 if [ "$(date +%u)" = "7" ] || [ "${FORCE_WEEKLY:-0}" = 1 ]; then
@@ -64,11 +76,11 @@ if [ "$(date +%u)" = "7" ] || [ "${FORCE_WEEKLY:-0}" = 1 ]; then
         # has run; it is removed on every exit path, including a failed
         # statement under set -e, so that it does not outlive this run.
         trap 'rm -f -- "$tmp" "$tmp-journal" "$tmp-wal" "$tmp-shm"' EXIT
-        SQL "VACUUM INTO '$tmp';"
+        SQL "VACUUM INTO $(sqlstr "$tmp");"
         sqlite3 "$tmp" ".timeout 5000" \
             "PRAGMA secure_delete=ON;" \
             "DELETE FROM relay_message;" >/dev/null
-        sqlite3 "$tmp" ".timeout 5000" "VACUUM INTO '$backup';"
+        sqlite3 "$tmp" ".timeout 5000" "VACUUM INTO $(sqlstr "$backup");"
         rm -f -- "$tmp" "$tmp-journal" "$tmp-wal" "$tmp-shm"
         left=$(sqlite3 "$backup" "SELECT COUNT(*) FROM relay_message;")
         if [ "$left" != "0" ]; then

@@ -85,7 +85,8 @@ func section(page, from, to string) string {
 // replaced (05-hub H10): `anet install --agent` became `anet agents wire`
 // (the page said both, a few screens apart), the MCP tools are the §12
 // names, and a text task is completed by its provider alone — "when both
-// end" described a handshake the daemon no longer has.
+// end" described a handshake the daemon no longer has, and the receipt is
+// the provider's signature, not both sides'.
 func TestTheManualNamesTheCurrentCommands(t *testing.T) {
 	srv := newHub(t)
 	code, body := getJSON(t, srv.URL+"/llms.txt")
@@ -94,13 +95,15 @@ func TestTheManualNamesTheCurrentCommands(t *testing.T) {
 	}
 	page := string(body)
 	for _, gone := range []string{"anet install --agent", "when both end",
-		"once both sides agree", "auto-proposes", "accept-end", "task_delegate", "agents_find",
-		"task_message", "task_end", "credit_balance", "evidence_read"} {
+		"once both sides agree", "both sides sign", "BOTH sides sign", "auto-proposes", "accept-end",
+		"task_delegate", "agents_find", "task_message", "task_end", "task_results", "task_inbox",
+		"credit_balance", "evidence_read"} {
 		if strings.Contains(page, gone) {
 			t.Errorf("the manual still says %q", gone)
 		}
 	}
-	for _, want := range []string{"anet agents wire", "doctor", "init", "anet peers allow",
+	for _, want := range []string{"anet agents wire", "anet --id <codename> doctor",
+		"anet --id <codename> init", "anet peers allow",
 		"peers allow|trust", "list_agents", "send_message", "wait_task", "reply_task", "cancel_task",
 		"UNVERIFIED", "signs the receipt"} {
 		if !strings.Contains(page, want) {

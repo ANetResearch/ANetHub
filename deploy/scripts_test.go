@@ -172,6 +172,7 @@ type cleanupFixture struct {
 	content                  string // task content, in every copy §9 lists
 	secret                   string // the monitor token's value
 	opsKey, otherKey         string
+	namedKey, authorized     string
 	envFile, dropIn, unit    string
 }
 
@@ -202,6 +203,8 @@ func newCleanupFixture(t *testing.T) cleanupFixture {
 		[]any{"goal " + c, "deliverable " + c}, nil,
 		[]any{[]byte("doc " + c), []byte("result " + c)})
 	writeFile(t, filepath.Join(f.hub, "hub-backup-20260906.db"), "SQLite backup "+c, 0o600)
+	// hub-db-roll.sh's temporary copy, left by a run that was killed.
+	writeFile(t, filepath.Join(f.hub, ".hub-backup-20260913.tmp.db"), "relay rows "+c, 0o600)
 	for _, s := range []string{"", "-wal", "-shm"} {
 		writeFile(t, filepath.Join(f.hub, "taskboard.db"+s), "card "+c, 0o600)
 	}
@@ -242,6 +245,16 @@ func newCleanupFixture(t *testing.T) cleanupFixture {
 	writeFile(t, f.opsKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nops\n", 0o600)
 	writeFile(t, f.opsKey+".pub", "ssh-ed25519 AAAA ops\n", 0o644)
 	writeFile(t, f.otherKey, "-----BEGIN OPENSSH PRIVATE KEY-----\nother\n", 0o600)
+	// A key under a name of its own, which the account's ssh config
+	// offers: the old ops plane ran ssh without -i, so this is as likely
+	// the ops key as a default one. And files in the directory that are
+	// not private keys, one of them named by mistake with --ops-ssh-key.
+	f.namedKey = filepath.Join(f.ssh, "hub_ops")
+	f.authorized = filepath.Join(f.ssh, "authorized_keys")
+	writeFile(t, f.namedKey, "-----BEGIN RSA PRIVATE KEY-----\nnamed\n", 0o600)
+	writeFile(t, filepath.Join(f.ssh, "config"), "Host dmax.example\n  IdentityFile ~/.ssh/hub_ops\n", 0o600)
+	writeFile(t, filepath.Join(f.ssh, "known_hosts"), "emax.example ssh-ed25519 AAAA\n", 0o644)
+	writeFile(t, f.authorized, "ssh-ed25519 AAAA operator\n", 0o600)
 
 	// The monitor token in each place systemd takes environment from.
 	f.unit = filepath.Join(f.systemd, "anet-hub-admin.service")
@@ -252,13 +265,14 @@ func newCleanupFixture(t *testing.T) cleanupFixture {
 	writeFile(t, f.dropIn, "[Service]\nEnvironment=\"ADMIN_MONITOR_TOKEN="+f.secret+"\"\n"+
 		"EnvironmentFile=-"+f.envFile+"\n"+
 		"Environment=LOG_LEVEL=info ADMIN_MONITOR_TOKEN="+f.secret+"\n", 0o644)
-	writeFile(t, f.envFile, "export ADMIN_MONITOR_TOKEN="+f.secret+"\nOTHER=1\n", 0o600)
+	// A commented-out assignment still holds the value on disk.
+	writeFile(t, f.envFile, "export ADMIN_MONITOR_TOKEN="+f.secret+"\nOTHER=1\n# ADMIN_MONITOR_TOKEN="+f.secret+"\n", 0o600)
 	return f
 }
 
 func (f cleanupFixture) args(extra ...string) []string {
 	return append([]string{"--hub-data", f.hub, "--admin-data", f.admin, "--ssh-dir", f.ssh,
-		"--systemd-dir", f.systemd, "--ops-ssh-key", f.opsKey}, extra...)
+		"--systemd-dir", f.systemd, "--ops-ssh-key", f.opsKey, "--ops-ssh-key", f.authorized}, extra...)
 }
 
 // The cleanup script on a v0.1 hub host. A dry run reports every item of
@@ -283,15 +297,19 @@ func TestTheCleanupScriptReportsThenDeletesEveryListedCopy(t *testing.T) {
 		"[1] relay_message: not migrated; all 2 rows are wire-1 plaintext",
 		"[3] review: goal/deliverable columns present (hub.db not yet migrated): 1 rows with content",
 		"[3] review_blob: request_doc_raw/deliverable_raw present: 1 rows",
-		"hub-backup-20260906.db", "[4] " + filepath.Join(f.hub, "taskboard.db-wal"),
+		"hub-backup-20260906.db", "[2] backup " + filepath.Join(f.hub, ".hub-backup-20260913.tmp.db"),
+		"[4] " + filepath.Join(f.hub, "taskboard.db-wal"),
 		"hub-relay: 1 files", "ai-studio: 1 files",
 		"[6] admin.db session: 1 rows", "[6] admin.db harvest_state: 1 rows",
 		"[7] admin.db official_agent: 1 manifests carry", "officials.json: 1 manifests carry",
 		"[8] " + filepath.Join(f.hub, "guest_identity.kel"),
 		// The ssh user defaults to root, as the old ops plane did.
 		"root@emax.example", "anet@dmax.example",
-		"private key " + f.opsKey, "private key " + f.otherKey,
-		f.unit + ": 1 line(s) name ADMIN_MONITOR_TOKEN", f.dropIn + ": 2 line(s)", f.envFile + ": 1 line(s)",
+		"private key " + f.opsKey, "private key " + f.otherKey, "private key " + f.namedKey,
+		"config names a key:   IdentityFile ~/.ssh/hub_ops",
+		"--ops-ssh-key " + f.authorized + ": not a private key file; not deleted",
+		f.unit + ": 1 line(s) name ADMIN_MONITOR_TOKEN", f.dropIn + ": 2 line(s)", f.envFile + ": 2 line(s)",
+		"--apply removes the 1 that only set it", "--apply removes the 2 that only set it",
 		"authorized_keys", "rotate ADMIN_TOKEN",
 		filepath.Join(f.hub, "notes.old"),
 		"nothing was deleted",
@@ -302,6 +320,11 @@ func TestTheCleanupScriptReportsThenDeletesEveryListedCopy(t *testing.T) {
 	}
 	if strings.Contains(out, f.content) || strings.Contains(out, f.secret) {
 		t.Errorf("the report printed content or the monitor token:\n%s", out)
+	}
+	for _, notKey := range []string{"known_hosts", "authorized_keys", "config", "id_ed25519.pub"} {
+		if strings.Contains(out, "private key "+filepath.Join(f.ssh, notKey)+" ") {
+			t.Errorf("the report calls %s a private key", notKey)
+		}
 	}
 	assertUnchanged(t, "dry run", before, snapshot(t, roots...))
 
@@ -331,7 +354,8 @@ func TestTheCleanupScriptReportsThenDeletesEveryListedCopy(t *testing.T) {
 			t.Errorf("%s still exists after --apply (%v)", gone, err)
 		}
 	}
-	for _, kept := range []string{filepath.Join(f.hub, "notes.old"), f.otherKey, filepath.Join(f.admin, "datasets")} {
+	for _, kept := range []string{filepath.Join(f.hub, "notes.old"), f.otherKey, f.namedKey, f.authorized,
+		filepath.Join(f.admin, "datasets")} {
 		if _, err := os.Stat(kept); err != nil {
 			t.Errorf("%s was not the script's to delete: %v", kept, err)
 		}
@@ -447,10 +471,55 @@ func TestTheCleanupScriptReportsWhatTheMigrationDropped(t *testing.T) {
 	}
 }
 
+// A hub.db an earlier wire-2 build migrated, copying the undelivered wire-1
+// rows, has no hub_meta record, and its rows look like any other. There
+// --relay-before is the only thing that tells them from wire-2 envelopes:
+// without it nothing is deleted, with it exactly the rows created before
+// that instant are, and their bytes leave the file.
+func TestTheCleanupScriptDeletesCopiedRowsOnlyBeforeTheGivenInstant(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	copied, sealed := canary(t, "WIRE1"), canary(t, "SEALED")
+	execAll(t, filepath.Join(dir, "hub.db"), []string{
+		`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES('bafya', 1, 1000, ?), ('bafya', 1, 3000, ?)`,
+	}, []any{[]byte(copied), []byte(sealed)})
+	args := []string{"--hub-data", dir, "--admin-data", t.TempDir(), "--ssh-dir", t.TempDir(),
+		"--systemd-dir", t.TempDir(), "--apply", "--yes"}
+	hubdb := filepath.Join(dir, "hub.db")
+
+	out, code := runScript(t, nil, "cleanup-content-v0.2.sh", args...)
+	if code != 0 || !strings.Contains(out, "without a migration record") {
+		t.Fatalf("without --relay-before: exit %d\n%s", code, out)
+	}
+	if n := queryInt(t, hubdb, `SELECT COUNT(*) FROM relay_message`); n != 2 {
+		t.Fatalf("without --relay-before %d rows are left, want both", n)
+	}
+
+	out, code = runScript(t, nil, "cleanup-content-v0.2.sh", append(args, "--relay-before", "2000")...)
+	if code != 0 || !strings.Contains(out, "[1] relay_message: 1 rows created before 2000") {
+		t.Fatalf("--relay-before 2000: exit %d\n%s", code, out)
+	}
+	if n := queryInt(t, hubdb, `SELECT COUNT(*) FROM relay_message WHERE created_at = 3000`); n != 1 {
+		t.Errorf("the envelope created after the instant is gone")
+	}
+	if n := queryInt(t, hubdb, `SELECT COUNT(*) FROM relay_message`); n != 1 {
+		t.Errorf("%d rows left, want only the one created after the instant", n)
+	}
+	if hits := filesHolding(t, copied, dir); len(hits) != 0 {
+		t.Errorf("the deleted row's payload is still in %v", hits)
+	}
+}
+
 // hub-db-roll.sh on the weekly path: the backup has no relay row and no
 // relay payload, keeps the rest, the WAL is truncated, the two newest
-// backups are kept, and no temporary copy is left behind. The hub holds
-// the database open while the script runs, as it does in production.
+// backups are kept, and no temporary copy is left behind, including one an
+// earlier, killed run left. The hub holds the database open while the
+// script runs, as it does in production.
 func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 	needSQLite3(t)
 	dir := t.TempDir()
@@ -478,6 +547,9 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 		t.Fatalf("precondition: the rows should be in hub.db-wal (%v); the checkpoint assertion "+
 			"would pass for the wrong reason", err)
 	}
+	// The temporary copy of a run killed before its EXIT trap: every relay
+	// row, under a name no backup rotation looks at.
+	writeFile(t, filepath.Join(dir, ".hub-backup-20200112.tmp.db"), "relay "+payload, 0o600)
 	// Two old backups; with today's the oldest must go.
 	for i, name := range []string{"hub-backup-20200105.db", "hub-backup-20200112.db"} {
 		p := filepath.Join(dir, name)
@@ -513,7 +585,8 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 		t.Errorf("temporary copies left behind: %v", tmp)
 	}
 	logb, _ := os.ReadFile(filepath.Join(dir, "roll.log"))
-	for _, want := range []string{"START", "relay_backlog=1", "weekly backup", "pruned old backup", "END"} {
+	for _, want := range []string{"START", "relay_backlog=1", "removed a temporary copy left by an interrupted run",
+		"weekly backup", "pruned old backup", "END"} {
 		if !bytes.Contains(logb, []byte(want)) {
 			t.Errorf("roll.log lacks %q:\n%s", want, logb)
 		}
