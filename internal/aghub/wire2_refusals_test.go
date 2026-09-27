@@ -310,33 +310,35 @@ func TestAPollIsBoundedByTheBudgetAndOldestFirst(t *testing.T) {
 	}
 }
 
-// Leaving removes the stored A2A card with the rest of the agent's
-// routing.
+// Leaving removes the stored A2A card and its skill and tag index rows
+// with the rest of the agent's routing.
 func TestLeavingRemovesTheA2ACard(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newHubAt(t, dir)
 	c, _ := twoAgents(t)
 	body := registerBody(t, c, "Agent", nil)
-	body["a2a_card"] = json.RawMessage(`{"name":"Agent"}`)
+	body["a2a_card"] = signA2A(t, c, a2aCardFor(c, 1))
 	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
 	if code != 200 {
 		t.Fatalf("register: %d %s", code, b)
 	}
-	count := func() int {
+	count := func(table string) int {
 		var n int
-		if err := openDB(t, dir).QueryRow(`SELECT COUNT(*) FROM agent_a2a_card WHERE aid=?`, c.AID()).Scan(&n); err != nil {
+		if err := openDB(t, dir).QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE aid=?`, c.AID()).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
 		return n
 	}
-	if count() != 1 {
-		t.Fatal("setup: the A2A card was not stored")
+	if count("agent_a2a_card") != 1 || count("agent_skill") != 1 || count("agent_tag") != 2 {
+		t.Fatal("setup: the A2A card was not admitted and indexed")
 	}
 	if code, b := leave(t, srv, c); code != 200 {
 		t.Fatalf("leave: %d %s", code, b)
 	}
-	if n := count(); n != 0 {
-		t.Fatalf("a departed agent's A2A card is still stored (%d rows)", n)
+	for _, table := range []string{"agent_a2a_card", "agent_skill", "agent_tag"} {
+		if n := count(table); n != 0 {
+			t.Errorf("%s keeps %d rows for an agent that left", table, n)
+		}
 	}
 }
 

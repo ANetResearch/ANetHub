@@ -400,9 +400,9 @@ func (s *Store) migrate() error {
 		   stored_at TEXT NOT NULL
 		 )`,
 		// The A2A AgentCard an agent submitted at registration, stored as
-		// the raw bytes it sent. Not verified or indexed yet; admission is
-		// added separately (A2A-DESIGN §10.3), and nothing reads this
-		// table into a listing until then.
+		// the raw bytes it sent once it passed admission (A2A-DESIGN
+		// §10.3). The admission columns and the skill and tag indexes are
+		// added by migrateA2ACard; see a2acard.go.
 		`CREATE TABLE IF NOT EXISTS agent_a2a_card (
 		   aid TEXT PRIMARY KEY,
 		   card BLOB NOT NULL,
@@ -459,7 +459,8 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("hub: migrate: %w", err)
 		}
 	}
-	return nil
+	// A2A card admission columns and the skill/tag indexes (a2acard.go).
+	return s.migrateA2ACard()
 }
 
 // PutAgent registers or updates an agent (upsert on AID). The caller has already verified the KEL
@@ -759,8 +760,20 @@ func (s *Store) AnyKEL(aid string) ([]byte, error) {
 	if kel, err := s.AgentKEL(aid); err == nil {
 		return kel, nil
 	}
+	// From a peer's ADP card stream (fed_card) or its A2A card stream
+	// (fed_a2a_card, fed_a2acard.go; a withdrawn row still holds the KEL,
+	// which is proof, not routing). Each table only ever extends its own
+	// copy, but the two streams arrive independently, so when both hold
+	// one the longer is served: a KEL that extends another is longer, and
+	// serving the other would go back to a key state the agent rotated
+	// away from, against which its current A2A card no longer verifies.
 	var kel []byte
-	err := s.db.QueryRow(`SELECT kel FROM fed_card WHERE aid=?`, aid).Scan(&kel)
+	err := s.db.QueryRow(
+		`SELECT kel FROM (
+		   SELECT kel FROM fed_card WHERE aid=?
+		   UNION ALL
+		   SELECT kel FROM fed_a2a_card WHERE aid=?
+		 ) ORDER BY length(kel) DESC LIMIT 1`, aid, aid).Scan(&kel)
 	if err == nil {
 		return kel, nil
 	}
@@ -1131,13 +1144,18 @@ func (s *Store) GraphNodeFor(aid string) AgentView {
 		return av
 	}
 	// Not in the registry at all: it left, or it never banked here and is
-	// only known through a review that crossed from a peer.
+	// only known through a review that crossed from a peer. It is named
+	// from its A2A card while a peer publishes one (fed_a2acard.go), as
+	// /agents names it, else from its ADP card.
 	var fedName string
+	_ = s.db.QueryRow(`SELECT name FROM fed_a2a_card WHERE aid=? AND verified_at IS NOT NULL`, aid).Scan(&fedName)
 	var raw []byte
-	if err := s.db.QueryRow(`SELECT card FROM fed_card WHERE aid=?`, aid).Scan(&raw); err == nil {
-		var card adp.AgentCard
-		if json.Unmarshal(raw, &card) == nil {
-			fedName = card.Name
+	if fedName == "" {
+		if err := s.db.QueryRow(`SELECT card FROM fed_card WHERE aid=?`, aid).Scan(&raw); err == nil {
+			var card adp.AgentCard
+			if json.Unmarshal(raw, &card) == nil {
+				fedName = card.Name
+			}
 		}
 	}
 	return AgentView{AID: aid, Name: fedName, Caps: []string{}, Registered: false}

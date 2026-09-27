@@ -392,9 +392,18 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keyset"}},
 		{"KeysPublishResponse", aghub.KeysPublishResponse{}, []string{"aid", "keys_status"}},
 		{"FedCard", aghub.FedCard{}, []string{"card", "fed_seq", "home", "kel", "keys"}},
+		// The A2A registry (A2A-DESIGN §10.5), read by the daemon's
+		// list_agents (ANet internal/hubapi pins the same names).
+		{"A2AAgentEntry", aghub.A2AAgentEntry{}, []string{
+			"aid", "avgRating", "card", "cardVerification", "homeHub", "lastSeen", "quiet", "reviewCount", "verifiedAt"}},
+		{"A2AAgentList", aghub.A2AAgentList{}, []string{"agents", "nextCursor"}},
 		{"federation.Envelope", federation.Envelope{}, []string{
 			"dest_aid", "hop", "key_state_seq", "origin_hub_aid", "payload", "payload_cid", "seen_hubs", "sig", "ts", "v"}},
 		{"federation.KeysAnswer", federation.KeysAnswer{}, []string{"kel", "keyset"}},
+		// GET /fed/v2/cards (A2A-DESIGN §10.6), read by peer hubs.
+		{"federation.FedA2ACardEntry", federation.FedA2ACardEntry{}, []string{
+			"card", "fed_seq", "format", "home", "kel", "keys"}},
+		{"federation.FedA2ACardPage", federation.FedA2ACardPage{}, []string{"cards", "cursor"}},
 	} {
 		got := goJSONFields(t, tc.value)
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
@@ -405,7 +414,11 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 	for _, pair := range [][2]string{
 		{aghub.KeysStatusOK, "ok"}, {aghub.KeysStatusUnchanged, "unchanged"}, {aghub.KeysStatusAbsent, "absent"},
 		{aghub.KeysStatusInvalid, "invalid"}, {aghub.KeysStatusConflict, "conflict"},
-		{aghub.CardStatusAbsent, "absent"}, {aghub.CardStatusUnverified, "unverified"}, {aghub.CardStatusInvalid, "invalid"},
+		{aghub.CardStatusOK, "ok"}, {aghub.CardStatusUnchanged, "unchanged"}, {aghub.CardStatusAbsent, "absent"},
+		{aghub.CardStatusInvalid, "invalid"}, {aghub.CardStatusConflict, "conflict"},
+		{aghub.CardVerificationOK, "ok"},
+		// The /fed/v2/cards entry formats a peer hub dispatches on.
+		{federation.FormatA2ACard, "a2a-card/1"}, {federation.FormatWithdrawal, "withdrawal/1"},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("status value %q, want %q", pair[0], pair[1])
