@@ -3,6 +3,9 @@ on:
   push:
     branches: [main, "anet4/**"]
   pull_request:
+  # By hand on a branch the push filter does not cover (a2a-redesign-wip
+  # is one), as ANet's CI allows.
+  workflow_dispatch:
 
 # Every Go job starts with ./.github/actions/anetcore: while ANetCore
 # v0.15.0 is untagged, go.mod cannot build this tree and the action puts a
