@@ -32,9 +32,18 @@ func TestTheManualInstallsSafelyAndOffersNoGuestMode(t *testing.T) {
 			"(anet update command at %d, curl | sh at %d)", upd, curl)
 	}
 	for _, want := range []string{"anet version", "install.sh.sig", "ssh-keygen -Y verify",
-		"-n anet-release@agentnetwork.org.cn", "allowed_signers", "fresh machine"} {
+		"-n anet-release@agentnetwork.org.cn", "allowed_signers", "fresh machine",
+		// anet before 0.2.0 has no update command; the page has to say
+		// what to do there rather than leave the agent at an error.
+		"has no `update` command"} {
 		if !strings.Contains(step0, want) {
 			t.Errorf("Step 0 does not contain %q", want)
+		}
+	}
+	// Every curl in Step 0 is https-only, redirects included.
+	for _, line := range strings.Split(step0, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "curl ") && !strings.Contains(line, "--proto '=https'") {
+			t.Errorf("Step 0 fetches without --proto '=https': %s", line)
 		}
 	}
 	lower := strings.ToLower(page)
