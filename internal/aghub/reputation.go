@@ -87,16 +87,24 @@ func (s *Store) ReviewsSince(cursor int64, limit int) ([]FedReview, int64, error
 	// Whose consent governs is the subject's, because the reputation at
 	// stake is the subject's. A local subject opts in by visibility; a
 	// foreign one already did, at its home hub, by federating the card
-	// that is how we know it exists.
+	// that is how we know it exists. Its card may have come over either
+	// stream: the ADP card (fed_card) or the A2A card while its home hub
+	// still publishes it (fed_a2a_card, listed). When both hold a KEL the
+	// longer is sent, as AnyKEL serves it. A subject registered here is
+	// governed by its visibility alone, whatever a peer's copy of its card
+	// left in those tables from before it registered.
 	rows, err := s.db.Query(
 		`SELECT r.rowid, r.interaction_id,
-		        COALESCE(p.kel, f.kel), q.kel
+		        COALESCE(p.kel,
+		          CASE WHEN g.kel IS NOT NULL AND (f.kel IS NULL OR length(g.kel) > length(f.kel))
+		               THEN g.kel ELSE f.kel END), q.kel
 		   FROM review r
 		   JOIN agent q ON q.aid = r.reviewer_aid
 		   LEFT JOIN agent p ON p.aid = r.subject_aid
 		   LEFT JOIN fed_card f ON f.aid = r.subject_aid
+		   LEFT JOIN fed_a2a_card g ON g.aid = r.subject_aid AND g.verified_at IS NOT NULL
 		  WHERE r.rowid > ?
-		    AND (p.visibility IN (?, ?) OR f.aid IS NOT NULL)
+		    AND (p.visibility IN (?, ?) OR (p.aid IS NULL AND (f.aid IS NOT NULL OR g.aid IS NOT NULL)))
 		  ORDER BY r.rowid LIMIT ?`,
 		cursor, VisibilityFederated, VisibilityPublic, limit)
 	if err != nil {

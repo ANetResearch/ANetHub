@@ -29,6 +29,10 @@ func TestTheKernelAndAdminDoNotDependOnContentCodecs(t *testing.T) {
 	forbidden := []string{
 		"github.com/ANetResearch/ANetCore/delegation",
 		"github.com/ANetResearch/ANetCore/tsir",
+		// a2a-go holds the A2A Message and Task types. The hub verifies
+		// A2A cards with ANetCore a2acard (A2A-DESIGN §10.3) and has no
+		// use for the rest.
+		"github.com/a2aproject/a2a-go",
 	}
 	for _, pkg := range []string{
 		"github.com/ANetResearch/ANetHub/internal/aghub",
