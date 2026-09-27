@@ -416,6 +416,7 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{aghub.KeysStatusInvalid, "invalid"}, {aghub.KeysStatusConflict, "conflict"},
 		{aghub.CardStatusOK, "ok"}, {aghub.CardStatusUnchanged, "unchanged"}, {aghub.CardStatusAbsent, "absent"},
 		{aghub.CardStatusInvalid, "invalid"}, {aghub.CardStatusConflict, "conflict"},
+		{aghub.CardStatusWithdrawn, "withdrawn"},
 		{aghub.CardVerificationOK, "ok"},
 		// The /fed/v2/cards entry formats a peer hub dispatches on.
 		{federation.FormatA2ACard, "a2a-card/1"}, {federation.FormatWithdrawal, "withdrawal/1"},

@@ -57,6 +57,7 @@ func (d storeDelivery) Enqueue(to string, envelope []byte) (int64, error) {
 // describing behaviour the binary does not have.
 type hubFlags struct {
 	addr           *string
+	publicURL      *string
 	data           *string
 	showVersion    *bool
 	grant          *string
@@ -92,6 +93,9 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	f := &hubFlags{}
 	f.addr = fs.String("addr", ":8088", "HTTP listen address")
 	f.data = fs.String("data", "./.anet-hub", "data directory (SQLite store)")
+	f.publicURL = fs.String("public-url", "",
+		"this hub's public base URL (e.g. https://hub.example.org), stated as homeHub in /a2a/v1/agents and "+
+			"checked against the relay URL of admitted A2A cards; empty: the origin of each request")
 	f.showVersion = fs.Bool("version", false, "print version and exit")
 	// Funding an account, which had no way in at all.
 	//
@@ -276,6 +280,9 @@ func main() {
 	srv0 := aghub.NewServer(store)
 	if err := srv0.SetLimits(f.limits()); err != nil {
 		log.Fatalf("anet-hub: relay limits: %v", err)
+	}
+	if err := srv0.SetPublicURL(*f.publicURL); err != nil {
+		log.Fatalf("anet-hub: -public-url: %v", err)
 	}
 	// This hub's own AID names the ledger it settles on (hub:<aid>), so a
 	// credit here is visibly not a credit somewhere else. It is also bound

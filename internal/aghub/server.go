@@ -57,6 +57,9 @@ type Server struct {
 	peerKELs func(aid string) ([]identity.SignedEvent, error)
 	// peerEndpoints, when set, answers where a peer hub can be reached.
 	peerEndpoints func(aid string) string
+	// publicURL is this hub's configured public base URL (publicurl.go);
+	// empty means the origin of each request.
+	publicURL string
 }
 
 // SetPeerEndpointResolver installs the federation hook for "where does
@@ -395,7 +398,7 @@ func (s *Server) hLLMs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	out := strings.ReplaceAll(string(b), "{{HUB_URL}}", requestOrigin(r))
+	out := strings.ReplaceAll(string(b), "{{HUB_URL}}", s.origin(r))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write([]byte(out))
@@ -724,6 +727,9 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	// against the KEL just registered, which may have rotated away from
 	// the key that signed it.
 	out.CardStatus, out.CardError = s.store.RegisterA2ACard(req.AID, req.A2ACard, kel, time.Now())
+	if out.CardStatus == CardStatusOK {
+		logCardHome(req.AID, req.A2ACard, s.origin(r))
+	}
 	if firstTime {
 		// A grant on arrival, so a new node can try a paid capability
 		// before anyone has funded it. A network where nothing works
