@@ -86,6 +86,8 @@ type hubFlags struct {
 	registerBurst     *int
 	keysLookupRate    *float64
 	keysLookupBurst   *int
+	// testNoFedKeyLookup is a test switch, not a setting: see defineFlags.
+	testNoFedKeyLookup *bool
 }
 
 func defineFlags(fs *flag.FlagSet) *hubFlags {
@@ -158,6 +160,22 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 		"per-client-IP token refill, per minute, for GET /agents/{aid}/keys lookups forwarded to peer hubs (429 when empty)")
 	f.keysLookupBurst = fs.Int("keys-lookup-burst", def.KeysLookupBurst,
 		"per-client-IP token bucket size for key lookups forwarded to peer hubs")
+	// A test switch for the joint runs, and the only one on this binary.
+	//
+	// ANet scripts/scenario.sh proves that the /fed/v2/keys lookup is what
+	// lets a sender on another hub reach an agent whose card is not
+	// federated (A2A-DESIGN §3.9, §17 C32): with the lookup off, the same
+	// run must fail at that step. The run uses one prebuilt set of binaries
+	// on the test hosts, and a patch applied to a second build would test a
+	// binary the rest of the run never touched. The switch only takes a
+	// path away — GET /agents/{aid}/keys answers 404 where a peer would
+	// have answered — so a hub started with it by mistake fails closed:
+	// such agents are unreachable from here, nothing is exposed. It is
+	// named test-* and logged at start so it is not mistaken for tuning.
+	f.testNoFedKeyLookup = fs.Bool("test-no-fed-key-lookup", false,
+		"TESTING ONLY (ANet scripts/scenario.sh, A2A-DESIGN §17 C32): never ask peer hubs for the keys of "+
+			"agents registered elsewhere (/fed/v2/keys); agents whose cards are not federated become "+
+			"unreachable from this hub. Never set in production")
 	return f
 }
 
@@ -308,7 +326,11 @@ func main() {
 	root := http.NewServeMux()
 	root.Handle("/hub/identity", hubID.Handler())
 	root.Handle("/", srv0.Handler())
-	deps := &hubDeps{data: *f.data, store: store, hubID: hubID, srv0: srv0, root: root}
+	if *f.testNoFedKeyLookup {
+		log.Printf("anet-hub: TEST MODE (-test-no-fed-key-lookup): federated key lookups (/fed/v2/keys) are off")
+	}
+	deps := &hubDeps{data: *f.data, store: store, hubID: hubID, srv0: srv0, root: root,
+		noFedKeyLookup: *f.testNoFedKeyLookup}
 	wired, closers, err := wireMounts(deps)
 	for _, closer := range closers {
 		defer closer()

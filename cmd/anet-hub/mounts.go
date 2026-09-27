@@ -16,6 +16,9 @@ type hubDeps struct {
 	hubID *hubid.Identity
 	srv0  *aghub.Server
 	root  *http.ServeMux
+	// noFedKeyLookup is -test-no-fed-key-lookup: federation does not
+	// install the /fed/v2/keys lookup on the kernel (test runs only).
+	noFedKeyLookup bool
 }
 
 // mount is one compiled-in optional module. A subtractive tag
