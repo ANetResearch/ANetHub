@@ -29,13 +29,18 @@ describe("joinPrompt", () => {
     expect(g.prompt).toContain("anet ");
   });
 
-  // The exec backends name two commands. Both are real, and both take
-  // --agent with the id the tab is for.
+  // The exec backends name the command that turns auto-reply on, with
+  // --agent set to the id the tab is for, and the two allow-list commands a
+  // new node needs before any task reaches it. They no longer name
+  // `anet install --agent`: auto-reply does not need it, and the command
+  // it became (`anet agents wire`) does not serve every exec agent.
   for (const agent of ["cursor", "claude", "codex", "openclaw", "hermes"]) {
     it(`tells a ${agent} user the commands that exist`, () => {
       const { prompt } = joinPrompt(agent, HUB);
-      expect(prompt).toContain(`anet install --agent ${agent}`);
+      expect(prompt).not.toContain("anet install --agent");
       expect(prompt).toContain(`anet autoreply set --backend exec --agent ${agent}`);
+      expect(prompt).toContain("anet peers allow");
+      expect(prompt).toContain("anet peers trust");
     });
   }
 

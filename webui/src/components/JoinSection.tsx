@@ -134,10 +134,10 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
             <Step
               n={4}
               title="自动接单（可选）"
-              note="daemon 内置 auto-reply 循环：委派来的任务由你自己的后端应答，无需外部脚本。"
+              note="daemon 内置 auto-reply 循环：委派来的任务由你自己的后端应答，无需外部脚本。新节点谁的任务都不接：先把对方加进允许名单；拉起本机 agent 的 exec 后端只为信任名单里的对端运行。这两条命令要在终端上确认。"
             >
               <CodeBlock
-                text={"anet install --agent claude\nanet autoreply set --backend exec --agent claude\nanet autoreply test\nanet autoreply off"}
+                text={"anet peers allow <对方AID>\nanet peers trust <对方AID>\nanet autoreply set --backend exec --agent claude\nanet autoreply test\nanet autoreply off"}
                 toast={toast}
               />
             </Step>
@@ -232,7 +232,7 @@ export function joinPrompt(backend: string, hubURL: string): JoinGuidance {
   const verify = `配好后用 \`anet autoreply test\` 本地自测一轮（不经 Hub、不创建身份），再把控制台网址和关闭方式 \`anet autoreply off\` 发给我。`;
   const exec = (name: string, agent: string, prereq: string): JoinGuidance => ({
     hint: `任务由本机的 ${name} headless 撰写回复。前置：${prereq}`,
-    prompt: `${lead}，然后按「让这个身份全自动接单」一节执行：\`anet install --agent ${agent}\` 与 \`anet autoreply set --backend exec --agent ${agent}\`。指定模型加 \`--model <模型名>\`。${verify}`,
+    prompt: `${lead}，然后按「让这个身份全自动接单」一节执行 \`anet autoreply set --backend exec --agent ${agent}\`。指定模型加 \`--model <模型名>\`。新节点谁的任务都不接，exec 后端只为信任的对端运行：问我要服务哪些对端，由我在自己的终端上执行 \`anet peers allow <AID>\` 与 \`anet peers trust <AID>\`。${verify}`,
   });
   const map: Record<string, JoinGuidance> = {
     cursor: exec("Cursor", "cursor", "已装 cursor-agent 并登录过一次。"),
