@@ -218,6 +218,10 @@ type Service struct {
 	// round counts sync passes, so a full re-read can be scheduled
 	// without a second timer. Touched only from the sync loop.
 	round int
+	// a2aStreamStatus is each peer's last HTTP status on /fed/v2/cards,
+	// so that a peer not yet upgraded is logged once rather than every
+	// round. Touched only from the sync loop.
+	a2aStreamStatus map[string]int
 }
 
 // SetDirectory wires the discovery sub-plane. Separate from New because
@@ -235,13 +239,15 @@ CREATE TABLE IF NOT EXISTS fed_dedupe (payload_cid TEXT PRIMARY KEY, ts INTEGER 
 CREATE TABLE IF NOT EXISTS fed_peer_kel (aid TEXT PRIMARY KEY, kel BLOB NOT NULL, fetched_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_review_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS fed_cursor_v2 (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 `); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Service{cfg: cfg, id: id, local: local, db: db,
 		http:        &http.Client{Timeout: 10 * time.Second},
-		maxEnvelope: defaultMaxEnvelope, replay: newReplayGuard()}, nil
+		maxEnvelope: defaultMaxEnvelope, replay: newReplayGuard(),
+		a2aStreamStatus: map[string]int{}}, nil
 }
 
 // defaultMaxEnvelope matches the kernel's default envelope limit
@@ -339,13 +345,16 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 // ---- inbound ----
 
 // Handler serves the federation routes: /fed/v1/forward, /fed/v1/cards,
-// /fed/v1/reviews and /fed/v2/keys/{aid}.
+// /fed/v1/reviews, /fed/v2/keys/{aid} and /fed/v2/cards.
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fed/v1/forward", s.hForward)
 	mux.HandleFunc("GET /fed/v1/cards", s.hCards)
 	mux.HandleFunc("GET /fed/v1/reviews", s.hFedReviewStream)
 	mux.HandleFunc("GET /fed/v2/keys/{aid}", s.hKeys)
+	// The A2A card stream (A2A-DESIGN §10.6). /fed/v1/cards stays until
+	// every peer reads v2.
+	mux.HandleFunc("GET /fed/v2/cards", s.hA2ACards)
 	return mux
 }
 
@@ -572,6 +581,16 @@ type Directory interface {
 	ReviewsSince(cursor int64, limit int) ([]json.RawMessage, int64, error)
 	// AdmitFedReview verifies and stores a review learned from a peer.
 	AdmitFedReview(peerAID string, review json.RawMessage) error
+	// A2ACardsSince serves the A2A card stream (/fed/v2/cards, A2A-DESIGN
+	// §10.6): the verified A2A cards of this hub's own agents that opted
+	// in, and the withdrawals of cards it stopped publishing, in fed_seq
+	// order after a cursor.
+	A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACardView, int64, error)
+	// AdmitFedA2ACard admits one A2A card stream entry learned from a
+	// peer, dispatching on its Format (FormatA2ACard or FormatWithdrawal;
+	// the sync loop skips any other). An error wrapping ErrRefusedForNow
+	// holds the cursor, as for AdmitFedCard.
+	AdmitFedA2ACard(peerAID string, entry FedA2ACardView) error
 }
 
 // ErrRefusedForNow marks a refusal that may stop applying.
@@ -842,6 +861,10 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 			s.setPeerCursor(p.AID, out.Cursor)
 		}
 	}
+	// The A2A card stream rides the same tick and the same full-resync
+	// schedule, with its own cursor (a2acards.go).
+	aa, ar := s.syncA2ACards(ctx, full)
+	admitted, refused = admitted+aa, refused+ar
 	// Reputation rides the same tick. Cards say who exists; reviews say
 	// how they have done. Pulling one without the other gives a directory
 	// full of strangers with no standing, which is a directory nobody can
