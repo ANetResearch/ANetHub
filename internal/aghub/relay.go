@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
+	"log"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/seal"
@@ -236,20 +236,28 @@ var relayIndexesV2 = []string{
 }
 
 // migrateRelayV2 rebuilds a wire-1 relay_message table into the wire-2
-// shape.
+// shape, empty.
 //
-// Only undelivered rows are copied; from_aid, kind, interaction_id and
-// delivered_at are dropped. The old table is dropped in the same
-// transaction, and with secure_delete=ON its pages are overwritten with
-// zeros as they are freed. The WAL is then checkpointed and truncated, so
-// the old page images do not remain in hub.db-wal either.
+// No wire-1 row is carried over, delivered or not. Every one of them is a
+// wire-1 plaintext payload — a delegation, a chat body, a deliverable — and
+// SI-1 says the hub's disk holds no task content. An undelivered one is
+// also of no use to anybody: a wire-2 daemon cannot open it and refuses it
+// as undecodable (§3.6 step 1, class P), and a wire-1 daemon is refused by
+// this hub with 426 before it can poll. Copying them, as this migration
+// first did, kept that plaintext on disk until the recipient came back or
+// the 14-day TTL ran out, and the §9 cleanup script could only find them
+// if the operator supplied the upgrade instant by hand (05-hub H5).
 //
-// The copied rows are wire-1 plaintext payloads, not sealed envelopes. A
-// wire-2 daemon refuses them as undecodable (§3.6 step 1, class P), acks
-// them, and the ack deletes them. They are copied rather than dropped
-// because the migration rule is "keep what is still undelivered"; the
-// production cleanup of §9 removes wire-1 content by a separate,
-// operator-approved script.
+// The old table is dropped in the same transaction, and with
+// secure_delete=ON its pages are overwritten with zeros as they are freed.
+// The WAL is then checkpointed and truncated, so the old page images do
+// not remain in hub.db-wal either.
+//
+// What was dropped is counted, logged, and recorded in hub_meta in the
+// same transaction (the Meta* keys below): the log line is gone once the log
+// rotates, and the operator running the §9 cleanup, or asked afterwards
+// what the upgrade discarded, needs the numbers and the instant. Counts
+// and a time, nothing about any row.
 //
 // The AUTOINCREMENT counter is carried over, so no new envelope receives
 // an id that a daemon may still hold from before the upgrade.
@@ -277,48 +285,85 @@ func (s *Store) migrateRelayV2() error {
 	if maxID > lastSeq {
 		lastSeq = maxID
 	}
+	// A wire-1 table without delivered_at never existed; the guard is for
+	// a hand-made or half-migrated one, where every row counts as
+	// undelivered.
+	undeliveredQ := `SELECT COUNT(*) FROM relay_message`
+	if cols["delivered_at"] {
+		undeliveredQ += ` WHERE delivered_at IS NULL`
+	}
+	var total, undelivered int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM relay_message`).Scan(&total); err != nil {
+		return fmt.Errorf("hub: migrate relay: %w", err)
+	}
+	if err := s.db.QueryRow(undeliveredQ).Scan(&undelivered); err != nil {
+		return fmt.Errorf("hub: migrate relay: %w", err)
+	}
+	now := time.Now().UnixMilli()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	stmts := []string{
-		strings.Replace(relayTableV2, "relay_message", "relay_message_v2", 1),
-		// created_at was RFC 3339 text; strftime('%s') reads it (fractional
-		// seconds and the Z suffix included). A value it cannot read gets
-		// the migration time, so the TTL still applies to the row.
-		`INSERT INTO relay_message_v2(id, to_aid, size, created_at, payload)
-		   SELECT id, to_aid, length(payload),
-		          COALESCE(CAST(strftime('%s', created_at) AS INTEGER) * 1000, ?),
-		          payload
-		     FROM relay_message WHERE delivered_at IS NULL`,
+	for _, q := range []string{
 		`DROP TABLE relay_message`,
-		`ALTER TABLE relay_message_v2 RENAME TO relay_message`,
-	}
-	for _, q := range stmts {
-		var err error
-		if strings.Contains(q, "?") {
-			_, err = tx.Exec(q, time.Now().UnixMilli())
-		} else {
-			_, err = tx.Exec(q)
-		}
-		if err != nil {
+		relayTableV2,
+		`DELETE FROM sqlite_sequence WHERE name IN ('relay_message','relay_message_v2')`,
+	} {
+		if _, err := tx.Exec(q); err != nil {
 			return fmt.Errorf("hub: migrate relay: %w", err)
 		}
-	}
-	if _, err := tx.Exec(`DELETE FROM sqlite_sequence WHERE name IN ('relay_message','relay_message_v2')`); err != nil {
-		return fmt.Errorf("hub: migrate relay: %w", err)
 	}
 	if _, err := tx.Exec(`INSERT INTO sqlite_sequence(name, seq) VALUES('relay_message', ?)`, lastSeq); err != nil {
 		return fmt.Errorf("hub: migrate relay: %w", err)
 	}
+	for k, v := range map[string]int64{
+		MetaRelayV2MigratedAt:         now,
+		MetaRelayV2DroppedUndelivered: undelivered,
+		MetaRelayV2DroppedDelivered:   total - undelivered,
+	} {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO hub_meta(key, value) VALUES(?, ?)`, k, fmt.Sprint(v)); err != nil {
+			return fmt.Errorf("hub: migrate relay: record: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("hub: migrate relay: %w", err)
 	}
+	log.Printf("hub: relay table migrated to wire 2: dropped %d undelivered and %d delivered wire-1 "+
+		"message(s); wire-1 payloads are plaintext and no wire-2 daemon can open them "+
+		"(recorded in hub_meta relay_v2_*)", undelivered, total-undelivered)
 	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return fmt.Errorf("hub: migrate relay: checkpoint: %w", err)
 	}
 	return nil
+}
+
+// hub_meta keys the relay migration writes, once, in its own transaction.
+// Values are decimal strings. deploy/cleanup-content-v0.2.sh reads them by
+// these names; change both together.
+const (
+	// MetaRelayV2MigratedAt is when the wire-1 relay table was rebuilt,
+	// in unix milliseconds.
+	MetaRelayV2MigratedAt = "relay_v2_migrated_at"
+	// MetaRelayV2DroppedUndelivered is how many undelivered wire-1
+	// messages the migration discarded.
+	MetaRelayV2DroppedUndelivered = "relay_v2_dropped_undelivered"
+	// MetaRelayV2DroppedDelivered is how many already delivered wire-1
+	// rows it deleted.
+	MetaRelayV2DroppedDelivered = "relay_v2_dropped_delivered"
+)
+
+// Meta returns a hub_meta value and whether it is set.
+func (s *Store) Meta(key string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM hub_meta WHERE key=?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
 }
 
 // tableColumns returns the column names of a table (empty when the table
