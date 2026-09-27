@@ -1099,7 +1099,7 @@ func (s *Server) hX402Supported(w http.ResponseWriter, r *http.Request) {
 	kels := map[string]string{}
 	if s.hubAID != "" {
 		signers[own] = []string{s.hubAID}
-		kels[s.hubAID] = requestOrigin(r) + "/hub/identity"
+		kels[s.hubAID] = s.origin(r) + "/hub/identity"
 	}
 	for _, aid := range s.store.ClearablePeers() {
 		kinds = append(kinds, payment.SupportedKind{
