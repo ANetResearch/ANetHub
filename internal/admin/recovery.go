@@ -188,12 +188,24 @@ func PruneAgentsExcept(hubDataDir string, keep []string) (before, after, removed
 		ph[i] = "?"
 		args[i] = k
 	}
+	tx, err := hub.db.Begin()
+	if err != nil {
+		return before, before, 0, err
+	}
+	defer tx.Rollback()
 	q := `DELETE FROM agent WHERE aid NOT IN (` + joinComma(ph) + `)`
-	res, err := hub.db.Exec(q, args...)
+	res, err := tx.Exec(q, args...)
 	if err != nil {
 		return before, before, 0, err
 	}
 	n, _ := res.RowsAffected()
+	// The A2A card and its index rows go with the agent, as in DeleteAgent.
+	if err := deleteA2AOrphans(tx); err != nil {
+		return before, before, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return before, before, 0, err
+	}
 	removed = int(n)
 	if err = hub.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&after); err != nil {
 		return before, after, removed, err

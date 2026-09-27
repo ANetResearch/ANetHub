@@ -70,6 +70,12 @@ const (
 	maxRegistryLimit     = 200
 )
 
+// maxRegistryQBytes bounds q. Every q request is a substring search
+// through each listed card's search text (up to a card's size), which
+// costs up to the product of the two lengths per card; a search box needs
+// nowhere near this.
+const maxRegistryQBytes = 256
+
 // registryCacheSeconds is the Cache-Control max-age of a card and a JWKS.
 // Five minutes: a card changes when its agent re-registers, and a JWKS
 // when the agent rotates, and a verifier that holds a stale copy fails
@@ -186,6 +192,11 @@ func (s *Server) hA2AAgents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	q.Q = strings.TrimSpace(query.Get("q"))
+	if len(q.Q) > maxRegistryQBytes {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "q is longer than " + strconv.Itoa(maxRegistryQBytes) + " bytes"})
+		return
+	}
 	q.Limit = defaultRegistryLimit
 	if query.Has("limit") {
 		n, err := strconv.Atoi(query.Get("limit"))
