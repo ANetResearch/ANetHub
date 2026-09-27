@@ -86,8 +86,8 @@ export interface CLIStep {
 /**
  * cliSteps is the command-line runbook, as data so that it can be tested
  * (see joinPrompt for why that matters). The commands are the ones of
- * A2A-DESIGN §13: `anet update` on a machine that has anet and the
- * installer only on a fresh one (§13.2, the same rule as Step 0 of
+ * A2A-DESIGN §13: `anet update` on a machine that already runs it, and the
+ * installer only on a fresh machine (§13.2, the same rule as Step 0 of
  * /llms.txt), `anet init`, `anet doctor`, `anet agents wire`. The update
  * and the installer are two blocks on purpose: one block holding both
  * would run the installer again on every machine it is pasted on, which is
