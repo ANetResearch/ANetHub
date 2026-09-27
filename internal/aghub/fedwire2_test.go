@@ -54,6 +54,15 @@ type fedHubNode struct {
 // controls whether A installs the federated key lookup.
 func twoFederatedHubs(t *testing.T, keyLookup bool) (a, b *fedHubNode) {
 	t.Helper()
+	return federatedHubs(t, keyLookup, false)
+}
+
+// federatedHubs is twoFederatedHubs, with the discovery sub-plane on as
+// well when discovery is set: each hub publishes its directory with its
+// own URL as home, pulls the other's (n.fed.SyncOnce), and lists what it
+// learned, as wire_federation.go wires it.
+func federatedHubs(t *testing.T, keyLookup, discovery bool) (a, b *fedHubNode) {
+	t.Helper()
 	mk := func() *fedHubNode {
 		n := &fedHubNode{dir: t.TempDir()}
 		n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,10 +89,18 @@ func twoFederatedHubs(t *testing.T, keyLookup bool) (a, b *fedHubNode) {
 	}
 	a, b = mk(), mk()
 	wire := func(n, peer *fedHubNode, lookup bool) {
-		fed, err := federation.New(t.TempDir(), federation.Config{Delivery: "allowlist",
-			Peers: []federation.Peer{{AID: peer.id.AID, Endpoint: peer.srv.URL}}}, n.id, fedDelivery{n.store})
+		cfg := federation.Config{Delivery: "allowlist",
+			Peers: []federation.Peer{{AID: peer.id.AID, Endpoint: peer.srv.URL}}}
+		if discovery {
+			cfg.Discovery, cfg.Home = "allowlist", n.srv.URL
+		}
+		fed, err := federation.New(t.TempDir(), cfg, n.id, fedDelivery{n.store})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if discovery {
+			fed.SetDirectory(aghub.FedDirectory{S: n.store})
+			n.s.SetFederatedDirectory(n.store.FederatedAgents)
 		}
 		t.Cleanup(func() { _ = fed.Close() })
 		fed.SetKeySource(aghub.StoreKeySource{S: n.store})
