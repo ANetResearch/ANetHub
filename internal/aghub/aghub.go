@@ -760,6 +760,15 @@ func (s *Store) AnyKEL(aid string) ([]byte, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
+	// Or from a peer's A2A card stream (fed_a2acard.go). A withdrawn row
+	// still holds the KEL, which is proof, not routing.
+	err = s.db.QueryRow(`SELECT kel FROM fed_a2a_card WHERE aid=?`, aid).Scan(&kel)
+	if err == nil {
+		return kel, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
 	// An agent that left. Its routing is gone and its proof is not.
 	if derr := s.db.QueryRow(`SELECT kel FROM departed_kel WHERE aid=?`, aid).Scan(&kel); derr == nil {
 		return kel, nil

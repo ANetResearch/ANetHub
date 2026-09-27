@@ -105,6 +105,13 @@ func (s *Store) Deregister(aid string) (undelivered int, err error) {
 	if err := withdrawCard(tx, aid, withdrawDeparted, federates(visibility)); err != nil {
 		return undelivered, err
 	}
+	// The same for the A2A card stream (/fed/v2/cards), whose card row is
+	// deleted below: the withdrawal is its own row (fed_a2acard.go).
+	if federates(visibility) {
+		if err := withdrawA2ACard(tx, aid, withdrawDeparted); err != nil {
+			return undelivered, err
+		}
+	}
 	// The encryption key set and the A2A card are routing too: they are
 	// how a sender reaches this agent here, and it has left.
 	for _, q := range []string{

@@ -387,6 +387,10 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{"federation.Envelope", federation.Envelope{}, []string{
 			"dest_aid", "hop", "key_state_seq", "origin_hub_aid", "payload", "payload_cid", "seen_hubs", "sig", "ts", "v"}},
 		{"federation.KeysAnswer", federation.KeysAnswer{}, []string{"kel", "keyset"}},
+		// GET /fed/v2/cards (A2A-DESIGN §10.6), read by peer hubs.
+		{"federation.FedA2ACardEntry", federation.FedA2ACardEntry{}, []string{
+			"card", "fed_seq", "format", "home", "kel", "keys"}},
+		{"federation.FedA2ACardPage", federation.FedA2ACardPage{}, []string{"cards", "cursor"}},
 	} {
 		got := goJSONFields(t, tc.value)
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
@@ -400,6 +404,8 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{aghub.CardStatusOK, "ok"}, {aghub.CardStatusUnchanged, "unchanged"}, {aghub.CardStatusAbsent, "absent"},
 		{aghub.CardStatusInvalid, "invalid"}, {aghub.CardStatusConflict, "conflict"},
 		{aghub.CardVerificationOK, "ok"},
+		// The /fed/v2/cards entry formats a peer hub dispatches on.
+		{federation.FormatA2ACard, "a2a-card/1"}, {federation.FormatWithdrawal, "withdrawal/1"},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("status value %q, want %q", pair[0], pair[1])
