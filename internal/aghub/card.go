@@ -245,6 +245,10 @@ func (s *Store) SetVisibility(aid, v string) error {
 		// every peer each time a node re-asserted its settings.
 		return nil
 	}
+	// The A2A card stream (/fed/v2/cards) follows the same change.
+	if err := a2aVisibilityChanged(s.db, aid, before, v); err != nil {
+		return err
+	}
 	if federates(before) && !federates(v) {
 		return withdrawCard(s.db, aid, withdrawNotFederated, true)
 	}
@@ -802,19 +806,50 @@ func (d FedDirectory) AdmitFedCard(peerAID string, card, kel, keys []byte, home 
 // Kept separate from the local directory and marked with their home hub:
 // which hub an agent lives on decides where work for it is delivered, and
 // a directory that forgot would answer with agents it cannot reach.
+//
+// Both streams contribute: ADP cards from /fed/v1/cards and A2A cards from
+// /fed/v2/cards. An agent known from both is listed once, with the name,
+// capability ids and home of its A2A card, as a local agent with an A2A
+// card is (A2A-DESIGN §10.5).
 func (s *Store) FederatedAgents(capFilter string) ([]AgentView, error) {
+	out, err := s.federatedA2AAgents(capFilter)
+	if err != nil {
+		return nil, err
+	}
+	// An agent with a listed A2A card is answered from that card, whether
+	// or not it matched the filter; its ADP card stands only while it has
+	// none (the two streams withdraw independently).
+	fromA2A := map[string]bool{}
+	arows, err := s.db.Query(`SELECT aid FROM fed_a2a_card WHERE verified_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	for arows.Next() {
+		var aid string
+		if err := arows.Scan(&aid); err != nil {
+			arows.Close()
+			return nil, err
+		}
+		fromA2A[aid] = true
+	}
+	arows.Close()
+	if err := arows.Err(); err != nil {
+		return nil, err
+	}
 	q := `SELECT aid, card, home FROM fed_card`
 	rows, err := s.db.Query(q)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []AgentView
 	for rows.Next() {
 		var aid, home string
 		var raw []byte
 		if err := rows.Scan(&aid, &raw, &home); err != nil {
 			return nil, err
+		}
+		if fromA2A[aid] {
+			continue
 		}
 		var card adp.AgentCard
 		if json.Unmarshal(raw, &card) != nil {
@@ -834,12 +869,17 @@ func (s *Store) FederatedAgents(capFilter string) ([]AgentView, error) {
 // cardServes applies the same exact/prefix/comma rules the local index
 // uses, so a federated agent answers the same question a local one does.
 func cardServes(card *adp.AgentCard, filter string) bool {
+	return capsServe(card.Capabilities, filter)
+}
+
+// capsServe is cardServes over a list of capability ids.
+func capsServe(caps []string, filter string) bool {
 	for _, term := range strings.Split(filter, ",") {
 		term = strings.TrimSpace(term)
 		if term == "" {
 			continue
 		}
-		for _, c := range card.Capabilities {
+		for _, c := range caps {
 			if strings.HasSuffix(term, "*") {
 				if strings.HasPrefix(c, strings.TrimSuffix(term, "*")) {
 					return true
