@@ -803,9 +803,12 @@ func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 		return code, out
 	}
 	k5, _ := mintKeySet(t, c, 5)
+	// A card that does not verify is reported and does not fail the
+	// registration or the key set beside it (registry_test.go covers
+	// admission itself).
 	card := json.RawMessage(`{"name":"Agent","signatures":[{"protected":"x","signature":"y"}]}`)
 	code, out := regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(k5), "a2a_card": card})
-	if code != 200 || out.KeysStatus != aghub.KeysStatusOK || out.CardStatus != aghub.CardStatusUnverified {
+	if code != 200 || out.KeysStatus != aghub.KeysStatusOK || out.CardStatus != aghub.CardStatusInvalid || out.CardError == "" {
 		t.Fatalf("first registration: %d %+v", code, out)
 	}
 	// A restarted daemon re-registers with the same set.
