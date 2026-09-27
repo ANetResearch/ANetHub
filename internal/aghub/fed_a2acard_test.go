@@ -513,3 +513,116 @@ func TestTheADPAndA2ACardStreamsCoexist(t *testing.T) {
 		t.Errorf("the A2A card's skill id does not find the agent: %+v", bySkill)
 	}
 }
+
+// An agent this hub knows only by the A2A card a peer publishes can be
+// reviewed by a user here, the review goes out on /fed/v1/reviews like
+// one of an agent known by its ADP card, and the agent is named from the
+// card. Once the peer withdraws the card, the consent it stood for is
+// gone and the review is no longer served.
+func TestReviewsOfAnAgentKnownByItsA2ACardTravel(t *testing.T) {
+	hub, store := newHubWithStore(t)
+	provider, requester := twoAgents(t)
+	register(t, hub, requester, "Requester", nil)
+	if err := store.AdmitFedA2ACard(homePeerAID,
+		a2aEntry(t, provider, signA2A(t, provider, a2aCardFor(provider, 1)))); err != nil {
+		t.Fatal(err)
+	}
+	uploadInterlockedReview(t, hub, provider, requester, 5, "crossed")
+	revs, _, err := store.ReviewsSince(0, 0)
+	if err != nil || len(revs) != 1 {
+		t.Fatalf("the review stream carried %d reviews (%v), want 1", len(revs), err)
+	}
+	if got := store.GraphNodeFor(provider.AID()).Name; got != "Test Agent" {
+		t.Errorf("the agent is named %q, want its card's name", got)
+	}
+
+	w, err := json.Marshal(map[string]string{"action": "withdraw", "agent_id": provider.AID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdmitFedA2ACard(homePeerAID,
+		aghub.FedA2ACard{Format: federation.FormatWithdrawal, Card: w}); err != nil {
+		t.Fatal(err)
+	}
+	if revs, _, _ := store.ReviewsSince(0, 0); len(revs) != 0 {
+		t.Errorf("a review of an agent whose card was withdrawn is still served: %d", len(revs))
+	}
+}
+
+// A subject registered here is governed by its own visibility, whatever a
+// peer's copy of its card (either stream) left behind from before it
+// registered: a hub-local agent's reviews stay here.
+func TestAPeersStaleCardDoesNotPublishALocalAgentsReviews(t *testing.T) {
+	hub, store := newHubWithStore(t)
+	provider, requester := twoAgents(t)
+	kel, err := identity.MarshalKEL(provider.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdmitFedCard(homePeerAID, aghub.FedCard{
+		Card: mintCard(t, provider, "Provider", []string{"work.do"}),
+		KEL:  base64.StdEncoding.EncodeToString(kel), Home: testHome,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdmitFedA2ACard(homePeerAID,
+		a2aEntry(t, provider, signA2A(t, provider, a2aCardFor(provider, 1)))); err != nil {
+		t.Fatal(err)
+	}
+	register(t, hub, provider, "Provider", []string{"work.do"}) // hub-local
+	register(t, hub, requester, "Requester", nil)
+	uploadInterlockedReview(t, hub, provider, requester, 4, "local")
+	if revs, _, _ := store.ReviewsSince(0, 0); len(revs) != 0 {
+		t.Fatalf("a hub-local agent's review was published: %d", len(revs))
+	}
+	setVisibility(t, hub, provider, aghub.VisibilityFederated)
+	if revs, _, _ := store.ReviewsSince(0, 0); len(revs) != 1 {
+		t.Fatalf("the review of an agent that opted in: %d, want 1", len(revs))
+	}
+}
+
+// An agent known from both streams is checked against the longer KEL: the
+// ADP card came over the KEL before a rotation, the re-signed A2A card
+// over the rotated one, and a receipt signed under the new key verifies.
+func TestAPeerLearnedKELIsTheLongerOfTheTwoStreams(t *testing.T) {
+	hub, store := newHubWithStore(t)
+	provider, requester := twoAgents(t)
+	register(t, hub, requester, "Requester", nil)
+	before, err := identity.MarshalKEL(provider.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdmitFedCard(homePeerAID, aghub.FedCard{
+		Card: mintCard(t, provider, "Provider", []string{"work.do"}),
+		KEL:  base64.StdEncoding.EncodeToString(before), Home: testHome,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdmitFedA2ACard(homePeerAID,
+		a2aEntry(t, provider, signA2A(t, provider, a2aCardFor(provider, 1)))); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := identity.MarshalKEL(provider.KEL())
+	if got, err := store.AnyKEL(provider.AID()); err != nil || !bytes.Equal(got, after) {
+		t.Fatalf("AnyKEL served the KEL before the rotation (%v)", err)
+	}
+	body := makeEvidence(t, provider, requester, "ix-rotated", 5, "")
+	if code, b := post(t, hub.URL+"/reviews", body); code != http.StatusOK {
+		t.Fatalf("a receipt signed under the rotated key: %d %s", code, b)
+	}
+}
+
+// A peer's limits are not this hub's: an entry whose KEL is larger than a
+// registration here could carry is refused before it is decoded.
+func TestAFederatedA2ACardWithAnOversizedKELIsRefused(t *testing.T) {
+	peer := openPeerStore(t)
+	agent, _ := twoAgents(t)
+	e := a2aEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 1)))
+	e.KEL = append(e.KEL, make([]byte, 1<<20)...)
+	if err := peer.AdmitFedA2ACard(homePeerAID, e); err == nil || !strings.Contains(err.Error(), "at most") {
+		t.Fatalf("an oversized KEL: %v, want refused on size", err)
+	}
+}

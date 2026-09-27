@@ -3,9 +3,13 @@ package admin
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/federation"
 )
 
 // An operator delete takes the agent's A2A card and its skill and tag
@@ -76,6 +80,58 @@ func checkA2ARows(t *testing.T, db *sql.DB, want map[string]int) {
 			if got != n {
 				t.Errorf("%s has %d rows for %s, want %d", table, got, aid, n)
 			}
+		}
+	}
+}
+
+// An operator delete of an agent whose A2A card federates puts a
+// withdrawal on the hub's /fed/v2/cards stream, after every entry already
+// there, so a peer that learned the card delists it; a hub-local agent's
+// delete names nothing on the stream. The same for the keep-list prune.
+func TestAnOperatorDeleteWithdrawsAFederatedA2ACard(t *testing.T) {
+	for _, prune := range []bool{false, true} {
+		dir, provAID, reqAID := buildHubDB(t)
+		db := a2aRowsFor(t, dir, provAID, reqAID)
+		for _, q := range []struct {
+			sql string
+			arg []any
+		}{
+			{`UPDATE agent SET visibility=? WHERE aid=?`, []any{aghub.VisibilityFederated, provAID}},
+			{`UPDATE agent_a2a_card SET fed_seq=5 WHERE aid=?`, []any{provAID}},
+			{`UPDATE agent_a2a_card SET fed_seq=6 WHERE aid=?`, []any{reqAID}},
+		} {
+			if _, err := db.Exec(q.sql, q.arg...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if prune {
+			if _, _, _, err := PruneAgentsExcept(dir, []string{"bafykeep"}); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			hub, err := OpenHubDB(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, aid := range []string{provAID, reqAID} {
+				if err := hub.DeleteAgent(aid); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hub.Close()
+		}
+		hs, err := aghub.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries, _, err := hs.A2ACardsSince(0, 100, "https://hub.example")
+		hs.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Format != federation.FormatWithdrawal || entries[0].FedSeq != 7 ||
+			!strings.Contains(string(entries[0].Card), provAID) {
+			t.Fatalf("prune=%v: the stream after the delete: %+v", prune, entries)
 		}
 	}
 }
