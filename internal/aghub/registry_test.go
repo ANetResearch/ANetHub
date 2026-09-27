@@ -235,7 +235,9 @@ func TestA2ACardRejections(t *testing.T) {
 			card: func(t *testing.T, c, other *identity.Controller) json.RawMessage {
 				return signA2A(t, other, a2aCardFor(c, 1))
 			}},
-		{name: "card for another AID", status: aghub.CardStatusInvalid, code: a2acard.CodeKELUnavailable,
+		// A definite refusal, not KEL_UNAVAILABLE: that code tells the
+		// sender the card's validity is unknown and worth retrying.
+		{name: "card for another AID", status: aghub.CardStatusInvalid, code: a2acard.CodeBindingMismatch,
 			detail: "not for the registrant",
 			card: func(t *testing.T, _, other *identity.Controller) json.RawMessage {
 				return signA2A(t, other, a2aCardFor(other, 1))
@@ -377,7 +379,8 @@ func TestTheRegistryFiltersAndPages(t *testing.T) {
 	if !sameSet(all, []string{echo, translate, summarize}) || !(all[0] < all[1] && all[1] < all[2]) {
 		t.Errorf("pages: %v", all)
 	}
-	for _, q := range []string{"?limit=0", "?limit=x", "?cursor=***", "?skill=", "?tag=%20"} {
+	for _, q := range []string{"?limit=0", "?limit=x", "?cursor=***", "?skill=", "?tag=%20",
+		"?q=" + strings.Repeat("a", 257)} {
 		if code, b := getJSON(t, srv.URL+"/a2a/v1/agents"+q); code != http.StatusBadRequest {
 			t.Errorf("%s: %d %s, want 400", q, code, b)
 		}
@@ -427,6 +430,17 @@ func TestTheCardEndpointServesTheAgentsBytes(t *testing.T) {
 	}
 	if code, _, _ := send(t, newGet(t, url, `"other"`)); code != http.StatusOK {
 		t.Errorf("a stale If-None-Match: %d, want 200", code)
+	}
+	// A browser client may send If-None-Match itself and read the ETag.
+	if !strings.Contains(hdr.Get("Access-Control-Expose-Headers"), "ETag") {
+		t.Errorf("ETag is not exposed to cross-origin readers: %v", hdr)
+	}
+	pre, err := http.NewRequest(http.MethodOptions, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, h := send(t, pre); !strings.Contains(h.Get("Access-Control-Allow-Headers"), "If-None-Match") {
+		t.Errorf("a preflight does not allow If-None-Match: %v", h)
 	}
 	for _, aid := range []string{bare.AID(), "bafyunknown"} {
 		if code, _, _ := send(t, newGet(t, srv.URL+"/a2a/v1/agents/"+aid+"/card", "")); code != http.StatusNotFound {
@@ -628,5 +642,25 @@ func TestTheRegistryCursorRoundTrips(t *testing.T) {
 	cursor := base64.RawURLEncoding.EncodeToString([]byte(c.AID()))
 	if l := registry(t, srv, "?cursor="+cursor); len(l.Agents) != 0 {
 		t.Errorf("a cursor at the last AID: %+v", l)
+	}
+}
+
+// Every registration re-verifies the stored card against the KEL it
+// carries, and verifiedAt reports that check, also when the registration
+// did not resend the card.
+func TestARegistrationWithoutTheCardRefreshesVerifiedAt(t *testing.T) {
+	dir := t.TempDir()
+	srv, _, _ := newHubAt(t, dir)
+	c, _ := twoAgents(t)
+	registerA2A(t, srv, c, "Agent", nil, signA2A(t, c, a2aCardFor(c, 1)))
+	const old = "2020-01-01T00:00:00Z"
+	if _, err := openDB(t, dir).Exec(`UPDATE agent_a2a_card SET verified_at=? WHERE aid=?`, old, c.AID()); err != nil {
+		t.Fatal(err)
+	}
+	if out := registerA2A(t, srv, c, "Agent", nil, nil); out.CardStatus != aghub.CardStatusAbsent {
+		t.Fatalf("registration without the card: %+v", out)
+	}
+	if l := registry(t, srv, ""); len(l.Agents) != 1 || l.Agents[0].VerifiedAt == old {
+		t.Errorf("verifiedAt after re-verification: %+v", l)
 	}
 }

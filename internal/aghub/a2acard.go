@@ -170,10 +170,20 @@ func (s *Store) readmitLegacyA2ACards() error {
 func registrantResolver(aid string, kel []identity.SignedEvent) a2acard.Resolver {
 	return func(a string) ([]identity.SignedEvent, error) {
 		if a != aid {
-			return nil, fmt.Errorf("the card speaks for %s, not for the registrant %s", a, aid)
+			return nil, &notTheRegistrant{card: a, registrant: aid}
 		}
 		return kel, nil
 	}
+}
+
+// notTheRegistrant is registrantResolver's refusal. a2acard.Verify reports
+// any resolver error as CodeKELUnavailable, which says the card's validity
+// is unknown and the caller may retry; this refusal is definite, so
+// AdmitA2ACard reports it as CodeBindingMismatch instead.
+type notTheRegistrant struct{ card, registrant string }
+
+func (e *notTheRegistrant) Error() string {
+	return "the card speaks for " + e.card + ", not for the registrant " + e.registrant
 }
 
 // RegisterA2ACard settles the A2A card of a registration that has just
@@ -217,6 +227,10 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 	}
 	// Verify is pure, so it runs before the store mutex is taken.
 	v, err := a2acard.Verify(raw, registrantResolver(aid, kel), uint64(now.UnixMilli()))
+	var foreign *notTheRegistrant
+	if errors.As(err, &foreign) {
+		return CardStatusInvalid, (&a2acard.Error{Code: a2acard.CodeBindingMismatch, Detail: foreign.Error()}).Error()
+	}
 	if err != nil {
 		return CardStatusInvalid, err.Error()
 	}
@@ -291,26 +305,36 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 // recheckA2ACard verifies aid's listed card against kel. A card that no
 // longer verifies is delisted: verified_at is cleared and its skill and
 // tag rows removed, and the name and capability ids the registration
-// declared stand. A card that still verifies restates the name and
-// capability ids derived from it.
+// declared stand. A card that still verifies has its verified_at
+// refreshed and restates the name and capability ids derived from it.
 func (s *Store) recheckA2ACard(aid string, kel []identity.SignedEvent, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var raw []byte
-	err := s.db.QueryRow(`SELECT card FROM agent_a2a_card WHERE aid=? AND verified_at IS NOT NULL`,
-		aid).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+	listed := func(q rowQuerier) ([]byte, error) {
+		var raw []byte
+		err := q.QueryRow(`SELECT card FROM agent_a2a_card WHERE aid=? AND verified_at IS NOT NULL`,
+			aid).Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return raw, err
 	}
-	if err != nil {
+	raw, err := listed(s.db)
+	if err != nil || raw == nil {
 		return err
 	}
+	// Verify outside the store mutex, which the relay shares, as
+	// AdmitA2ACard does; the write below goes ahead only if the listed
+	// card is still the one verified here.
 	v, verr := a2acard.Verify(raw, registrantResolver(aid, kel), uint64(now.UnixMilli()))
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if again, err := listed(tx); err != nil || !bytes.Equal(again, raw) {
+		return err // replaced or delisted meanwhile, by a write that checked it
+	}
 	if verr != nil {
 		log.Printf("hub: the A2A card of %s no longer verifies against its KEL and is delisted until it is re-signed: %v",
 			aid, verr)
@@ -331,6 +355,12 @@ func (s *Store) recheckA2ACard(aid string, kel []identity.SignedEvent, now time.
 			return err
 		}
 		return tx.Commit()
+	}
+	// Verified again: verifiedAt says so (registry.go), as it does after
+	// an "unchanged" registration.
+	if _, err := tx.Exec(`UPDATE agent_a2a_card SET verified_at=? WHERE aid=?`,
+		verifiedStamp(now), aid); err != nil {
+		return err
 	}
 	if err := indexA2ACard(tx, aid, v); err != nil {
 		return err

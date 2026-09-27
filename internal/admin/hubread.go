@@ -245,16 +245,24 @@ func (h *HubDB) DeleteAgent(aid string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("admin: agent %s not registered", aid)
 	}
-	for _, q := range []string{
-		`DELETE FROM agent_a2a_card WHERE aid=?`,
-		`DELETE FROM agent_skill WHERE aid=?`,
-		`DELETE FROM agent_tag WHERE aid=?`,
-	} {
+	if err := deleteA2AOrphans(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteA2AOrphans removes A2A card, skill and tag rows whose agent row is
+// gone, in the transaction that removed it. Every operator delete goes
+// through here (DeleteAgent, PruneAgentsExcept), and so do rows an older
+// admin binary left behind.
+func deleteA2AOrphans(tx *sql.Tx) error {
+	for _, table := range []string{"agent_a2a_card", "agent_skill", "agent_tag"} {
 		// A hub.db written by a hub that predates these tables does not
 		// have them, and there is nothing to remove from it.
-		if _, err := tx.Exec(q, aid); err != nil && !strings.Contains(err.Error(), "no such table") {
+		if _, err := tx.Exec(`DELETE FROM ` + table + ` WHERE aid NOT IN (SELECT aid FROM agent)`); err != nil &&
+			!strings.Contains(err.Error(), "no such table") {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }

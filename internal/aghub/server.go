@@ -1313,8 +1313,11 @@ func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, "+wireVersionHeader+", "+
+		// If-None-Match and ETag: a browser client of the A2A card and
+		// JWKS endpoints revalidates its copy itself (registry.go).
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, If-None-Match, "+wireVersionHeader+", "+
 			relayauth.HeaderAID+", "+relayauth.HeaderTS+", "+relayauth.HeaderSeq+", "+relayauth.HeaderSig)
+		w.Header().Set("Access-Control-Expose-Headers", "ETag")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
