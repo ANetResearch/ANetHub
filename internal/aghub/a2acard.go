@@ -95,6 +95,11 @@ func (s *Store) migrateA2ACard() error {
 			return fmt.Errorf("hub: migrate a2a card: %w", err)
 		}
 	}
+	// The federation stream's withdrawals share fed_seq with the cards,
+	// so they exist before any card is stored (fed_a2acard.go).
+	if err := s.migrateFedA2ACard(); err != nil {
+		return err
+	}
 	return s.readmitLegacyA2ACards()
 }
 
@@ -135,8 +140,8 @@ func (s *Store) readmitLegacyA2ACards() error {
 		if err != nil {
 			return nil
 		}
-		v, err := a2acard.Verify(card, registrantResolver(aid, kel), uint64(now.UnixMilli()))
-		if err != nil || validateCaps(skillIDs(v)) != nil {
+		v, err := verifyA2ACardFor(aid, card, kel, now)
+		if err != nil {
 			return nil
 		}
 		return v
@@ -186,6 +191,38 @@ func (e *notTheRegistrant) Error() string {
 	return "the card speaks for " + e.card + ", not for the registrant " + e.registrant
 }
 
+// verifyA2ACardFor is the admission check of an A2A card that speaks for
+// aid, whose KEL is kel: a2acard.Verify with a resolver that answers only
+// for aid, and the capability index bounds on the card's skill ids. It is
+// the check for a card an agent registers here (AdmitA2ACard, the
+// re-verification after a KEL change) and for one a peer hub federates
+// (AdmitFedA2ACard), where aid is the AID the entry's KEL replays to. The
+// params.seq high-water rule is the caller's, against its own table.
+//
+// A card for any other AID is reported as CodeBindingMismatch.
+func verifyA2ACardFor(aid string, raw []byte, kel []identity.SignedEvent, now time.Time) (*a2acard.Verified, error) {
+	v, err := a2acard.Verify(raw, registrantResolver(aid, kel), uint64(now.UnixMilli()))
+	var foreign *notTheRegistrant
+	if errors.As(err, &foreign) {
+		return nil, &a2acard.Error{Code: a2acard.CodeBindingMismatch, Detail: foreign.Error()}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if v.AID != aid {
+		// The resolver refuses every other AID, so this is unreachable;
+		// it is the admission rule, stated where it is applied.
+		return nil, &a2acard.Error{Code: a2acard.CodeBindingMismatch,
+			Detail: "the card speaks for " + v.AID + ", not for " + aid}
+	}
+	// The skill ids become the agent's capability ids, and the index
+	// bounds apply to them as to ids declared at registration.
+	if err := validateCaps(skillIDs(v)); err != nil {
+		return nil, fmt.Errorf("skill ids: %w", err)
+	}
+	return v, nil
+}
+
 // RegisterA2ACard settles the A2A card of a registration that has just
 // been written, and returns the card_status and card_error /register
 // reports. raw is the a2a_card field (nil when absent) and kel the KEL the
@@ -226,23 +263,9 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 		return CardStatusInvalid, "a2a_card must be a JSON object"
 	}
 	// Verify is pure, so it runs before the store mutex is taken.
-	v, err := a2acard.Verify(raw, registrantResolver(aid, kel), uint64(now.UnixMilli()))
-	var foreign *notTheRegistrant
-	if errors.As(err, &foreign) {
-		return CardStatusInvalid, (&a2acard.Error{Code: a2acard.CodeBindingMismatch, Detail: foreign.Error()}).Error()
-	}
+	v, err := verifyA2ACardFor(aid, raw, kel, now)
 	if err != nil {
 		return CardStatusInvalid, err.Error()
-	}
-	if v.AID != aid {
-		// The resolver refuses every other AID, so this is unreachable;
-		// it is the admission rule, stated where it is applied.
-		return CardStatusInvalid, "the card speaks for " + v.AID + ", not for the registrant"
-	}
-	// The skill ids become the agent's capability ids, and the index
-	// bounds apply to them as to ids declared at registration.
-	if err := validateCaps(skillIDs(v)); err != nil {
-		return CardStatusInvalid, "skill ids: " + err.Error()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -282,6 +305,9 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 				return CardStatusInvalid, "not stored: " + err.Error()
 			}
 			if err := indexA2ACard(tx, aid, v); err != nil {
+				return CardStatusInvalid, "not stored: " + err.Error()
+			}
+			if err := clearA2AWithdrawal(tx, aid); err != nil {
 				return CardStatusInvalid, "not stored: " + err.Error()
 			}
 			if err := tx.Commit(); err != nil {
@@ -324,7 +350,7 @@ func (s *Store) recheckA2ACard(aid string, kel []identity.SignedEvent, now time.
 	// Verify outside the store mutex, which the relay shares, as
 	// AdmitA2ACard does; the write below goes ahead only if the listed
 	// card is still the one verified here.
-	v, verr := a2acard.Verify(raw, registrantResolver(aid, kel), uint64(now.UnixMilli()))
+	v, verr := verifyA2ACardFor(aid, raw, kel, now)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -353,6 +379,15 @@ func (s *Store) recheckA2ACard(aid string, kel []identity.SignedEvent, now time.
 		if _, err := tx.Exec(`UPDATE agent_a2a_card SET verified_at=NULL, fed_seq=? WHERE aid=?`,
 			next, aid); err != nil {
 			return err
+		}
+		// Peers that learned the card stop publishing it too
+		// (fed_a2acard.go).
+		if fed, err := agentFederates(tx, aid); err != nil {
+			return err
+		} else if fed {
+			if err := withdrawA2ACard(tx, aid, withdrawDelisted); err != nil {
+				return err
+			}
 		}
 		return tx.Commit()
 	}
@@ -392,7 +427,7 @@ func a2aMark(tx *sql.Tx, aid string) (*a2acard.Mark, []byte, error) {
 }
 
 // storeAdmittedA2ACard writes an admitted card and everything derived
-// from it, in tx.
+// from it, in tx, at the head of the federation stream.
 func storeAdmittedA2ACard(tx *sql.Tx, aid string, raw []byte, v *a2acard.Verified, now time.Time) error {
 	next, err := nextA2AFedSeq(tx)
 	if err != nil {
@@ -407,7 +442,10 @@ func storeAdmittedA2ACard(tx *sql.Tx, aid string, raw []byte, v *a2acard.Verifie
 		aid, raw, nowStamp(), v.Seq, v.PayloadHash[:], verifiedStamp(now), cardSearchText(raw, v), next); err != nil {
 		return err
 	}
-	return indexA2ACard(tx, aid, v)
+	if err := indexA2ACard(tx, aid, v); err != nil {
+		return err
+	}
+	return clearA2AWithdrawal(tx, aid)
 }
 
 // indexA2ACard rebuilds aid's agent_skill and agent_tag rows from a
@@ -447,10 +485,13 @@ func indexA2ACard(tx *sql.Tx, aid string, v *a2acard.Verified) error {
 	return err
 }
 
-// nextA2AFedSeq is the next position on the A2A card federation stream.
-func nextA2AFedSeq(tx *sql.Tx) (int64, error) {
+// nextA2AFedSeq is the next position on the A2A card federation stream,
+// which the cards and their withdrawals share (fed_a2acard.go).
+func nextA2AFedSeq(q rowQuerier) (int64, error) {
 	var next int64
-	err := tx.QueryRow(`SELECT COALESCE(MAX(fed_seq),0)+1 FROM agent_a2a_card`).Scan(&next)
+	err := q.QueryRow(`SELECT MAX(
+	    (SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
+	    (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal))+1`).Scan(&next)
 	return next, err
 }
 

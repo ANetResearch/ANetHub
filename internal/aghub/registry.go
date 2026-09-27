@@ -29,10 +29,13 @@ import (
 // hub's, and a consumer that needs more than the hub's word verifies the
 // card against the agent's KEL itself.
 //
-// Only agents registered here, with a card that passed admission
-// (a2acard.go) and that is still listed by AgentView.Browsable, appear.
-// Every query joins the agent table, so a card whose agent row an operator
-// deleted is not served.
+// Agents registered here appear with a card that passed admission
+// (a2acard.go) while AgentView.Browsable lists them. Every query joins the
+// agent table, so a card whose agent row an operator deleted is not
+// served. On a hub whose discovery federation is on, the listed A2A cards
+// learned from peers (/fed/v2/cards, fed_a2acard.go) appear too, with the
+// home hub they live on, unless the agent is registered here: an agent
+// registered here speaks for itself.
 //
 // The paths sit outside /relay/, so wireContract does not ask external
 // A2A clients for X-ANet-Wire.
@@ -48,7 +51,9 @@ type A2AAgentEntry struct {
 	// VerifiedAt is when the card last verified against the agent's KEL
 	// (RFC 3339): at admission, or at the agent's latest registration.
 	VerifiedAt string `json:"verifiedAt"`
-	// HomeHub is the hub the agent is registered at, the one answering.
+	// HomeHub is the hub the agent is registered at: the one answering,
+	// or for a card learned from a peer the hub its card's relay
+	// interface names (else the peer's statement of it).
 	HomeHub string `json:"homeHub"`
 	// LastSeen and Quiet are the liveness of AgentView (liveness.go).
 	LastSeen    string  `json:"lastSeen,omitempty"`
@@ -84,41 +89,60 @@ const registryCacheSeconds = 300
 
 // RegistryQuery selects registry entries. Skill and Tag match exactly;
 // Q is a case-insensitive substring of the card's name, description or a
-// skill name. After is the AID the previous page ended with.
+// skill name. After is the AID the previous page ended with. Federated
+// includes the A2A cards learned from peers.
 type RegistryQuery struct {
 	Skill, Tag, Q string
 	After         string
 	Limit         int
+	Federated     bool
 }
 
 // A2ARegistry returns up to q.Limit entries in AID order after q.After,
-// and whether more follow. HomeHub is left for the caller, which knows
-// the origin it answers under.
+// and whether more follow. HomeHub is set on entries learned from peers
+// and left empty on local ones for the caller, which knows the origin it
+// answers under.
 func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 	if q.Limit < 1 {
 		q.Limit = defaultRegistryLimit
 	}
-	query := `SELECT a.aid, c.card, c.verified_at, a.registered_at, a.last_seen_at,
-	                 (SELECT COUNT(*) FROM review r WHERE r.subject_aid = a.aid),
-	                 (SELECT COALESCE(AVG(r.rating),0) FROM review r WHERE r.subject_aid = a.aid)
-	            FROM agent_a2a_card c JOIN agent a ON a.aid = c.aid
-	           WHERE c.verified_at IS NOT NULL AND a.aid > ?`
-	args := []any{q.After}
-	if q.Skill != "" {
-		query += ` AND EXISTS (SELECT 1 FROM agent_skill s WHERE s.aid = a.aid AND s.skill_id = ?)`
-		args = append(args, q.Skill)
+	var args []any
+	// arm is one source of entries with the filters applied against its
+	// own indexes: the local tables, or the federated ones.
+	arm := func(sel, from, aidCol, skillTable, tagTable, searchCol string) string {
+		query := sel + ` FROM ` + from + ` AND ` + aidCol + ` > ?`
+		args = append(args, q.After)
+		if q.Skill != "" {
+			query += ` AND EXISTS (SELECT 1 FROM ` + skillTable + ` s WHERE s.aid = ` + aidCol + ` AND s.skill_id = ?)`
+			args = append(args, q.Skill)
+		}
+		if q.Tag != "" {
+			query += ` AND EXISTS (SELECT 1 FROM ` + tagTable + ` t WHERE t.aid = ` + aidCol + ` AND t.tag = ?)`
+			args = append(args, q.Tag)
+		}
+		if q.Q != "" {
+			// instr rather than LIKE: no pattern language to escape.
+			// search is lowercased at admission with the same function
+			// as here.
+			query += ` AND instr(` + searchCol + `, ?) > 0`
+			args = append(args, strings.ToLower(q.Q))
+		}
+		return query
 	}
-	if q.Tag != "" {
-		query += ` AND EXISTS (SELECT 1 FROM agent_tag t WHERE t.aid = a.aid AND t.tag = ?)`
-		args = append(args, q.Tag)
+	union := arm(`SELECT a.aid AS aid, c.card AS card, c.verified_at AS verified_at,
+	                     a.registered_at AS registered_at, a.last_seen_at AS last_seen_at, '' AS home`,
+		`agent_a2a_card c JOIN agent a ON a.aid = c.aid WHERE c.verified_at IS NOT NULL`,
+		"a.aid", "agent_skill", "agent_tag", "c.search")
+	if q.Federated {
+		union += ` UNION ALL ` + arm(`SELECT f.aid, f.card, f.verified_at, '', NULL, f.home`,
+			`fed_a2a_card f WHERE f.verified_at IS NOT NULL
+			   AND NOT EXISTS (SELECT 1 FROM agent a WHERE a.aid = f.aid)`,
+			"f.aid", "fed_a2a_skill", "fed_a2a_tag", "f.search")
 	}
-	if q.Q != "" {
-		// instr rather than LIKE: no pattern language to escape. search
-		// is lowercased at admission with the same function as here.
-		query += ` AND instr(c.search, ?) > 0`
-		args = append(args, strings.ToLower(q.Q))
-	}
-	query += ` ORDER BY a.aid`
+	query := `SELECT u.aid, u.card, u.verified_at, u.registered_at, u.last_seen_at, u.home,
+	                 (SELECT COUNT(*) FROM review r WHERE r.subject_aid = u.aid),
+	                 (SELECT COALESCE(AVG(r.rating),0) FROM review r WHERE r.subject_aid = u.aid)
+	            FROM (` + union + `) u ORDER BY u.aid`
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, false, err
@@ -131,7 +155,7 @@ func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 		var card []byte
 		var registeredAt string
 		var lastSeen sql.NullString
-		if err := rows.Scan(&e.AID, &card, &e.VerifiedAt, &registeredAt, &lastSeen,
+		if err := rows.Scan(&e.AID, &card, &e.VerifiedAt, &registeredAt, &lastSeen, &e.HomeHub,
 			&e.ReviewCount, &e.AvgRating); err != nil {
 			return nil, false, err
 		}
@@ -155,12 +179,20 @@ func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 }
 
 // VerifiedA2ACard returns the stored bytes of aid's card, or nil when aid
-// is not registered here or has no card that verified.
-func (s *Store) VerifiedA2ACard(aid string) ([]byte, error) {
+// is not registered here or has no card that verified. With federated,
+// an agent not registered here is answered from the listed A2A card
+// learned from a peer, as A2ARegistry lists it.
+func (s *Store) VerifiedA2ACard(aid string, federated bool) ([]byte, error) {
 	var raw []byte
 	err := s.db.QueryRow(
 		`SELECT c.card FROM agent_a2a_card c JOIN agent a ON a.aid = c.aid
 		  WHERE c.aid = ? AND c.verified_at IS NOT NULL`, aid).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) && federated {
+		err = s.db.QueryRow(
+			`SELECT f.card FROM fed_a2a_card f
+			  WHERE f.aid = ? AND f.verified_at IS NOT NULL
+			    AND NOT EXISTS (SELECT 1 FROM agent a WHERE a.aid = f.aid)`, aid).Scan(&raw)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -214,6 +246,9 @@ func (s *Server) hA2AAgents(w http.ResponseWriter, r *http.Request) {
 		}
 		q.After = string(after)
 	}
+	// Peer-learned cards are listed where the federated directory is,
+	// that is when the discovery federation wired it (SetFederatedDirectory).
+	q.Federated = s.federated != nil
 	entries, more, err := s.store.A2ARegistry(q)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -221,7 +256,9 @@ func (s *Server) hA2AAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	home := requestOrigin(r)
 	for i := range entries {
-		entries[i].HomeHub = home
+		if entries[i].HomeHub == "" {
+			entries[i].HomeHub = home
+		}
 	}
 	out := A2AAgentList{Agents: entries}
 	if more {
@@ -241,7 +278,7 @@ func (s *Server) hA2AAgents(w http.ResponseWriter, r *http.Request) {
 // sent it, byte for byte, which is what its signature covers.
 func (s *Server) hA2ACard(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
-	raw, err := s.store.VerifiedA2ACard(aid)
+	raw, err := s.store.VerifiedA2ACard(aid, s.federated != nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
