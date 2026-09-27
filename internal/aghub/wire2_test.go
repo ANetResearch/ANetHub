@@ -522,9 +522,11 @@ func TestAnAckedEnvelopeLeavesNoBytesOnDisk(t *testing.T) {
 	}
 }
 
-// A wire-1 relay table is rebuilt: undelivered rows survive without their
-// sender metadata, delivered rows are gone from the file, and new ids
-// continue above the old ones.
+// A wire-1 relay table is rebuilt empty: no wire-1 row survives, delivered
+// or not, because each is a plaintext payload no wire-2 daemon can open
+// (SI-1; 05-hub H5). The migration records what it dropped in hub_meta,
+// neither payload is left in the files, and new ids continue above the
+// old ones.
 func TestAWire1RelayTableIsMigrated(t *testing.T) {
 	dir := t.TempDir()
 	old, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
@@ -533,6 +535,7 @@ func TestAWire1RelayTableIsMigrated(t *testing.T) {
 	}
 	recip, sender := twoAgents(t)
 	delivered := []byte("DELIVERED-CANARY-" + strings.Repeat("9c", 128))
+	waiting := []byte("UNDELIVERED-CANARY-" + strings.Repeat("7e", 128))
 	for _, q := range []string{
 		`CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
 		   from_aid TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, interaction_id TEXT NOT NULL DEFAULT '',
@@ -548,20 +551,23 @@ func TestAWire1RelayTableIsMigrated(t *testing.T) {
 		"2026-09-01T10:00:00.123456789Z", "2026-09-01T10:01:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := old.Exec(ins, 9, recip.AID(), sender.AID(), "message", "ix-old", []byte("waiting"),
-		"2026-09-20T08:00:00.5Z", nil); err != nil {
-		t.Fatal(err)
+	for _, id := range []int64{9, 10} {
+		if _, err := old.Exec(ins, id, recip.AID(), sender.AID(), "message", "ix-old", waiting,
+			"2026-09-20T08:00:00.5Z", nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	old.Close()
 
+	before := time.Now().UnixMilli()
 	store, err := aghub.Open(dir)
 	if err != nil {
 		t.Fatalf("open migrates: %v", err)
 	}
 	// While the hub is running: the migration checkpointed the WAL into
 	// the main file, whose freed pages secure_delete zeroed.
-	if b, err := os.ReadFile(filepath.Join(dir, "hub.db")); err != nil || bytes.Contains(b, delivered) {
-		t.Errorf("hub.db still holds a delivered wire-1 payload while the migrated hub runs (%v)", err)
+	if b, err := os.ReadFile(filepath.Join(dir, "hub.db")); err != nil || bytes.Contains(b, delivered) || bytes.Contains(b, waiting) {
+		t.Errorf("hub.db still holds a wire-1 payload while the migrated hub runs (%v)", err)
 	}
 	db := openDB(t, dir)
 	var cols []string
@@ -576,17 +582,23 @@ func TestAWire1RelayTableIsMigrated(t *testing.T) {
 	if strings.Join(cols, ",") != "created_at,id,payload,size,to_aid" {
 		t.Fatalf("columns after migration: %v", cols)
 	}
-	var id, size, created int64
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM relay_message`).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("rows after migration: %d %v, want only the undelivered one", n, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM relay_message`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("rows after migration: %d %v, want none: an undelivered wire-1 row is plaintext", n, err)
 	}
-	if err := db.QueryRow(`SELECT id, size, created_at FROM relay_message`).Scan(&id, &size, &created); err != nil {
-		t.Fatal(err)
+	// The record the operator reads afterwards.
+	for key, want := range map[string]string{
+		aghub.MetaRelayV2DroppedUndelivered: "2",
+		aghub.MetaRelayV2DroppedDelivered:   "1",
+	} {
+		if v, ok, err := store.Meta(key); err != nil || !ok || v != want {
+			t.Errorf("hub_meta %s = %q (set %v, %v), want %q", key, v, ok, err, want)
+		}
 	}
-	want := time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC).UnixMilli()
-	if id != 9 || size != int64(len("waiting")) || created != want {
-		t.Fatalf("migrated row id=%d size=%d created=%d, want 9 %d %d", id, size, created, len("waiting"), want)
+	at, ok, err := store.Meta(aghub.MetaRelayV2MigratedAt)
+	if ms, perr := strconv.ParseInt(at, 10, 64); err != nil || !ok || perr != nil || ms < before || ms > time.Now().UnixMilli() {
+		t.Errorf("hub_meta %s = %q (set %v, %v), want the migration instant in unix ms",
+			aghub.MetaRelayV2MigratedAt, at, ok, err)
 	}
 	kel, _ := identity.MarshalKEL(recip.KEL())
 	if err := store.PutAgent(recip.AID(), "Recipient", nil, kel); err != nil {
@@ -601,6 +613,15 @@ func TestAWire1RelayTableIsMigrated(t *testing.T) {
 	}
 	store.Close()
 	db.Close()
+	// A second open finds nothing to migrate and leaves the record as it is.
+	again, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _, _ := again.Meta(aghub.MetaRelayV2MigratedAt); v != at {
+		t.Errorf("reopening rewrote %s: %q, was %q", aghub.MetaRelayV2MigratedAt, v, at)
+	}
+	again.Close()
 	for _, f := range []string{"hub.db", "hub.db-wal"} {
 		b, err := os.ReadFile(filepath.Join(dir, f))
 		if err != nil {
@@ -608,6 +629,9 @@ func TestAWire1RelayTableIsMigrated(t *testing.T) {
 		}
 		if bytes.Contains(b, delivered) {
 			t.Errorf("%s still holds a delivered wire-1 payload after migration", f)
+		}
+		if bytes.Contains(b, waiting) {
+			t.Errorf("%s still holds an undelivered wire-1 payload after migration", f)
 		}
 		if bytes.Contains(b, []byte("ix-old")) {
 			t.Errorf("%s still holds a wire-1 interaction id after migration", f)

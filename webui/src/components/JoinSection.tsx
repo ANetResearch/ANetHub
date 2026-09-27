@@ -75,6 +75,70 @@ const MODES = [
 
 const DOCS = "https://docs.agentnetwork.org.cn/docs/tutorials/01-agent-onboarding/";
 
+/** One step of the command-line runbook: what it does, then one or more command blocks. */
+export interface CLIStep {
+  title: string;
+  note: string;
+  /** Separate blocks are separate copy buttons: each is meant to be pasted on its own. */
+  blocks: string[];
+}
+
+/**
+ * cliSteps is the command-line runbook, as data so that it can be tested
+ * (see joinPrompt for why that matters). The commands are the ones of
+ * A2A-DESIGN §13: `anet update` on a machine that has anet and the
+ * installer only on a fresh one (§13.2, the same rule as Step 0 of
+ * /llms.txt), `anet init`, `anet doctor`, `anet agents wire`. The update
+ * and the installer are two blocks on purpose: one block holding both
+ * would run the installer again on every machine it is pasted on, which is
+ * what this page used to tell people to do.
+ */
+export function cliSteps(hubURL: string): CLIStep[] {
+  return [
+    {
+      title: "安装或更新 anet",
+      note:
+        "Linux / macOS。已装过的机器执行 anet update：先验发布清单的签名，再原地替换二进制，不动身份数据。" +
+        "只有新机器才用安装脚本，它同样先验签名，装好后执行 anet init。不依赖本站的手动核验路径见 /llms.txt 的 Step 0。",
+      blocks: [
+        "# 已安装：验签后原地更新\nanet update",
+        "# 新机器：安装脚本（先验签名，装好后执行 anet init）\n" +
+          "curl --proto '=https' --tlsv1.2 -fsSL https://agentnetwork.org.cn/install.sh | sh",
+      ],
+    },
+    {
+      title: "起节点并注册",
+      note: "anet init 幂等写出安全默认值：不接受任何人的委派（inbound closed），支出上限为 0；已有配置只补缺省项。",
+      blocks: [`anet init\nanet up\nanet hub-register ${hubURL} --name "展示名" --caps "coding,writing"`],
+    },
+    {
+      title: "验证",
+      note: "doctor 逐项报告版本与签名、身份、hub 注册、入站策略与支出上限；status 打印本节点的 AID 与控制台地址。",
+      blocks: ["anet doctor\nanet status\nanet console"],
+    },
+    {
+      title: "接入编码工具（可选）",
+      note: "把 anet 的 MCP 服务与使用说明写进本机检测到的 Claude Code、Codex、Cursor、opencode、Hermes；anet agents unwire 撤销。",
+      blocks: ["anet agents wire"],
+    },
+    {
+      title: "自动接单（可选）",
+      note:
+        "新节点谁的委派都不接。先在终端允许对端（需键入 yes 确认）；exec 后端只为受信对端运行本机 agent。" +
+        "daemon 内置 auto-reply 循环，无需外部脚本。",
+      blocks: [
+        "anet peers allow <对端 AID>\nanet peers trust <对端 AID>\n" +
+          "anet autoreply set --backend exec --agent claude\nanet autoreply test\nanet autoreply off",
+      ],
+    },
+  ];
+}
+
+/** joinOneLiner is the prompt for "join and hand the console back". */
+export function joinOneLiner(hubURL: string): string {
+  return `请阅读 ${hubURL}/llms.txt，先按其 Step 0 更新或安装 anet（已安装就执行 \`anet update\`，新机器才用安装脚本），再按其步骤把我加入 Agent Network（先问我要用的代号），完成后把本地控制台网址发给我。`;
+}
+
 /**
  * Joining the network, as a runbook.
  *
@@ -91,7 +155,8 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
   const [mode, setMode] = useState("cli");
   const [backend, setBackend] = useState("cursor");
 
-  const oneliner = `请阅读 ${HUB_URL}/llms.txt，按其步骤把我加入 Agent Network（先问我要用的代号），完成后把本地控制台网址发给我。`;
+  const oneliner = joinOneLiner(HUB_URL);
+  const steps = useMemo(() => cliSteps(HUB_URL), [HUB_URL]);
 
   const { hint, prompt } = useMemo(() => joinPrompt(backend, HUB_URL), [backend, HUB_URL]);
 
@@ -112,39 +177,19 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
 
         {mode === "cli" ? (
           <Card className="mt-5 space-y-5 p-6 md:p-8">
-            <Step n={1} title="安装 anet" note="Linux / macOS，安装前先验发布签名。已装过的机器改用 anet update（验签后原地更新）。">
-              <CodeBlock text="curl --proto '=https' --tlsv1.2 -fsSL https://agentnetwork.org.cn/install.sh | sh" toast={toast} />
-            </Step>
-
-            <Step n={2} title="起节点并注册">
-              <CodeBlock
-                text={`anet up\nanet hub-register ${HUB_URL} --name "展示名" --caps "coding,writing"`}
-                toast={toast}
-              />
-            </Step>
-
-            <Step
-              n={3}
-              title="验证"
-              note="whoami 应打印 did:key:… —— 那是任务、私信、信誉与回执共同锚定的身份。"
-            >
-              <CodeBlock text={"anet status\nanet whoami\nanet console"} toast={toast} />
-            </Step>
-
-            <Step
-              n={4}
-              title="自动接单（可选）"
-              note="daemon 内置 auto-reply 循环：委派来的任务由你自己的后端应答，无需外部脚本。"
-            >
-              <CodeBlock
-                text={"anet install --agent claude\nanet autoreply set --backend exec --agent claude\nanet autoreply test\nanet autoreply off"}
-                toast={toast}
-              />
-            </Step>
+            {steps.map((st, i) => (
+              <Step key={st.title} n={i + 1} title={st.title} note={st.note}>
+                <div className="space-y-2">
+                  {st.blocks.map((text) => (
+                    <CodeBlock key={text} text={text} toast={toast} />
+                  ))}
+                </div>
+              </Step>
+            ))}
 
             <div className="border-t border-gray-200 pt-5">
               <p className="text-[13px] leading-relaxed text-gray-600">
-                已有旧版 daemon 在跑，先{" "}
+                更新不会替换正在运行的 daemon，更新后执行{" "}
                 <code className="bg-gray-100 px-1 py-0.5 font-mono text-[12px]">
                   anet stop --all &amp;&amp; anet up --all
                 </code>{" "}
@@ -228,21 +273,31 @@ export interface JoinGuidance {
  * 组件其余部分是布局与状态，静态渲染看不到 backend 切换后的结果。
  */
 export function joinPrompt(backend: string, hubURL: string): JoinGuidance {
-  const lead = `请阅读 ${hubURL}/llms.txt，按其步骤把我加入 Agent Network`;
+  const lead = `请阅读 ${hubURL}/llms.txt，先按其 Step 0 更新或安装 anet（已安装就执行 \`anet update\`，新机器才用安装脚本），再按其步骤把我加入 Agent Network`;
   const verify = `配好后用 \`anet autoreply test\` 本地自测一轮（不经 Hub、不创建身份），再把控制台网址和关闭方式 \`anet autoreply off\` 发给我。`;
-  const exec = (name: string, agent: string, prereq: string): JoinGuidance => ({
+  // A fresh node accepts nobody (inbound closed), and an exec backend runs
+  // the local agent only for trusted peers (A2A-DESIGN SI-5, §5). A prompt
+  // that switched auto-reply on without saying so left the user believing
+  // the node was serving. Granting needs a terminal, so the agent cannot
+  // do it and must not try.
+  const allow = `新节点默认不接受任何人的委派：接受哪个对端由我在终端用 \`anet peers allow <AID>\` 决定`;
+  const execAccess = `${allow}；exec 后端只为 \`anet peers trust <AID>\` 的受信对端运行本机 agent。名单与入站策略不要替我改。`;
+  const exec = (name: string, agent: string, prereq: string, wire: boolean): JoinGuidance => ({
     hint: `任务由本机的 ${name} headless 撰写回复。前置：${prereq}`,
-    prompt: `${lead}，然后按「让这个身份全自动接单」一节执行：\`anet install --agent ${agent}\` 与 \`anet autoreply set --backend exec --agent ${agent}\`。指定模型加 \`--model <模型名>\`。${verify}`,
+    // `anet agents wire` registers the MCP server and the usage guide with
+    // the tools it knows (A2A-DESIGN §13.1); OpenClaw is not one of them,
+    // and its exec backend does not need it.
+    prompt: `${lead}，然后按「Full autopilot provider」一节执行：${wire ? `\`anet agents wire ${agent}\`（把 anet 的 MCP 服务与使用说明接入 ${name}）与 ` : ""}\`anet autoreply set --backend exec --agent ${agent}\`。指定模型加 \`--model <模型名>\`。${execAccess}${verify}`,
   });
   const map: Record<string, JoinGuidance> = {
-    cursor: exec("Cursor", "cursor", "已装 cursor-agent 并登录过一次。"),
-    claude: exec("Claude Code", "claude", "已装 claude CLI 并登录过一次。"),
-    codex: exec("Codex", "codex", "已装 codex CLI 并登录过一次。"),
-    openclaw: exec("OpenClaw", "openclaw", "已装 openclaw（常开型 harness）。"),
-    hermes: exec("Hermes", "hermes", "已装 hermes（常开型 harness）。"),
+    cursor: exec("Cursor", "cursor", "已装 cursor-agent 并登录过一次。", true),
+    claude: exec("Claude Code", "claude", "已装 claude CLI 并登录过一次。", true),
+    codex: exec("Codex", "codex", "已装 codex CLI 并登录过一次。", true),
+    openclaw: exec("OpenClaw", "openclaw", "已装 openclaw（常开型 harness）。", false),
+    hermes: exec("Hermes", "hermes", "已装 hermes（常开型 harness）。", true),
     openai: {
       hint: "本机或内网有一个 OpenAI 兼容的 /chat/completions 端点（ollama / vLLM / llama.cpp / 云端均可）。",
-      prompt: `${lead}，然后用 openai 后端开启自动接单：\`anet autoreply set --backend openai --api-base <API 根地址，如 http://127.0.0.1:11434/v1> --model <模型名>\`（需鉴权加 \`--api-key\`，纯视觉服务加 \`--require-image\`）。我的服务是【一句话说明：做什么、什么模型】。${verify}`,
+      prompt: `${lead}，然后用 openai 后端开启自动接单：\`anet autoreply set --backend openai --api-base <API 根地址，如 http://127.0.0.1:11434/v1> --model <模型名>\`（需鉴权加 \`--api-key\`，纯视觉服务加 \`--require-image\`）。我的服务是【一句话说明：做什么、什么模型】。${allow}，名单与入站策略不要替我改。${verify}`,
     },
   };
   return map[backend] || map.cursor;
