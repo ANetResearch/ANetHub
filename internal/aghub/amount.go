@@ -1,6 +1,7 @@
 package aghub
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 
@@ -60,4 +61,47 @@ func errStoredAmount(table, id string, n int64) error {
 	return fmt.Errorf("%s row %s holds amount %d, outside 1..%d; it was written by a hub without the "+
 		"amount range check (see deploy/audit-amount-overflow.sql) and is not repeated",
 		table, id, n, int64(math.MaxInt64))
+}
+
+// execer is what addToRow writes through: the store's database or one of
+// its transactions.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// addToRow adds delta to column col of the row of table whose key column
+// keyCol is key, creating the row at delta, and refuses a result outside
+// int64 with invalid_amount, moving nothing.
+//
+// amountInt64 bounds each amount; this bounds the sum. SQLite does not
+// fail an integer overflow in "col + ?": it turns the result into a
+// REAL, stored as such in the INTEGER column, so two in-range amounts
+// whose sum passes MaxInt64 (two peer receipts of 2^63-1, say) left the
+// account unreadable — every later read of it a scan error, /x402/supply
+// an "integer overflow" — and every later sum on it rounded
+// [redteam:si9]. The guard is in the statement, so the check and the write
+// are one step inside the caller's transaction.
+func addToRow(ex execer, table, keyCol, col, key string, delta int64) error {
+	if delta == math.MinInt64 {
+		return refuse(payment.ReasonInvalidAmount, "%s of %s: a change of %d cannot be applied", col, key, delta)
+	}
+	cmp, bound := "<=", int64(math.MaxInt64)-delta
+	if delta < 0 {
+		cmp, bound = ">=", math.MinInt64-delta
+	}
+	res, err := ex.Exec(fmt.Sprintf(
+		`INSERT INTO %[1]s(%[2]s, %[3]s) VALUES(?,?)
+		 ON CONFLICT(%[2]s) DO UPDATE SET %[3]s = %[3]s + ? WHERE %[3]s %[4]s ?`,
+		table, keyCol, col, cmp), key, delta, delta, bound)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n == 0 {
+		return refuse(payment.ReasonInvalidAmount,
+			"%s %s of %s cannot take %+d: the result would leave the range this ledger can hold",
+			table, col, key, delta)
+	}
+	return nil
 }
