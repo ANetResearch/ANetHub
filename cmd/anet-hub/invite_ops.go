@@ -62,8 +62,12 @@ func runInviteOp(store *aghub.Store, required string, mint bool, label string,
 		fmt.Println("This is the only time the token is shown. The hub stores a hash of it,")
 		fmt.Println("so it cannot be printed again — mint another if it is lost.")
 		fmt.Println()
-		fmt.Println("The machine joining runs:")
-		fmt.Printf("  anet hub-register <hub-url> --name <name> --token %s\n", token)
+		// In the environment of the command, not in its arguments: other
+		// local users of the joining machine can read every process's
+		// arguments, and whoever presents an invite first is admitted
+		// (ANet A2A-DESIGN §13.2 [redteam:F41]).
+		fmt.Println("The machine joining runs (the invite goes in the environment, never on the command line):")
+		fmt.Printf("  ANET_INVITE=%s anet hub-register <hub-url> --name <name>\n", token)
 		if !store.InviteRequired() {
 			fmt.Println()
 			fmt.Println("Note: admission is currently OFF, so this hub admits anybody and the")
