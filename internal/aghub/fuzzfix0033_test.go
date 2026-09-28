@@ -1,6 +1,7 @@
 package aghub_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -211,5 +212,38 @@ func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 	}
 	if code, b := getJSON(t, srv.URL+"/x402/issuance?from=0"); code != http.StatusOK || !strings.Contains(string(b), `"seq":0`) {
 		t.Errorf("from=0: %d %s", code, b)
+	}
+}
+
+// A key set whose seq is above 2^63-1 verified, passed the high-water
+// rule, and then failed to store (database/sql refuses a uint64 with the
+// high bit set): POST /agents/{aid}/keys answered 500 (FuzzHubKeys,
+// 84868313374056c7). It is refused as invalid, 400, and the stored set
+// is kept; 2^63-1 itself still stores.
+func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
+	srv := newHub(t)
+	c, _ := identity.Incept()
+	register(t, srv, c, "Keys", nil)
+	raw, _ := mintKeySet(t, c, 1)
+	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
+		t.Fatalf("first set: %d %s", code, b)
+	}
+	for _, seq := range []uint64{1 << 63, math.MaxUint64} {
+		raw, _ := mintKeySet(t, c, seq)
+		code, b := publishKeys(t, srv, c, raw)
+		if code != http.StatusBadRequest || !strings.Contains(string(b), "seq") {
+			t.Errorf("seq %d: %d %s, want 400 naming the seq", seq, code, b)
+		}
+	}
+	code, b := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
+	var v struct {
+		KeySet string `json:"keyset"`
+	}
+	if code != http.StatusOK || json.Unmarshal(b, &v) != nil || v.KeySet != base64.StdEncoding.EncodeToString(raw) {
+		t.Errorf("the stored set changed: %d %s", code, b)
+	}
+	raw, _ = mintKeySet(t, c, math.MaxInt64)
+	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
+		t.Errorf("seq 2^63-1: %d %s", code, b)
 	}
 }
