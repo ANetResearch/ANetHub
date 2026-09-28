@@ -162,8 +162,18 @@ func Open(dir string) (*Store, error) {
 	// overwrites deleted row content and freed pages with zeros; without
 	// it an acked envelope stays readable in the file's free space until
 	// the page is reused. The cost is extra writes on every delete.
+	//
+	// _txlock=immediate: every transaction takes the write lock when it
+	// begins. Begun deferred, a transaction that reads first (RelayEnqueue's
+	// quota check, then its INSERT) has to upgrade to a writer, and when
+	// another connection wrote in between — SeenPolling on every poll —
+	// SQLite answers SQLITE_BUSY_SNAPSHOT, or SQLITE_BUSY without waiting on
+	// busy_timeout (waiting could deadlock). The send failed with "database
+	// is locked" (ANet docs/notes/0036 F2). A lock taken at BEGIN waits
+	// under busy_timeout like any single statement.
 	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+
-		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)&_pragma=secure_delete(ON)")
+		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)&_pragma=secure_delete(ON)"+
+		"&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("hub: open db: %w", err)
 	}
