@@ -1,10 +1,12 @@
 package aghub
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -87,32 +89,93 @@ func parseV2Headers(r *http.Request) (v2Auth, error) {
 //
 // Keys are the first 16 bytes of SHA-256(aid ‖ 0x00 ‖ sig), which keeps an
 // entry at a fixed small size; a collision would need a second preimage of
-// a 128-bit truncation. The cache is bounded: when it holds max live
-// entries, new requests are refused (503) rather than older entries being
-// evicted, because eviction would re-admit the evicted signatures.
+// a 128-bit truncation. An entry is never dropped before its window ends,
+// because dropping it would re-admit its signature.
+//
+// The entries are held per signer, and every entry is also in one heap
+// ordered by the end of its window, so expired entries leave the cache as
+// they expire, whoever they belong to, at the cost of a heap operation
+// each. The bounds are per signer first [redteam:F4]:
+//
+//   - perSigner: one AID holds at most this many live entries. Past it that
+//     AID alone is refused (429) until its own entries expire. Signing
+//     fast, or with timestamps far in the future (which keep an entry
+//     longest), fills only the signer's own share.
+//   - max: all signers together. At max, a signer that holds at least an
+//     even share (max divided by the number of signers holding entries,
+//     and at least one) is refused (503); a signer below it is admitted.
+//     Many AIDs filling the cache together therefore refuse themselves,
+//     not everyone. The total can pass max only by entries of signers
+//     below an even share, which keeps it under twice max, and at one
+//     entry per signer with more signers than that.
+//
+// The global bound used to refuse every signer at max, so one registered
+// AID that kept the cache full stopped the relay for all.
 type replayCache struct {
-	mu    sync.Mutex
-	seen  map[[16]byte]int64 // key -> window end, unix ms
-	max   int
-	swept int64
+	mu        sync.Mutex
+	signers   map[string]*replayShard
+	expiry    replayHeap
+	max       int
+	perSigner int
 }
 
-// defaultReplayCacheMax bounds the replay cache. At about 40 bytes per
-// entry this is some 40 MiB, and at the longest window (ts up to MaxSkew
-// in the future plus MaxSkew after it, 10 minutes) it admits about 1,600
-// signed requests per second sustained.
+// replayShard is one signer's live entries: key -> window end, unix ms.
+type replayShard struct {
+	aid  string
+	seen map[[16]byte]int64
+}
+
+// replayEntry is one entry in the expiry heap.
+type replayEntry struct {
+	end   int64
+	shard *replayShard
+	key   [16]byte
+}
+
+// replayHeap is a min-heap of entries by the end of their window.
+type replayHeap []replayEntry
+
+func (h replayHeap) Len() int           { return len(h) }
+func (h replayHeap) Less(i, j int) bool { return h[i].end < h[j].end }
+func (h replayHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *replayHeap) Push(x any)        { *h = append(*h, x.(replayEntry)) }
+func (h *replayHeap) Pop() any {
+	old := *h
+	e := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return e
+}
+
+// defaultReplayCacheMax bounds the replay cache. An entry costs about 100
+// bytes (its map slot and its heap slot), so this is some 100 MiB at the
+// bound, and at the longest window (ts up to MaxSkew in the future plus
+// MaxSkew after it, 10 minutes) it holds about 1,600 signed requests per
+// second across all signers.
 const defaultReplayCacheMax = 1 << 20
 
-func newReplayCache(max int) *replayCache {
-	return &replayCache{seen: map[[16]byte]int64{}, max: max}
+// defaultReplayPerSigner bounds one signer's live entries. At the default
+// send bucket (20/s) a sender's own sends take 6,000 entries over a
+// 5-minute window (a timestamp near now) and 12,000 over the longest; this
+// leaves room for its polls, acks and other signed calls on top.
+const defaultReplayPerSigner = 1 << 15
+
+// replayRetryAfter is the Retry-After of a replay-cache refusal. Entries
+// leave the cache continuously as their windows end.
+const replayRetryAfter = 10 * time.Second
+
+func newReplayCache(max, perSigner int) *replayCache {
+	return &replayCache{signers: map[string]*replayShard{}, max: max, perSigner: perSigner}
 }
 
 var errReplayed = errors.New("this signature was already used; sign each request anew")
 
 var errReplayCacheFull = errors.New("replay cache full; retry later")
 
+var errReplaySignerFull = errors.New("this agent has too many signed requests inside the replay window; retry later")
+
 // admit records a signature. It fails when the signature was seen before
-// within its window, or when the cache is full.
+// within its window, when the signer holds its whole share of the cache,
+// or when the cache is full and the signer holds at least an even share.
 func (c *replayCache) admit(aid string, sig []byte, windowEnd, now int64) error {
 	h := sha256.New()
 	h.Write([]byte(aid))
@@ -123,35 +186,82 @@ func (c *replayCache) admit(aid string, sig []byte, windowEnd, now int64) error 
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Expired entries are swept every 10 seconds, and sooner when the
-	// cache is full, but at most once a second: a sweep walks every entry,
-	// and sweeping on each request while the cache is full of live entries
-	// would cost a full walk per refused request.
-	if now-c.swept > 10_000 || (len(c.seen) >= c.max && now-c.swept > 1000) {
-		for k, end := range c.seen {
-			if end < now {
-				delete(c.seen, k)
-			}
+	c.expire(now)
+	sh := c.signers[aid]
+	held := 0
+	if sh != nil {
+		if _, ok := sh.seen[key]; ok {
+			return errReplayed
 		}
-		c.swept = now
+		held = len(sh.seen)
 	}
-	if end, ok := c.seen[key]; ok && end >= now {
-		return errReplayed
+	if held >= c.perSigner {
+		return errReplaySignerFull
 	}
-	if len(c.seen) >= c.max {
-		return errReplayCacheFull
+	if len(c.expiry) >= c.max {
+		n := len(c.signers)
+		if sh == nil {
+			n++
+		}
+		if held >= max(1, c.max/n) {
+			return errReplayCacheFull
+		}
 	}
-	c.seen[key] = windowEnd
+	if sh == nil {
+		sh = &replayShard{aid: aid, seen: map[[16]byte]int64{}}
+		c.signers[aid] = sh
+	}
+	sh.seen[key] = windowEnd
+	heap.Push(&c.expiry, replayEntry{end: windowEnd, shard: sh, key: key})
 	return nil
+}
+
+// expire drops every entry whose window ended before now, and every signer
+// left without entries.
+func (c *replayCache) expire(now int64) {
+	for len(c.expiry) > 0 && c.expiry[0].end < now {
+		e := heap.Pop(&c.expiry).(replayEntry)
+		delete(e.shard.seen, e.key)
+		if len(e.shard.seen) == 0 {
+			delete(c.signers, e.shard.aid)
+		}
+	}
+}
+
+// setPerSigner changes the per-signer bound (Server.SetLimits).
+func (c *replayCache) setPerSigner(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.perSigner = n
+}
+
+// replayPerSignerFor is the per-signer bound for limits l: the default, or
+// twice what the send bucket alone lets a sender sign over the longest
+// window when that is more, so that raising -relay-send-rate does not turn
+// a sender's own sends into replay-cache refusals.
+func replayPerSignerFor(l Limits) int {
+	sends := int(math.Ceil(l.SendRate*float64(2*relayauth.MaxSkewMillis)/1000)) + l.SendBurst
+	return max(defaultReplayPerSigner, 2*sends)
 }
 
 // authFailure is a refusal with its HTTP status.
 type authFailure struct {
 	code int
 	err  error
+	// retryAfter, when set, is sent as Retry-After.
+	retryAfter time.Duration
 }
 
 func (f *authFailure) Error() string { return f.err.Error() }
+
+// writeAuthFailure answers a refusal, with Retry-After when it has one.
+// prefix, when set, is put before the reason.
+func writeAuthFailure(w http.ResponseWriter, f *authFailure, prefix string) {
+	if f.retryAfter > 0 {
+		w.Header().Set("Retry-After", retryAfter(f.retryAfter))
+	}
+	writeJSON(w, f.code, map[string]string{"error": prefix + f.Error()})
+}
 
 func unauthorized(format string, args ...any) *authFailure {
 	return &authFailure{code: http.StatusUnauthorized, err: fmt.Errorf(format, args...)}
@@ -180,8 +290,11 @@ func (s *Server) verifyV2(r *http.Request, action string, body []byte, a v2Auth,
 		return unauthorized("signature does not verify for action %q: %v", action, err)
 	}
 	if err := s.replay.admit(a.AID, a.Sig, int64(a.TS)+relayauth.MaxSkewMillis, now); err != nil {
-		if errors.Is(err, errReplayCacheFull) {
-			return &authFailure{code: http.StatusServiceUnavailable, err: err}
+		switch {
+		case errors.Is(err, errReplaySignerFull):
+			return &authFailure{code: http.StatusTooManyRequests, err: err, retryAfter: replayRetryAfter}
+		case errors.Is(err, errReplayCacheFull):
+			return &authFailure{code: http.StatusServiceUnavailable, err: err, retryAfter: replayRetryAfter}
 		}
 		return unauthorized("%v", err)
 	}
@@ -244,7 +357,7 @@ func (s *Server) authRegistered(w http.ResponseWriter, r *http.Request, action s
 		return authed{}, false
 	}
 	if f := s.verifyV2(r, action, body, a, kel); f != nil {
-		writeJSON(w, f.code, map[string]string{"error": f.Error()})
+		writeAuthFailure(w, f, "")
 		return authed{}, false
 	}
 	return authed{AID: a.AID, Body: body}, true
