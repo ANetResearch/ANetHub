@@ -256,15 +256,34 @@ func TestAPinnedPeerKELWithAMalformedKeyIsDroppedNotAPanic(t *testing.T) {
 // its KEL at once (a merchant's retry of a settlement completes); but the
 // uses waiting while a fetch fails get its failure, rather than each
 // fetching again behind it [redteam:F34].
+//
+// The peer fails the fetch once all the uses are waiting on it. A use that
+// asks after a fetch has ended is not waiting on it and fetches anew; with
+// the failure sent after a fixed 300 ms, a use slow to ask — its lookup of
+// a pinned KEL opens an SQLite connection, which on a loaded host can take
+// longer — was that, and made a second fetch.
 func TestUsesWaitingOnAFailingPeerKELFetchShareItsFailure(t *testing.T) {
 	idSelf, idPeer, _ := threeHubIdentities(t)
+	const uses = 20
+	var asked atomic.Int32
+	allAsked := make(chan struct{})
+	testHookPeerKELAsked = func() {
+		if asked.Add(1) == uses {
+			close(allAsked)
+		}
+	}
+	t.Cleanup(func() { testHookPeerKELAsked = nil })
 	var down atomic.Bool
 	down.Store(true)
 	var fetches atomic.Int32
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetches.Add(1)
 		if down.Load() {
-			time.Sleep(300 * time.Millisecond)
+			select {
+			case <-allAsked:
+			case <-time.After(10 * time.Second):
+				t.Error("the uses did not all ask for the KEL")
+			}
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
 		}
@@ -280,7 +299,7 @@ func TestUsesWaitingOnAFailingPeerKELFetchShareItsFailure(t *testing.T) {
 	defer svc.Close()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for i := 0; i < uses; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -291,7 +310,7 @@ func TestUsesWaitingOnAFailingPeerKELFetchShareItsFailure(t *testing.T) {
 	}
 	wg.Wait()
 	if n := fetches.Load(); n != 1 {
-		t.Fatalf("20 uses waiting on one failing fetch fetched %d times, want 1", n)
+		t.Fatalf("%d uses waiting on one failing fetch fetched %d times, want 1", uses, n)
 	}
 	down.Store(false)
 	if _, err := svc.PeerKEL(idPeer.AID); err != nil {
