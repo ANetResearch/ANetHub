@@ -38,7 +38,8 @@ import (
 // is what a wire-1 daemon sends.
 var errNoAuthHeaders = errors.New("relay v2 authentication headers " +
 	relayauth.HeaderAID + ", " + relayauth.HeaderTS + ", " + relayauth.HeaderSeq + ", " +
-	relayauth.HeaderSig + " are required; this hub speaks wire 2 and needs anet >= 0.2.0")
+	relayauth.HeaderSig + " are required; this hub speaks wire " + strconv.Itoa(wireVersion) +
+	" and needs anet >= " + RequiredAnet)
 
 // v2Auth is the parsed header tuple of one request.
 type v2Auth struct {
