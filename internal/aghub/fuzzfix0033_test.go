@@ -1,7 +1,9 @@
 package aghub_test
 
 import (
+	"math"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,5 +121,72 @@ func TestAPeerReceiptPayingThisHubIsNotCleared(t *testing.T) {
 	}
 	if sup := supplyFull(t, srv); !sup.ChainAgrees || sup.Outstanding != sup.Balances {
 		t.Errorf("supply after the refused receipt: %+v", sup)
+	}
+}
+
+// What a hub has issued in total is what /x402/supply adds up, and it
+// has to fit the ledger's int64 like every balance does. A peer's receipt
+// for 2^63-1-100 to an account holding nothing passed every per-row bound
+// (the payee's balance, the hub's row, what the peer owes), and on a hub
+// that had granted anything before, the sum of its issuance no longer
+// fit: /x402/supply answered 500 "integer overflow" for good
+// (FuzzHubClearFromPeer). A peer receipt, and an operator grant, is now
+// refused with invalid_amount when it would take the total issued past
+// MaxInt64; exactly up to it still clears.
+func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	payer, payee := twoAgents(t)
+	register(t, srv, payer, "Payer", nil)
+	register(t, srv, payee, "Payee", nil)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stranger, _ := identity.Incept()
+	receipt := func(id, payTo string, amount uint64) *payment.Receipt {
+		rec := &payment.Receipt{AuthID: id, Payer: "did:anet:their-user", PayTo: payTo, Amount: amount,
+			Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
+		if err := rec.Sign(peer); err != nil {
+			t.Fatal(err)
+		}
+		return rec
+	}
+	issued := supplyFull(t, srv).Issued // the two registration grants
+
+	err = store.ClearFromPeer(peer.AID(), peer.KEL(), receipt("past-supply", stranger.AID(), math.MaxInt64-100))
+	if err == nil || !strings.Contains(err.Error(), payment.ReasonInvalidAmount) {
+		t.Errorf("a receipt taking issuance past MaxInt64: err = %v, want %s", err, payment.ReasonInvalidAmount)
+	}
+	if b := balanceOf(t, srv, stranger.AID()); b != 0 {
+		t.Errorf("the refused receipt credited %d", b)
+	}
+	if _, err := store.Supply(hubAIDOf(t, srv)); err != nil {
+		t.Fatalf("supply after the refused receipt: %v", err)
+	}
+
+	// Exactly up to MaxInt64 in total still clears, and the supply adds up.
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(),
+		receipt("fills-supply", stranger.AID(), uint64(math.MaxInt64-issued))); err != nil {
+		t.Fatalf("a receipt that fills the supply exactly: %v", err)
+	}
+	sup, err := store.Supply(hubAIDOf(t, srv))
+	if err != nil || sup.Issued != math.MaxInt64 || !sup.ChainAgrees || sup.Outstanding != sup.Balances {
+		t.Fatalf("supply at the edge: %+v, %v", sup, err)
+	}
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), receipt("one-more", payee.AID(), 1)); err == nil {
+		t.Error("one more credit past the full supply was cleared")
+	}
+	if err := store.GrantCredit(payee.AID(), 1, "one more"); err == nil {
+		t.Error("an operator grant past the full supply was accepted")
+	}
+	// A registration at the bound is admitted without its grant.
+	late, _ := identity.Incept()
+	register(t, srv, late, "Late", nil)
+	if b := balanceOf(t, srv, late.AID()); b != 0 {
+		t.Errorf("a registration past the full supply was granted %d", b)
+	}
+	code, b := getJSON(t, srv.URL+"/x402/supply")
+	if code != http.StatusOK {
+		t.Errorf("/x402/supply: %d %s", code, b)
 	}
 }

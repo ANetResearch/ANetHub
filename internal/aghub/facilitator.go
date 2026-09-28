@@ -1062,6 +1062,11 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 		}
 		return fmt.Errorf("recording the clearing of %s: %w", rec.AuthID, err)
 	}
+	// The credit is new supply here, so it must fit what the supply can
+	// add up to, not only the payee's row.
+	if err := issuanceRoom(tx, s.hubAID, amt); err != nil {
+		return err
+	}
 	// addToRow, as in settleAuth: a sum the column cannot hold is refused
 	// (invalid_amount) and the whole clearing rolls back.
 	if err := addToRow(tx, "credit_balance", "aid", "credits", rec.PayTo, amt); err != nil {
@@ -1311,6 +1316,13 @@ func (s *Store) GrantOnRegistration(aid string) error {
 	if entries > 0 {
 		return nil
 	}
+	// The grant is issuance like any other; at the supply's bound it is
+	// skipped (the caller logs this) rather than breaking /x402/supply.
+	if s.hubAID != "" {
+		if err := issuanceRoom(s.db, s.hubAID, RegistrationGrant); err != nil {
+			return err
+		}
+	}
 	return s.Credit(aid, RegistrationGrant, "registration grant")
 }
 
@@ -1329,6 +1341,11 @@ func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
 	} else if bal > math.MaxInt64-amount {
 		return fmt.Errorf("%s holds %d; a grant of %d would take it past %d, the most this ledger can hold",
 			aid, bal, amount, int64(math.MaxInt64))
+	}
+	if s.hubAID != "" && aid != s.hubAID {
+		if err := issuanceRoom(s.db, s.hubAID, amount); err != nil {
+			return err
+		}
 	}
 	if reason == "" {
 		reason = "operator grant"
