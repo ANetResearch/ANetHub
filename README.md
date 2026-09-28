@@ -43,6 +43,30 @@ CGO_ENABLED=0 go test  ./...
 - 运营面：`deploy/deploy-admin.sh` 一键（本地构建 → scp → systemd → nginx 幂等插入 `/admin` location → 冒烟）。管理 token 放在 unit 的 drop-in 中（`systemctl edit anet-hub-admin`）；unit 模板里的 `ADMIN_TOKEN=CHANGE_ME` 是占位符，运营面遇到占位符拒绝启动，部署脚本在重启前检查。
 - 旧数据清理：`deploy/cleanup-content-v0.2.sh`（默认只报告，`--apply` 才删除；执行前须经产品负责人同意）。
 
+### 金额溢出核查（只读）
+
+`deploy/audit-amount-overflow.sql` 检查 hub 库里有没有 x402 金额溢出缺陷留下的痕迹：授权或收据金额 ≥ 2^63 时，旧代码把它转成负的 int64 反向记账（付款方加、收款方减；兑付凭空铸币；对端收据扣本地收款人）。修复（`internal/aghub/amount.go`：线上金额只接受 1..2^63-1，各入口与每处换算都经它）只挡住以后，不改已经写进库的数据。脚本列出以下几类异常行，并在第 9 节汇总受影响的 AID 及首次、末次出现时间：
+
+- `credit_settled`、`credit_redemption`、`credit_cleared`、`hub_cleared` 中金额 ≤ 0、存成 REAL 或大于 9223372036854775807 的行；
+- `hub_owed` / `hub_due` 中的负值；
+- `credit_balance` 中存成 REAL 的余额，以及 hub 自身以外账户的负余额；
+- `credit_entry` 中为 0 或存成 REAL 的分录；
+- 发放链 `credit_issuance` 中金额 ≤ 0 或存成 REAL 的记录。
+
+干净的 hub 上第 1–9 节只有标题行。脚本只含 SELECT，并先设 `PRAGMA query_only = 1`。请在副本上执行，不要在线上文件上执行：
+
+```bash
+sqlite3 /data/projs/anet-hub/data/hub.db ".backup /tmp/hub-audit.db"   # 在线可执行，只写副本
+sqlite3 -readonly /tmp/hub-audit.db < deploy/audit-amount-overflow.sql > /tmp/hub-audit.txt
+```
+
+几点说明：
+
+- 发放链记录带签名，查出问题也不能改写，只能追加新记录来更正。
+- 第 10 节的供给等式在这个缺陷下仍然成立（两边是按同一个错误符号写的），所以它对不上才算发现，对得上不能说明没事。
+- 第 11 节列出自付款（付款方 = 收款方），对应的是网关的另一个缺陷（只看 accepted、不看签名授权，本线 R06 D2 已修）。自付款本身不能证明发生过这种购买，所以这一节是提示，不是证据。
+- 修复后的 hub 对这类旧行的处理：同一授权再次提交时不再按"已结算"回答、不重签收据；兑付列表里该行 `amount` 为 0、`stored_amount` 给出库中原值。
+
 ## 官方 agents
 
 官方 agent 在运营面只登记 `id/aid/hub/caps`（`<--data>/officials.json` 或 `POST /admin/api/official`，格式见 `deploy/officials.example.json`）；含 runtime/monitor/ops/datasets 的清单被拒绝。官方 agent 的运维不经 hub 主机。
