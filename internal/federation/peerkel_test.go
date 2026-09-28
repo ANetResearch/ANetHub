@@ -15,8 +15,10 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 
@@ -88,6 +90,9 @@ func TestAPeerKELIsPinnedOnlyWhenItReplaysToThePeer(t *testing.T) {
 
 	peerKEL := idPeer.KEL
 	served.Store(&peerKEL)
+	// The failed fetch holds the next one off for peerKELRetry
+	// (TestAPeerKELThatFailsIsNotFetchedOnEveryUse); let that pass.
+	svc.kelFetches[idPeer.AID].failed = time.Now().Add(-peerKELRetry)
 	kel, err := svc.PeerKEL(idPeer.AID)
 	if err != nil {
 		t.Fatalf("the peer's own KEL: %v", err)
@@ -137,5 +142,112 @@ func TestAMisPinnedPeerKELIsDroppedWhenTheServiceOpens(t *testing.T) {
 	}
 	if states, err := identity.Replay(kel); err != nil || states[len(states)-1].AID != idPeer.AID {
 		t.Fatalf("after reopening, PeerKEL replays to %v (%v), want %s", states, err, idPeer.AID)
+	}
+}
+
+// A peer KEL that is not pinned used to be fetched again on every use, and
+// a use can be an unauthenticated GET /agents/{peer}/kel on the kernel: a
+// peer serving a KEL that does not prove its AID (or a peer that is down)
+// turned each such request into an outbound fetch and a replay of whatever
+// the peer served. The fetches of one peer's KEL are now made one at a
+// time, the next one waits peerKELRetry after a failure, and a KEL that is
+// somebody else's is refused on its inception, before the rest of it is
+// replayed [redteam:F34].
+func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
+	idSelf, idPeer, _ := threeHubIdentities(t)
+	stranger, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 30; i++ {
+		if err := stranger.Rotate(uint64(i + 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	strangerKEL, _ := identity.MarshalKEL(stranger.KEL())
+	var served atomic.Pointer[[]byte]
+	served.Store(&strangerKEL)
+	var fetches atomic.Int32
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.StdEncoding.EncodeToString(*served.Load()) + `"}`))
+	}))
+	defer fake.Close()
+	svc, err := New(t.TempDir(),
+		Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: fake.URL}}},
+		idSelf, newFakeLocal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	counter := identity.NewReplayCache(0) // holds nothing: its misses count every replay
+	prev := identity.SetReplayCache(counter)
+	defer identity.SetReplayCache(prev)
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := svc.PeerKEL(idPeer.AID); err == nil {
+				t.Error("a KEL that does not prove the peer's AID was accepted")
+			}
+		}()
+	}
+	wg.Wait()
+	for i := 0; i < 20; i++ {
+		if _, err := svc.PeerKEL(idPeer.AID); err == nil {
+			t.Fatal("a KEL that does not prove the peer's AID was accepted")
+		}
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Fatalf("40 uses of a peer whose KEL failed to pin fetched it %d times, want 1", n)
+	}
+	if _, misses := counter.Stats(); misses != 1 {
+		t.Fatalf("refusing a 31-event KEL of somebody else replayed %d times, want 1 (its inception)", misses)
+	}
+
+	// After the wait, the next use fetches again, and the peer's own KEL
+	// is pinned.
+	peerKEL := idPeer.KEL
+	served.Store(&peerKEL)
+	svc.kelFetches[idPeer.AID].failed = time.Now().Add(-peerKELRetry)
+	if _, err := svc.PeerKEL(idPeer.AID); err != nil {
+		t.Fatalf("after the retry wait: %v", err)
+	}
+	if n := pinnedPeerKELs(t, svc); n != 1 || fetches.Load() != 2 {
+		t.Fatalf("after the retry wait: %d pinned, %d fetches; want 1 and 2", n, fetches.Load())
+	}
+}
+
+// A pinned peer KEL whose key is not 32 bytes (a pin written before peerKEL
+// replayed what it pinned) does not stop the service from opening: the
+// replay at open refuses it, rather than panicking in ed25519.Verify
+// (ANetCore identity.Replay), and it is dropped [redteam:F34].
+func TestAPinnedPeerKELWithAMalformedKeyIsDroppedNotAPanic(t *testing.T) {
+	idSelf, idPeer, _ := threeHubIdentities(t)
+	short := []identity.SignedEvent{{Event: identity.KeyEvent{Type: identity.Inception,
+		Keys: [][]byte{make([]byte, 31)}, Threshold: 1}, Sig: make([]byte, 64)}}
+	blob, err := identity.MarshalKEL(short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: "http://127.0.0.1:1"}}}
+	dir := t.TempDir()
+	svc, err := New(dir, cfg, idSelf, newFakeLocal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.db.Exec(`INSERT INTO fed_peer_kel (aid, kel, fetched_at) VALUES (?,?,0)`, idPeer.AID, blob); err != nil {
+		t.Fatal(err)
+	}
+	svc.Close()
+	svc, err = New(dir, cfg, idSelf, newFakeLocal())
+	if err != nil {
+		t.Fatalf("reopening over a malformed pin: %v", err)
+	}
+	defer svc.Close()
+	if n := pinnedPeerKELs(t, svc); n != 0 {
+		t.Fatalf("the malformed pin survived reopening (%d rows)", n)
 	}
 }
