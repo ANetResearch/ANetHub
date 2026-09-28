@@ -92,7 +92,7 @@ func TestAPeerKELIsPinnedOnlyWhenItReplaysToThePeer(t *testing.T) {
 	served.Store(&peerKEL)
 	// The failed fetch holds the next one off for peerKELRetry
 	// (TestAPeerKELThatFailsIsNotFetchedOnEveryUse); let that pass.
-	svc.kelFetches[idPeer.AID].failed = time.Now().Add(-peerKELRetry)
+	svc.kelFetches[idPeer.AID].refused = time.Now().Add(-peerKELRetry)
 	kel, err := svc.PeerKEL(idPeer.AID)
 	if err != nil {
 		t.Fatalf("the peer's own KEL: %v", err)
@@ -147,10 +147,10 @@ func TestAMisPinnedPeerKELIsDroppedWhenTheServiceOpens(t *testing.T) {
 
 // A peer KEL that is not pinned used to be fetched again on every use, and
 // a use can be an unauthenticated GET /agents/{peer}/kel on the kernel: a
-// peer serving a KEL that does not prove its AID (or a peer that is down)
-// turned each such request into an outbound fetch and a replay of whatever
-// the peer served. The fetches of one peer's KEL are now made one at a
-// time, the next one waits peerKELRetry after a failure, and a KEL that is
+// peer serving a KEL that does not prove its AID turned each such request
+// into an outbound fetch and a replay of whatever the peer served. The
+// fetches of one peer's KEL are now made one at a time, the next one waits
+// peerKELRetry after the peer served such a KEL, and a KEL that is
 // somebody else's is refused on its inception, before the rest of it is
 // replayed [redteam:F34].
 func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
@@ -211,7 +211,7 @@ func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 	// is pinned.
 	peerKEL := idPeer.KEL
 	served.Store(&peerKEL)
-	svc.kelFetches[idPeer.AID].failed = time.Now().Add(-peerKELRetry)
+	svc.kelFetches[idPeer.AID].refused = time.Now().Add(-peerKELRetry)
 	if _, err := svc.PeerKEL(idPeer.AID); err != nil {
 		t.Fatalf("after the retry wait: %v", err)
 	}
@@ -249,5 +249,55 @@ func TestAPinnedPeerKELWithAMalformedKeyIsDroppedNotAPanic(t *testing.T) {
 	defer svc.Close()
 	if n := pinnedPeerKELs(t, svc); n != 0 {
 		t.Fatalf("the malformed pin survived reopening (%d rows)", n)
+	}
+}
+
+// A peer that is down holds nothing off, so a use after it is back pins
+// its KEL at once (a merchant's retry of a settlement completes); but the
+// uses waiting while a fetch fails get its failure, rather than each
+// fetching again behind it [redteam:F34].
+func TestUsesWaitingOnAFailingPeerKELFetchShareItsFailure(t *testing.T) {
+	idSelf, idPeer, _ := threeHubIdentities(t)
+	var down atomic.Bool
+	down.Store(true)
+	var fetches atomic.Int32
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		if down.Load() {
+			time.Sleep(300 * time.Millisecond)
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.StdEncoding.EncodeToString(idPeer.KEL) + `"}`))
+	}))
+	defer fake.Close()
+	svc, err := New(t.TempDir(),
+		Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: fake.URL}}},
+		idSelf, newFakeLocal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc.Close()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := svc.PeerKEL(idPeer.AID); err == nil {
+				t.Error("a KEL was pinned from a peer that is down")
+			}
+		}()
+	}
+	wg.Wait()
+	if n := fetches.Load(); n != 1 {
+		t.Fatalf("20 uses waiting on one failing fetch fetched %d times, want 1", n)
+	}
+	down.Store(false)
+	if _, err := svc.PeerKEL(idPeer.AID); err != nil {
+		t.Fatalf("the first use after the peer is back: %v", err)
+	}
+	if n := pinnedPeerKELs(t, svc); n != 1 {
+		t.Fatalf("the peer's KEL was not pinned once it was back (%d rows)", n)
 	}
 }
