@@ -389,6 +389,8 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 			"aid", "card_error", "card_status", "keys_error", "keys_status", "status"}},
 		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "pricing", "readme", "summary"}},
 		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keyset"}},
+		// POST /agents/keys:lookup, the daemon's recipient lookup [redteam:F3].
+		{"KeysLookupRequest", aghub.KeysLookupRequest{}, []string{"aid"}},
 		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keyset"}},
 		{"KeysPublishResponse", aghub.KeysPublishResponse{}, []string{"aid", "keys_status"}},
 		{"FedCard", aghub.FedCard{}, []string{"card", "fed_seq", "home", "kel", "keys"}},
@@ -443,6 +445,9 @@ func TestTheWire2VersionsAndHeadersArePinned(t *testing.T) {
 		{relayauth.ActionRegister, "register"}, {relayauth.ActionProfile, "profile"},
 		{relayauth.ActionVisibility, "visibility"}, {relayauth.ActionDeregister, "deregister"},
 		{relayauth.ActionP2P, "p2p"}, {relayauth.ActionKeys, "keys"},
+		// The recipient key lookup the daemon POSTs (ANet internal/hubapi
+		// KeysLookupPath pins the same path) [redteam:F3].
+		{aghub.KeysLookupPath, "/agents/keys:lookup"},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%q, want %q", pair[0], pair[1])
@@ -471,6 +476,14 @@ func TestTheWire2RoutesAreServed(t *testing.T) {
 	var out map[string]string
 	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
 		t.Errorf("GET keys of an unknown AID: %d %s, want the handler's JSON 404", code, body)
+	}
+	// The daemon tells this route's own 404 (a JSON error) from a hub that
+	// does not serve it (the mux's plain-text 405 or 404) and only then
+	// falls back to GET.
+	code, body, _ = send(t, newRequest(t, srv, http.MethodPost, aghub.KeysLookupPath, []byte(`{"aid":"`+c.AID()+`"}`)))
+	out = nil
+	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
+		t.Errorf("POST %s of an unknown AID: %d %s, want the handler's JSON 404", aghub.KeysLookupPath, code, body)
 	}
 }
 

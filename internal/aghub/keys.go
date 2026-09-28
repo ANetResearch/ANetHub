@@ -58,6 +58,25 @@ type KeysView struct {
 	KEL    string `json:"kel"`    // base64 (std) of identity.MarshalKEL
 }
 
+// KeysLookupPath is the key-set lookup that names the AID in its body
+// rather than in its path (A2A-DESIGN §3.5 step 1, §3.7). A sender looks up
+// its recipient's key set before the first message and every ten minutes
+// of a conversation, from its own address and without authentication; a
+// reverse proxy logging request lines would write the edge
+// sender-address -> recipient-AID to the hub host's disk if the AID were
+// in the path [redteam:F3]. GET /agents/{aid}/keys answers the same and
+// stays for older daemons and for readers.
+const KeysLookupPath = "/agents/keys:lookup"
+
+// KeysLookupRequest is the POST /agents/keys:lookup body. The answer is a
+// KeysView, as for GET /agents/{aid}/keys.
+type KeysLookupRequest struct {
+	AID string `json:"aid"`
+}
+
+// keysLookupBodyLimit caps a lookup body: one AID in JSON.
+const keysLookupBodyLimit = 4 << 10
+
 // KeysPublishRequest is the POST /agents/{aid}/keys body.
 type KeysPublishRequest struct {
 	KeySet string `json:"keyset"` // base64 (std) of the seal.SignedEncKeySet encoding
@@ -230,7 +249,8 @@ func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 	})
 }
 
-// hKeysGet serves GET /agents/{aid}/keys.
+// hKeysGet serves GET /agents/{aid}/keys; POST /agents/keys:lookup
+// (hKeysLookup) is the same with the AID in the body.
 //
 // Sources, in order: an agent registered here; a key set that arrived with
 // a peer's card sync (the A2A card stream, then the ADP card stream); a
@@ -240,7 +260,33 @@ func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 // ([C32]). Its answer is relayed to this caller and not stored: it does
 // not enter fed_card, /agents or any index.
 func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
+	s.serveKeys(w, r, r.PathValue("aid"))
+}
+
+// hKeysLookup serves POST /agents/keys:lookup: GET /agents/{aid}/keys with
+// the AID in the body (KeysLookupRequest), so that no request line names it.
+func (s *Server) hKeysLookup(w http.ResponseWriter, r *http.Request) {
+	body, err := readAllLimited(w, r, keysLookupBodyLimit)
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": fmt.Sprintf("a key lookup body is at most %d bytes", keysLookupBodyLimit)})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return
+	}
+	var req KeysLookupRequest
+	if err := json.Unmarshal(body, &req); err != nil || req.AID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `body must be {"aid": "<AID>"}`})
+		return
+	}
+	s.serveKeys(w, r, req.AID)
+}
+
+// serveKeys answers a key-set lookup for aid (hKeysGet, hKeysLookup).
+func (s *Server) serveKeys(w http.ResponseWriter, r *http.Request, aid string) {
 	keyset, kel, registered, err := s.store.LocalKeys(aid)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

@@ -289,6 +289,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}/ledger", s.hLedger)
 	// Encryption key sets (§3.7). See keys.go.
 	mux.HandleFunc("GET /agents/{aid}/keys", s.hKeysGet)
+	mux.HandleFunc("POST "+KeysLookupPath, s.hKeysLookup)
 	mux.HandleFunc("POST /agents/{aid}/keys", s.hKeysPost)
 	mux.HandleFunc("POST /agents/{aid}/visibility", s.hVisibility)
 	// The other half of registration: leaving. See deregister.go.
