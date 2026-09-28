@@ -18,7 +18,13 @@ package version
 // the two numbers are the same. The first start of a 0.2.0 hub on a
 // wire-1 database migrates it irreversibly: see ANet docs/notes/0027 for
 // the upgrade procedure.
-const V = "0.2.0"
+//
+// 0.2.1 is a patch release of the same wire (ANet docs/RELEASE-NOTES-0.2.1.md):
+// hub.db transactions take the write lock when they begin, so a relay write
+// no longer fails "database is locked" under concurrent polls, and the
+// federation dedupe window is pruned through an index. It still requires anet
+// >= 0.2.0 (RequiredAnet); nodes and hubs of 0.2.0 and 0.2.1 interoperate.
+const V = "0.2.1"
 
 // Commit and BuiltAt are stamped at build time:
 //
