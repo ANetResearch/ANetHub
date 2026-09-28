@@ -252,6 +252,13 @@ func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
 				"error": aid + " is registered here and has published no encryption key set"})
 			return
 		}
+		// A key history stored before /register capped it is not
+		// served: no sender accepts it (seal.ParseKEL) [redteam:F36].
+		if _, err := seal.ParseKEL(kel); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": aid + "'s key history on this hub is not one a sender accepts: " + err.Error()})
+			return
+		}
 		writeKeys(w, aid, keyset, kel)
 		return
 	}
@@ -308,6 +315,12 @@ func (s *Server) hKeysPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kel, err := s.agentKELEvents(a.AID)
+	if seal.ReasonOf(err) == seal.ReasonKELTooLarge {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+			"the key history this hub holds for %s is past %d events or %d bytes, which no sender accepts: %v",
+			a.AID, seal.MaxKELEvents, seal.MaxKELBytes, err)})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -327,13 +340,15 @@ func (s *Server) hKeysPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, KeysPublishResponse{AID: a.AID, KeysStatus: status})
 }
 
-// agentKELEvents returns the stored KEL of a registered agent, decoded.
+// agentKELEvents returns the stored KEL of a registered agent, decoded
+// under the caps /register applies (seal.ParseKEL) [redteam:F36]: a key
+// history stored before those caps is refused rather than replayed.
 func (s *Server) agentKELEvents(aid string) ([]identity.SignedEvent, error) {
 	kelBytes, err := s.store.AgentKEL(aid)
 	if err != nil {
 		return nil, err
 	}
-	return identity.UnmarshalKEL(kelBytes)
+	return seal.ParseKEL(kelBytes)
 }
 
 // keysStatusOf maps a PublishKeys result onto the per-field status that

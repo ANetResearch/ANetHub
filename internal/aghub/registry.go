@@ -10,10 +10,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/seal"
 )
 
 // The A2A registry (A2A-DESIGN §10.5).
@@ -295,10 +296,15 @@ func (s *Server) hA2ACard(w http.ResponseWriter, r *http.Request) {
 // hJWKS serves GET /agents/{aid}/jwks.json, the jku named in the
 // signature header of aid's A2A card (A2A-DESIGN §10.3).
 //
-// It is derived from the KEL on every request (a2acard.JWKS) and lists
-// exactly the key states a2acard.Verify accepts: those after the last
-// rotation, none after a deactivation. It is this hub's statement about
-// the KEL, weaker than the KEL itself, which /agents/{aid}/kel serves.
+// It is derived from the stored KEL (a2acard.JWKS) and lists exactly the
+// key states a2acard.Verify accepts: those after the last rotation, none
+// after a deactivation. It is this hub's statement about the KEL, weaker
+// than the KEL itself, which /agents/{aid}/kel serves.
+//
+// Deriving replays the KEL, one Ed25519 verification per event, and this
+// route needs no authentication; the result is cached by the hash of the
+// stored KEL bytes, so a caller asking again, with or without
+// If-None-Match, costs a lookup and a hash [redteam:F36].
 func (s *Server) hJWKS(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	_, kelBytes, registered, err := s.store.LocalKeys(aid)
@@ -310,17 +316,75 @@ func (s *Server) hJWKS(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": aid + " is not registered here"})
 		return
 	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stored KEL undecodable: " + err.Error()})
+	jwks, err := s.jwks.get(kelBytes)
+	switch {
+	case seal.ReasonOf(err) == seal.ReasonKELTooLarge:
+		// Stored before /register capped KELs; not replayed here.
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": aid + "'s key history on this hub is past the cap every sender applies: " + err.Error()})
 		return
-	}
-	jwks, err := a2acard.JWKS(kel)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	case err != nil:
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stored KEL: " + err.Error()})
 		return
 	}
 	serveCacheable(w, r, "application/jwk-set+json", jwks)
+}
+
+// jwksCache holds the JWKS derived from a KEL, keyed by the SHA-256 of the
+// KEL bytes as stored. A JWKS depends on nothing but those bytes, so an
+// entry never goes stale: a KEL that changed is another key. The cache is
+// bounded by the bytes it holds and forgets its oldest entries first.
+type jwksCache struct {
+	mu     sync.Mutex
+	byKEL  map[[32]byte][]byte
+	order  [][32]byte // insertion order, oldest first
+	bytes  int
+	max    int
+	derive func([]identity.SignedEvent) ([]byte, error)
+}
+
+// jwksCacheBytes bounds the JWKS cache. A JWKS of a KEL without rotations
+// is a few hundred bytes, one at the KEL cap tens of KiB.
+const jwksCacheBytes = 16 << 20
+
+func newJWKSCache(max int, derive func([]identity.SignedEvent) ([]byte, error)) *jwksCache {
+	return &jwksCache{byKEL: map[[32]byte][]byte{}, max: max, derive: derive}
+}
+
+// get returns the JWKS of the KEL kelBytes, deriving it on a miss. The KEL
+// is decoded under the caps /register applies (seal.ParseKEL), so a key
+// history stored before them is refused rather than replayed.
+func (c *jwksCache) get(kelBytes []byte) ([]byte, error) {
+	sum := sha256.Sum256(kelBytes)
+	c.mu.Lock()
+	b, ok := c.byKEL[sum]
+	c.mu.Unlock()
+	if ok {
+		return b, nil
+	}
+	kel, err := seal.ParseKEL(kelBytes)
+	if err != nil {
+		return nil, err
+	}
+	if b, err = c.derive(kel); err != nil {
+		return nil, err
+	}
+	cost := len(b) + len(sum)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.byKEL[sum]; ok || cost > c.max {
+		return b, nil
+	}
+	for c.bytes+cost > c.max {
+		old := c.order[0]
+		c.order = c.order[1:]
+		c.bytes -= len(c.byKEL[old]) + len(old)
+		delete(c.byKEL, old)
+	}
+	c.byKEL[sum] = b
+	c.order = append(c.order, sum)
+	c.bytes += cost
+	return b, nil
 }
 
 // serveCacheable writes body with a strong ETag over its bytes and a
