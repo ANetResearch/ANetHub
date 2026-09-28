@@ -401,6 +401,9 @@ func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
 	if p == nil {
 		return refusedSettlement(refuse(payment.ReasonMalformed, "no payment payload"), nil, own)
 	}
+	if rf := payeeIsThisHub(hubAID, req); rf != nil {
+		return refusedSettlement(rf, nil, own)
+	}
 	// A payment on another hub's ledger is that hub's to settle. We ask
 	// it, and if it says yes we credit our own payee and record what that
 	// hub now owes us — the two hubs clearing against each other rather
@@ -435,6 +438,26 @@ func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
 		return refusedSettlement(rf, auth, own)
 	}
 	return s.settleAuth(hubAID, auth, id)
+}
+
+// payeeIsThisHub refuses requirements that name this hub as the payee.
+//
+// A payment to the hub is a redemption, and /x402/redeem is the one path
+// that books it as one: it records the redemption with its reference and
+// puts the retirement on the issuance chain. Settled through /x402/settle
+// the same authorization moved the credit to the hub's row with neither,
+// so the published supply fell while the signed chain did not and
+// chain_agrees stayed false from then on (found by FuzzHubX402Facilitator,
+// ANet docs/notes/0033). On a peer's ledger the same payment comes back as
+// a peer receipt naming this hub, which ClearFromPeer refuses for the
+// same reason, so it is not forwarded either.
+func payeeIsThisHub(hubAID string, req *payment.PaymentRequirements) *Refusal {
+	if hubAID != "" && req.PayTo == hubAID {
+		return refuse(payment.ReasonPayeeMismatch,
+			"the requirements name this hub (%s) as the payee; a payment to the hub is a redemption, made at /x402/redeem",
+			hubAID)
+	}
+	return nil
 }
 
 // settleAuth moves the credit for an authorization whose caller has
@@ -813,6 +836,9 @@ func (s *Store) VerifyWithRequirements(hubAID string, p *payment.PaymentPayload,
 	if p == nil {
 		return invalid(refuse(payment.ReasonMalformed, "no payment payload"), nil)
 	}
+	if rf := payeeIsThisHub(hubAID, req); rf != nil {
+		return invalid(rf, nil)
+	}
 	if own := payment.CreditNetwork(hubAID); p.Accepted.Network != own {
 		return invalid(refuse(payment.ReasonNetworkMismatch,
 			"this facilitator verifies payments on %s only", own), nil)
@@ -998,6 +1024,17 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	}
 	if rec.Network != payment.CreditNetwork(peerAID) {
 		return fmt.Errorf("receipt is for %s, not %s's ledger", rec.Network, peerAID)
+	}
+	// Not to this hub itself. The credit would land on the hub's own row
+	// and leave it again below, the peer would be recorded as owing it,
+	// and the issuance appended after the commit would be held by no
+	// account, so chain_agrees went false (found by FuzzHubClearFromPeer,
+	// ANet docs/notes/0033). A payment to a hub is a redemption on that
+	// hub's own ledger; SettleWithRequirements does not forward one.
+	if s.hubAID != "" && rec.PayTo == s.hubAID {
+		return refuse(payment.ReasonPayeeMismatch,
+			"%s's receipt pays this hub (%s); a peer's settlement credits an agent here, never the hub's own row",
+			peerAID, rec.PayTo)
 	}
 	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("settlement receipt from %s: %w", peerAID, err)
