@@ -230,12 +230,21 @@ func refuseEmptyModeFlags(fs *flag.FlagSet) error {
 		"\"flag not given\" would start the hub instead", strings.Join(bad, ", "))
 }
 
+// versionLine is what -version prints: the release, and the wire contract
+// it speaks with the anet release that contract needs. The wire is what an
+// operator upgrading from wire 1 has to know about the binary in hand
+// before starting it (the first start migrates the database; docs/notes
+// 0027 in the ANet repository).
+func versionLine() string {
+	return fmt.Sprintf("anet-hub %s (wire %d, nodes need anet >= %s; commit %s, built %s)",
+		version.V, aghub.WireVersion, aghub.RequiredAnet, version.Commit, version.BuiltAt)
+}
+
 func main() {
 	f := defineFlags(flag.CommandLine)
 	flag.Parse()
 	if *f.showVersion {
-		fmt.Printf("anet-hub %s (commit %s, built %s)\n",
-			version.V, version.Commit, version.BuiltAt)
+		fmt.Println(versionLine())
 		return
 	}
 	if err := refuseEmptyModeFlags(flag.CommandLine); err != nil {

@@ -218,6 +218,12 @@ const (
 // WireVersion is the Hub wire contract version this build speaks.
 const WireVersion = wireVersion
 
+// RequiredAnet is the first anet release that speaks WireVersion. Every
+// refusal that tells a node to upgrade names it (the 426 below, the
+// missing relayauth v2 headers, a review that still carries content), so
+// the three cannot name different releases.
+const RequiredAnet = "0.2.0"
+
 // wireContract stamps this hub's contract version on every response,
 // turns away a caller speaking a newer one, and turns away a /relay/*
 // caller speaking an older one.
@@ -252,8 +258,8 @@ func wireContract(next http.Handler) http.Handler {
 			}
 			writeJSON(w, http.StatusUpgradeRequired, map[string]any{
 				"error": fmt.Sprintf(
-					"this hub's relay speaks wire contract %d and requires anet >= 0.2.0 "+
-						"(the request declared %s: %s); upgrade the node", wireVersion, wireVersionHeader, sent),
+					"this hub's relay speaks wire contract %d and requires anet >= %s "+
+						"(the request declared %s: %s); upgrade the node", wireVersion, RequiredAnet, wireVersionHeader, sent),
 				"required_wire": wireVersion,
 			})
 			return
@@ -848,7 +854,7 @@ func (s *Server) hUploadReview(w http.ResponseWriter, r *http.Request) {
 	if req.RequestDoc != "" || req.Deliverable != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this hub does not accept " +
 			"interaction content with a review: send receipt and review only (request_doc and " +
-			"deliverable were removed; upgrade anet to >= 0.2.0)"})
+			"deliverable were removed; upgrade anet to >= " + RequiredAnet + ")"})
 		return
 	}
 	rcBytes, err1 := base64.StdEncoding.DecodeString(req.Receipt)
