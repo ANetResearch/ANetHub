@@ -697,13 +697,27 @@ func TestPeerReceiptsInRangeCannotSumPastWhatALedgerHolds(t *testing.T) {
 	}
 
 	// The edge: exactly up to MaxInt64 clears, and one more does not.
+	//
+	// The bound that meets first is what the hub has issued in total,
+	// which /x402/supply adds up (issuanceRoom, ANet docs/notes/0033): the
+	// attacker's grant counts toward it, so a receipt can fill the supply
+	// exactly, and the victim's balance then stops that much short of
+	// MaxInt64. The victim's own row bound is the next test's subject.
 	have := balanceOf(t, w.srv, w.victim.AID())
-	if err := w.store.ClearFromPeer(peer.AID(), peer.KEL(),
-		peerReceipt(t, peer, "bafy-sum-edge", w.victim.AID(), uint64(math.MaxInt64-have))); err != nil {
-		t.Fatalf("a receipt that fills the balance exactly: %v", err)
+	sup, err := w.store.Supply(w.hubAID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := balanceOf(t, w.srv, w.victim.AID()); got != math.MaxInt64 {
-		t.Fatalf("victim balance = %d, want %d", got, int64(math.MaxInt64))
+	edge := uint64(math.MaxInt64 - sup.Issued)
+	if err := w.store.ClearFromPeer(peer.AID(), peer.KEL(),
+		peerReceipt(t, peer, "bafy-sum-edge", w.victim.AID(), edge)); err != nil {
+		t.Fatalf("a receipt that fills the supply exactly: %v", err)
+	}
+	if got, want := balanceOf(t, w.srv, w.victim.AID()), have+int64(edge); got != want {
+		t.Fatalf("victim balance = %d, want %d", got, want)
+	}
+	if sup, err := w.store.Supply(w.hubAID); err != nil || sup.Issued != math.MaxInt64 {
+		t.Fatalf("supply at the edge: %+v, %v", sup, err)
 	}
 	before := moneyState(t, w.dir)
 	err = w.store.ClearFromPeer(peer.AID(), peer.KEL(), peerReceipt(t, peer, "bafy-sum-over", w.victim.AID(), 1))

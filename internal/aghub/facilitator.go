@@ -401,6 +401,9 @@ func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
 	if p == nil {
 		return refusedSettlement(refuse(payment.ReasonMalformed, "no payment payload"), nil, own)
 	}
+	if rf := payeeIsThisHub(hubAID, req); rf != nil {
+		return refusedSettlement(rf, nil, own)
+	}
 	// A payment on another hub's ledger is that hub's to settle. We ask
 	// it, and if it says yes we credit our own payee and record what that
 	// hub now owes us — the two hubs clearing against each other rather
@@ -435,6 +438,26 @@ func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
 		return refusedSettlement(rf, auth, own)
 	}
 	return s.settleAuth(hubAID, auth, id)
+}
+
+// payeeIsThisHub refuses requirements that name this hub as the payee.
+//
+// A payment to the hub is a redemption, and /x402/redeem is the one path
+// that books it as one: it records the redemption with its reference and
+// puts the retirement on the issuance chain. Settled through /x402/settle
+// the same authorization moved the credit to the hub's row with neither,
+// so the published supply fell while the signed chain did not and
+// chain_agrees stayed false from then on (found by FuzzHubX402Facilitator,
+// ANet docs/notes/0033). On a peer's ledger the same payment comes back as
+// a peer receipt naming this hub, which ClearFromPeer refuses for the
+// same reason, so it is not forwarded either.
+func payeeIsThisHub(hubAID string, req *payment.PaymentRequirements) *Refusal {
+	if hubAID != "" && req.PayTo == hubAID {
+		return refuse(payment.ReasonPayeeMismatch,
+			"the requirements name this hub (%s) as the payee; a payment to the hub is a redemption, made at /x402/redeem",
+			hubAID)
+	}
+	return nil
 }
 
 // settleAuth moves the credit for an authorization whose caller has
@@ -813,6 +836,9 @@ func (s *Store) VerifyWithRequirements(hubAID string, p *payment.PaymentPayload,
 	if p == nil {
 		return invalid(refuse(payment.ReasonMalformed, "no payment payload"), nil)
 	}
+	if rf := payeeIsThisHub(hubAID, req); rf != nil {
+		return invalid(rf, nil)
+	}
 	if own := payment.CreditNetwork(hubAID); p.Accepted.Network != own {
 		return invalid(refuse(payment.ReasonNetworkMismatch,
 			"this facilitator verifies payments on %s only", own), nil)
@@ -999,9 +1025,24 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	if rec.Network != payment.CreditNetwork(peerAID) {
 		return fmt.Errorf("receipt is for %s, not %s's ledger", rec.Network, peerAID)
 	}
+	// Not to this hub itself. The credit would land on the hub's own row
+	// and leave it again below, the peer would be recorded as owing it,
+	// and the issuance appended after the commit would be held by no
+	// account, so chain_agrees went false (found by FuzzHubClearFromPeer,
+	// ANet docs/notes/0033). A payment to a hub is a redemption on that
+	// hub's own ledger; SettleWithRequirements does not forward one.
+	if s.hubAID != "" && rec.PayTo == s.hubAID {
+		return refuse(payment.ReasonPayeeMismatch,
+			"%s's receipt pays this hub (%s); a peer's settlement credits an agent here, never the hub's own row",
+			peerAID, rec.PayTo)
+	}
 	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("settlement receipt from %s: %w", peerAID, err)
 	}
+	// With the grants: issuanceRoom below and the credit are one step
+	// against them too (issueMu).
+	s.issueMu.Lock()
+	defer s.issueMu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1024,6 +1065,11 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 			return nil
 		}
 		return fmt.Errorf("recording the clearing of %s: %w", rec.AuthID, err)
+	}
+	// The credit is new supply here, so it must fit what the supply can
+	// add up to, not only the payee's row.
+	if err := issuanceRoom(tx, s.hubAID, amt); err != nil {
+		return err
 	}
 	// addToRow, as in settleAuth: a sum the column cannot hold is refused
 	// (invalid_amount) and the whole clearing rolls back.
@@ -1265,6 +1311,8 @@ const RegistrationGrant = 100
 // agent re-registering is the same agent, and paying out again for a
 // changed capability list would make re-registration a faucet.
 func (s *Store) GrantOnRegistration(aid string) error {
+	s.issueMu.Lock()
+	defer s.issueMu.Unlock()
 	var entries int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(1) FROM credit_entry WHERE aid=? AND reason=?`,
@@ -1273,6 +1321,13 @@ func (s *Store) GrantOnRegistration(aid string) error {
 	}
 	if entries > 0 {
 		return nil
+	}
+	// The grant is issuance like any other; at the supply's bound it is
+	// skipped (the caller logs this) rather than breaking /x402/supply.
+	if s.hubAID != "" {
+		if err := issuanceRoom(s.db, s.hubAID, RegistrationGrant); err != nil {
+			return err
+		}
 	}
 	return s.Credit(aid, RegistrationGrant, "registration grant")
 }
@@ -1284,6 +1339,8 @@ func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
 	if amount <= 0 {
 		return fmt.Errorf("a grant must be positive, got %d", amount)
 	}
+	s.issueMu.Lock()
+	defer s.issueMu.Unlock()
 	// Checked before anything is written: Credit records the issuance
 	// first, and a balance SQLite could only hold as a REAL would leave the
 	// account unreadable (addToRow) [redteam:si9].
@@ -1292,6 +1349,11 @@ func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
 	} else if bal > math.MaxInt64-amount {
 		return fmt.Errorf("%s holds %d; a grant of %d would take it past %d, the most this ledger can hold",
 			aid, bal, amount, int64(math.MaxInt64))
+	}
+	if s.hubAID != "" && aid != s.hubAID {
+		if err := issuanceRoom(s.db, s.hubAID, amount); err != nil {
+			return err
+		}
 	}
 	if reason == "" {
 		reason = "operator grant"

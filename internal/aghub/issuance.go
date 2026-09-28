@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -188,9 +189,16 @@ func (s *Store) IssuanceSince(from uint64, limit int) ([]IssuanceEntry, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 500
 	}
+	// seq is an SQLite INTEGER, so no record is at or above 2^63; and
+	// database/sql refuses a uint64 with the high bit set, which made
+	// GET /x402/issuance?from=<that> a 500 (found by FuzzHubPublicRoutes,
+	// ANet docs/notes/0033).
+	if from > math.MaxInt64 {
+		return []IssuanceEntry{}, nil
+	}
 	rows, err := s.db.Query(
 		`SELECT seq, id, prev_id, kind, aid, amount, reason, at, record
-		   FROM credit_issuance WHERE seq >= ? ORDER BY seq LIMIT ?`, from, limit)
+		   FROM credit_issuance WHERE seq >= ? ORDER BY seq LIMIT ?`, int64(from), limit)
 	if err != nil {
 		return nil, err
 	}
