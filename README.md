@@ -94,8 +94,22 @@ Hub 服务端（本仓）保持闭源；公开的客户端/协议仓是 [ANetRes
 
 ## License
 
-ANet Community License 1.0 — free for non-commercial use and commercial
-deployments up to 1,000 nodes; larger commercial deployments: hi@anet0.com.
+ANet Open Source License, a modified Apache License 2.0 (see
+[LICENSE](LICENSE)), the same license as ANet and ANetCore. For this repository
+two conditions matter most: operating a multi-tenant hosted hub (a hub offered
+as a service to unrelated organizations or individuals) needs written
+authorization from Agent Network Research, with an exemption for a
+non-commercial hub federated with the anet network; and the ANet logo and
+copyright notices in the hub web UI (`webui/`, `internal/aghub/web/`), the
+operator console (`internal/admin/web/`) and `anet-hub`'s output must not be
+removed or modified. Questions and commercial licensing: hi@anet0.com.
+
+This repository stays closed-source (see 闭源边界 above); the license governs
+whoever receives the source. Hub code that Agent Network Research submits to
+the A2A project (for example the relay-binding endpoints) is contributed, as
+submitted, under Apache-2.0 (LICENSE, condition 3). This license applies from
+anet-hub 0.2.0 (hub wire 2); copies received earlier stay under the ANet
+Community License 1.0 they came with.
 
 ## Modules (anet4)
 
