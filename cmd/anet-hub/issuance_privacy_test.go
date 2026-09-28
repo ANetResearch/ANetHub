@@ -2,30 +2,36 @@
 
 package main
 
-// Red-team PoC (lens si1, A2A-DESIGN §1 SI-1, §2 X4, §21 item 9).
+// What the public issuance chain says about a cross-hub task payment
+// (A2A-DESIGN §1 SI-1, §2 X4, §21 item 9) [redteam:F1].
 //
-// A cross-hub task payment goes on both hubs' public issuance chains
+// A cross-hub payment goes on both hubs' public issuance chains
 // (GET /x402/issuance, unauthenticated): the ledger hub records the payer,
 // the amount and "cross-hub settlement <id> to <payee>", the payee's hub
-// records the payee and the amount. §21 item 9 admits amounts, times and
-// AIDs are public. What it does not admit is that, together with the
-// payee's signed per-skill prices (anet-pricing/v1 on its A2A card, also
-// public), the amount names the capability that was bought — the x402
-// `resource` ("anet:capability/<id>") SI-1 keeps off the hub and X4 strips
-// from the settlement. Here that inference is open to anyone who can read
-// the two chains, not only the hub.
+// records the payee and the amount. §21 item 9 states this, and states
+// what the red team's PoC (lens si1) showed follows from it: where the
+// payee publishes a different signed price per skill (anet-pricing/v1 on
+// its card), payee and amount name the skill bought — the x402 resource
+// SI-1 keeps off the hub — for anyone who reads the chains. It is a stated
+// limitation, not a leak of the task: the daemon's
+// payments.publish_prices=false keeps the prices off the cards (ANet
+// module/x402/price_inference_test.go covers that side).
 //
-// The test passes when the attack succeeds.
+// So this test pins both halves: the inference works from public data
+// alone, exactly as §21 item 9 says, and nothing of the task itself — the
+// binding the authorization carries, the skill's id — is on either chain.
+// If the chain stops showing amounts, item 9 and this test change together.
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
 )
 
-func TestRedteamSI1PublicIssuanceChainNamesTheCapabilityBought(t *testing.T) {
+func TestThePublicIssuanceChainShowsAmountsAndAIDsAndNothingOfTheTask(t *testing.T) {
 	r := newCrossHubRig(t)
 
 	// The payee's published prices (module/x402/card.go puts these in the
@@ -57,10 +63,21 @@ func TestRedteamSI1PublicIssuanceChainNamesTheCapabilityBought(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s/x402/issuance: %s", base, resp.Status)
 		}
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Nothing of the task: not the binding the authorization carries
+		// (pay_bind in production, one-way), not the skill (SI-1).
+		for _, secret := range []string{"bind-opaque", secretCap, "anet:capability/"} {
+			if strings.Contains(string(raw), secret) {
+				t.Errorf("GET %s/x402/issuance shows %q", base, secret)
+			}
+		}
 		var out struct {
 			Entries []entry `json:"entries"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		if err := json.Unmarshal(raw, &out); err != nil {
 			t.Fatal(err)
 		}
 		return out.Entries
@@ -72,7 +89,7 @@ func TestRedteamSI1PublicIssuanceChainNamesTheCapabilityBought(t *testing.T) {
 		}
 	}
 	if payer == "" {
-		t.Fatalf("attack failed: no cross-hub settlement on the ledger hub's public chain")
+		t.Fatalf("no cross-hub settlement on the ledger hub's public chain; §21 item 9 says there is one")
 	}
 	sawClearing := false
 	for _, e := range read(r.aURL) {
@@ -86,9 +103,13 @@ func TestRedteamSI1PublicIssuanceChainNamesTheCapabilityBought(t *testing.T) {
 			hits = append(hits, skill)
 		}
 	}
+	// The inference §21 item 9 states: payer, payee and amount from the
+	// chain, and the payee's published prices, name the skill.
 	if payer != r.payer.AID() || len(hits) != 1 || hits[0] != secretCap {
-		t.Fatalf("attack failed: payer %s amount %s skills %v", payer, amount, hits)
+		t.Fatalf("payer %s amount %s skills %v: the chain no longer shows what §21 item 9 says it shows",
+			payer, amount, hits)
 	}
-	t.Logf("public chain: %s paid %s %s credits (payee's chain shows the clearing: %v) => resource anet:capability/%s",
-		payer, payee, amount, sawClearing, hits[0])
+	if !sawClearing {
+		t.Errorf("the payee's hub's chain does not show the clearing of %s credits to %s", amount, payee)
+	}
 }
