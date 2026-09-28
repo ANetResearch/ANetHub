@@ -1,6 +1,3 @@
-# ANetCore 打 tag 后改回 go.mod 版本: until then the Go jobs build through a
-# go.work over an ANetCore checkout (.github/actions/anetcore), because
-# go.mod's ANetCore v0.14.0 has no seal/a2acard.
 name: ci
 on:
   push:
@@ -10,10 +7,9 @@ on:
   # is one), as ANet's CI allows.
   workflow_dispatch:
 
-# Every Go job starts with ./.github/actions/anetcore: while ANetCore
-# v0.15.0 is untagged, go.mod cannot build this tree and the action puts a
-# pinned ANetCore checkout in a workspace. It does nothing once go.mod can
-# (A2A-DESIGN §18). ANet's CI does the same.
+# The Go jobs build exactly what go.mod names (ANetCore v0.15.0). The
+# workspace bridge used while v0.15.0 was untagged (.github/actions/anetcore,
+# A2A-DESIGN §18) was removed when go.mod moved to the tag.
 
 jobs:
   test:
@@ -25,7 +21,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: ./.github/actions/anetcore
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: vet
@@ -62,7 +57,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: ./.github/actions/anetcore
       - name: build, vet and test without ${{ matrix.tags }}
         run: |
           go build -tags "${{ matrix.tags }}" ./...
@@ -102,7 +96,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: ./.github/actions/anetcore
       - name: vet and test with the module in
         run: |
           go vet -tags "${{ matrix.tag }}" ./...
@@ -136,7 +129,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: ./.github/actions/anetcore
       - name: tests under the race detector
         env:
           CGO_ENABLED: "1"   # -race needs cgo; runners ship gcc
