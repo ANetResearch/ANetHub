@@ -1327,15 +1327,26 @@ func (st *Store) VerifyAgentChallenge(action, aid string, ts, keyStateSeq uint64
 // caller signs relayauth.Preimage(action, aid, ts) with its current key; this rebuilds the identical
 // bytes and verifies them, binding the signature to (action, aid) so it cannot be reused elsewhere.
 func verifyChallenge(kel []identity.SignedEvent, action, aid string, ts, keyStateSeq uint64, sigB64 string) error {
+	return verifyChallengeAt(kel, action, aid, ts, keyStateSeq, sigB64, uint64(time.Now().UnixMilli()))
+}
+
+// verifyChallengeAt is verifyChallenge at the hub time now (unix ms).
+//
+// A ts above 2^62 is refused before the window is computed, as verifyV2
+// does: int64(now) - int64(ts) overflows for a ts 2^63 away, and
+// negating math.MinInt64 leaves it negative, so a challenge dated half
+// the clock away passed "skew > MaxSkew" (found by
+// FuzzTaskboardChallengeTime, ANet docs/notes/0033).
+func verifyChallengeAt(kel []identity.SignedEvent, action, aid string, ts, keyStateSeq uint64, sigB64 string,
+	now uint64) error {
 	if aid == "" || sigB64 == "" {
 		return fmt.Errorf("aid + sig required")
 	}
-	now := uint64(time.Now().UnixMilli())
 	skew := int64(now) - int64(ts)
 	if skew < 0 {
 		skew = -skew
 	}
-	if skew > relayauth.MaxSkewMillis {
+	if ts > uint64(1)<<62 || skew > relayauth.MaxSkewMillis {
 		return fmt.Errorf("stale or future-dated challenge")
 	}
 	sig, err := base64.StdEncoding.DecodeString(sigB64)
