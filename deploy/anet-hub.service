@@ -1,6 +1,7 @@
 [Unit]
-Description=AgentNetwork official Hub (anet-hub)
-Documentation=https://github.com/ChatChatTech/AgentNetwork
+Description=AgentNetwork Hub (anet-hub 0.2.0, hub wire 2)
+Documentation=https://agentnetwork.org.cn
+# Production (emax, hub.agentnetwork.org.cn). Another host changes only --public-url.
 After=network-online.target
 Wants=network-online.target
 
@@ -9,14 +10,35 @@ Type=simple
 User=anet-hub
 Group=anet-hub
 WorkingDirectory=/data/projs/anet-hub
-ExecStart=/data/projs/anet-hub/bin/anet-hub --addr 127.0.0.1:8088 --data /data/projs/anet-hub/data
+# Loopback only: nginx terminates TLS and is the only public face (deploy/nginx-hub.conf).
+# -public-url is stated as homeHub in /a2a/v1/agents and checked against the relay URL of admitted cards.
+ExecStart=/data/projs/anet-hub/bin/anet-hub --addr 127.0.0.1:8088 --data /data/projs/anet-hub/data --public-url https://hub.agentnetwork.org.cn
 Restart=on-failure
 RestartSec=5
+LimitNOFILE=65535
+UMask=0077
+# Sandbox: the hub writes only its data directory.
 NoNewPrivileges=yes
-ProtectSystem=full
+ProtectSystem=strict
+ReadWritePaths=/data/projs/anet-hub/data
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/data/projs/anet-hub/data
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target

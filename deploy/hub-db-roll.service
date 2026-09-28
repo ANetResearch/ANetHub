@@ -1,0 +1,25 @@
+[Unit]
+Description=hub.db maintenance for anet-hub (WAL checkpoint; Sunday backup without relay rows)
+After=anet-hub.service
+
+[Service]
+Type=oneshot
+User=anet-hub
+Group=anet-hub
+Environment=HUB_DATA_DIR=/data/projs/anet-hub/data
+ExecStart=/data/projs/anet-hub/bin/hub-db-roll.sh
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/data/projs/anet-hub/data
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+CapabilityBoundingSet=
