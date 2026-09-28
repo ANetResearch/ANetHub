@@ -132,7 +132,7 @@ func (s *Server) SetModules(names []string) {
 
 // NewServer wraps a store, with DefaultLimits.
 func NewServer(store *Store) *Server {
-	s := &Server{store: store, replay: newReplayCache(defaultReplayCacheMax)}
+	s := &Server{store: store, replay: newReplayCache(defaultReplayCacheMax, defaultReplayPerSigner)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
@@ -149,6 +149,7 @@ func (s *Server) SetLimits(l Limits) error {
 	s.sendLimiter = newRateLimiter(l.SendRate, l.SendBurst)
 	s.registerLimiter = newRateLimiter(l.RegisterPerMinute/60, l.RegisterBurst)
 	s.keysLimiter = newRateLimiter(l.KeysLookupPerMinute/60, l.KeysLookupBurst)
+	s.replay.setPerSigner(replayPerSignerFor(l))
 	s.store.SetRelayQuota(l.MailboxMessages, l.MailboxBytes)
 	return nil
 }
@@ -634,7 +635,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	// Proof of key possession, against the SUBMITTED KEL (the agent may
 	// not be stored yet).
 	if f := s.verifyV2(r, relayauth.ActionRegister, body, auth, kel); f != nil {
-		writeJSON(w, f.code, map[string]string{"error": "register authentication invalid: " + f.Error()})
+		writeAuthFailure(w, f, "register authentication invalid: ")
 		return
 	}
 	// The KEL may only grow (§3.8). The registrant is the owner, so a
