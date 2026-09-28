@@ -193,10 +193,23 @@ func TestAKeyLookupMustBeSignedByAPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// signingTS is "now" for a signature, strictly after the previous one:
+	// the control and the replay below sign the same lookup, and the same
+	// lookup signed twice in one millisecond is the same (deterministic
+	// Ed25519) signature, which the hub refuses the second time by design.
+	var lastTS uint64
+	signingTS := func() uint64 {
+		ts := uint64(time.Now().UnixMilli())
+		if ts <= lastTS {
+			ts = lastTS + 1
+		}
+		lastTS = ts
+		return ts
+	}
 	get := func(path string, signer *hubid.Identity, answering string, tamper func(*http.Request)) (int, string) {
 		req, _ := http.NewRequest(http.MethodGet, r.bSrv.URL+path, nil)
 		if signer != nil {
-			ts := uint64(time.Now().UnixMilli())
+			ts := signingTS()
 			sig, seq := signer.Sign(relayauth.PreimageV2(actionFedKeys, signer.AID, answering, ts,
 				http.MethodGet, req.URL.RequestURI(), nil))
 			req.Header.Set(relayauth.HeaderAID, signer.AID)
@@ -242,7 +255,7 @@ func TestAKeyLookupMustBeSignedByAPeer(t *testing.T) {
 	}
 	// Replay: the same signed request twice.
 	req, _ := http.NewRequest(http.MethodGet, r.bSrv.URL+"/fed/v2/keys/aid:bob", nil)
-	ts := uint64(time.Now().UnixMilli())
+	ts := signingTS()
 	sig, seq := r.aid.Sign(relayauth.PreimageV2(actionFedKeys, r.aid.AID, r.bid.AID, ts, http.MethodGet, req.URL.RequestURI(), nil))
 	for i, want := range []int{http.StatusOK, http.StatusUnauthorized} {
 		again, _ := http.NewRequest(http.MethodGet, r.bSrv.URL+"/fed/v2/keys/aid:bob", nil)
