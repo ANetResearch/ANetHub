@@ -287,6 +287,16 @@ func (s *Store) verifiedAuth(hubAID string, p *payment.PaymentPayload) (
 		return auth, id, nil, refuse(payment.ReasonSettlementFailed,
 			"the payer's stored key history is unreadable: %v", err)
 	}
+	// /x402/verify and /x402/settle need no authentication, so a bad
+	// signature is refused on the key the KEL names, before auth.Verify
+	// replays the payer's KEL (kelreplay.go) [redteam:F36]. Only where
+	// auth.Verify would reach the signature: its other refusals come first
+	// and cost nothing.
+	if auth.IssuedAt > 0 && auth.NotAfter > auth.IssuedAt {
+		if verr := plausibleEnvelope(auth.Envelope, auth.Payer, kel, auth.CanonicalPreimage); verr != nil {
+			return auth, id, nil, refuse(verifyReason(verr), "%v", verr)
+		}
+	}
 	if err := auth.Verify(kel, auth.IssuedAt); err != nil {
 		return auth, id, nil, refuse(verifyReason(err), "%v", err)
 	}
