@@ -18,11 +18,29 @@
 # to disk before proxying, and the hub buffers it again to decode. On a
 # small box, 512m of allowed body is a promise about disk you may not want
 # to keep.
+#
+# Logs (A2A-DESIGN X1, §21 item 1) [redteam:F3]. The hub stores no record
+# of who sent what to whom; nginx's default access log would. Every hub
+# request line names agents (/agents/<aid>/..., /a2a/v1/agents/<aid>/card,
+# /fed/v2/keys/<aid>, /x402/resource/<aid>/...) and comes from the client's
+# address, so a kept log rebuilds the social graph — sender address ->
+# recipient, with times and sizes — long after the envelope was acked and
+# deleted. Both server blocks therefore keep no access log (access_log off
+# also replaces the http-level one from nginx.conf) and an error log at crit
+# only: an [error] line (hub down or restarting, body too large, timeout)
+# carries "client: <address>" and "request: <request line>", a [crit] line
+# is written before a request is read and carries at most an address.
+# Retention: /var/log/nginx/hub.error.log is rotated by the host's
+# logrotate rule for /var/log/nginx/*.log (Debian/Ubuntu stock: daily,
+# rotate 14, compress), so nothing in it is older than 14 days. Do not add
+# an access_log, or a log_format with $remote_addr or $request/$request_uri.
 
 server {
     listen 80;
     listen [::]:80;
     server_name hub.example.org;
+    access_log off;
+    error_log  /var/log/nginx/hub.error.log crit;
 
     location /.well-known/acme-challenge/ { root /var/www/certbot; }
     location / { return 301 https://$host$request_uri; }
@@ -36,6 +54,10 @@ server {
     ssl_certificate     /etc/letsencrypt/live/hub.example.org/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/hub.example.org/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
+
+    # No access log, error log at crit only: see the top of this file.
+    access_log off;
+    error_log  /var/log/nginx/hub.error.log crit;
 
     add_header X-Content-Type-Options nosniff always;
     add_header X-Frame-Options SAMEORIGIN always;

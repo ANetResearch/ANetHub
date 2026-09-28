@@ -12,9 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
+	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/seamerr"
 	"github.com/ANetResearch/ANetHub/internal/version"
@@ -43,6 +45,8 @@ type Server struct {
 	registerLimiter *rateLimiter
 	keysLimiter     *rateLimiter
 	replay          *replayCache
+	// jwks caches the JWKS derived from each stored KEL (registry.go).
+	jwks *jwksCache
 	// federated, when set, answers discovery with agents learned from
 	// peer hubs. Nil in a build without federation, which is how that
 	// build says it has none.
@@ -132,7 +136,8 @@ func (s *Server) SetModules(names []string) {
 
 // NewServer wraps a store, with DefaultLimits.
 func NewServer(store *Store) *Server {
-	s := &Server{store: store, replay: newReplayCache(defaultReplayCacheMax)}
+	s := &Server{store: store, replay: newReplayCache(defaultReplayCacheMax, defaultReplayPerSigner),
+		jwks: newJWKSCache(jwksCacheBytes, a2acard.JWKS)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
@@ -149,6 +154,7 @@ func (s *Server) SetLimits(l Limits) error {
 	s.sendLimiter = newRateLimiter(l.SendRate, l.SendBurst)
 	s.registerLimiter = newRateLimiter(l.RegisterPerMinute/60, l.RegisterBurst)
 	s.keysLimiter = newRateLimiter(l.KeysLookupPerMinute/60, l.KeysLookupBurst)
+	s.replay.setPerSigner(replayPerSignerFor(l))
 	s.store.SetRelayQuota(l.MailboxMessages, l.MailboxBytes)
 	return nil
 }
@@ -275,6 +281,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents", s.hAgents)
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
+	mux.HandleFunc("POST "+KELLookupPath, s.hAgentKELLookup)
 	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
 	// The JWKS named by the jku of an agent's A2A card, derived from its
 	// KEL (A2A-DESIGN §10.3, §10.5). See registry.go.
@@ -283,6 +290,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}/ledger", s.hLedger)
 	// Encryption key sets (§3.7). See keys.go.
 	mux.HandleFunc("GET /agents/{aid}/keys", s.hKeysGet)
+	mux.HandleFunc("POST "+KeysLookupPath, s.hKeysLookup)
 	mux.HandleFunc("POST /agents/{aid}/keys", s.hKeysPost)
 	mux.HandleFunc("POST /agents/{aid}/visibility", s.hVisibility)
 	// The other half of registration: leaving. See deregister.go.
@@ -328,6 +336,7 @@ func (s *Server) Handler() http.Handler {
 	// (A2A-DESIGN §10.5). See registry.go.
 	mux.HandleFunc("GET /a2a/v1/agents", s.hA2AAgents)
 	mux.HandleFunc("GET /a2a/v1/agents/{aid}/card", s.hA2ACard)
+	mux.HandleFunc("POST "+CardLookupPath, s.hA2ACardLookup)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay (wire 2): sealed envelopes only. send is authenticated so the
@@ -611,13 +620,45 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// On a hub that admits by invitation, a newcomer without a usable
+	// invite is refused next, before its KEL is replayed or its signature
+	// kept in the replay cache (Store.CheckInvite) [redteam:F4]. The invite
+	// is spent further down, after the signature. An AID this hub knows is
+	// not gated, as below; claiming one does not get a stranger past the
+	// signature.
+	if s.store.InviteRequired() && !s.store.KnowsAgent(req.AID) {
+		if err := s.store.CheckInvite(req.Invite, req.AID); err != nil {
+			// Logged as the refusal after the signature is (see there),
+			// saying that this AID is only claimed.
+			log.Printf("hub: registration refused for %s (claimed, not yet proven): %v", req.AID, err)
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": err.Error(),
+				"hint":  "ask this hub's operator for an invite, then register with --token",
+			})
+			return
+		}
+	}
 	kelBytes, err := base64.StdEncoding.DecodeString(req.KEL)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel not base64"})
 		return
 	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
+	// The same caps every sender applies to a KEL it is handed
+	// (seal.MaxKELEvents, seal.MaxKELBytes). A KEL is replayed, one
+	// Ed25519 verification per event, wherever it is checked: here, on
+	// each signed request of this agent, and for readers of its JWKS. The
+	// hub had no bound but the 1 MiB body, so one registration of a long
+	// KEL made every unauthenticated read of it cost hundreds of
+	// milliseconds of this hub's CPU [redteam:F36]. No sender would accept
+	// a longer KEL anyway, so the agent could not be written to.
+	kel, err := seal.ParseKEL(kelBytes)
 	if err != nil {
+		if seal.ReasonOf(err) == seal.ReasonKELTooLarge {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+				"kel too long (%v): this hub, like every sender, accepts at most %d events and %d bytes",
+				err, seal.MaxKELEvents, seal.MaxKELBytes)})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel undecodable"})
 		return
 	}
@@ -634,7 +675,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	// Proof of key possession, against the SUBMITTED KEL (the agent may
 	// not be stored yet).
 	if f := s.verifyV2(r, relayauth.ActionRegister, body, auth, kel); f != nil {
-		writeJSON(w, f.code, map[string]string{"error": "register authentication invalid: " + f.Error()})
+		writeAuthFailure(w, f, "register authentication invalid: ")
 		return
 	}
 	// The KEL may only grow (§3.8). The registrant is the owner, so a
@@ -900,6 +941,16 @@ func (s *Server) verify(rc *evidence.Receipt, rv *evidence.Review) (ReviewDetail
 	reqKEL, err := identity.UnmarshalKEL(reqKELBytes)
 	if err != nil {
 		return zero, fmt.Errorf("reviewer kel corrupt")
+	}
+
+	// /reviews needs no authentication, so a bad signature on either
+	// object is refused on the key its signer's KEL names, before the
+	// interlock replays the two KELs (kelreplay.go) [redteam:F36].
+	if verr := plausibleEnvelope(rc.Envelope, rc.ProviderAID, provKEL, rc.CanonicalPreimage); verr != nil {
+		return zero, fmt.Errorf("evidence: receipt signature invalid: %w", verr)
+	}
+	if verr := plausibleEnvelope(rv.Envelope, rv.ReviewerAID, reqKEL, rv.CanonicalPreimage); verr != nil {
+		return zero, fmt.Errorf("evidence: review signature invalid: %w", verr)
 	}
 
 	// Everything else is arithmetic over the objects, and it lives in
@@ -1285,7 +1336,13 @@ func verifyChallenge(kel []identity.SignedEvent, action, aid string, ts, keyStat
 	if err != nil {
 		return fmt.Errorf("sig not base64")
 	}
-	return identity.VerifyObject(kel, aid, keyStateSeq, ts, relayauth.Preimage(action, aid, ts), sig)
+	pre := relayauth.Preimage(action, aid, ts)
+	// A bad signature costs one verification, not a replay of the KEL
+	// (kelreplay.go) [redteam:F36].
+	if verr := plausibleSignature(kel, keyStateSeq, pre, sig); verr != nil {
+		return verr
+	}
+	return identity.VerifyObject(kel, aid, keyStateSeq, ts, pre, sig)
 }
 
 func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {
@@ -1356,7 +1413,20 @@ func cors(next http.Handler) http.Handler {
 // Publishing costs nothing and is not an authorization: holding the KEL
 // lets you CHECK signatures, never make them.
 func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
+	s.serveAgentKEL(w, r.PathValue("aid"))
+}
+
+// hAgentKELLookup serves POST /agents/kel:lookup: GET /agents/{aid}/kel
+// with the AID in the body (KeysLookupRequest), so that no request line
+// names it [redteam:F3].
+func (s *Server) hAgentKELLookup(w http.ResponseWriter, r *http.Request) {
+	if aid, ok := lookupAID(w, r); ok {
+		s.serveAgentKEL(w, aid)
+	}
+}
+
+// serveAgentKEL answers a KEL lookup for aid (hAgentKEL, hAgentKELLookup).
+func (s *Server) serveAgentKEL(w http.ResponseWriter, aid string) {
 	// The hub's own history is served here too.
 	//
 	// It signs settlements, redemption receipts and vouchers, and every

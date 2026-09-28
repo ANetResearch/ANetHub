@@ -154,6 +154,9 @@ func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("hub: mkdir: %w", err)
 	}
+	// The process replays each KEL it verifies against once
+	// (kelreplay.go) [redteam:F36].
+	useReplayCache()
 	// secure_delete is a per-connection setting, so it is in the DSN and
 	// applies to every connection the pool opens. With it SQLite
 	// overwrites deleted row content and freed pages with zeros; without
