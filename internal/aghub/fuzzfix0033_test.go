@@ -1,6 +1,7 @@
 package aghub_test
 
 import (
+	"encoding/json"
 	"math"
 	"net/http"
 	"strings"
@@ -188,5 +189,27 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	code, b := getJSON(t, srv.URL+"/x402/supply")
 	if code != http.StatusOK {
 		t.Errorf("/x402/supply: %d %s", code, b)
+	}
+}
+
+// GET /x402/issuance?from= above 2^63-1 answered 500: the uint64 went to
+// database/sql, which refuses a uint64 with the high bit set. No chain
+// seq is that high, so the answer is an empty page (FuzzHubPublicRoutes,
+// boundary seed).
+func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
+	srv := newHub(t)
+	c, _ := identity.Incept()
+	register(t, srv, c, "Grantee", nil) // one issuance on the chain
+	for _, from := range []string{"18446744073709551615", "9223372036854775808", "9223372036854775807"} {
+		code, b := getJSON(t, srv.URL+"/x402/issuance?from="+from)
+		var out struct {
+			Entries []json.RawMessage `json:"entries"`
+		}
+		if code != http.StatusOK || json.Unmarshal(b, &out) != nil || len(out.Entries) != 0 {
+			t.Errorf("from=%s: %d %s, want 200 and no entries", from, code, b)
+		}
+	}
+	if code, b := getJSON(t, srv.URL+"/x402/issuance?from=0"); code != http.StatusOK || !strings.Contains(string(b), `"seq":0`) {
+		t.Errorf("from=0: %d %s", code, b)
 	}
 }
