@@ -12,9 +12,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
+	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/seamerr"
 	"github.com/ANetResearch/ANetHub/internal/version"
@@ -43,6 +45,8 @@ type Server struct {
 	registerLimiter *rateLimiter
 	keysLimiter     *rateLimiter
 	replay          *replayCache
+	// jwks caches the JWKS derived from each stored KEL (registry.go).
+	jwks *jwksCache
 	// federated, when set, answers discovery with agents learned from
 	// peer hubs. Nil in a build without federation, which is how that
 	// build says it has none.
@@ -132,7 +136,8 @@ func (s *Server) SetModules(names []string) {
 
 // NewServer wraps a store, with DefaultLimits.
 func NewServer(store *Store) *Server {
-	s := &Server{store: store, replay: newReplayCache(defaultReplayCacheMax, defaultReplayPerSigner)}
+	s := &Server{store: store, replay: newReplayCache(defaultReplayCacheMax, defaultReplayPerSigner),
+		jwks: newJWKSCache(jwksCacheBytes, a2acard.JWKS)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
@@ -617,8 +622,22 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel not base64"})
 		return
 	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
+	// The same caps every sender applies to a KEL it is handed
+	// (seal.MaxKELEvents, seal.MaxKELBytes). A KEL is replayed, one
+	// Ed25519 verification per event, wherever it is checked: here, on
+	// each signed request of this agent, and for readers of its JWKS. The
+	// hub had no bound but the 1 MiB body, so one registration of a long
+	// KEL made every unauthenticated read of it cost hundreds of
+	// milliseconds of this hub's CPU [redteam:F36]. No sender would accept
+	// a longer KEL anyway, so the agent could not be written to.
+	kel, err := seal.ParseKEL(kelBytes)
 	if err != nil {
+		if seal.ReasonOf(err) == seal.ReasonKELTooLarge {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+				"kel too long (%v): this hub, like every sender, accepts at most %d events and %d bytes",
+				err, seal.MaxKELEvents, seal.MaxKELBytes)})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel undecodable"})
 		return
 	}
