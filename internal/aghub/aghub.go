@@ -140,6 +140,14 @@ type Store struct {
 	// duplicate sequence number would make the chain unverifiable, and
 	// two concurrent grants are an ordinary thing to have.
 	issuance issuanceChain
+	// issueMu makes each creation of credit (GrantOnRegistration,
+	// GrantCredit, ClearFromPeer) one step with issuanceRoom, the check
+	// that it fits what the supply can add up to. The grants read the room
+	// and wrote in separate statements, so grants arriving together at the
+	// bound each found room for itself and the sum passed MaxInt64 anyway
+	// (the review of ANet docs/notes/0033). Taken before issuance.mu, never
+	// after it.
+	issueMu sync.Mutex
 	// quota bounds each recipient's undelivered messages (relay.go).
 	quota relayQuota
 	db    *sql.DB

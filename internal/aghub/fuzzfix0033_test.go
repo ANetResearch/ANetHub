@@ -1,16 +1,22 @@
 package aghub_test
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // Regressions for what the hub fuzz targets found (ANet
@@ -245,5 +251,83 @@ func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 	raw, _ = mintKeySet(t, c, math.MaxInt64)
 	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
 		t.Errorf("seq 2^63-1: %d %s", code, b)
+	}
+}
+
+// issuanceRoom and the credit it admits are one step: grants arriving
+// together at the supply's bound do not each find room for themselves
+// (the review of docs/notes/0033, finding 3). GrantOnRegistration and
+// GrantCredit checked the room outside any transaction and wrote after, so
+// with room for one grant, concurrent grants were all made and
+// /x402/supply went back to "integer overflow".
+//
+// A write transaction held on the database from outside the store lets
+// every grant reach its check before any of them can write, so the race
+// is not left to the scheduler: without the store serialising issuance
+// all sixteen pass the check, and the test fails every time.
+func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
+	srv, dir := newHubWithDir(t)
+	v, ok := testHubStores.Load(srv.URL)
+	if !ok {
+		t.Fatal("no store for this hub")
+	}
+	store := v.(*aghub.Store)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stranger, _ := identity.Incept()
+	issued := supplyFull(t, srv).Issued
+	// Room for one grant of RegistrationGrant, not for two.
+	fill := uint64(math.MaxInt64 - issued - 3*aghub.RegistrationGrant/2)
+	rec := &payment.Receipt{AuthID: "near-the-bound", Payer: "did:anet:their-user", PayTo: stranger.AID(),
+		Amount: fill, Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
+	if err := rec.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), rec); err != nil {
+		t.Fatalf("filling the supply to one grant short of the bound: %v", err)
+	}
+
+	hold, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=busy_timeout(15000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hold.Close()
+	tx, err := hold.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO credit_entry(aid, delta, reason, at) VALUES('hold', 0, 'hold', '')`); err != nil {
+		t.Fatal(err)
+	}
+	const n = 16
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			aid := fmt.Sprintf("did:anet:late-%02d", i)
+			if i%2 == 0 {
+				_ = store.GrantOnRegistration(aid)
+			} else {
+				_ = store.GrantCredit(aid, aghub.RegistrationGrant, "operator grant")
+			}
+		}(i)
+	}
+	// Long enough for every grant to read the room it would take; each
+	// then waits for the write lock (busy_timeout), not for the scheduler.
+	time.Sleep(time.Second)
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
+	sup, err := store.Supply(hubAIDOf(t, srv))
+	if err != nil {
+		t.Fatalf("supply after %d concurrent grants at the bound: %v", n, err)
+	}
+	if want := issued + int64(fill) + aghub.RegistrationGrant; sup.Issued != want || !sup.ChainAgrees {
+		t.Fatalf("supply after %d concurrent grants with room for one: %+v, want issued %d", n, sup, want)
 	}
 }
