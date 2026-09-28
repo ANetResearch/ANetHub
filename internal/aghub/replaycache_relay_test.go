@@ -118,3 +118,80 @@ func TestOneRegisteredAgentFillingTheReplayCacheStopsOnlyItself(t *testing.T) {
 		t.Fatalf("recipient poll into a cache the attackers filled: %d %s", code, b)
 	}
 }
+
+// [redteam:F4] Review of the fix: the replay cache is shared out by signer,
+// and a signer is whoever passes the signature check, which /register makes
+// against the KEL it is handed. On a hub that admits by invitation a
+// stranger without an invite passed it with a fresh AID on every attempt,
+// was then refused 403, and left a signer in the cache each time: signers
+// the stranger could never have joined as, each lowering everyone's even
+// share. A newcomer without a usable invite is now refused before its
+// signature is checked, and leaves nothing in the cache.
+func TestAStrangerAtAClosedHubLeavesNothingInTheReplayCache(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.SetInviteRequired(true); err != nil {
+		t.Fatal(err)
+	}
+	id, err := hubid.LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(store)
+	s.SetHubAID(id.AID)
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	register := func(c *identity.Controller, invite, ip string) (int, string) {
+		kel, _ := identity.MarshalKEL(c.KEL())
+		raw, _ := json.Marshal(map[string]any{"aid": c.AID(), "name": "n",
+			"kel": base64.StdEncoding.EncodeToString(kel), "invite": invite})
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/register", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-ANet-Wire", "2")
+		req.Header.Set("X-Real-IP", ip)
+		ts := uint64(time.Now().UnixMilli())
+		sig, seq := c.Sign(relayauth.PreimageV2(relayauth.ActionRegister, c.AID(), id.AID, ts, req.Method, req.URL.RequestURI(), raw))
+		req.Header.Set(relayauth.HeaderAID, c.AID())
+		req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
+		req.Header.Set(relayauth.HeaderSeq, strconv.FormatUint(seq, 10))
+		req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	for i := 0; i < 20; i++ {
+		c, err := identity.Incept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, invite := range []string{"", "not-an-invite"} {
+			if code, b := register(c, invite, "198.51.100."+strconv.Itoa(i)); code != http.StatusForbidden {
+				t.Fatalf("a stranger registering with invite %q: %d %s", invite, code, b)
+			}
+		}
+	}
+	if entries, signers := s.replay.size(); entries != 0 || signers != 0 {
+		t.Fatalf("40 refused registrations left %d entries of %d signers in the replay cache", entries, signers)
+	}
+
+	// An invited newcomer registers, and its signature is kept.
+	token, _, err := store.NewInvite("t", 1, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := identity.Incept()
+	if code, b := register(c, token, "203.0.113.1"); code != http.StatusOK {
+		t.Fatalf("an invited newcomer: %d %s", code, b)
+	}
+	if entries, signers := s.replay.size(); entries != 1 || signers != 1 {
+		t.Fatalf("the invited registration left %d entries of %d signers, want 1 and 1", entries, signers)
+	}
+}

@@ -271,47 +271,18 @@ func (s *Store) Invites() ([]InviteView, error) {
 // response should not burn a use. The use row is keyed on
 // (invite, aid) and the counter follows it.
 func (s *Store) RedeemInvite(token, aid string) error {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return ErrInviteRequired
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-
-	var id string
-	var maxUses, uses int
-	var expiresAt, revokedAt int64
-	err = tx.QueryRow(
-		`SELECT id,max_uses,uses,expires_at,revoked_at FROM invite WHERE token_sha256=?`,
-		hashInvite(token)).Scan(&id, &maxUses, &uses, &expiresAt, &revokedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrInviteUnknown
-	}
+	id, already, err := inviteAdmits(tx, token, aid)
 	if err != nil {
 		return err
 	}
-	if revokedAt != 0 {
-		return ErrInviteRevoked
-	}
-	now := time.Now().Unix()
-	if expiresAt != 0 && now > expiresAt {
-		return ErrInviteExpired
-	}
-
-	var already int
-	if err := tx.QueryRow(
-		`SELECT COUNT(*) FROM invite_use WHERE invite_id=? AND aid=?`, id, aid).Scan(&already); err != nil {
-		return err
-	}
-	if already == 0 {
-		if maxUses > 0 && uses >= maxUses {
-			return ErrInviteUsedUp
-		}
+	if !already {
 		if _, err := tx.Exec(
-			`INSERT INTO invite_use(invite_id,aid,at) VALUES(?,?,?)`, id, aid, now); err != nil {
+			`INSERT INTO invite_use(invite_id,aid,at) VALUES(?,?,?)`, id, aid, time.Now().Unix()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE invite SET uses=uses+1 WHERE id=?`, id); err != nil {
@@ -319,6 +290,53 @@ func (s *Store) RedeemInvite(token, aid string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// CheckInvite reports what RedeemInvite would refuse, without consuming a
+// use. /register asks it before anything costs this hub work: on a hub
+// that admits by invitation, a newcomer without a usable invite is refused
+// before its KEL is replayed or its signature is kept in the replay cache,
+// so strangers cannot fill the replay cache's signer table, one fresh AID
+// per registration attempt, on a hub they cannot join [redteam:F4].
+// RedeemInvite, after the signature, is still what admits.
+func (s *Store) CheckInvite(token, aid string) error {
+	_, _, err := inviteAdmits(s.db, token, aid)
+	return err
+}
+
+// inviteAdmits is RedeemInvite's check, through q: the invite's id, and
+// whether aid has used it already (which is not a second use).
+func inviteAdmits(q rowQuerier, token, aid string) (id string, already bool, err error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", false, ErrInviteRequired
+	}
+	var maxUses, uses int
+	var expiresAt, revokedAt int64
+	err = q.QueryRow(
+		`SELECT id,max_uses,uses,expires_at,revoked_at FROM invite WHERE token_sha256=?`,
+		hashInvite(token)).Scan(&id, &maxUses, &uses, &expiresAt, &revokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, ErrInviteUnknown
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if revokedAt != 0 {
+		return "", false, ErrInviteRevoked
+	}
+	if expiresAt != 0 && time.Now().Unix() > expiresAt {
+		return "", false, ErrInviteExpired
+	}
+	var n int
+	if err := q.QueryRow(
+		`SELECT COUNT(*) FROM invite_use WHERE invite_id=? AND aid=?`, id, aid).Scan(&n); err != nil {
+		return "", false, err
+	}
+	if n == 0 && maxUses > 0 && uses >= maxUses {
+		return "", false, ErrInviteUsedUp
+	}
+	return id, n > 0, nil
 }
 
 func hashInvite(token string) string {
