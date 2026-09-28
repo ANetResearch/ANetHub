@@ -64,6 +64,11 @@ type Redemption struct {
 	// Receipt is the hub's signed statement that the credit was
 	// destroyed. Base64 CoreDet-CBOR.
 	Receipt string `json:"receipt,omitempty"`
+	// StoredAmount is set, and Amount left 0, only on a row whose stored
+	// amount is not a positive int64: one written before the amount
+	// range check, when a redemption signed for 2^64-1000 was stored as
+	// -1000 and credited the redeemer. It is the stored figure as it is.
+	StoredAmount int64 `json:"stored_amount,omitempty"`
 }
 
 // Redeem destroys credit an agent signed away, and says so under
@@ -86,6 +91,13 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	auth, id, kel, rf := s.verifiedAuth(hubAID, p)
 	if rf != nil {
 		return Redemption{}, rf
+	}
+	// verifiedAuth refused it already (parseAuth); the conversion is kept
+	// behind the same check. An overflowing redemption used to be booked
+	// as a negative one, which credited the redeemer: minting.
+	amt, ok := amountInt64(auth.Amount)
+	if !ok {
+		return Redemption{}, amountRefusal("authorization", auth.Amount)
 	}
 	if auth.PayTo != hubAID {
 		return Redemption{}, refuse(payment.ReasonPayeeMismatch,
@@ -117,7 +129,7 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.db.Exec(
 		`INSERT INTO credit_redemption(auth_id, aid, amount, reference, at) VALUES(?,?,?,?,?)`,
-		settled.Transaction, auth.Payer, int64(auth.Amount), reference, at); err != nil {
+		settled.Transaction, auth.Payer, amt, reference, at); err != nil {
 		// The credit is already gone; the note is what is missing. Say
 		// so rather than reporting a failure that would have the agent
 		// believe it still had the balance.
@@ -138,7 +150,7 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	// And on the signed chain, so the supply is auditable in both
 	// directions. A redemption missing from the chain would leave the
 	// chain overstating what is outstanding.
-	if err := s.appendIssuance(EvCreditRetired, auth.Payer, int64(auth.Amount), reference); err != nil {
+	if err := s.appendIssuance(EvCreditRetired, auth.Payer, amt, reference); err != nil {
 		log.Printf("hub: redemption %s not recorded on the issuance chain: %v",
 			settled.Transaction, err)
 	}
@@ -172,8 +184,10 @@ func (s *Store) RedemptionTotals(aid string) (total int, sum uint64, err error) 
 	).Scan(&n, &amt); err != nil {
 		return 0, 0, err
 	}
-	if amt.Valid && amt.Int64 > 0 {
-		sum = uint64(amt.Int64)
+	if amt.Valid {
+		// 0 for a total that is not a positive int64 (possible only with
+		// rows from before the amount range check); see storedAmount.
+		sum, _ = storedAmount(amt.Int64)
 	}
 	return int(n), sum, nil
 }
@@ -192,7 +206,12 @@ func (s *Store) redemptionOf(hubAID, authID string) (Redemption, bool, error) {
 	if err != nil {
 		return Redemption{}, false, err
 	}
-	r.Amount = uint64(amt)
+	// Answered as a record only when it could be one; see storedAmount.
+	n, ok := storedAmount(amt)
+	if !ok {
+		return Redemption{}, false, errStoredAmount("credit_redemption", authID, amt)
+	}
+	r.Amount = n
 	if settled, ok, err := s.settledBefore(hubAID, authID); err != nil {
 		return Redemption{}, false, err
 	} else if ok {
@@ -219,7 +238,16 @@ func (s *Store) Redemptions(aid string, limit int) ([]Redemption, error) {
 		if err := rows.Scan(&r.AuthID, &r.AID, &amt, &r.Reference, &r.At); err != nil {
 			return nil, err
 		}
-		r.Amount = uint64(amt)
+		// A row from before the amount range check (-1000 for a
+		// redemption signed as 2^64-1000) is listed, since it is the
+		// account's history, but not as an amount it never was: a bare
+		// uint64(…) would show the overflowed figure as credit taken out.
+		if n, ok := storedAmount(amt); ok {
+			r.Amount = n
+		} else {
+			r.StoredAmount = amt
+			log.Printf("hub: %v", errStoredAmount("credit_redemption", r.AuthID, amt))
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -345,6 +373,11 @@ func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEven
 	if rec == nil {
 		return fmt.Errorf("no clearing statement")
 	}
+	// A negative discharge passes "more than owed" and raises the debt.
+	amt, ok := amountInt64(rec.Amount)
+	if !ok {
+		return amountRefusal("clearing statement", rec.Amount)
+	}
 	if rec.Payer != peerAID {
 		return fmt.Errorf("this statement is from %s, not from %s", rec.Payer, peerAID)
 	}
@@ -370,7 +403,7 @@ func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEven
 	// obligation once.
 	if _, err := tx.Exec(
 		`INSERT INTO hub_cleared(auth_id, peer_aid, amount, at) VALUES(?,?,?,?)`,
-		rec.AuthID, peerAID, int64(rec.Amount), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		rec.AuthID, peerAID, amt, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return nil // already applied; the same statement, not a new one
 	}
 	var owed int64
@@ -378,14 +411,14 @@ func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEven
 		peerAID).Scan(&owed); err != nil && err.Error() != "sql: no rows in result set" {
 		return err
 	}
-	if int64(rec.Amount) > owed {
+	if amt > owed {
 		// Rolls back the guard row with it, so this exact statement can
 		// be presented again if the debt ever reaches that size.
 		return fmt.Errorf("%s offers to clear %d but owes %d", peerAID, rec.Amount, owed)
 	}
 	if _, err := tx.Exec(
 		`UPDATE hub_owed SET amount = amount - ? WHERE peer_aid = ?`,
-		int64(rec.Amount), peerAID); err != nil {
+		amt, peerAID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -400,6 +433,11 @@ func (s *Store) IssueOwedSettlement(hubAID, peerAID string, amount uint64,
 	}
 	if amount == 0 {
 		return nil, fmt.Errorf("nothing to clear")
+	}
+	// The peer books this as an int64, and so does DischargeDue here; see
+	// amountInt64.
+	if _, ok := amountInt64(amount); !ok {
+		return nil, amountRefusal("discharge", amount)
 	}
 	// The id has to be unique per statement, not per reference.
 	//
