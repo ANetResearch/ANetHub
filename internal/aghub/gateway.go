@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -166,17 +167,31 @@ func (v verifiedCard) price(capID string) (uint64, error) {
 	if !ok {
 		return 0, fmt.Errorf("%s does not sell %q through a gateway", aid, capID)
 	}
+	var price uint64
 	switch n := p.(type) {
 	case float64:
-		if n < 0 || n != float64(uint64(n)) {
+		// 2^64 and above do not convert: uint64(n) of such a float is
+		// implementation-defined, and n != float64(uint64(n)) is not a
+		// test that catches it on every platform.
+		if n < 0 || n >= 1<<64 || n != math.Trunc(n) {
 			return 0, fmt.Errorf("%s published a price that is not a whole number of credits", aid)
 		}
-		return uint64(n), nil
+		price = uint64(n)
 	case string:
-		return payment.ParseAmount(n)
+		v, err := payment.ParseAmount(n)
+		if err != nil {
+			return 0, err
+		}
+		price = v
 	default:
 		return 0, fmt.Errorf("%s published a price this hub cannot read", aid)
 	}
+	// A price the ledger cannot settle is not one to quote, or to put in
+	// a signed voucher. See amountInt64.
+	if _, ok := amountInt64(price); !ok {
+		return 0, fmt.Errorf("%s published a price of %d, which this hub's ledger cannot settle", aid, price)
+	}
+	return price, nil
 }
 
 // redeemEndpoint is where a buyer takes a voucher for this agent.

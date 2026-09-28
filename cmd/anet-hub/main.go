@@ -265,7 +265,7 @@ func main() {
 		return
 	}
 	if *f.clearPeer != "" {
-		if err := clearOwed(*f.data, *f.clearPeer, uint64(*f.amount), *f.reason, *f.peerEndpoint, *f.cleared); err != nil {
+		if err := clearOwed(*f.data, *f.clearPeer, *f.amount, *f.reason, *f.peerEndpoint, *f.cleared); err != nil {
 			log.Fatalf("anet-hub: clear: %v", err)
 		}
 		return
@@ -470,10 +470,19 @@ func listDue(dir string) error {
 	return nil
 }
 
-func clearOwed(dir, peerAID string, amount uint64, reason, endpoint, payeeAID string) error {
-	if amount == 0 {
+func clearOwed(dir, peerAID string, credits int64, reason, endpoint, payeeAID string) error {
+	// The flag is an int64. It used to arrive here as uint64(*f.amount),
+	// so -amount -1000 became 2^64-1000: a statement signed for an amount
+	// the peer books as -1000, which raises the debt it claims to settle,
+	// and a DischargeDue of -1000, which raised what is due. Only a
+	// positive number of credits is a discharge.
+	if credits == 0 {
 		return fmt.Errorf("-amount is required")
 	}
+	if credits < 0 {
+		return fmt.Errorf("-amount must be a positive number of credits, got %d", credits)
+	}
+	amount := uint64(credits) // in 1..MaxInt64, checked above
 	store, err := aghub.Open(dir)
 	if err != nil {
 		return err
@@ -504,7 +513,7 @@ func clearOwed(dir, peerAID string, amount uint64, reason, endpoint, payeeAID st
 	if owedBefore < 0 {
 		// Unknown rather than zero. Treating "could not ask" as "owes
 		// nothing" would make the check below pass for the wrong reason.
-		owedBefore = int64(amount)
+		owedBefore = credits
 	}
 
 	rec, err := store.IssueOwedSettlement(id.AID, peerAID, amount, reason)
@@ -553,7 +562,7 @@ func clearOwed(dir, peerAID string, amount uint64, reason, endpoint, payeeAID st
 		Owed int64  `json:"owed"`
 	}
 	if json.Unmarshal(out, &ack) == nil {
-		if ack.Owed > owedBefore-int64(amount) {
+		if ack.Owed > owedBefore-credits {
 			return fmt.Errorf(
 				"%s still shows %d owed after a discharge of %d (it was %d) — "+
 					"the statement was accepted and not applied, most likely as a repeat "+
@@ -570,7 +579,7 @@ func clearOwed(dir, peerAID string, amount uint64, reason, endpoint, payeeAID st
 	// owed. Optional because a discharge can also be an out-of-band
 	// arrangement that no hub_due row corresponds to.
 	if payeeAID != "" {
-		if err := store.DischargeDue(payeeAID, int64(amount)); err != nil {
+		if err := store.DischargeDue(payeeAID, credits); err != nil {
 			return fmt.Errorf("delivered, but the local record was not reduced: %w", err)
 		}
 		fmt.Printf("due to %s reduced by %d\n", payeeAID, amount)

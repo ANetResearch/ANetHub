@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -170,11 +171,24 @@ func CheckRequirements(p *payment.PaymentPayload, auth *payment.Authorization,
 	if err != nil {
 		return refuse(payment.ReasonInvalidRequirements, "required amount: %v", err)
 	}
+	// A price this ledger cannot hold is not a price: an authorization
+	// meeting it would be refused below anyway, and a requirement of 0 is
+	// met by any amount at all. See amountInt64.
+	if _, ok := amountInt64(want); !ok {
+		return refuse(payment.ReasonInvalidRequirements,
+			"required amount %d is outside 1..%d, the range this ledger can hold", want, int64(math.MaxInt64))
+	}
 	if req.PayTo == "" || req.Network == "" {
 		return refuse(payment.ReasonInvalidRequirements, "the requirements name no payee or no network")
 	}
 	if p == nil || auth == nil {
 		return refuse(payment.ReasonMalformed, "no payment")
+	}
+	// parseAuth refuses it first; this function is also called on an
+	// authorization decoded elsewhere, and "at least want" must not be
+	// read off an amount that is negative on the ledger.
+	if _, ok := amountInt64(auth.Amount); !ok {
+		return amountRefusal("authorization", auth.Amount)
 	}
 	if req.Scheme != payment.SchemeCredit {
 		return refuse(payment.ReasonUnsupportedScheme,
@@ -213,7 +227,14 @@ func CheckRequirements(p *payment.PaymentPayload, auth *payment.Authorization,
 }
 
 // parseAuth reads the anet-credit authorization out of a payload. It
-// checks only that there is one to read.
+// checks that there is one to read, and that its amount is one this
+// ledger can hold (amountInt64).
+//
+// Every door onto a settlement comes through here: /x402/verify and
+// /x402/settle (own ledger and forwarded), /x402/redeem and the gateway.
+// An amount above math.MaxInt64 is refused before its signature is even
+// looked at, so no path below can book it as the negative number a bare
+// int64(…) would make of it.
 func parseAuth(p *payment.PaymentPayload) (*payment.Authorization, *Refusal) {
 	if p == nil {
 		return nil, refuse(payment.ReasonMalformed, "no payment payload")
@@ -229,6 +250,9 @@ func parseAuth(p *payment.PaymentPayload) (*payment.Authorization, *Refusal) {
 	auth, err := payment.UnmarshalAuthorization(b)
 	if err != nil {
 		return nil, refuse(payment.ReasonMalformed, "authorization malformed: %v", err)
+	}
+	if _, ok := amountInt64(auth.Amount); !ok {
+		return nil, amountRefusal("authorization", auth.Amount)
 	}
 	return auth, nil
 }
@@ -425,6 +449,13 @@ func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
 func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string) payment.SettlementResponse {
 	network := auth.Network
 	fail := func(rf *Refusal) payment.SettlementResponse { return refusedSettlement(rf, auth, network) }
+	// parseAuth already refused it; this is the conversion itself, kept
+	// behind the same check so no statement below can book a negative
+	// amount even if a caller skipped parseAuth.
+	amt, ok := amountInt64(auth.Amount)
+	if !ok {
+		return fail(amountRefusal("authorization", auth.Amount))
+	}
 	now := time.Now().UTC()
 	at := now.Format(time.RFC3339Nano)
 	// Signed before the commit and stored with the row, so a repeat is
@@ -450,7 +481,7 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 	if _, err := tx.Exec(
 		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at, bound, receipt)
 		 VALUES(?,?,?,?,?,?,1,?)`,
-		id, auth.Payer, auth.PayTo, int64(auth.Amount), auth.InteractionID, at, rec); err != nil {
+		id, auth.Payer, auth.PayTo, amt, auth.InteractionID, at, rec); err != nil {
 		_ = tx.Rollback()
 		return s.settleConflict(hubAID, auth, id, err)
 	}
@@ -460,14 +491,21 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 		auth.Payer).Scan(&bal); err != nil && err.Error() != "sql: no rows in result set" {
 		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 	}
-	if bal < int64(auth.Amount) {
+	if bal < amt {
 		return fail(refuse(payment.ReasonInsufficientFunds, "has %d, needs %d", bal, auth.Amount))
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?, -?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits - ?`,
-		auth.Payer, int64(auth.Amount), int64(auth.Amount)); err != nil {
-		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+	// Every balance below moves through addToRow, which refuses a sum
+	// the column cannot hold rather than letting SQLite store it as a
+	// REAL; a refusal rolls the settlement back like any other failure.
+	moved := func(err error) *Refusal {
+		var rf *Refusal
+		if errors.As(err, &rf) {
+			return rf
+		}
+		return refuse(payment.ReasonSettlementFailed, "%v", err)
+	}
+	if err := addToRow(tx, "credit_balance", "aid", "credits", auth.Payer, -amt); err != nil {
+		return fail(moved(err))
 	}
 	// Whether the payee banks here decides where the credit goes.
 	//
@@ -498,29 +536,20 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 		}
 	}
 	if local {
-		if _, err := tx.Exec(
-			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
-			auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
-			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+		if err := addToRow(tx, "credit_balance", "aid", "credits", auth.PayTo, amt); err != nil {
+			return fail(moved(err))
 		}
 	} else {
-		if _, err := tx.Exec(
-			`INSERT INTO hub_due(payee_aid, amount) VALUES(?,?)
-			 ON CONFLICT(payee_aid) DO UPDATE SET amount = amount + ?`,
-			auth.PayTo, int64(auth.Amount), int64(auth.Amount)); err != nil {
-			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+		if err := addToRow(tx, "hub_due", "payee_aid", "amount", auth.PayTo, amt); err != nil {
+			return fail(moved(err))
 		}
 		// The credit comes home to the hub's own row, which is the same
 		// movement a redemption makes: value left this ledger, so this
 		// hub's outstanding liability falls by it. Without this the payer
 		// was debited and nothing recorded the drop, so outstanding kept
 		// counting credit that was no longer on any account here.
-		if _, err := tx.Exec(
-			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
-			hubAID, int64(auth.Amount), int64(auth.Amount)); err != nil {
-			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+		if err := addToRow(tx, "credit_balance", "aid", "credits", hubAID, amt); err != nil {
+			return fail(moved(err))
 		}
 	}
 	// The ledger entries, in the same transaction as the balance move.
@@ -539,8 +568,8 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 		aid   string
 		delta int64
 	}{
-		{auth.Payer, -int64(auth.Amount)},
-		{auth.PayTo, int64(auth.Amount)},
+		{auth.Payer, -amt},
+		{auth.PayTo, amt},
 	} {
 		// A foreign payee has no account here, so it gets no entry here.
 		// Its entry is written by its own hub when that hub clears this
@@ -552,7 +581,7 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 			// this row, so the entry is what makes the liability fall.
 			if _, err := tx.Exec(
 				`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
-				hubAID, int64(auth.Amount), id, at); err != nil {
+				hubAID, amt, id, at); err != nil {
 				return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 			}
 			continue
@@ -575,7 +604,7 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 	// redemption path: the credit is already gone, and reporting a failure
 	// would have the payer believe it still held the balance.
 	if !local {
-		if err := s.appendIssuance(EvCreditRetired, auth.Payer, int64(auth.Amount),
+		if err := s.appendIssuance(EvCreditRetired, auth.Payer, amt,
 			"cross-hub settlement "+id+" to "+auth.PayTo); err != nil {
 			log.Printf("hub: cross-hub settlement %s not recorded on the issuance chain: %v",
 				id, err)
@@ -635,9 +664,17 @@ func (s *Store) settledBefore(hubAID, id string) (payment.SettlementResponse, bo
 	if err != nil {
 		return payment.SettlementResponse{}, false, err
 	}
+	// Stated back as it was settled, and only an amount that could have
+	// been: a row from before the range check (a settlement of 2^64-1000
+	// stored as -1000) is not answered as a success, and its receipt is
+	// not re-signed.
+	settledAmount, ok := storedAmount(amount)
+	if !ok {
+		return payment.SettlementResponse{}, false, errStoredAmount("credit_settled", id, amount)
+	}
 	network := payment.CreditNetwork(hubAID)
 	out := payment.SettlementResponse{Success: true, Payer: payer, Transaction: id,
-		Network: network, Amount: payment.Amount(uint64(amount)),
+		Network: network, Amount: payment.Amount(settledAmount),
 		Extensions: map[string]any{payment.ExtReplayed: true}}
 	if len(rec) == 0 {
 		// A row settled before receipts were stored. The receipt is
@@ -649,7 +686,7 @@ func (s *Store) settledBefore(hubAID, id string) (payment.SettlementResponse, bo
 		if t, perr := time.Parse(time.RFC3339Nano, at); perr == nil {
 			settleAt = t.UnixMilli()
 		}
-		if rec, err = s.signReceipt(id, payer, payTo, uint64(amount), network, settleAt); err != nil {
+		if rec, err = s.signReceipt(id, payer, payTo, settledAmount, network, settleAt); err != nil {
 			log.Printf("hub: re-signing the receipt of settlement %s: %v", id, err)
 		}
 	}
@@ -794,11 +831,15 @@ func (s *Store) VerifyWithRequirements(hubAID string, p *payment.PaymentPayload,
 	if rf := currentAuth(auth, kel, time.Now().UnixMilli()); rf != nil {
 		return invalid(rf, auth)
 	}
+	amt, ok := amountInt64(auth.Amount)
+	if !ok {
+		return invalid(amountRefusal("authorization", auth.Amount), auth)
+	}
 	bal, err := s.Balance(auth.Payer)
 	if err != nil {
 		return invalid(refuse(payment.ReasonSettlementFailed, "%v", err), auth)
 	}
-	if bal < int64(auth.Amount) {
+	if bal < amt {
 		return invalid(refuse(payment.ReasonInsufficientFunds, "has %d, needs %d", bal, auth.Amount), auth)
 	}
 	return payment.VerifyResponse{IsValid: true, Payer: auth.Payer}
@@ -874,6 +915,12 @@ func (s *Store) ClearPeerSettlement(peerAID string,
 	if err != nil {
 		return withReceipt(refuse(payment.ReasonInvalidRequirements, "required amount: %v", err))
 	}
+	if _, ok := amountInt64(rec.Amount); !ok {
+		// Forwarded only in range (parseAuth), so a receipt outside it
+		// states a movement the ledger hub made of its own accord; this
+		// ledger cannot book it, and ClearFromPeer would refuse it too.
+		return withReceipt(amountRefusal(peerAID+"'s receipt", rec.Amount))
+	}
 	switch {
 	case rec.AuthID != id || rec.Payer != auth.Payer || rec.Network != network:
 		return withReceipt(refuse(payment.ReasonSettlementFailed,
@@ -885,6 +932,14 @@ func (s *Store) ClearPeerSettlement(peerAID string,
 	case rec.Amount < want:
 		return withReceipt(refuse(payment.ReasonInvalidAmount,
 			"%s settled %d; the requirements ask for %d", peerAID, rec.Amount, want))
+	case rec.Amount != auth.Amount:
+		// The ledger hub moves exactly what the payer signed (settleAuth),
+		// and the authorization is here to compare with. A receipt for more
+		// credited the local payee, and what the peer owes us, with an
+		// amount nobody signed — up to 2^63-1 at a time, enough to push a
+		// balance past what the ledger can hold [redteam:si9].
+		return withReceipt(refuse(payment.ReasonInvalidAmount,
+			"%s settled %d; the authorization it was forwarded pays %d", peerAID, rec.Amount, auth.Amount))
 	}
 	kel, err := peerKEL(peerAID)
 	if err != nil {
@@ -924,6 +979,13 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	if rec == nil {
 		return fmt.Errorf("no settlement receipt")
 	}
+	// A peer's signature over an amount this ledger cannot hold does not
+	// make it one: credited as int64(…) it debited the local payee and
+	// the peer's debt to us. See amountInt64.
+	amt, ok := amountInt64(rec.Amount)
+	if !ok {
+		return amountRefusal("receipt", rec.Amount)
+	}
 	if rec.Network != payment.CreditNetwork(peerAID) {
 		return fmt.Errorf("receipt is for %s, not %s's ledger", rec.Network, peerAID)
 	}
@@ -939,7 +1001,7 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	// not credit our user twice.
 	if _, err := tx.Exec(
 		`INSERT INTO credit_cleared(auth_id, peer_aid, pay_to, amount, at) VALUES(?,?,?,?,?)`,
-		rec.AuthID, peerAID, rec.PayTo, int64(rec.Amount),
+		rec.AuthID, peerAID, rec.PayTo, amt,
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		// Already cleared is success: the same statement, not a new one.
 		// Any other failure to write the row is returned. Reading every
@@ -953,10 +1015,9 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 		}
 		return fmt.Errorf("recording the clearing of %s: %w", rec.AuthID, err)
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
-		rec.PayTo, int64(rec.Amount), int64(rec.Amount)); err != nil {
+	// addToRow, as in settleAuth: a sum the column cannot hold is refused
+	// (invalid_amount) and the whole clearing rolls back.
+	if err := addToRow(tx, "credit_balance", "aid", "credits", rec.PayTo, amt); err != nil {
 		return err
 	}
 	// With its ledger entry, for the same reason settlement has one: a
@@ -964,32 +1025,26 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	// cannot reconcile its own account.
 	if _, err := tx.Exec(
 		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
-		rec.PayTo, int64(rec.Amount), rec.AuthID,
+		rec.PayTo, amt, rec.AuthID,
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	// The hub's own row falls by what it just created, because supply is
 	// counted off that row: crediting the payee without it left the ledger
 	// showing more credit on accounts than the hub had ever issued.
-	if _, err := tx.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?, -?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits - ?`,
-		s.hubKey.AID(), int64(rec.Amount), int64(rec.Amount)); err != nil {
+	if err := addToRow(tx, "credit_balance", "aid", "credits", s.hubKey.AID(), -amt); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
-		s.hubKey.AID(), -int64(rec.Amount), rec.AuthID,
+		s.hubKey.AID(), -amt, rec.AuthID,
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	// What the peer owes us, kept as a running total rather than netted
 	// into anyone's balance: it is a claim on another hub, not credit
 	// here, and the two must not be allowed to look alike.
-	if _, err := tx.Exec(
-		`INSERT INTO hub_owed(peer_aid, amount) VALUES(?,?)
-		 ON CONFLICT(peer_aid) DO UPDATE SET amount = amount + ?`,
-		peerAID, int64(rec.Amount), int64(rec.Amount)); err != nil {
+	if err := addToRow(tx, "hub_owed", "peer_aid", "amount", peerAID, amt); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1007,7 +1062,7 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	// After the commit and logged rather than failed, matching the
 	// redemption path: the credit is already there, and refusing now would
 	// tell the payee it had not been paid when it had.
-	if err := s.appendIssuance(EvCreditIssued, rec.PayTo, int64(rec.Amount),
+	if err := s.appendIssuance(EvCreditIssued, rec.PayTo, amt,
 		"cleared from "+peerAID+" "+rec.AuthID); err != nil {
 		log.Printf("hub: clearing %s from %s not recorded on the issuance chain: %v",
 			rec.AuthID, peerAID, err)
@@ -1047,6 +1102,11 @@ func (s *Store) Due() (map[string]int64, error) {
 // before the peer accepted would leave this hub believing it had paid
 // something the other hub still shows as owed.
 func (s *Store) DischargeDue(payeeAID string, amount int64) error {
+	// A discharge reduces what is due. A negative one would raise it, and
+	// "amount >= ?" below would let it through.
+	if amount <= 0 {
+		return fmt.Errorf("a discharge must be positive, got %d", amount)
+	}
 	res, err := s.db.Exec(
 		`UPDATE hub_due SET amount = amount - ? WHERE payee_aid = ? AND amount >= ?`,
 		amount, payeeAID, amount)
@@ -1213,6 +1273,15 @@ func (s *Store) GrantOnRegistration(aid string) error {
 func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
 	if amount <= 0 {
 		return fmt.Errorf("a grant must be positive, got %d", amount)
+	}
+	// Checked before anything is written: Credit records the issuance
+	// first, and a balance SQLite could only hold as a REAL would leave the
+	// account unreadable (addToRow) [redteam:si9].
+	if bal, err := s.Balance(aid); err != nil {
+		return err
+	} else if bal > math.MaxInt64-amount {
+		return fmt.Errorf("%s holds %d; a grant of %d would take it past %d, the most this ledger can hold",
+			aid, bal, amount, int64(math.MaxInt64))
 	}
 	if reason == "" {
 		reason = "operator grant"
