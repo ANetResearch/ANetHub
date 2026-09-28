@@ -318,6 +318,5 @@ task-content codecs (`delegation`, `tsir`), which `internal/aghub/importguard_te
 Commercial use is allowed; the two added conditions are the multi-tenant hosted hub authorization and the
 logo and copyright notices, both described [above](#who-may-run-a-hub). Hub code that Agent Network
 Research submits to the A2A project (for example the relay-binding endpoints) is contributed, as
-submitted, under Apache-2.0 (LICENSE, condition 3). This license applies from anet-hub 0.2.0 (hub wire 2);
-copies received earlier stay under the ANet Community License 1.0 they came with. Questions and
+submitted, under Apache-2.0 (LICENSE, condition 3). Questions and
 commercial licensing: hi@anet0.com.
