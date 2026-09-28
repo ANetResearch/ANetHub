@@ -321,7 +321,7 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 	// must be rejected — you can only read a mailbox you provably control.
 	raw := rawBody(t, map[string]any{})
 	req := newRequest(t, srv, http.MethodPost, "/relay/poll", raw)
-	signV2(t, req, sender, relayauth.ActionPoll, hubAIDOf(t, srv), raw, time.Now())
+	signV2(t, req, sender, relayauth.ActionPoll, hubAIDOf(t, srv), raw, signingNow())
 	req.Header.Set(relayauth.HeaderAID, recip.AID())
 	if code, _, _ := send(t, req); code != http.StatusUnauthorized {
 		t.Fatalf("forged poll (recipient AID, wrong key) must be 401, got %d", code)

@@ -126,7 +126,7 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	}
 
 	if code := sendReq(func(req *http.Request) {
-		signV2(t, req, sender, relayauth.ActionSend, hubAID, body, time.Now())
+		signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
 	}); code != http.StatusOK {
 		t.Fatalf("control: a correctly signed send was refused: %d", code)
 	}
@@ -137,13 +137,13 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	}{
 		{"no headers", func(req *http.Request) {}},
 		{"bad signature", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, time.Now())
+			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
 			junk := make([]byte, 64)
 			_, _ = rand.Read(junk)
 			req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(junk))
 		}},
 		{"wrong action", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionPoll, hubAID, body, time.Now())
+			signV2(t, req, sender, relayauth.ActionPoll, hubAID, body, signingNow())
 		}},
 		{"too old", func(req *http.Request) {
 			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, time.Now().Add(-6*time.Minute))
@@ -153,20 +153,20 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 		}},
 		{"body tampered", func(req *http.Request) {
 			other := rawBody(t, map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("other")))})
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, other, time.Now())
+			signV2(t, req, sender, relayauth.ActionSend, hubAID, other, signingNow())
 		}},
 		{"signed for another hub", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, "bafyreianotherhub", body, time.Now())
+			signV2(t, req, sender, relayauth.ActionSend, "bafyreianotherhub", body, signingNow())
 		}},
 		{"signer not registered", func(req *http.Request) {
-			signV2(t, req, stranger, relayauth.ActionSend, hubAID, body, time.Now())
+			signV2(t, req, stranger, relayauth.ActionSend, hubAID, body, signingNow())
 		}},
 		{"claims another AID", func(req *http.Request) {
-			signV2(t, req, stranger, relayauth.ActionSend, hubAID, body, time.Now())
+			signV2(t, req, stranger, relayauth.ActionSend, hubAID, body, signingNow())
 			req.Header.Set(relayauth.HeaderAID, sender.AID())
 		}},
 		{"non-canonical ts", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, time.Now())
+			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
 			req.Header.Set(relayauth.HeaderTS, "0"+req.Header.Get(relayauth.HeaderTS))
 		}},
 	}
@@ -178,7 +178,7 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 
 	// Replay: the same signed request twice.
 	req := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-	signV2(t, req, sender, relayauth.ActionSend, hubAID, body, time.Now())
+	signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
 	hdr := req.Header.Clone()
 	if code, b, _ := send(t, req); code != http.StatusOK {
 		t.Fatalf("first use: %d %s", code, b)
@@ -193,12 +193,12 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	// control first: a request signed with its query string is accepted.
 	pollBody := rawBody(t, map[string]any{})
 	ok := newRequest(t, srv, http.MethodPost, "/relay/poll?cursor=1", pollBody)
-	signV2(t, ok, recip, relayauth.ActionPoll, hubAID, pollBody, time.Now())
+	signV2(t, ok, recip, relayauth.ActionPoll, hubAID, pollBody, signingNow())
 	if code, b, _ := send(t, ok); code != http.StatusOK {
 		t.Fatalf("control: a signed request with a query string: %d %s", code, b)
 	}
 	q := newRequest(t, srv, http.MethodPost, "/relay/poll?cursor=1", pollBody)
-	signV2(t, q, recip, relayauth.ActionPoll, hubAID, pollBody, time.Now())
+	signV2(t, q, recip, relayauth.ActionPoll, hubAID, pollBody, signingNow())
 	q.URL.RawQuery = "cursor=2"
 	if code, b, _ := send(t, q); code != http.StatusUnauthorized {
 		t.Errorf("query tampered: %d %s, want 401", code, b)
@@ -208,7 +208,7 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	// signature covers the target as sent, so it no longer verifies.
 	pb := rawBody(t, map[string]any{"addr": "tcp://10.0.0.1:1"})
 	p := newRequest(t, srv, http.MethodPost, "/agents/"+sender.AID()+"/p2p", pb)
-	signV2(t, p, sender, relayauth.ActionP2P, hubAID, pb, time.Now())
+	signV2(t, p, sender, relayauth.ActionP2P, hubAID, pb, signingNow())
 	p.URL.RawPath = "/agents/%" + strconv.FormatInt(int64(sender.AID()[0]), 16) + sender.AID()[1:] + "/p2p"
 	if code, b, _ := send(t, p); code != http.StatusUnauthorized {
 		t.Errorf("path tampered: %d %s, want 401", code, b)
@@ -977,7 +977,7 @@ func TestAForgedSenderHeaderDoesNotDrainTheBucket(t *testing.T) {
 		env := testEnvelope(t, recip.AID(), []byte{byte(i)})
 		body := rawBody(t, map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(env)})
 		req := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-		signV2(t, req, attacker, relayauth.ActionSend, hubAIDOf(t, srv), body, time.Now())
+		signV2(t, req, attacker, relayauth.ActionSend, hubAIDOf(t, srv), body, signingNow())
 		req.Header.Set(relayauth.HeaderAID, victim.AID())
 		if code, _, _ := send(t, req); code != http.StatusUnauthorized {
 			t.Fatalf("forged send %d: %d, want 401", i, code)

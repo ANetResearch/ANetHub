@@ -85,7 +85,7 @@ func TestABadSignatureDoesNotReplayTheKELItNames(t *testing.T) {
 	t.Run("relay poll", func(t *testing.T) {
 		raw := []byte(`{}`)
 		req := newRequest(t, srv, http.MethodPost, "/relay/poll", raw)
-		signV2(t, req, long, relayauth.ActionPoll, hub, raw, time.Now())
+		signV2(t, req, long, relayauth.ActionPoll, hub, raw, signingNow())
 		sig, _ := relayauth.DecodeSig(req.Header.Get(relayauth.HeaderSig))
 		req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(flipped(sig)))
 		before := replays(counter)

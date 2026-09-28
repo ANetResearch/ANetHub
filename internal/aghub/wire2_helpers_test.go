@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +39,30 @@ func rawBody(t *testing.T, body any) []byte {
 	}
 }
 
+// lastSignedMS is the X-ANet-TS of the last request signed "now" by these
+// helpers. Ed25519 is deterministic: the same request signed twice in one
+// millisecond is the same signature, and the hub's replay cache refuses the
+// second by design ("this signature was already used"). A daemon signs each
+// request anew at a later time; the helpers do the same.
+var lastSignedMS atomic.Int64
+
+// signingNow is the time to sign a request at "now": the current time, but
+// always at least one millisecond after the previous one it returned, so
+// no two helper signatures share a timestamp. Tests that mean a specific
+// time (outside the skew window, a fixed replay) pass it to signV2 instead.
+func signingNow() time.Time {
+	for {
+		last := lastSignedMS.Load()
+		now := time.Now().UnixMilli()
+		if now <= last {
+			now = last + 1
+		}
+		if lastSignedMS.CompareAndSwap(last, now) {
+			return time.UnixMilli(now)
+		}
+	}
+}
+
 // signV2 signs req (whose body is raw) as c for hubAID at time at.
 func signV2(t *testing.T, req *http.Request, c *identity.Controller, action, hubAID string, raw []byte, at time.Time) {
 	t.Helper()
@@ -61,12 +86,13 @@ func newRequest(t *testing.T, srv *httptest.Server, method, path string, raw []b
 	return req
 }
 
-// signedRequest builds a wire-2 request signed as c for this hub, now.
+// signedRequest builds a wire-2 request signed as c for this hub, now
+// (signingNow).
 func signedRequest(t *testing.T, srv *httptest.Server, c *identity.Controller, action, method, path string, body any) *http.Request {
 	t.Helper()
 	raw := rawBody(t, body)
 	req := newRequest(t, srv, method, path, raw)
-	signV2(t, req, c, action, hubAIDOf(t, srv), raw, time.Now())
+	signV2(t, req, c, action, hubAIDOf(t, srv), raw, signingNow())
 	return req
 }
 

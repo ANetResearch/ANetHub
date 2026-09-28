@@ -98,7 +98,7 @@ func TestOnlyTheAgentCanDeregisterItself(t *testing.T) {
 	// Nor can it claim to be the agent: the signature does not verify
 	// under the agent's KEL.
 	req := newRequest(t, srv, http.MethodPost, "/agents/"+agent.AID()+"/deregister", nil)
-	signV2(t, req, thief, relayauth.ActionDeregister, hubAIDOf(t, srv), nil, time.Now())
+	signV2(t, req, thief, relayauth.ActionDeregister, hubAIDOf(t, srv), nil, signingNow())
 	req.Header.Set(relayauth.HeaderAID, agent.AID())
 	if code, _, _ := send(t, req); code == 200 {
 		t.Fatal("a signature by another key deregistered the agent")

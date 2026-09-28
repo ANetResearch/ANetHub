@@ -39,7 +39,7 @@ func signedPathRequest(t *testing.T, srvURL string, hubAID string, signer *ident
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-ANet-Wire", "2")
 	if signer != nil {
-		signV2(t, req, signer, action, hubAID, body, time.Now())
+		signV2(t, req, signer, action, hubAID, body, signingNow())
 	}
 	if claim != "" {
 		req.Header.Set(relayauth.HeaderAID, claim)
@@ -498,7 +498,7 @@ func TestARefusedRequestDoesNotSpendItsSignature(t *testing.T) {
 	body := rawBody(t, map[string]any{"to_aid": recip.AID(),
 		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("genuine")))})
 	genuine := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-	signV2(t, genuine, sender, relayauth.ActionSend, hubAIDOf(t, srv), body, time.Now())
+	signV2(t, genuine, sender, relayauth.ActionSend, hubAIDOf(t, srv), body, signingNow())
 
 	altered := rawBody(t, map[string]any{"to_aid": recip.AID(),
 		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("altered")))})
