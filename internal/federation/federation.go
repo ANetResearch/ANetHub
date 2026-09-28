@@ -259,6 +259,9 @@ func New(dir string, cfg Config, id *hubid.Identity, local LocalDelivery) (*Serv
 	}
 	if _, err := db.Exec(`
 CREATE TABLE IF NOT EXISTS fed_dedupe (payload_cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
+-- Each accepted forward prunes entries older than DedupeWindow; without this
+-- the DELETE reads a week of payload CIDs per message (ANet docs/notes/0036).
+CREATE INDEX IF NOT EXISTS idx_fed_dedupe_ts ON fed_dedupe(ts);
 CREATE TABLE IF NOT EXISTS fed_peer_kel (aid TEXT PRIMARY KEY, kel BLOB NOT NULL, fetched_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_review_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
