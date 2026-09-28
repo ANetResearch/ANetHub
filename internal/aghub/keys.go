@@ -69,10 +69,25 @@ type KeysView struct {
 const KeysLookupPath = "/agents/keys:lookup"
 
 // KeysLookupRequest is the POST /agents/keys:lookup body. The answer is a
-// KeysView, as for GET /agents/{aid}/keys.
+// KeysView, as for GET /agents/{aid}/keys. KELLookupPath and
+// CardLookupPath take the same body.
 type KeysLookupRequest struct {
 	AID string `json:"aid"`
 }
+
+// KELLookupPath and CardLookupPath are GET /agents/{aid}/kel and
+// GET /a2a/v1/agents/{aid}/card with the AID in the body
+// (KeysLookupRequest), as KeysLookupPath is for the key set. A daemon asks
+// for a peer's card before it writes to it (the A2A proxy card an A2A
+// client reads first, MCP get_agent_card) and for the peer's KEL to verify
+// that card, from its own address and without authentication; with the
+// AID in the path those two request lines gave a logging proxy the same
+// edge sender-address -> recipient that the key lookup did [redteam:F3].
+// The GETs answer the same and stay for older daemons and for readers.
+const (
+	KELLookupPath  = "/agents/kel:lookup"
+	CardLookupPath = "/a2a/v1/agents/card:lookup"
+)
 
 // keysLookupBodyLimit caps a lookup body: one AID in JSON.
 const keysLookupBodyLimit = 4 << 10
@@ -266,23 +281,32 @@ func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
 // hKeysLookup serves POST /agents/keys:lookup: GET /agents/{aid}/keys with
 // the AID in the body (KeysLookupRequest), so that no request line names it.
 func (s *Server) hKeysLookup(w http.ResponseWriter, r *http.Request) {
+	if aid, ok := lookupAID(w, r); ok {
+		s.serveKeys(w, r, aid)
+	}
+}
+
+// lookupAID reads the body of a lookup that names its AID in the body
+// (KeysLookupRequest: KeysLookupPath, KELLookupPath, CardLookupPath). On
+// failure it writes the refusal and returns false.
+func lookupAID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	body, err := readAllLimited(w, r, keysLookupBodyLimit)
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
 			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-				"error": fmt.Sprintf("a key lookup body is at most %d bytes", keysLookupBodyLimit)})
-			return
+				"error": fmt.Sprintf("a lookup body is at most %d bytes", keysLookupBodyLimit)})
+			return "", false
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
-		return
+		return "", false
 	}
 	var req KeysLookupRequest
 	if err := json.Unmarshal(body, &req); err != nil || req.AID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `body must be {"aid": "<AID>"}`})
-		return
+		return "", false
 	}
-	s.serveKeys(w, r, req.AID)
+	return req.AID, true
 }
 
 // serveKeys answers a key-set lookup for aid (hKeysGet, hKeysLookup).

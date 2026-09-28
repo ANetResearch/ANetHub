@@ -240,26 +240,84 @@ func TestAKeysLookupDoesNotNameTheRecipientInTheRequestLine(t *testing.T) {
 	}
 }
 
-// The lookup route's refusals: an AID nobody holds is the handler's JSON
-// 404 (what a daemon reads as "recipient unknown"), a body without an AID
-// is 400, and a body larger than an AID needs is 413.
+// The lookup routes' refusals: an AID nobody holds is the handler's JSON
+// 404 (what a daemon reads as "recipient unknown", or "no card"), a body
+// without an AID is 400, and a body larger than an AID needs is 413.
 func TestTheKeysLookupRefusals(t *testing.T) {
 	srv := newHub(t)
 	c, _ := twoAgents(t)
-	for _, tc := range []struct {
-		name string
-		body []byte
-		code int
-	}{
-		{"unknown AID", []byte(`{"aid":"` + c.AID() + `"}`), http.StatusNotFound},
-		{"no AID", []byte(`{}`), http.StatusBadRequest},
-		{"not JSON", []byte(`aid=` + c.AID()), http.StatusBadRequest},
-		{"oversized", []byte(`{"aid":"` + strings.Repeat("a", 8<<10) + `"}`), http.StatusRequestEntityTooLarge},
-	} {
-		code, b, _ := send(t, newRequest(t, srv, http.MethodPost, aghub.KeysLookupPath, tc.body))
-		var out map[string]string
-		if code != tc.code || json.Unmarshal(b, &out) != nil || out["error"] == "" {
-			t.Errorf("%s: %d %s, want %d with a JSON error", tc.name, code, b, tc.code)
+	for _, path := range []string{aghub.KeysLookupPath, aghub.KELLookupPath, aghub.CardLookupPath} {
+		for _, tc := range []struct {
+			name string
+			body []byte
+			code int
+		}{
+			{"unknown AID", []byte(`{"aid":"` + c.AID() + `"}`), http.StatusNotFound},
+			{"no AID", []byte(`{}`), http.StatusBadRequest},
+			{"not JSON", []byte(`aid=` + c.AID()), http.StatusBadRequest},
+			{"oversized", []byte(`{"aid":"` + strings.Repeat("a", 8<<10) + `"}`), http.StatusRequestEntityTooLarge},
+		} {
+			code, b, _ := send(t, newRequest(t, srv, http.MethodPost, path, tc.body))
+			var out map[string]string
+			if code != tc.code || json.Unmarshal(b, &out) != nil || out["error"] == "" {
+				t.Errorf("%s %s: %d %s, want %d with a JSON error", path, tc.name, code, b, tc.code)
+			}
 		}
+	}
+}
+
+// Before it writes to a peer, a daemon reads the peer's card (the proxy
+// card an A2A client asks for first, MCP get_agent_card) and the peer's
+// KEL to verify it, from its own address. Those lookups named the peer in
+// the request line too, and the send path's key lookup alone was moved to
+// the body: an A2A client talking to a peer through its daemon still left
+// sender-address -> peer in a logging proxy's lines [redteam:F3]. The
+// card and KEL lookups now take the AID in the body as well, and answer
+// what the GETs answer.
+func TestTheCardAndKELLookupsDoNotNameTheAgentInTheRequestLine(t *testing.T) {
+	store, err := aghub.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := hubid.LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetHubKey(id.Ctrl)
+	s := aghub.NewServer(store)
+	s.SetHubAID(id.AID)
+	var acc combinedLog
+	srv := httptest.NewServer(acc.wrap(s.Handler()))
+	t.Cleanup(func() { srv.Close(); store.Close() })
+	testHubAID.Store(srv.URL, id.AID)
+
+	bob, _ := twoAgents(t)
+	registerA2A(t, srv, bob, "Bob", nil, signA2A(t, bob, a2aCardFor(bob, 1)))
+	const ipAlice = "203.0.113.10"
+	lookup := func(path string) []byte {
+		body, _ := json.Marshal(aghub.KeysLookupRequest{AID: bob.AID()})
+		req := newRequest(t, srv, http.MethodPost, path, body)
+		req.Header.Set("X-Real-IP", ipAlice)
+		code, b, _ := send(t, req)
+		if code != http.StatusOK {
+			t.Fatalf("POST %s: %d %s", path, code, b)
+		}
+		return b
+	}
+	card, kel := lookup(aghub.CardLookupPath), lookup(aghub.KELLookupPath)
+
+	acc.mu.Lock()
+	lines := append([]string(nil), acc.lines...)
+	acc.mu.Unlock()
+	for _, l := range lines {
+		if strings.HasPrefix(l, ipAlice+" ") && strings.Contains(l, bob.AID()) {
+			t.Errorf("a request line from the reader's address names the agent: %s", l)
+		}
+	}
+	if code, b := getJSON(t, srv.URL+"/a2a/v1/agents/"+bob.AID()+"/card"); code != 200 || !bytes.Equal(b, card) {
+		t.Fatalf("GET card: %d %s; the POST lookup answered %s", code, b, card)
+	}
+	if code, b := getJSON(t, srv.URL+"/agents/"+bob.AID()+"/kel"); code != 200 || !bytes.Equal(b, kel) {
+		t.Fatalf("GET kel: %d %s; the POST lookup answered %s", code, b, kel)
 	}
 }
