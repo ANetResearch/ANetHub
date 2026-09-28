@@ -923,6 +923,16 @@ func (s *Server) verify(rc *evidence.Receipt, rv *evidence.Review) (ReviewDetail
 		return zero, fmt.Errorf("reviewer kel corrupt")
 	}
 
+	// /reviews needs no authentication, so a bad signature on either
+	// object is refused on the key its signer's KEL names, before the
+	// interlock replays the two KELs (kelreplay.go) [redteam:F36].
+	if verr := plausibleEnvelope(rc.Envelope, rc.ProviderAID, provKEL, rc.CanonicalPreimage); verr != nil {
+		return zero, fmt.Errorf("evidence: receipt signature invalid: %w", verr)
+	}
+	if verr := plausibleEnvelope(rv.Envelope, rv.ReviewerAID, reqKEL, rv.CanonicalPreimage); verr != nil {
+		return zero, fmt.Errorf("evidence: review signature invalid: %w", verr)
+	}
+
 	// Everything else is arithmetic over the objects, and it lives in
 	// ANetCore so that anyone holding these files reaches this same
 	// verdict without trusting this Hub — which is the whole content of
@@ -1306,7 +1316,13 @@ func verifyChallenge(kel []identity.SignedEvent, action, aid string, ts, keyStat
 	if err != nil {
 		return fmt.Errorf("sig not base64")
 	}
-	return identity.VerifyObject(kel, aid, keyStateSeq, ts, relayauth.Preimage(action, aid, ts), sig)
+	pre := relayauth.Preimage(action, aid, ts)
+	// A bad signature costs one verification, not a replay of the KEL
+	// (kelreplay.go) [redteam:F36].
+	if verr := plausibleSignature(kel, keyStateSeq, pre, sig); verr != nil {
+		return verr
+	}
+	return identity.VerifyObject(kel, aid, keyStateSeq, ts, pre, sig)
 }
 
 func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {

@@ -286,6 +286,11 @@ func (s *Server) verifyV2(r *http.Request, action string, body []byte, a v2Auth,
 		return unauthorized("%s is outside the ±%d ms window", relayauth.HeaderTS, relayauth.MaxSkewMillis)
 	}
 	pre := relayauth.PreimageV2(action, a.AID, s.hubAID, a.TS, r.Method, r.URL.RequestURI(), body)
+	// The key the KEL names first, so that a bad signature does not cost a
+	// replay of the signer's KEL (kelreplay.go) [redteam:F36].
+	if verr := plausibleSignature(kel, a.Seq, pre, a.Sig); verr != nil {
+		return unauthorized("signature does not verify for action %q: %v", action, verr)
+	}
 	if err := identity.VerifyObject(kel, a.AID, a.Seq, a.TS, pre, a.Sig); err != nil {
 		return unauthorized("signature does not verify for action %q: %v", action, err)
 	}
