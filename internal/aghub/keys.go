@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 
@@ -156,6 +157,15 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 	set, err := seal.VerifyEncKeySet(signed, aid, kel, uint64(now.UnixMilli()))
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrKeysInvalid, err)
+	}
+	// agent_keys.seq is an SQLite INTEGER, and database/sql refuses a
+	// uint64 with the high bit set: such a set verified and then failed to
+	// store, and POST /agents/{aid}/keys answered 500 (found by FuzzHubKeys,
+	// ANet docs/notes/0033). A seq is unix milliseconds or one above the
+	// last (seal.NextSeq), nowhere near 2^63; one past it is refused here.
+	if set.Seq > math.MaxInt64 {
+		return "", fmt.Errorf("%w: seq %d is above %d, the largest this hub stores", ErrKeysInvalid,
+			set.Seq, int64(math.MaxInt64))
 	}
 	if decision == seal.Same {
 		// The same set may arrive with a new signature, for example
