@@ -32,7 +32,8 @@
 #
 # Run it as the hub's account (anet-hub), from cron or a systemd timer, e.g.
 #   17 4 * * *  HUB_DATA_DIR=/data/projs/anet-hub/data /data/projs/anet-hub/bin/hub-db-roll.sh
-# No unit for it ships in this repository. It needs the sqlite3 CLI.
+# deploy/hub-db-roll.service and deploy/hub-db-roll.timer are the units the production hubs run
+# (daily at 04:30, as anet-hub, sandboxed to the data directory). It needs the sqlite3 CLI.
 #
 # Tested by deploy/scripts_test.go against a fixture hub.db (skipped where
 # sqlite3 is not installed).

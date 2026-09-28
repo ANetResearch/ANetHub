@@ -56,10 +56,15 @@ func TestTheManualInstallsSafelyAndOffersNoGuestMode(t *testing.T) {
 		t.Errorf("the manual mentions guest %d times; only the sentence stating there is none may",
 			strings.Count(lower, "guest"))
 	}
-	// The hub's view of content is stated as the 0.2.0 target together
-	// with what it still sees, not as an unconditional claim.
-	if !strings.Contains(page, "target of anet 0.2.0") || !strings.Contains(page, "who sends to whom") {
-		t.Error("the manual does not state what the hub can see as the 0.2.0 target with its limits")
+	// The hub's view of content is stated for anet >= 0.2.0 (this hub
+	// speaks wire 2 only) together with what it still sees, not as an
+	// unconditional claim (ANet docs/notes/0027 §4.1 A1).
+	if !strings.Contains(page, "end to end (anet >= 0.2.0)") || !strings.Contains(page, "who sends to whom") ||
+		!strings.Contains(page, "KNOWN-LIMITATIONS") {
+		t.Error("the manual does not state what the hub can see for anet >= 0.2.0 with its limits")
+	}
+	if strings.Contains(page, "target of anet 0.2.0") {
+		t.Error("the manual still states end-to-end encryption as a target; the hub serving it is wire 2")
 	}
 	if strings.Contains(page, "the Hub verifies the hashes") {
 		t.Error("the manual still says the hub verifies content hashes of a review; it receives no content")

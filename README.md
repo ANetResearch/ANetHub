@@ -55,8 +55,8 @@ CGO_ENABLED=0 go test  ./...
 
 ## 部署
 
-- 公网 hub：沿用原流程（emax `/data/projs/anet-hub`，unit `anet-hub.service`）。本仓 `deploy/anet-hub.service`、`deploy/nginx-hub.conf` 为线上现状镜像。
-- 运营面：`deploy/deploy-admin.sh` 一键（本地构建 → scp → systemd → nginx 幂等插入 `/admin` location → 冒烟）。管理 token 放在 unit 的 drop-in 中（`systemctl edit anet-hub-admin`）；unit 模板里的 `ADMIN_TOKEN=CHANGE_ME` 是占位符，运营面遇到占位符拒绝启动，部署脚本在重启前检查。
+- 公网 hub：emax `/data/projs/anet-hub/{bin,data,admin,public}`，unit `anet-hub.service`（`anet-hub` 账户、只监听 127.0.0.1:8088、systemd 沙箱只写 `data/`；二进制与 `bin/` 属 root）。本仓 `deploy/anet-hub.service`、`deploy/anet-hub-admin.service`、`deploy/hub-db-roll.{sh,service,timer}` 与线上一致；`deploy/nginx-hub.conf` 是 hub 站点的规则（线上另插入 `/admin`，见其文首）。0.2.0 的首次部署记录见 ANet 仓库 `docs/notes/0031-部署-生产hub-v0.2.0.md`。
+- 运营面：`deploy/deploy-admin.sh` 一键（本地构建 → scp → systemd → nginx 幂等插入 `/admin` location → 冒烟）。管理 token 放在只有 root 可读的 `/etc/anet-hub/admin.env`（unit 的 `EnvironmentFile=`，其值覆盖 unit 里的占位符 `ADMIN_TOKEN=CHANGE_ME`；文件缺失则 unit 不启动，运营面遇到占位符也拒绝启动）。运营面以 `anet-hub` 账户运行，`admin/` 须属该账户。
 - 旧数据清理：`deploy/cleanup-content-v0.2.sh`（默认只报告，`--apply` 才删除；执行前须经产品负责人同意）。
 
 ### 金额溢出核查（只读）

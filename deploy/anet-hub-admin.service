@@ -1,19 +1,25 @@
 [Unit]
-Description=AgentNetwork Hub operator plane (anet-hub-admin)
+Description=AgentNetwork Hub operator plane (anet-hub-admin 0.2.0)
 After=network-online.target anet-hub.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-# Needs write access to the hub-owned hub.db (registry delete and restore) and its own admin/ tree.
-# It no longer reaches any other host: the ssh ops plane, the monitor proxy and the harvest were
-# removed (A2A-DESIGN §9), so root is not required for ssh any more. Running it as the hub's own
-# account instead of root needs admin/ to be owned by that account; that is a deployment change and
-# is not made by this file.
-# It binds loopback only; nginx is the sole public face.
-# ADMIN_TOKEN is REQUIRED (no default). The value below is a placeholder: anet-hub-admin refuses to
-# start while ADMIN_TOKEN is CHANGE_ME or any other placeholder. Set a random secret before starting.
+# The hub's own account, not root: the ssh ops plane, the monitor proxy and the harvest were removed
+# (A2A-DESIGN §9), so the admin plane reaches no other host. It needs write access to the hub-owned
+# hub.db (registry delete and restore) and to its own admin/ tree, so admin/ must be owned by
+# anet-hub (install -d -o anet-hub -g anet-hub -m 0700 /data/projs/anet-hub/admin) before this unit
+# starts. It binds loopback only; nginx is the sole public face.
+User=anet-hub
+Group=anet-hub
+# ADMIN_TOKEN is REQUIRED (no default). The line below is a placeholder that anet-hub-admin refuses to
+# start with; the real token lives in a root-only EnvironmentFile (0600 root:root, read by systemd
+# before it drops privileges), whose values override Environment= lines. Create it once:
+#   install -d -m 0700 /etc/anet-hub
+#   (umask 077; printf 'ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" > /etc/anet-hub/admin.env)
+# Without the file the unit does not start (no leading '-'), so a host never runs on the placeholder.
 Environment=ADMIN_TOKEN=CHANGE_ME
+EnvironmentFile=/etc/anet-hub/admin.env
 ExecStart=/data/projs/anet-hub/bin/anet-hub-admin \
   --addr 127.0.0.1:8078 \
   --hub-data /data/projs/anet-hub/data \
@@ -21,7 +27,28 @@ ExecStart=/data/projs/anet-hub/bin/anet-hub-admin \
 WorkingDirectory=/data/projs/anet-hub
 Restart=on-failure
 RestartSec=3
+UMask=0077
 NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/data/projs/anet-hub/data /data/projs/anet-hub/admin
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target
