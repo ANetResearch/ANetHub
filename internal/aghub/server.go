@@ -620,6 +620,24 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// On a hub that admits by invitation, a newcomer without a usable
+	// invite is refused next, before its KEL is replayed or its signature
+	// kept in the replay cache (Store.CheckInvite) [redteam:F4]. The invite
+	// is spent further down, after the signature. An AID this hub knows is
+	// not gated, as below; claiming one does not get a stranger past the
+	// signature.
+	if s.store.InviteRequired() && !s.store.KnowsAgent(req.AID) {
+		if err := s.store.CheckInvite(req.Invite, req.AID); err != nil {
+			// Logged as the refusal after the signature is (see there),
+			// saying that this AID is only claimed.
+			log.Printf("hub: registration refused for %s (claimed, not yet proven): %v", req.AID, err)
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": err.Error(),
+				"hint":  "ask this hub's operator for an invite, then register with --token",
+			})
+			return
+		}
+	}
 	kelBytes, err := base64.StdEncoding.DecodeString(req.KEL)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel not base64"})
