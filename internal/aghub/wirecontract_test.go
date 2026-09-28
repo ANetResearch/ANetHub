@@ -448,6 +448,10 @@ func TestTheWire2VersionsAndHeadersArePinned(t *testing.T) {
 		// The recipient key lookup the daemon POSTs (ANet internal/hubapi
 		// KeysLookupPath pins the same path) [redteam:F3].
 		{aghub.KeysLookupPath, "/agents/keys:lookup"},
+		// The card and KEL lookups, likewise (hubapi KELLookupPath,
+		// CardLookupPath) [redteam:F3].
+		{aghub.KELLookupPath, "/agents/kel:lookup"},
+		{aghub.CardLookupPath, "/a2a/v1/agents/card:lookup"},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%q, want %q", pair[0], pair[1])
@@ -480,10 +484,12 @@ func TestTheWire2RoutesAreServed(t *testing.T) {
 	// The daemon tells this route's own 404 (a JSON error) from a hub that
 	// does not serve it (the mux's plain-text 405 or 404) and only then
 	// falls back to GET.
-	code, body, _ = send(t, newRequest(t, srv, http.MethodPost, aghub.KeysLookupPath, []byte(`{"aid":"`+c.AID()+`"}`)))
-	out = nil
-	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
-		t.Errorf("POST %s of an unknown AID: %d %s, want the handler's JSON 404", aghub.KeysLookupPath, code, body)
+	for _, path := range []string{aghub.KeysLookupPath, aghub.KELLookupPath, aghub.CardLookupPath} {
+		code, body, _ = send(t, newRequest(t, srv, http.MethodPost, path, []byte(`{"aid":"`+c.AID()+`"}`)))
+		out = nil
+		if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
+			t.Errorf("POST %s of an unknown AID: %d %s, want the handler's JSON 404", path, code, body)
+		}
 	}
 }
 

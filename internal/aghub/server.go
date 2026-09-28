@@ -281,6 +281,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents", s.hAgents)
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
+	mux.HandleFunc("POST "+KELLookupPath, s.hAgentKELLookup)
 	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
 	// The JWKS named by the jku of an agent's A2A card, derived from its
 	// KEL (A2A-DESIGN §10.3, §10.5). See registry.go.
@@ -335,6 +336,7 @@ func (s *Server) Handler() http.Handler {
 	// (A2A-DESIGN §10.5). See registry.go.
 	mux.HandleFunc("GET /a2a/v1/agents", s.hA2AAgents)
 	mux.HandleFunc("GET /a2a/v1/agents/{aid}/card", s.hA2ACard)
+	mux.HandleFunc("POST "+CardLookupPath, s.hA2ACardLookup)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay (wire 2): sealed envelopes only. send is authenticated so the
@@ -1393,7 +1395,20 @@ func cors(next http.Handler) http.Handler {
 // Publishing costs nothing and is not an authorization: holding the KEL
 // lets you CHECK signatures, never make them.
 func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
+	s.serveAgentKEL(w, r.PathValue("aid"))
+}
+
+// hAgentKELLookup serves POST /agents/kel:lookup: GET /agents/{aid}/kel
+// with the AID in the body (KeysLookupRequest), so that no request line
+// names it [redteam:F3].
+func (s *Server) hAgentKELLookup(w http.ResponseWriter, r *http.Request) {
+	if aid, ok := lookupAID(w, r); ok {
+		s.serveAgentKEL(w, aid)
+	}
+}
+
+// serveAgentKEL answers a KEL lookup for aid (hAgentKEL, hAgentKELLookup).
+func (s *Server) serveAgentKEL(w http.ResponseWriter, aid string) {
 	// The hub's own history is served here too.
 	//
 	// It signs settlements, redemption receipts and vouchers, and every

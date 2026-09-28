@@ -279,7 +279,20 @@ func (s *Server) hA2AAgents(w http.ResponseWriter, r *http.Request) {
 // hA2ACard serves GET /a2a/v1/agents/{aid}/card: the card as the agent
 // sent it, byte for byte, which is what its signature covers.
 func (s *Server) hA2ACard(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
+	s.serveA2ACard(w, r, r.PathValue("aid"))
+}
+
+// hA2ACardLookup serves POST /a2a/v1/agents/card:lookup:
+// GET /a2a/v1/agents/{aid}/card with the AID in the body
+// (KeysLookupRequest), so that no request line names it [redteam:F3].
+func (s *Server) hA2ACardLookup(w http.ResponseWriter, r *http.Request) {
+	if aid, ok := lookupAID(w, r); ok {
+		s.serveA2ACard(w, r, aid)
+	}
+}
+
+// serveA2ACard answers a card lookup for aid (hA2ACard, hA2ACardLookup).
+func (s *Server) serveA2ACard(w http.ResponseWriter, r *http.Request, aid string) {
 	raw, err := s.store.VerifiedA2ACard(aid, s.federated != nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
