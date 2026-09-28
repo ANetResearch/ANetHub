@@ -11,7 +11,7 @@
 
 | 面 | 旧行为 | 现状 |
 |---|---|---|
-| 中继 | `relay_message.payload` 为明文 CBOR（TaskDoc、聊天正文、交付物、附件字节），ack 后保留 7 天 | 只存封装信封（daemon 之间端到端加密的目标由 anet 0.2.0 实现）；不存发送方、消息类型、交互 id；ack 即删，未投递 14 天删除 |
+| 中继 | `relay_message.payload` 为明文 CBOR（TaskDoc、聊天正文、交付物、附件字节），ack 后保留 7 天 | 只存封装信封（daemon 之间端到端加密由 anet 0.2.0 实现）；不存发送方、消息类型、交互 id；ack 即删，未投递 14 天删除 |
 | 运营面采收 | `hub-relay` 源解码中继载荷；`ai-studio` 源经 ssh 或 monitor 复制官方 agent 的任务记录（含 prompt） | 两个源均删除。`RunAll` 不读任何源、不写 `datasets/`（单测钉住） |
 | 评价 | `review.goal`、`review.deliverable` 与 `review_blob.request_doc_raw`、`review_blob.deliverable_raw` 保存请求与交付物原文，经 `GET /agents/{aid}` 与 `GET /fed/v1/reviews` 公开 | 上传只收回执与评价两个签名对象；表列已删除（迁移重建 + VACUUM）；内容绑定如实标 `UNVERIFIED` |
 | 访客模式 | hub 以自持身份代浏览器收发明文消息 | 删除 |
