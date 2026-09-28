@@ -58,6 +58,40 @@ type KeysView struct {
 	KEL    string `json:"kel"`    // base64 (std) of identity.MarshalKEL
 }
 
+// KeysLookupPath is the key-set lookup that names the AID in its body
+// rather than in its path (A2A-DESIGN §3.5 step 1, §3.7). A sender looks up
+// its recipient's key set before the first message and every ten minutes
+// of a conversation, from its own address and without authentication; a
+// reverse proxy logging request lines would write the edge
+// sender-address -> recipient-AID to the hub host's disk if the AID were
+// in the path [redteam:F3]. GET /agents/{aid}/keys answers the same and
+// stays for older daemons and for readers.
+const KeysLookupPath = "/agents/keys:lookup"
+
+// KeysLookupRequest is the POST /agents/keys:lookup body. The answer is a
+// KeysView, as for GET /agents/{aid}/keys. KELLookupPath and
+// CardLookupPath take the same body.
+type KeysLookupRequest struct {
+	AID string `json:"aid"`
+}
+
+// KELLookupPath and CardLookupPath are GET /agents/{aid}/kel and
+// GET /a2a/v1/agents/{aid}/card with the AID in the body
+// (KeysLookupRequest), as KeysLookupPath is for the key set. A daemon asks
+// for a peer's card before it writes to it (the A2A proxy card an A2A
+// client reads first, MCP get_agent_card) and for the peer's KEL to verify
+// that card, from its own address and without authentication; with the
+// AID in the path those two request lines gave a logging proxy the same
+// edge sender-address -> recipient that the key lookup did [redteam:F3].
+// The GETs answer the same and stay for older daemons and for readers.
+const (
+	KELLookupPath  = "/agents/kel:lookup"
+	CardLookupPath = "/a2a/v1/agents/card:lookup"
+)
+
+// keysLookupBodyLimit caps a lookup body: one AID in JSON.
+const keysLookupBodyLimit = 4 << 10
+
 // KeysPublishRequest is the POST /agents/{aid}/keys body.
 type KeysPublishRequest struct {
 	KeySet string `json:"keyset"` // base64 (std) of the seal.SignedEncKeySet encoding
@@ -230,7 +264,8 @@ func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 	})
 }
 
-// hKeysGet serves GET /agents/{aid}/keys.
+// hKeysGet serves GET /agents/{aid}/keys; POST /agents/keys:lookup
+// (hKeysLookup) is the same with the AID in the body.
 //
 // Sources, in order: an agent registered here; a key set that arrived with
 // a peer's card sync (the A2A card stream, then the ADP card stream); a
@@ -240,7 +275,42 @@ func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 // ([C32]). Its answer is relayed to this caller and not stored: it does
 // not enter fed_card, /agents or any index.
 func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
+	s.serveKeys(w, r, r.PathValue("aid"))
+}
+
+// hKeysLookup serves POST /agents/keys:lookup: GET /agents/{aid}/keys with
+// the AID in the body (KeysLookupRequest), so that no request line names it.
+func (s *Server) hKeysLookup(w http.ResponseWriter, r *http.Request) {
+	if aid, ok := lookupAID(w, r); ok {
+		s.serveKeys(w, r, aid)
+	}
+}
+
+// lookupAID reads the body of a lookup that names its AID in the body
+// (KeysLookupRequest: KeysLookupPath, KELLookupPath, CardLookupPath). On
+// failure it writes the refusal and returns false.
+func lookupAID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	body, err := readAllLimited(w, r, keysLookupBodyLimit)
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": fmt.Sprintf("a lookup body is at most %d bytes", keysLookupBodyLimit)})
+			return "", false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
+		return "", false
+	}
+	var req KeysLookupRequest
+	if err := json.Unmarshal(body, &req); err != nil || req.AID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `body must be {"aid": "<AID>"}`})
+		return "", false
+	}
+	return req.AID, true
+}
+
+// serveKeys answers a key-set lookup for aid (hKeysGet, hKeysLookup).
+func (s *Server) serveKeys(w http.ResponseWriter, r *http.Request, aid string) {
 	keyset, kel, registered, err := s.store.LocalKeys(aid)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -250,6 +320,13 @@ func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
 		if keyset == nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{
 				"error": aid + " is registered here and has published no encryption key set"})
+			return
+		}
+		// A key history stored before /register capped it is not
+		// served: no sender accepts it (seal.ParseKEL) [redteam:F36].
+		if _, err := seal.ParseKEL(kel); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": aid + "'s key history on this hub is not one a sender accepts: " + err.Error()})
 			return
 		}
 		writeKeys(w, aid, keyset, kel)
@@ -308,6 +385,12 @@ func (s *Server) hKeysPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kel, err := s.agentKELEvents(a.AID)
+	if seal.ReasonOf(err) == seal.ReasonKELTooLarge {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
+			"the key history this hub holds for %s is past %d events or %d bytes, which no sender accepts: %v",
+			a.AID, seal.MaxKELEvents, seal.MaxKELBytes, err)})
+		return
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -327,13 +410,15 @@ func (s *Server) hKeysPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, KeysPublishResponse{AID: a.AID, KeysStatus: status})
 }
 
-// agentKELEvents returns the stored KEL of a registered agent, decoded.
+// agentKELEvents returns the stored KEL of a registered agent, decoded
+// under the caps /register applies (seal.ParseKEL) [redteam:F36]: a key
+// history stored before those caps is refused rather than replayed.
 func (s *Server) agentKELEvents(aid string) ([]identity.SignedEvent, error) {
 	kelBytes, err := s.store.AgentKEL(aid)
 	if err != nil {
 		return nil, err
 	}
-	return identity.UnmarshalKEL(kelBytes)
+	return seal.ParseKEL(kelBytes)
 }
 
 // keysStatusOf maps a PublishKeys result onto the per-field status that

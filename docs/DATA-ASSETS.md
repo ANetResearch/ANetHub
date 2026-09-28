@@ -32,7 +32,20 @@
   `/fed/v2/cards`（验证通过的 A2A 卡片）发往对等 hub，出现在对方的 `/agents` 与 `/a2a/v1/agents`；
   这两个流不要求认证。停止发布（注销、可见性收窄；`/fed/v2/cards` 另有换钥后卡片不再验证与运营者删除）
   时，流中出现一条只含 AID 与原因的撤回条目。
-- 通信元数据：发送时刻 hub 知道"谁发给谁"、何时、多大，以及来源 IP；不写入存储。
+- 通信元数据：发送时刻 hub 知道"谁发给谁"、何时、多大，以及来源 IP；不写入 hub 的存储，hub 进程日志也不逐条
+  记录中继。
+- hub 主机上的反向代理日志（A2A-DESIGN X1、§21 第 1 条）[redteam:F3]：hub 的请求行多数含 AID
+  （`/agents/<aid>/…`、`/a2a/v1/agents/<aid>/card`、`/fed/v2/keys/<aid>`、`/x402/resource/<aid>/…`），且来自客户端
+  地址；代理若保留访问日志，就把"哪个地址在何时查了谁、发了多少、收了多少"写在 hub 主机的磁盘上，ack 删行之后
+  仍可重建社交图。随仓库下发的 `deploy/nginx-hub.conf` 与 `nginx-hub.conf.example` 因此对 hub 虚拟主机的两个
+  server 块都关闭访问日志（`access_log off`，同时覆盖 nginx.conf 的 http 级访问日志），错误日志只记 `crit`
+  （`error` 级的行带 `client: <地址>` 与 `request: <请求行>`，`crit` 行发生在读请求之前，至多带地址），写在
+  `/var/log/nginx/hub.error.log`，由主机 logrotate 对 `/var/log/nginx/*.log` 的规则轮转（Debian/Ubuntu 默认按天、
+  保留 14 份并压缩），即至多保留 14 天。`internal/aghub/proxylog_test.go` 检查这两个文件。运营者改用自己的配置并
+  打开访问日志，就会持有上述记录。daemon 在给对端写之前查的加密公钥、卡片与验卡用的 KEL 都把 AID 放在
+  请求体（`POST /agents/keys:lookup`、`/a2a/v1/agents/card:lookup`、`/agents/kel:lookup`），请求行不含对端；对应的 `GET`
+  仍为旧 daemon 与读者保留，p2p 地址查询 `GET /agents/{aid}/p2p`（anetpeer）
+  仍在请求行里带对端 AID。
 - 评价关系图：谁评价了谁、评分、评语（≤ 280 字符，由评价者签名公开）、回执中的 request_cid 与
   result_cid。anet 0.2.0 起这两个值的原像含 16 字节随机数（A2A-DESIGN §2 X4），不能用候选内容逐个
   计算比对来确认内容；更早版本签发的回执不含随机数，对低熵内容可以这样确认。

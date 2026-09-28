@@ -5,6 +5,8 @@ package taskboard
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -61,15 +63,41 @@ func (s *Server) Handler() http.Handler {
 	return withCORS(mux)
 }
 
+// maxMutationBody caps a board mutation: the auth fields, a card id, a
+// title, a note and a CID. The board is mounted on the hub's root mux
+// beside the hub handler, not behind its limitBody, so it caps its own
+// bodies; before, a caller with no signature could make the hub buffer and
+// decode a JSON document of any size [redteam:F38].
+const maxMutationBody = 64 << 10
+
+// mutation serves one signed board action. The body is read under
+// maxMutationBody, the signature is checked from the auth fields alone,
+// and only then is the content decoded.
 func (s *Server) mutation(action string, fn func(mutateReq) (*Card, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req mutateReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxMutationBody))
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+					"error": fmt.Sprintf("request body exceeds %d bytes", maxMutationBody)})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 			return
 		}
-		if err := s.auth.VerifyAgentChallenge(action, req.AID, req.TS, req.KeyStateSeq, req.Sig); err != nil {
+		var a authFields
+		if err := json.Unmarshal(raw, &a); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+			return
+		}
+		if err := s.auth.VerifyAgentChallenge(action, a.AID, a.TS, a.KeyStateSeq, a.Sig); err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
+		}
+		var req mutateReq
+		if err := json.Unmarshal(raw, &req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 			return
 		}
 		card, err := fn(req)
