@@ -8,7 +8,10 @@
 -- 2^63 or more became negative and was booked backwards: the payer's row
 -- went UP, the payee's went DOWN, redemptions minted credit, a peer's
 -- receipt debited the local payee. At exactly 2^63 SQLite's integer
--- arithmetic overflowed into REAL. Zero amounts were accepted too.
+-- arithmetic overflowed into REAL. Zero amounts were accepted too. A sum
+-- of in-range amounts past 2^63-1 (two peer receipts of 2^63-1 for one
+-- payee) was stored as REAL as well, leaving the row unreadable; the
+-- fixed hub refuses such a movement (addToRow in internal/aghub/amount.go).
 --
 -- What a hit looks like here:
 --   * a settlement / redemption / clearing row whose amount is <= 0, or

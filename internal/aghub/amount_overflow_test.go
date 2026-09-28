@@ -641,3 +641,162 @@ func TestALegacyNegativeRedemptionRowIsNotListedAsAnAmount(t *testing.T) {
 		t.Errorf("sum = %d (%v), want 0", sum, err)
 	}
 }
+
+// ---- sums: each amount in range, the result not ----
+//
+// amountInt64 bounds one amount. SQLite does not fail "credits + ?" when
+// the sum passes MaxInt64: it stores a REAL in the INTEGER column. The
+// red team's variant (the review of the si9 fix): two peer receipts of
+// 2^63-1 for one local payee, each in range, left the payee's balance and
+// hub_owed as 1.8e19 floats — Balance and Owed then failed to scan, and
+// /x402/supply answered "integer overflow". A sum outside int64 is now
+// refused like an amount outside it, and nothing moves.
+
+// readable checks an account and a peer's debt still read as integers.
+func (w overflowWorld) readable(t *testing.T, aid, peerAID string) {
+	t.Helper()
+	if _, err := w.store.Balance(aid); err != nil {
+		t.Errorf("balance of %s is unreadable: %v", aid, err)
+	}
+	if peerAID != "" {
+		if _, err := w.store.Owed(peerAID); err != nil {
+			t.Errorf("owed by %s is unreadable: %v", peerAID, err)
+		}
+	}
+}
+
+func peerReceipt(t *testing.T, peer *identity.Controller, authID, payTo string, amount uint64) *payment.Receipt {
+	t.Helper()
+	rec := &payment.Receipt{AuthID: authID, Payer: "did:anet:their-user", PayTo: payTo, Amount: amount,
+		Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
+	if err := rec.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	return rec
+}
+
+func TestPeerReceiptsInRangeCannotSumPastWhatALedgerHolds(t *testing.T) {
+	w := newOverflowWorld(t)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The red team's inputs: two receipts of 2^63-1 for the victim, who
+	// already holds 5100. The first alone does not fit.
+	for i, id := range []string{"bafy-sum-a", "bafy-sum-b"} {
+		before := moneyState(t, w.dir)
+		err := w.store.ClearFromPeer(peer.AID(), peer.KEL(), peerReceipt(t, peer, id, w.victim.AID(), math.MaxInt64))
+		if err == nil || !refusedAsAmount(err.Error()) {
+			t.Errorf("receipt %d of 2^63-1: err = %v, want %s", i, err, payment.ReasonInvalidAmount)
+		}
+		w.untouched(t, before)
+		w.readable(t, w.victim.AID(), peer.AID())
+	}
+	if _, err := w.store.Supply(w.hubAID); err != nil {
+		t.Errorf("supply: %v", err)
+	}
+
+	// The edge: exactly up to MaxInt64 clears, and one more does not.
+	have := balanceOf(t, w.srv, w.victim.AID())
+	if err := w.store.ClearFromPeer(peer.AID(), peer.KEL(),
+		peerReceipt(t, peer, "bafy-sum-edge", w.victim.AID(), uint64(math.MaxInt64-have))); err != nil {
+		t.Fatalf("a receipt that fills the balance exactly: %v", err)
+	}
+	if got := balanceOf(t, w.srv, w.victim.AID()); got != math.MaxInt64 {
+		t.Fatalf("victim balance = %d, want %d", got, int64(math.MaxInt64))
+	}
+	before := moneyState(t, w.dir)
+	err = w.store.ClearFromPeer(peer.AID(), peer.KEL(), peerReceipt(t, peer, "bafy-sum-over", w.victim.AID(), 1))
+	if err == nil || !refusedAsAmount(err.Error()) {
+		t.Errorf("one credit past MaxInt64: err = %v, want %s", err, payment.ReasonInvalidAmount)
+	}
+	if after := moneyState(t, w.dir); after != before {
+		t.Errorf("the money tables changed.\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	w.readable(t, w.victim.AID(), peer.AID())
+}
+
+// The same on this hub's own ledger: a payee whose balance cannot take
+// the payment. The payer is not debited, and no receipt is signed.
+func TestASettlementThatWouldOverflowThePayeeMovesNothing(t *testing.T) {
+	w := newOverflowWorld(t)
+	fundAgent(t, w.srv, w.victim.AID(), math.MaxInt64-50-balanceOf(t, w.srv, w.victim.AID()))
+	own := payment.CreditNetwork(w.hubAID)
+	before := moneyState(t, w.dir)
+	auth := signedAuth(t, w.attacker, w.victim.AID(), 100, w.hubAID, "ov-sum-settle")
+	_, sr := settleCall(t, w.srv, creditPayload(t, auth, w.victim.AID(), own), requirementsFor(w.victim.AID(), 100, own))
+	if sr.Success || sr.ErrorReason != payment.ReasonInvalidAmount {
+		t.Errorf("settlement past the payee's MaxInt64: %+v", sr)
+	}
+	if _, ok := sr.Extensions[payment.ExtReceipt]; ok {
+		t.Error("a refused settlement carried a signed receipt")
+	}
+	if after := moneyState(t, w.dir); after != before {
+		t.Errorf("the money tables changed.\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if got := balanceOf(t, w.srv, w.attacker.AID()); got != aghub.RegistrationGrant {
+		t.Errorf("payer balance = %d, want %d", got, aghub.RegistrationGrant)
+	}
+	w.readable(t, w.victim.AID(), "")
+	// Within range it settles.
+	auth = signedAuth(t, w.attacker, w.victim.AID(), 50, w.hubAID, "ov-sum-fits")
+	if _, sr := settleCall(t, w.srv, creditPayload(t, auth, w.victim.AID(), own),
+		requirementsFor(w.victim.AID(), 50, own)); !sr.Success {
+		t.Errorf("a settlement that fits: %+v", sr)
+	}
+}
+
+// Cross-hub, entry hub: the ledger hub moves exactly what the payer
+// signed, so its receipt for more is refused rather than credited to the
+// local payee and added to what the peer owes.
+func TestAPeerReceiptForMoreThanTheForwardedAuthorizationIsNotCleared(t *testing.T) {
+	w := newOverflowWorld(t)
+	peer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignPayer, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	net := payment.CreditNetwork(peer.AID())
+	auth := signedAuth(t, foreignPayer, w.victim.AID(), 50, peer.AID(), "ov-more")
+	id, err := auth.ID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := &payment.Receipt{AuthID: id, Payer: auth.Payer, PayTo: w.victim.AID(), Amount: 1 << 40,
+		Network: net, SettleAt: time.Now().UnixMilli()}
+	if err := rec.Sign(peer); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := rec.Marshal()
+	before := moneyState(t, w.dir)
+	out := w.store.ClearPeerSettlement(peer.AID(),
+		func(string) ([]identity.SignedEvent, error) { return peer.KEL(), nil },
+		payment.SettlementResponse{Success: true, Transaction: id, Network: net,
+			Extensions: map[string]any{payment.ExtReceipt: base64.StdEncoding.EncodeToString(raw)}},
+		auth, requirementsFor(w.victim.AID(), 50, net))
+	if out.Success || out.ErrorReason != payment.ReasonInvalidAmount {
+		t.Errorf("a receipt for 2^40 on an authorization of 50 cleared: %+v", out)
+	}
+	if _, ok := out.Extensions[payment.ExtReceipt]; !ok {
+		t.Error("the refusal does not carry the peer's receipt")
+	}
+	w.untouched(t, before)
+	if owed, _ := w.store.Owed(peer.AID()); owed != 0 {
+		t.Errorf("owed by peer = %d, want 0", owed)
+	}
+}
+
+// The operator's grant is refused before the issuance is recorded when
+// the balance could not hold it.
+func TestAGrantPastWhatALedgerHoldsIsRefused(t *testing.T) {
+	w := newOverflowWorld(t)
+	before := moneyState(t, w.dir)
+	if err := w.store.GrantCredit(w.victim.AID(), math.MaxInt64, "too much"); err == nil {
+		t.Error("a grant of 2^63-1 on top of 5100 was accepted")
+	}
+	w.untouched(t, before)
+	w.readable(t, w.victim.AID(), "")
+}

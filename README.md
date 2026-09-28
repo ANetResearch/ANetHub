@@ -45,7 +45,7 @@ CGO_ENABLED=0 go test  ./...
 
 ### 金额溢出核查（只读）
 
-`deploy/audit-amount-overflow.sql` 检查 hub 库里有没有 x402 金额溢出缺陷留下的痕迹：授权或收据金额 ≥ 2^63 时，旧代码把它转成负的 int64 反向记账（付款方加、收款方减；兑付凭空铸币；对端收据扣本地收款人）。修复（`internal/aghub/amount.go`：线上金额只接受 1..2^63-1，各入口与每处换算都经它）只挡住以后，不改已经写进库的数据。脚本列出以下几类异常行，并在第 9 节汇总受影响的 AID 及首次、末次出现时间：
+`deploy/audit-amount-overflow.sql` 检查 hub 库里有没有 x402 金额溢出缺陷留下的痕迹：授权或收据金额 ≥ 2^63 时，旧代码把它转成负的 int64 反向记账（付款方加、收款方减；兑付凭空铸币；对端收据扣本地收款人）。单笔金额都在范围内、但加上已有余额后超过 2^63-1 时（例如对端 hub 的两张 2^63-1 收据），SQLite 不报错，而是把余额存成 REAL，之后该账户读不出、`/x402/supply` 报 integer overflow。修复（`internal/aghub/amount.go`：线上金额只接受 1..2^63-1，各入口与每处换算都经它；余额、`hub_due`、`hub_owed` 的加减经 `addToRow`，结果超出 int64 时拒绝，什么都不动）只挡住以后，不改已经写进库的数据。脚本列出以下几类异常行，并在第 9 节汇总受影响的 AID 及首次、末次出现时间：
 
 - `credit_settled`、`credit_redemption`、`credit_cleared`、`hub_cleared` 中金额 ≤ 0、存成 REAL 或大于 9223372036854775807 的行；
 - `hub_owed` / `hub_due` 中的负值；

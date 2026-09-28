@@ -494,11 +494,18 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 	if bal < amt {
 		return fail(refuse(payment.ReasonInsufficientFunds, "has %d, needs %d", bal, auth.Amount))
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?, -?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits - ?`,
-		auth.Payer, amt, amt); err != nil {
-		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+	// Every balance below moves through addToRow, which refuses a sum
+	// the column cannot hold rather than letting SQLite store it as a
+	// REAL; a refusal rolls the settlement back like any other failure.
+	moved := func(err error) *Refusal {
+		var rf *Refusal
+		if errors.As(err, &rf) {
+			return rf
+		}
+		return refuse(payment.ReasonSettlementFailed, "%v", err)
+	}
+	if err := addToRow(tx, "credit_balance", "aid", "credits", auth.Payer, -amt); err != nil {
+		return fail(moved(err))
 	}
 	// Whether the payee banks here decides where the credit goes.
 	//
@@ -529,29 +536,20 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 		}
 	}
 	if local {
-		if _, err := tx.Exec(
-			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
-			auth.PayTo, amt, amt); err != nil {
-			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+		if err := addToRow(tx, "credit_balance", "aid", "credits", auth.PayTo, amt); err != nil {
+			return fail(moved(err))
 		}
 	} else {
-		if _, err := tx.Exec(
-			`INSERT INTO hub_due(payee_aid, amount) VALUES(?,?)
-			 ON CONFLICT(payee_aid) DO UPDATE SET amount = amount + ?`,
-			auth.PayTo, amt, amt); err != nil {
-			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+		if err := addToRow(tx, "hub_due", "payee_aid", "amount", auth.PayTo, amt); err != nil {
+			return fail(moved(err))
 		}
 		// The credit comes home to the hub's own row, which is the same
 		// movement a redemption makes: value left this ledger, so this
 		// hub's outstanding liability falls by it. Without this the payer
 		// was debited and nothing recorded the drop, so outstanding kept
 		// counting credit that was no longer on any account here.
-		if _, err := tx.Exec(
-			`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-			 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
-			hubAID, amt, amt); err != nil {
-			return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
+		if err := addToRow(tx, "credit_balance", "aid", "credits", hubAID, amt); err != nil {
+			return fail(moved(err))
 		}
 	}
 	// The ledger entries, in the same transaction as the balance move.
@@ -934,6 +932,14 @@ func (s *Store) ClearPeerSettlement(peerAID string,
 	case rec.Amount < want:
 		return withReceipt(refuse(payment.ReasonInvalidAmount,
 			"%s settled %d; the requirements ask for %d", peerAID, rec.Amount, want))
+	case rec.Amount != auth.Amount:
+		// The ledger hub moves exactly what the payer signed (settleAuth),
+		// and the authorization is here to compare with. A receipt for more
+		// credited the local payee, and what the peer owes us, with an
+		// amount nobody signed — up to 2^63-1 at a time, enough to push a
+		// balance past what the ledger can hold [redteam:si9].
+		return withReceipt(refuse(payment.ReasonInvalidAmount,
+			"%s settled %d; the authorization it was forwarded pays %d", peerAID, rec.Amount, auth.Amount))
 	}
 	kel, err := peerKEL(peerAID)
 	if err != nil {
@@ -1009,10 +1015,9 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 		}
 		return fmt.Errorf("recording the clearing of %s: %w", rec.AuthID, err)
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`,
-		rec.PayTo, amt, amt); err != nil {
+	// addToRow, as in settleAuth: a sum the column cannot hold is refused
+	// (invalid_amount) and the whole clearing rolls back.
+	if err := addToRow(tx, "credit_balance", "aid", "credits", rec.PayTo, amt); err != nil {
 		return err
 	}
 	// With its ledger entry, for the same reason settlement has one: a
@@ -1027,10 +1032,7 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	// The hub's own row falls by what it just created, because supply is
 	// counted off that row: crediting the payee without it left the ledger
 	// showing more credit on accounts than the hub had ever issued.
-	if _, err := tx.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?, -?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits - ?`,
-		s.hubKey.AID(), amt, amt); err != nil {
+	if err := addToRow(tx, "credit_balance", "aid", "credits", s.hubKey.AID(), -amt); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(
@@ -1042,10 +1044,7 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	// What the peer owes us, kept as a running total rather than netted
 	// into anyone's balance: it is a claim on another hub, not credit
 	// here, and the two must not be allowed to look alike.
-	if _, err := tx.Exec(
-		`INSERT INTO hub_owed(peer_aid, amount) VALUES(?,?)
-		 ON CONFLICT(peer_aid) DO UPDATE SET amount = amount + ?`,
-		peerAID, amt, amt); err != nil {
+	if err := addToRow(tx, "hub_owed", "peer_aid", "amount", peerAID, amt); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1274,6 +1273,15 @@ func (s *Store) GrantOnRegistration(aid string) error {
 func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
 	if amount <= 0 {
 		return fmt.Errorf("a grant must be positive, got %d", amount)
+	}
+	// Checked before anything is written: Credit records the issuance
+	// first, and a balance SQLite could only hold as a REAL would leave the
+	// account unreadable (addToRow) [redteam:si9].
+	if bal, err := s.Balance(aid); err != nil {
+		return err
+	} else if bal > math.MaxInt64-amount {
+		return fmt.Errorf("%s holds %d; a grant of %d would take it past %d, the most this ledger can hold",
+			aid, bal, amount, int64(math.MaxInt64))
 	}
 	if reason == "" {
 		reason = "operator grant"
