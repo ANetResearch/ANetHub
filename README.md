@@ -228,8 +228,9 @@ the sum with an existing balance exceeded 2^63−1 (for example two receipts of 
 SQLite raised no error and stored the balance as REAL; that account could then not be read, and
 `/x402/supply` reported an integer overflow. The fix (`internal/aghub/amount.go`: amounts on the wire are
 accepted only in 1..2^63−1, and every entry point and conversion goes through it; additions to balances,
-`hub_due` and `hub_owed` go through `addToRow`, which refuses a result outside int64 and changes nothing)
-prevents new cases; it does not change rows already in the database. The script lists these anomalous
+`hub_due` and `hub_owed` go through `addToRow`, which refuses a result outside int64 and changes nothing;
+credit is created only while the hub's total issuance stays within 2^63−1, `issuanceRoom`, so
+`/x402/supply` cannot overflow either) prevents new cases; it does not change rows already in the database. The script lists these anomalous
 rows, and its section 9 sums up the affected AIDs with first and last occurrence:
 
 - rows of `credit_settled`, `credit_redemption`, `credit_cleared` and `hub_cleared` with an amount ≤ 0,
