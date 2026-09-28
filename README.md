@@ -107,7 +107,9 @@ removed or modified. Questions and commercial licensing: hi@anet0.com.
 This repository stays closed-source (see 闭源边界 above); the license governs
 whoever receives the source. Hub code that Agent Network Research submits to
 the A2A project (for example the relay-binding endpoints) is contributed, as
-submitted, under Apache-2.0 (LICENSE Section 3).
+submitted, under Apache-2.0 (LICENSE, condition 3). This license applies from
+anet-hub 0.2.0 (hub wire 2); copies received earlier stay under the ANet
+Community License 1.0 they came with.
 
 ## Modules (anet4)
 
