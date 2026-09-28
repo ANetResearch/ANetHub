@@ -1039,6 +1039,10 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("settlement receipt from %s: %w", peerAID, err)
 	}
+	// With the grants: issuanceRoom below and the credit are one step
+	// against them too (issueMu).
+	s.issueMu.Lock()
+	defer s.issueMu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1307,6 +1311,8 @@ const RegistrationGrant = 100
 // agent re-registering is the same agent, and paying out again for a
 // changed capability list would make re-registration a faucet.
 func (s *Store) GrantOnRegistration(aid string) error {
+	s.issueMu.Lock()
+	defer s.issueMu.Unlock()
 	var entries int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(1) FROM credit_entry WHERE aid=? AND reason=?`,
@@ -1333,6 +1339,8 @@ func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
 	if amount <= 0 {
 		return fmt.Errorf("a grant must be positive, got %d", amount)
 	}
+	s.issueMu.Lock()
+	defer s.issueMu.Unlock()
 	// Checked before anything is written: Credit records the issuance
 	// first, and a balance SQLite could only hold as a REAL would leave the
 	// account unreadable (addToRow) [redteam:si9].
