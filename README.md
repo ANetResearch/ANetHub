@@ -87,11 +87,6 @@ sqlite3 -readonly /tmp/hub-audit.db < deploy/audit-amount-overflow.sql > /tmp/hu
 
 官方 agent 在运营面只登记 `id/aid/hub/caps`（`<--data>/officials.json` 或 `POST /admin/api/official`，格式见 `deploy/officials.example.json`）；含 runtime/monitor/ops/datasets 的清单被拒绝。官方 agent 的运维不经 hub 主机。
 
-## 闭源边界
-
-Hub 服务端（本仓）保持闭源；公开的客户端/协议仓是 [ANetResearch/ANet](https://github.com/ANetResearch/ANet)（wire types 见其 `internal/hubapi`）。
-
-
 ## License
 
 ANet Open Source License, a modified Apache License 2.0 (see
@@ -104,8 +99,9 @@ copyright notices in the hub web UI (`webui/`, `internal/aghub/web/`), the
 operator console (`internal/admin/web/`) and `anet-hub`'s output must not be
 removed or modified. Questions and commercial licensing: hi@anet0.com.
 
-This repository stays closed-source (see 闭源边界 above); the license governs
-whoever receives the source. Hub code that Agent Network Research submits to
+This repository is open source under the ANet Open Source License, like the
+client and protocol repository [ANetResearch/ANet](https://github.com/ANetResearch/ANet)
+(wire types in its `internal/hubapi`) and ANetCore. Hub code that Agent Network Research submits to
 the A2A project (for example the relay-binding endpoints) is contributed, as
 submitted, under Apache-2.0 (LICENSE, condition 3). This license applies from
 anet-hub 0.2.0 (hub wire 2); copies received earlier stay under the ANet
