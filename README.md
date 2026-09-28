@@ -159,12 +159,12 @@ operator console (`internal/admin/web/`) and the output of `anet-hub` stay in pl
 - **A running hub** says what it is:
 
   ```sh
-  curl -s  https://hub.example.org/healthz        # {"built_at":"…","commit":"…","status":"ok","version":"0.2.0"}
+  curl -s  https://hub.example.org/healthz        # {"built_at":"…","commit":"…","status":"ok","version":"0.2.1"}
   curl -sI https://hub.example.org/healthz | grep -i '^x-anet-wire' # X-Anet-Wire: 2
   curl -s  https://hub.example.org/hub/identity   # the hub's AID and key event log
   ```
 
-  `anet-hub -version` prints `anet-hub 0.2.0 (wire 2, nodes need anet >= 0.2.0; commit …, built …)`;
+  `anet-hub -version` prints `anet-hub 0.2.1 (wire 2, nodes need anet >= 0.2.0; commit …, built …)`;
   build from a commit you have checked, and compare the commit a deployed hub reports.
 - **anet releases**, which the connecting nodes install, are signed. `install.sh` and `anet update`
   verify the signed manifest automatically; to check it by hand, with the release key from ANet's
@@ -180,6 +180,14 @@ operator console (`internal/admin/web/`) and the output of `anet-hub` stay in pl
 
   Key fingerprint `SHA256:/4FMm/jgZcBII3z3O3r81Y8SxFfugdLRu3zj2gnclD4`. `release.json` names the sha256 of
   every release asset.
+
+## Version 0.2.1
+
+0.2.1 is a patch of 0.2.0 on the same wire, released with anet 0.2.1 (ANet docs/RELEASE-NOTES-0.2.1.md): `hub.db`
+transactions take the write lock when they begin, so a relay write no longer fails with "database is locked"
+while nodes poll, and the federation dedupe window is pruned through an index on its timestamp (created at the
+first start). Nodes of anet 0.2.0 and 0.2.1 both work with it, and a 0.2.0 hub works with both; upgrade in any
+order.
 
 ## Version 0.2.0 = hub wire 2
 
