@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily hub.db maintenance at 04:30 (deploy/hub-db-roll.sh)
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
