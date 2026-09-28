@@ -677,7 +677,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 			// mint another invite; they cannot un-admit quietly.
 			writeJSON(w, http.StatusForbidden, map[string]string{
 				"error": err.Error(),
-				"hint":  "ask this hub's operator for an invite, then register with --token",
+				"hint":  "ask this hub's operator for an invite, then register with it in ANET_INVITE (or --token-file)",
 			})
 			return
 		}
