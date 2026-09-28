@@ -239,6 +239,11 @@ type peerKELFetch struct {
 	refused time.Time  // zero, or when the peer last served a KEL that does not prove its AID
 }
 
+// testHookPeerKELAsked, when a test sets it, is called by each use of a
+// peer's KEL that found none pinned, once it has noted when it asked and
+// before it waits for the fetch in progress, if any.
+var testHookPeerKELAsked func()
+
 // peerKELRetry is how long after the peer served a KEL that does not prove
 // its AID the next fetch waits.
 const peerKELRetry = time.Minute
@@ -373,6 +378,9 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	}
 	s.kelFetchesMu.Unlock()
 	asked := time.Now()
+	if testHookPeerKELAsked != nil {
+		testHookPeerKELAsked()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// Pinned while this call waited for another's fetch.
