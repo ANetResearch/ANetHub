@@ -13,10 +13,26 @@ hub 与运营面都不持有任务内容（A2A-DESIGN §0 决定 2、§9）：�
 
 公网面与运营面**进程隔离**：admin 崩溃/升级不影响公网 hub；公网行为零改动。
 
+## 版本:0.2.0 = hub wire 2
+
+`anet-hub -version` 打印 `anet-hub 0.2.0 (wire 2, nodes need anet >= 0.2.0; …)`。0.2.0 是第一个说 wire 2 的
+hub,与 anet 0.2.0 同批发布,两者版本号相同(`internal/version`)。wire 2 是破坏性变更(A2A-DESIGN §3.7、§18):
+
+- 中继只收发封装信封(daemon 之间端到端加密),`/relay/send` 以 relayauth v2 认证发送方,hub 不存发送方;
+  所有签名端点改用 relayauth v2 头。
+- 没有向后兼容:0.1.x 的 daemon 对 `/relay/*` 得到 **426**(`requires anet >= 0.2.0`),签名写入在鉴权处被拒;
+  0.2.0 的 daemon 拒绝 wire 1 的 hub。所以 hub 与其上的节点要同批升级。
+- **首次以 0.2.0 启动会不可逆地迁移 hub.db**:wire-1 中继表整表丢弃(未投递与已投递的明文行都不保留,计数记入
+  `hub_meta.relay_v2_*`),评价的内容列与 `completed_task`、`agent.guest_quota` 删除,随后 VACUUM 与截断 WAL。
+  需要约等于库大小的空闲磁盘,迁移期间持独占锁;升级前先停服务、整库备份。完整的升级、回滚与清理步骤见
+  ANet 仓库 `docs/notes/0027-发布准备-v0.2.0与G阶段操作单.md`。
+- 前置 nginx 的 `client_max_body_size` 须为 129m,hub 虚拟主机不留访问日志(`deploy/nginx-hub.conf`)。
+- 任务板改为加法 tag(`-tags taskboard`),默认构建不含;访客模式、中继与官方 agent 数据采集、评价内容均已删除。
+
 ## 布局
 
 ```
-cmd/anet-hub            公网 Hub（与线上 0.1.5 行为一致，仅模块路径重命名）
+cmd/anet-hub            公网 Hub（0.2.0，wire 2）
 cmd/anet-hub-admin      运营面入口
 internal/aghub          Hub 存储 + HTTP + 内嵌公开 SPA (web/index.html)
 internal/admin          运营面全部逻辑（见 docs/ADMIN.md）

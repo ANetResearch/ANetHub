@@ -10,7 +10,15 @@ package version
 // That is fine for "which release is this" and useless for "is the thing
 // I just deployed the thing that is running", which is the question that
 // actually comes up.
-const V = "0.1.7"
+//
+// 0.2.0 is the first hub release that speaks hub wire 2 (aghub.WireVersion):
+// the relay carries only sealed envelopes, every signed endpoint uses
+// relayauth v2, and nodes older than anet 0.2.0 are refused with 426
+// (A2A-DESIGN §3.7, §18). It ships together with anet 0.2.0, which is why
+// the two numbers are the same. The first start of a 0.2.0 hub on a
+// wire-1 database migrates it irreversibly: see ANet docs/notes/0027 for
+// the upgrade procedure.
+const V = "0.2.0"
 
 // Commit and BuiltAt are stamped at build time:
 //
