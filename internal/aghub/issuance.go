@@ -45,8 +45,8 @@ import (
 
 // Issuance event types on the chain.
 const (
-	// EvCreditIssued records credit created: a registration grant or an
-	// operator grant.
+	// EvCreditIssued records credit created: an operator's grant, an
+	// admission grant, a trial credit or a peer hub's clearing.
 	EvCreditIssued = "anet.credit.issued"
 	// EvCreditRetired records credit destroyed by redemption.
 	EvCreditRetired = "anet.credit.retired"
@@ -107,8 +107,26 @@ func (s *Store) appendIssuance(kind, aid string, amount int64, reason string) er
 	}
 	s.issuance.mu.Lock()
 	defer s.issuance.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.appendIssuanceTx(tx, kind, aid, amount, reason); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
-	prevID, seq, have, err := s.issuanceHeadLocked()
+// appendIssuanceTx is appendIssuance inside tx: the head is read and the
+// record written in the same transaction, which is what keeps two appends
+// from taking one sequence number (an IMMEDIATE transaction holds the
+// database's write lock from its start).
+func (s *Store) appendIssuanceTx(tx *sql.Tx, kind, aid string, amount int64, reason string) error {
+	if s.hubKey == nil {
+		return fmt.Errorf("hub: no signing key, so supply changes cannot be recorded")
+	}
+	prevID, seq, have, err := issuanceHead(tx)
 	if err != nil {
 		return err
 	}
@@ -135,7 +153,7 @@ func (s *Store) appendIssuance(kind, aid string, amount int64, reason string) er
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
+	_, err = tx.Exec(
 		`INSERT INTO credit_issuance(seq, id, prev_id, kind, aid, amount, reason, at, record)
 		 VALUES(?,?,?,?,?,?,?,?,?)`,
 		rec.Seq, rec.ID, rec.PrevID, kind, aid, amount, reason, rec.Timestamp, raw)
@@ -151,9 +169,14 @@ func (s *Store) appendIssuance(kind, aid string, amount int64, reason string) er
 //
 // Caller holds the chain mutex.
 func (s *Store) issuanceHeadLocked() (id string, seq uint64, have bool, err error) {
+	return issuanceHead(s.db)
+}
+
+// issuanceHead reads the head through q (the database or a transaction).
+func issuanceHead(q rowQuerier) (id string, seq uint64, have bool, err error) {
 	var idv sql.NullString
 	var seqv sql.NullInt64
-	err = s.db.QueryRow(`SELECT id, seq FROM credit_issuance ORDER BY seq DESC LIMIT 1`).
+	err = q.QueryRow(`SELECT id, seq FROM credit_issuance ORDER BY seq DESC LIMIT 1`).
 		Scan(&idv, &seqv)
 	if err == sql.ErrNoRows {
 		return ael.GenesisPrev(), 0, false, nil

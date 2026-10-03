@@ -121,34 +121,36 @@ func TestOneRegisteredAgentFillingTheReplayCacheStopsOnlyItself(t *testing.T) {
 
 // [redteam:F4] Review of the fix: the replay cache is shared out by signer,
 // and a signer is whoever passes the signature check, which /register makes
-// against the KEL it is handed. On a hub that admits by invitation a
-// stranger without an invite passed it with a fresh AID on every attempt,
-// was then refused 403, and left a signer in the cache each time: signers
-// the stranger could never have joined as, each lowering everyone's even
-// share. A newcomer without a usable invite is now refused before its
-// signature is checked, and leaves nothing in the cache.
+// against the KEL it is handed. A stranger the hub would not take passed it
+// with a fresh AID on every attempt, was then refused 403, and left a signer
+// in the cache each time: signers the stranger could never have joined as,
+// each lowering everyone's even share. The admission gate (PAY-A1 step 4)
+// refuses a newcomer the hub would not take before its signature is
+// checked: on a closed hub one that is not on the list, on an open hub one
+// without a good proof of work. Neither leaves anything in the cache.
 func TestAStrangerAtAClosedHubLeavesNothingInTheReplayCache(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if err := store.SetInviteRequired(true); err != nil {
-		t.Fatal(err)
-	}
 	id, err := hubid.LoadOrIncept(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.SetHubKey(id.Ctrl)
 	s := NewServer(store)
 	s.SetHubAID(id.AID)
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
-	register := func(c *identity.Controller, invite, ip string) (int, string) {
+	register := func(c *identity.Controller, extra map[string]any, ip string) (int, string) {
 		kel, _ := identity.MarshalKEL(c.KEL())
-		raw, _ := json.Marshal(map[string]any{"aid": c.AID(), "name": "n",
-			"kel": base64.StdEncoding.EncodeToString(kel), "invite": invite})
+		body := map[string]any{"aid": c.AID(), "name": "n", "kel": base64.RawURLEncoding.EncodeToString(kel)}
+		for k, v := range extra {
+			body[k] = v
+		}
+		raw, _ := json.Marshal(body)
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/register", bytes.NewReader(raw))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set(wireVersionHeader, strconv.Itoa(wireVersion))
@@ -167,31 +169,37 @@ func TestAStrangerAtAClosedHubLeavesNothingInTheReplayCache(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	for i := 0; i < 20; i++ {
-		c, err := identity.Incept()
-		if err != nil {
+	badPow := map[string]any{"pow": map[string]any{
+		"seed": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), "nonce": "AA"}}
+	for _, mode := range []string{AdmissionClosed, AdmissionOpen} {
+		if err := store.SetAdmissionMode(mode); err != nil {
 			t.Fatal(err)
 		}
-		for _, invite := range []string{"", "not-an-invite"} {
-			if code, b := register(c, invite, "198.51.100."+strconv.Itoa(i)); code != http.StatusForbidden {
-				t.Fatalf("a stranger registering with invite %q: %d %s", invite, code, b)
+		for i := 0; i < 20; i++ {
+			c, err := identity.Incept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, extra := range []map[string]any{nil, badPow} {
+				if code, b := register(c, extra, "198.51.100."+strconv.Itoa(i)); code != http.StatusForbidden {
+					t.Fatalf("%s hub, a stranger registering with %v: %d %s", mode, extra, code, b)
+				}
 			}
 		}
 	}
 	if entries, signers := s.replay.size(); entries != 0 || signers != 0 {
-		t.Fatalf("40 refused registrations left %d entries of %d signers in the replay cache", entries, signers)
+		t.Fatalf("80 refused registrations left %d entries of %d signers in the replay cache", entries, signers)
 	}
 
-	// An invited newcomer registers, and its signature is kept.
-	token, _, err := store.NewInvite("t", 1, time.Hour)
-	if err != nil {
+	// An admitted newcomer registers, and its signature is kept.
+	c, _ := identity.Incept()
+	if _, err := store.Admit(c.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
-	c, _ := identity.Incept()
-	if code, b := register(c, token, "203.0.113.1"); code != http.StatusOK {
-		t.Fatalf("an invited newcomer: %d %s", code, b)
+	if code, b := register(c, nil, "203.0.113.1"); code != http.StatusOK {
+		t.Fatalf("an admitted newcomer: %d %s", code, b)
 	}
 	if entries, signers := s.replay.size(); entries != 1 || signers != 1 {
-		t.Fatalf("the invited registration left %d entries of %d signers, want 1 and 1", entries, signers)
+		t.Fatalf("the admitted registration left %d entries of %d signers, want 1 and 1", entries, signers)
 	}
 }

@@ -384,9 +384,11 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"ids"}},
 		{"RelayAckResponse", aghub.RelayAckResponse{}, []string{"acked"}},
 		{"RegisterRequest", aghub.RegisterRequest{}, []string{
-			"a2a_card", "aid", "caps", "card", "enc_keys", "invite", "kel", "name", "pricing", "readme", "summary"}},
+			"a2a_card", "aid", "caps", "card", "check_only", "enc_keys", "kel", "name", "pow", "prev_seq", "pricing",
+			"readme", "summary"}},
 		{"RegisterResponse", aghub.RegisterResponse{}, []string{
-			"aid", "card_error", "card_status", "keys_error", "keys_status", "status"}},
+			"aid", "card_error", "card_status", "keys_error", "keys_status", "probation_until", "status", "trial"}},
+		{"CheckOnlyResponse", aghub.CheckOnlyResponse{}, []string{"status"}},
 		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "pricing", "readme", "summary"}},
 		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keyset"}},
 		// POST /agents/keys:lookup, the daemon's recipient lookup [redteam:F3].

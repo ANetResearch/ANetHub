@@ -195,6 +195,9 @@ func TestAKeysLookupDoesNotNameTheRecipientInTheRequestLine(t *testing.T) {
 		c  *identity.Controller
 		ip string
 	}{{alice, ipAlice}, {bob, ipBob}} {
+		if _, err := store.Admit(p.c.AID(), 0, "", false); err != nil {
+			t.Fatal(err)
+		}
 		if code, b := as(p.ip, signedRequest(t, srv, p.c, relayauth.ActionRegister, http.MethodPost,
 			"/register", registerBody(t, p.c, "n", nil))); code != 200 {
 			t.Fatalf("register: %d %s", code, b)
@@ -290,6 +293,7 @@ func TestTheCardAndKELLookupsDoNotNameTheAgentInTheRequestLine(t *testing.T) {
 	srv := httptest.NewServer(acc.wrap(s.Handler()))
 	t.Cleanup(func() { srv.Close(); store.Close() })
 	testHubAID.Store(srv.URL, id.AID)
+	testHubStores.Store(srv.URL, store)
 
 	bob, _ := twoAgents(t)
 	registerA2A(t, srv, bob, "Bob", nil, signA2A(t, bob, a2aCardFor(bob, 1)))

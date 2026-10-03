@@ -243,6 +243,7 @@ func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 	t.Cleanup(srv.Close)
 	// Registration signs for this hub's AID (relayauth v2).
 	testHubAID.Store(srv.URL, id.AID)
+	testHubStores.Store(srv.URL, store)
 
 	for _, spec := range []struct {
 		name string

@@ -162,7 +162,7 @@ func TestAnAbandonedAgentLeavesTheListingAndNothingElse(t *testing.T) {
 		t.Errorf("its reviews went with it: %+v %v", rep.Local, err)
 	}
 	bal, err := store.Balance(gone.AID())
-	if err != nil || bal != 400+int64(aghub.RegistrationGrant) {
+	if err != nil || bal != 400+int64(testRegistrationFunds) {
 		t.Errorf("its balance went with it: %d %v", bal, err)
 	}
 	// And one poll brings it back.

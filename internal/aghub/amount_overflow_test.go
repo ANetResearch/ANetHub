@@ -144,10 +144,10 @@ func eachAmount(t *testing.T, amounts []uint64, body func(t *testing.T, w overfl
 // failure says who gained and who lost, then the full table dump.
 func (w overflowWorld) untouched(t *testing.T, before string) {
 	t.Helper()
-	if got, want := balanceOf(t, w.srv, w.attacker.AID()), int64(aghub.RegistrationGrant); got != want {
+	if got, want := balanceOf(t, w.srv, w.attacker.AID()), int64(testRegistrationFunds); got != want {
 		t.Errorf("attacker balance = %d, want %d", got, want)
 	}
-	if got, want := balanceOf(t, w.srv, w.victim.AID()), int64(aghub.RegistrationGrant+victimFunds); got != want {
+	if got, want := balanceOf(t, w.srv, w.victim.AID()), int64(testRegistrationFunds+victimFunds); got != want {
 		t.Errorf("victim balance = %d, want %d", got, want)
 	}
 	if after := moneyState(t, w.dir); after != before {
@@ -748,8 +748,8 @@ func TestASettlementThatWouldOverflowThePayeeMovesNothing(t *testing.T) {
 	if after := moneyState(t, w.dir); after != before {
 		t.Errorf("the money tables changed.\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-	if got := balanceOf(t, w.srv, w.attacker.AID()); got != aghub.RegistrationGrant {
-		t.Errorf("payer balance = %d, want %d", got, aghub.RegistrationGrant)
+	if got := balanceOf(t, w.srv, w.attacker.AID()); got != testRegistrationFunds {
+		t.Errorf("payer balance = %d, want %d", got, testRegistrationFunds)
 	}
 	w.readable(t, w.victim.AID(), "")
 	// Within range it settles.

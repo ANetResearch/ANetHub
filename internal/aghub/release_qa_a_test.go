@@ -58,7 +58,7 @@ func registerWithProfile(t *testing.T, srv *httptest.Server, c *identity.Control
 	t.Helper()
 	body := registerBody(t, c, name, []string{})
 	body["readme"] = readme
-	return signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	return registerFunded(t, srv, c, body)
 }
 
 // getAgents runs one directory query and returns the agents in the order
@@ -184,7 +184,7 @@ func TestAnOverlongCapabilityIDIsRefused(t *testing.T) {
 	}
 	// The refusal has to say which bound was crossed; "400" alone sends
 	// an operator to read hub source.
-	if !strings.Contains(string(body), "capability id") {
+	if !strings.Contains(strings.ToLower(string(body)), "capability id") {
 		t.Errorf("the refusal does not name the reason: %s", body)
 	}
 	// Refused means nothing was written — not written and then rejected.
@@ -295,20 +295,22 @@ func TestABlankCapFilterIsRefusedRatherThanIgnored(t *testing.T) {
 
 // --- admission/F-3: a refused registration is observable ---
 
-// The admission gate's audit surface was its success side only: invite_use
-// rows and the redeemers in -invite-list. A refusal left no log line, no
-// row and nothing in -invite-list, so an operator running a closed hub
-// could not tell whether anybody had been turned away.
+// A refusal left no log line and no row, so an operator running a closed
+// hub could not tell whether anybody had been turned away. A newcomer the
+// hub would not take is logged with its AID, which is what the operator
+// needs to admit it.
 func TestARefusedRegistrationLeavesARecord(t *testing.T) {
 	logs := captureLog(t)
 	srv, store := newHubWithStore(t)
-	if err := store.SetInviteRequired(true); err != nil {
-		t.Fatal(err)
-	}
 	c := mustIncept(t)
 
-	if code, body := registerWithInvite(t, srv, c, "Uninvited", ""); code != http.StatusForbidden {
-		t.Fatalf("an uninvited agent must be refused, got %d %s", code, body)
+	code, body := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
+		registerBody(t, c, "Unadmitted", nil))
+	if code != http.StatusForbidden {
+		t.Fatalf("an agent not on the list of a closed hub must be refused, got %d %s", code, body)
+	}
+	if store.KnowsAgent(c.AID()) {
+		t.Fatal("a refused agent was registered anyway")
 	}
 	got := logs.String()
 	if !strings.Contains(got, c.AID()) {
@@ -317,8 +319,8 @@ func TestARefusedRegistrationLeavesARecord(t *testing.T) {
 	if !strings.Contains(got, "refused") {
 		t.Fatalf("the refusal is not identifiable as one: %q", got)
 	}
-	// And it says why, so "wrong token" and "hub is closed" stay apart.
-	if !strings.Contains(got, "invite") {
+	// And it says why, and what the operator can do.
+	if !strings.Contains(got, "admission list") || !strings.Contains(got, "anet-hub admit "+c.AID()) {
 		t.Fatalf("the refusal does not say why: %q", got)
 	}
 }

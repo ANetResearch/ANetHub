@@ -18,7 +18,6 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -122,7 +121,7 @@ func registerA2A(t *testing.T, srv *httptest.Server, c *identity.Controller, nam
 	if card != nil {
 		body["a2a_card"] = card
 	}
-	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	code, b := registerFunded(t, srv, c, body)
 	if code != http.StatusOK {
 		t.Fatalf("register %s: %d %s", name, code, b)
 	}

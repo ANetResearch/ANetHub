@@ -1,0 +1,35 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /register on a closed hub with a sign-up window of one place (hub-payment-privacy PAY-A1 step 4c): check_only answers open while there is room; a newcomer with a good proof of work takes the place and registers on probation; the next newcomer finds the window full, 403 admission_required, proof of work or not.",
+  "setup": "register_window",
+  "cases": [
+    {
+      "name": "check_only answers open while the window has room",
+      "cite": "PAY-A1 step 4c",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger2"},
+        "json": {"aid": "${stranger2}", "kel": "${stranger2_kel}", "check_only": true}},
+      "response": {"status": 200, "body": {"status": "open"}}
+    },
+    {
+      "name": "the window asks for a proof of work",
+      "cite": "PAY-A1 step 4c",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}"}},
+      "response": {"status": 403, "body_has": {"reason": "pow_required", "challenge": {"bits": 22}}}
+    },
+    {
+      "name": "a good proof of work takes the place",
+      "cite": "PAY-A1 step 4c, step 10",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "pow": {"seed": "${pow_seed}", "nonce": "${stranger_nonce}"}}},
+      "response": {"status": 200, "body_has": {"aid": "${stranger}", "status": "registered", "trial": "pending"}}
+    },
+    {
+      "name": "the full window is admission_required",
+      "cite": "PAY-A1 step 4d",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger2"},
+        "json": {"aid": "${stranger2}", "kel": "${stranger2_kel}", "pow": {"seed": "${pow_seed}", "nonce": "${stranger2_nonce}"}}},
+      "response": {"status": 403, "body_has": {"reason": "admission_required", "aid": "${stranger2}"}}
+    }
+  ]
+}

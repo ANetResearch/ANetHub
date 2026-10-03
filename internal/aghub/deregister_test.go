@@ -12,8 +12,6 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
-
-	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 func leave(t *testing.T, srv *httptest.Server, c *identity.Controller) (int, []byte) {
@@ -172,7 +170,7 @@ func TestLeavingDoesNotEraseWhatHappened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bal != 250+int64(aghub.RegistrationGrant) {
+	if bal != 250+int64(testRegistrationFunds) {
 		t.Errorf("leaving moved the balance: %d", bal)
 	}
 }

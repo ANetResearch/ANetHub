@@ -164,13 +164,17 @@ func (f *fz) registration(tb testing.TB, c *identity.Controller, name string, ca
 	}
 	return map[string]any{
 		"aid": c.AID(), "name": name, "caps": caps,
-		"kel":  base64.StdEncoding.EncodeToString(kel),
+		"kel":  base64.RawURLEncoding.EncodeToString(kel),
 		"card": fzADPCard(tb, c, name, caps),
 	}
 }
 
-// register posts raw to /register signed as c.
+// register posts raw to /register signed as c, after the operator admitted
+// c (a new hub admits only its list; the admission gate has its own tests).
 func (f *fz) register(c *identity.Controller, raw []byte) *httptest.ResponseRecorder {
+	if _, err := f.store.Admit(c.AID(), 0, "", false); err != nil {
+		panic(err)
+	}
 	return f.signedDo(c, relayauth.ActionRegister, http.MethodPost, "/register", "", raw)
 }
 

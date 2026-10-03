@@ -1,0 +1,137 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /register on a closed hub (hub-payment-privacy PAY-A1, §2.2; core §2.12.2): the one order of its checks. A member \"invite\" is 400 invite_removed before any other unknown member; another unknown member, a missing kel or a malformed pow is 400 bad_request; X-ANet-AID other than aid is 401; a newcomer not on the list is 403 admission_required naming its AID, with or without check_only or a proof of work; an AID on the list or registered answers check_only with admitted and nothing is written; a listed AID registers; a key history not in base64url, of another agent, older than or forking from the one held is 400 kel_invalid, 409 kel_rollback, 409 kel_fork; a signature for another action is 401.",
+  "setup": "register",
+  "cases": [
+    {
+      "name": "an invite member is invite_removed",
+      "cite": "PAY-A1 step 2, LEC HN-5",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}", "kel": "${listed_kel}", "invite": "anything"}},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "invite_removed", "error": "Hubs no longer use invites; register without one and send the admit command to the operator."}}
+    },
+    {
+      "name": "invite_removed comes before another unknown member",
+      "cite": "PAY-A1 step 2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}", "zz_unknown": 1, "kel": "${listed_kel}", "invite": ""}},
+      "response": {"status": 400, "body_has": {"reason": "invite_removed"}}
+    },
+    {
+      "name": "invite_removed comes before the signature",
+      "cite": "PAY-A1 step 2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "invite": "anything"}},
+      "response": {"status": 400, "body_has": {"reason": "invite_removed"}}
+    },
+    {
+      "name": "another unknown member is bad_request",
+      "cite": "PAY-A1 step 2, CORE-E7",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}", "kel": "${listed_kel}", "zz_unknown": 1}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "no kel is bad_request",
+      "cite": "PAY-A1 step 3",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a pow of the wrong shape is bad_request",
+      "cite": "PAY-A1 step 3, §2.2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "pow": {"seed": "AAAA", "nonce": "AA"}}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a signer other than the aid is unauthorized",
+      "cite": "PAY-A1 step 3",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${listed}", "kel": "${listed_kel}"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "a newcomer not on the list is admission_required",
+      "cite": "PAY-A1 step 4d, §5.5",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}"}},
+      "response": {"status": 403, "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "admission_required", "error": "This hub admits AIDs one by one; ask its operator to run: anet-hub admit <AID>.", "aid": "${stranger}"}}
+    },
+    {
+      "name": "check_only for a newcomer not on the list is admission_required",
+      "cite": "§2.2, LEC HN-2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "check_only": true}},
+      "response": {"status": 403, "body_has": {"reason": "admission_required", "aid": "${stranger}"}}
+    },
+    {
+      "name": "a proof of work does not open a closed hub",
+      "cite": "PAY-A1 step 4d",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "pow": {"seed": "${bogus_seed}", "nonce": "AAAA"}}},
+      "response": {"status": 403, "body_has": {"reason": "admission_required"}}
+    },
+    {
+      "name": "check_only for an AID on the list is admitted",
+      "cite": "§2.2, PAY-A1 step 8",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}", "kel": "${listed_kel}", "check_only": true}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body": {"status": "admitted"}}
+    },
+    {
+      "name": "check_only for a registered AID is admitted",
+      "cite": "§2.2, PAY-A1 step 8",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}", "check_only": true}},
+      "response": {"status": 200, "body": {"status": "admitted"}}
+    },
+    {
+      "name": "an AID on the list registers",
+      "cite": "PAY-A1 step 4a, step 10",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}", "kel": "${listed_kel}", "name": "Listed"}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"aid": "${listed}", "status": "registered", "keys_status": "absent"}}
+    },
+    {
+      "name": "a key history in padded base64 is kel_invalid",
+      "cite": "PAY-A1 step 5, core G2, CORE-E5",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel_std}"}},
+      "response": {"status": 400, "body_has": {"reason": "kel_invalid"}}
+    },
+    {
+      "name": "another agent's key history is kel_invalid",
+      "cite": "PAY-A1 step 5",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${listed_kel}"}},
+      "response": {"status": 400, "body_has": {"reason": "kel_invalid"}}
+    },
+    {
+      "name": "a signature for another action is unauthorized",
+      "cite": "PAY-A1 step 5",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "an older key history is kel_rollback",
+      "cite": "PAY-A1 step 6",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "rotor_old"},
+        "json": {"aid": "${rotor}", "kel": "${rotor_old_kel}"}},
+      "response": {"status": 409, "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "kel_rollback", "error": "The key history is older than the one this hub holds for this AID; send the full, current history."}}
+    },
+    {
+      "name": "a forked key history is kel_fork",
+      "cite": "PAY-A1 step 6",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "rotor_fork"},
+        "json": {"aid": "${rotor}", "kel": "${rotor_fork_kel}"}},
+      "response": {"status": 409, "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "kel_fork", "error": "The key history conflicts with the one this hub holds for this AID; the identity has diverged, so retrying will not help."}}
+    }
+  ]
+}

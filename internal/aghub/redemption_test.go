@@ -53,7 +53,7 @@ func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 	}
 
 	// The balance actually fell.
-	if got := balanceOf(t, srv, agent.AID()); got != int64(400+aghub.RegistrationGrant-300) {
+	if got := balanceOf(t, srv, agent.AID()); got != int64(400+testRegistrationFunds-300) {
 		t.Errorf("balance = %d", got)
 	}
 
@@ -138,7 +138,7 @@ func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 		"paymentPayload": json.RawMessage(mustPayload(t, thief, opt, "redeem:theft")),
 		"reference":      "theft",
 	})
-	if got := balanceOf(t, srv, agent.AID()); got != int64(400+aghub.RegistrationGrant) {
+	if got := balanceOf(t, srv, agent.AID()); got != int64(400+testRegistrationFunds) {
 		t.Errorf("somebody else's redemption moved this agent's credit: %d (code %d)", got, code)
 	}
 }
@@ -316,7 +316,7 @@ func TestAnOperatorGrantIsIssuedOnTheBooks(t *testing.T) {
 	if err := store.GrantCredit(agent.AID(), 500, "operator grant"); err != nil {
 		t.Fatal(err)
 	}
-	if bal, _ := store.Balance(agent.AID()); bal != 500+int64(aghub.RegistrationGrant) {
+	if bal, _ := store.Balance(agent.AID()); bal != 500+int64(testRegistrationFunds) {
 		t.Errorf("balance = %d after a 500 grant", bal)
 	}
 	after := supplyOf(t, srv)
@@ -521,7 +521,7 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bal != 400+int64(aghub.RegistrationGrant) {
+	if bal != 400+int64(testRegistrationFunds) {
 		t.Errorf("the discharge moved a user's balance: %d", bal)
 	}
 }
@@ -572,7 +572,7 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	}
 
 	// The payer paid.
-	if got, _ := store.Balance(payer.AID()); got != int64(400+aghub.RegistrationGrant-250) {
+	if got, _ := store.Balance(payer.AID()); got != int64(400+testRegistrationFunds-250) {
 		t.Errorf("payer balance = %d", got)
 	}
 	// The foreign payee holds nothing here. Crediting it here is the half

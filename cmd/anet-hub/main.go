@@ -57,25 +57,23 @@ func (d storeDelivery) Enqueue(to string, envelope []byte) (int64, error) {
 // check asserts about its own copy, which is how a help string can go on
 // describing behaviour the binary does not have.
 type hubFlags struct {
-	addr           *string
-	publicURL      *string
-	data           *string
-	showVersion    *bool
-	grant          *string
-	amount         *int64
-	reason         *string
-	clearPeer      *string
-	peerEndpoint   *string
-	cleared        *string
-	repair         *string
-	showDue        *bool
-	inviteRequired *string
-	inviteNew      *bool
-	inviteLabel    *string
-	inviteUses     *int
-	inviteDays     *int
-	inviteList     *bool
-	inviteRevoke   *string
+	addr        *string
+	publicURL   *string
+	data        *string
+	showVersion *bool
+	// v030-todo(PAY-4): -amount, -reason, -clear, -payee, -peer-endpoint,
+	// -due and -repair-ledger become the subcommands due and clear, and
+	// -repair-ledger goes (hub_flag_removed.none).
+	amount       *int64
+	reason       *string
+	clearPeer    *string
+	peerEndpoint *string
+	cleared      *string
+	repair       *string
+	showDue      *bool
+	// removed collects the action flags that are subcommands now, in the
+	// order given (core G12; removedFlags).
+	removed *[]removedUse
 	// The §3.7 relay limits (A2A-DESIGN). See aghub.Limits.
 	maxEnvelope       *int64
 	sendRate          *float64
@@ -100,23 +98,6 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 		"this hub's public base URL (e.g. https://hub.example.org), stated as homeHub in /a2a/v1/agents and "+
 			"checked against the relay URL of admitted A2A cards; empty: the origin of each request")
 	f.showVersion = fs.Bool("version", false, "print version and exit")
-	// Funding an account, which had no way in at all.
-	//
-	// Store.GrantCredit called itself "the operator's way in" and had
-	// zero call sites — so an operator could not actually fund anything,
-	// and every account on this hub was stuck with whatever the
-	// registration grant gave it. A seam that compiles is not a seam that
-	// is connected, and this is the fourth of that kind found this month.
-	//
-	// A flag on the hub binary rather than an HTTP endpoint, deliberately.
-	// Who may create credit is a policy question this round does not
-	// answer, and an endpoint would answer it by accident — badly, since
-	// the obvious authentication for it does not exist yet. Requiring
-	// shell access to the machine that holds the ledger is a defensible
-	// interim: it is the same trust boundary as the database file.
-	f.grant = fs.String("grant", "", "credit an account: -grant <aid> -amount <n> (requires the hub to be stopped)")
-	f.amount = fs.Int64("amount", 0, "amount for -grant")
-	f.reason = fs.String("reason", "operator grant", "why, recorded on the ledger entry")
 	// Discharging what this hub owes a peer, which had no way in either.
 	//
 	// Store.IssueOwedSettlement signs the statement and had zero call
@@ -126,23 +107,18 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	// standing arrangement — and this does not model it. It signs the
 	// statement that the obligation is discharged, and the peer holds the
 	// signature.
+	f.amount = fs.Int64("amount", 0, "amount for -clear")
+	f.reason = fs.String("reason", "operator grant", "why, recorded on the ledger entry")
 	f.clearPeer = fs.String("clear", "", "discharge what this hub owes a peer: -clear <peer-aid> -amount <n> -peer-endpoint <url>")
 	f.peerEndpoint = fs.String("peer-endpoint", "", "where to deliver the discharge for -clear")
 	f.cleared = fs.String("payee", "", "which obligation -clear discharges: the payee AID from -due")
 	f.repair = fs.String("repair-ledger", "",
 		"write one entry so <aid>'s entries sum to its balance (amount derived, balance untouched)")
 	f.showDue = fs.Bool("due", false, "list what this hub owes for payments made to agents that bank elsewhere")
-	// Admission. Off unless turned on, so a hub that upgrades keeps
-	// admitting exactly who it admitted before.
-	f.inviteRequired = fs.String("invite-required", "",
-		"turn admission on or off: -invite-required true|false (use -invite-list to see the current setting)")
-	f.inviteNew = fs.Bool("invite-new", false,
-		"mint an invite and print it ONCE: -invite-new -label 'bench board' [-invite-uses N] [-invite-days N]")
-	f.inviteLabel = fs.String("label", "", "what -invite-new is for, so the listing is readable later")
-	f.inviteUses = fs.Int("invite-uses", 1, "how many agents -invite-new admits (0 = unlimited)")
-	f.inviteDays = fs.Int("invite-days", 0, "how long -invite-new stays valid, in days (0 = no expiry)")
-	f.inviteList = fs.Bool("invite-list", false, "list invites, who redeemed each, and whether admission is on")
-	f.inviteRevoke = fs.String("invite-revoke", "", "stop an invite being redeemed again: -invite-revoke <id>")
+	// The action flags that became subcommands (core G12): still known
+	// to the parser, so each is answered with the subcommand to run
+	// rather than with "flag provided but not defined".
+	f.removed = defineRemovedFlags(fs)
 	// Relay limits (A2A-DESIGN §3.7). Defaults are aghub.DefaultLimits.
 	def := aghub.DefaultLimits()
 	f.maxEnvelope = fs.Int64("relay-max-envelope", def.MaxEnvelope,
@@ -197,7 +173,54 @@ func (f *hubFlags) limits() aghub.Limits {
 
 // modeFlags name a thing to act on instead of starting the hub. An empty
 // value names nothing.
-var modeFlags = []string{"invite-required", "invite-revoke", "grant", "clear", "repair-ledger"}
+var modeFlags = []string{"clear", "repair-ledger"}
+
+// removedFlags are the action flags of 0.2 that are subcommands now (core
+// G12, hub-payment-privacy PAY-U3), each with the subcommand to run. A
+// command line with one is refused with hub_flag_removed, exit 2, before
+// anything is opened.
+var removedFlags = []struct {
+	name, subcommand string
+	boolean          bool
+}{
+	{"grant", "grant", false},
+	{"invite-required", "admission", false},
+	{"invite-new", "admit", true},
+	{"label", "admit", false},
+	{"invite-uses", "admit", false},
+	{"invite-days", "admit", false},
+	{"invite-list", "admissions", true},
+	{"invite-revoke", "admissions revoke", false},
+}
+
+// removedUse is one removed flag on the command line.
+type removedUse struct{ flag, subcommand string }
+
+// removedFlagValue records that a removed flag was given; boolean ones take
+// no value, the others take one (so the parser stays in step with the rest
+// of the command line).
+type removedFlagValue struct {
+	name, subcommand string
+	boolean          bool
+	seen             *[]removedUse
+}
+
+func (v *removedFlagValue) String() string { return "" }
+func (v *removedFlagValue) Set(string) error {
+	*v.seen = append(*v.seen, removedUse{flag: "-" + v.name, subcommand: v.subcommand})
+	return nil
+}
+func (v *removedFlagValue) IsBoolFlag() bool { return v.boolean }
+
+// defineRemovedFlags declares the removed flags on fs.
+func defineRemovedFlags(fs *flag.FlagSet) *[]removedUse {
+	seen := &[]removedUse{}
+	for _, r := range removedFlags {
+		fs.Var(&removedFlagValue{name: r.name, subcommand: r.subcommand, boolean: r.boolean, seen: seen},
+			r.name, "removed: run anet-hub "+r.subcommand)
+	}
+	return seen
+}
 
 // refuseEmptyModeFlags rejects a mode flag that was given an empty value.
 //
@@ -231,6 +254,25 @@ func refuseEmptyModeFlags(fs *flag.FlagSet) error {
 		"\"flag not given\" would start the hub instead", strings.Join(bad, ", "))
 }
 
+// beforeServing is what the command line asks for other than serving: a
+// removed action flag is answered first, before anything is opened, with
+// the subcommand to run instead (hub_flag_removed, exit 2); then -version;
+// then a subcommand, a one-off operation on the hub's database beside a
+// running hub (core G12). done is false when the hub is to be served.
+func beforeServing(f *hubFlags, fs *flag.FlagSet, c *console) (code int, done bool) {
+	if r := *f.removed; len(r) > 0 {
+		return c.say("hub_flag_removed", map[string]string{"flag": r[0].flag, "subcommand": r[0].subcommand}), true
+	}
+	if *f.showVersion {
+		fmt.Fprintln(c.out, versionLine())
+		return 0, true
+	}
+	if fs.NArg() > 0 {
+		return runSubcommand(c, fs.Arg(0), *f.data, fs.Args()[1:]), true
+	}
+	return 0, false
+}
+
 // versionLine is what -version prints: the release, and the wire contract
 // it speaks with the anet release that contract needs. The wire is what an
 // operator upgrading from wire 1 has to know about the binary in hand
@@ -244,9 +286,8 @@ func versionLine() string {
 func main() {
 	f := defineFlags(flag.CommandLine)
 	flag.Parse()
-	if *f.showVersion {
-		fmt.Println(versionLine())
-		return
+	if code, done := beforeServing(f, flag.CommandLine, newConsole(os.Stdout, os.Stderr)); done {
+		os.Exit(code)
 	}
 	if err := refuseEmptyModeFlags(flag.CommandLine); err != nil {
 		log.Fatalf("anet-hub: %v", err)
@@ -280,25 +321,6 @@ func main() {
 		}
 		return
 	}
-	if *f.grant != "" {
-		if err := grantCredit(*f.data, *f.grant, *f.amount, *f.reason); err != nil {
-			log.Fatalf("anet-hub: grant: %v", err)
-		}
-		return
-	}
-	// The invite ops run against the SAME store handle the hub would use,
-	// on a WAL database with a busy timeout, so they work while the hub
-	// is serving. Minting an invite is something an operator does in the
-	// middle of onboarding somebody; making it require a restart would
-	// mean dropping every live relay connection to add one machine.
-	if *f.inviteRequired != "" || *f.inviteNew || *f.inviteList || *f.inviteRevoke != "" {
-		if err := runInviteOp(store, *f.inviteRequired, *f.inviteNew, *f.inviteLabel,
-			*f.inviteUses, *f.inviteDays, *f.inviteList, *f.inviteRevoke); err != nil {
-			log.Fatalf("anet-hub: %v", err)
-		}
-		return
-	}
-
 	hubID, err := hubid.LoadOrIncept(*f.data)
 	if err != nil {
 		log.Fatalf("anet-hub: hub identity: %v", err)
@@ -336,6 +358,15 @@ func main() {
 	}
 	// Envelopes nobody collects are deleted after the undelivered TTL.
 	go srv0.RunRelayJanitor(ctx, 10*time.Minute)
+	// This process is the hub: it drops what it holds in memory for an AID
+	// deregistered by another process (anet-hub admissions revoke, the
+	// admin tool) within a second (hub-payment-privacy PAY-O2).
+	if err := store.StartDeregWatcher(ctx); err != nil {
+		log.Fatalf("anet-hub: watching for deregistrations: %v", err)
+	}
+	// Accounts that never collected their mail in 7 days are deregistered,
+	// hourly (PAY-A6).
+	go store.RunAdmissionJanitor(ctx, time.Hour)
 
 	root := newRoot(hubID, srv0)
 	if *f.testNoFedKeyLookup {
@@ -375,45 +406,6 @@ func main() {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
-}
-
-// grantCredit funds an account from the command line.
-//
-// Opens the store, credits, closes. Run against a stopped hub or a
-// running one — SQLite serialises the write either way — but the balance
-// a running hub has cached in flight is its own business, so the flag's
-// help says stopped and means it.
-//
-// The hub's own row is debited by Credit, so a grant made this way shows
-// up in /x402/supply as issued liability like any other. An operator
-// creating credit off the books would defeat the one arithmetic that
-// makes custody checkable.
-func grantCredit(dir, aid string, amount int64, reason string) error {
-	if amount == 0 {
-		return fmt.Errorf("-amount is required and must not be zero (negative debits)")
-	}
-	store, err := aghub.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer store.Close()
-	id, err := hubid.LoadOrIncept(dir)
-	if err != nil {
-		return err
-	}
-	// The hub key names the row credit is issued from. Without it the
-	// grant would appear from nowhere and the ledger would stop summing
-	// to zero.
-	store.SetHubKey(id.Ctrl)
-	if err := store.GrantCredit(aid, amount, reason); err != nil {
-		return err
-	}
-	bal, err := store.Balance(aid)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("granted %d to %s (%s) — balance now %d\n", amount, aid, reason, bal)
-	return nil
 }
 
 // clearOwed signs this hub's statement that it has discharged what it
