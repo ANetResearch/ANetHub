@@ -1,0 +1,65 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "U+0000 in the text fields a hub hashes or signs over (core CORE-E9): an AID in the path, the query, X-ANet-AID, X-ANet-Home, and any text of a JSON request body is 400 bad_request, before authentication and before any handler runs, on read-only routes too.",
+  "setup": "hub",
+  "cases": [
+    {
+      "name": "an AID in the path",
+      "cite": "CORE-E9",
+      "request": {"method": "GET", "path": "/agents/%00/kel"},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The \"path\" of this request contains U+0000, which no hub field may contain; remove it and send again."}
+      }
+    },
+    {
+      "name": "inside an AID in the path of a signed route",
+      "cite": "CORE-E9",
+      "request": {"method": "GET", "path": "/agents/${alice}%00/balance", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "the query",
+      "cite": "CORE-E9",
+      "request": {"method": "GET", "path": "/agents?cap=%00"},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The \"query\" of this request contains U+0000, which no hub field may contain; remove it and send again."}
+      }
+    },
+    {
+      "name": "X-ANet-AID, before the signature is looked at",
+      "cite": "CORE-E9",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3", "X-ANet-AID": "${alice}\u0000"}, "json": {}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The \"X-ANet-AID\" of this request contains U+0000, which no hub field may contain; remove it and send again."}
+      }
+    },
+    {
+      "name": "X-ANet-Home",
+      "cite": "CORE-E9",
+      "request": {"method": "POST", "path": "/relay/send", "headers": {"X-ANet-Wire": "3", "X-ANet-Home": "\u0000${hub}"}, "b64url": "oA"},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a text value of a signed JSON body",
+      "cite": "CORE-E9, CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"limit": 1, "after_id": "\u0000"}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The \"after_id\" of this request contains U+0000, which no hub field may contain; remove it and send again."}
+      }
+    },
+    {
+      "name": "a member name of a signed JSON body",
+      "cite": "CORE-E9, CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"lim\u0000it": 1}},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "bad_request"}}
+    }
+  ]
+}

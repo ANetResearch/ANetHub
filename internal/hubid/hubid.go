@@ -6,11 +6,15 @@ package hubid
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/ANetResearch/ANetCore/identity"
+
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // Identity is the hub's own KEL-backed identity.
@@ -58,16 +62,40 @@ func (i *Identity) Sign(preimage []byte) (sig []byte, keyStateSeq uint64) {
 	return i.Ctrl.Sign(preimage)
 }
 
+// IdentityResponse is the body of GET /hub/identity.
+type IdentityResponse struct {
+	AID string `json:"aid"`
+	// KEL is the hub's key history, CoreDet CBOR in standard base64.
+	KEL string `json:"kel"`
+	// Wire is the hub wire contract this hub speaks (core CORE-V1): a
+	// daemon or a peer can tell before its first signed request whether
+	// it can talk to this hub at all.
+	Wire int `json:"wire"`
+}
+
 // Handler serves GET /hub/identity: the hub's AID + KEL so peers and agents
-// can verify hub-signed objects.
+// can verify hub-signed objects, and the wire it speaks. Any other method
+// is 404 not_found in the wire-3 error body.
+//
+// The body is built per request from the identity as it is then, so a KEL
+// that grows (a rotation) is served as it is, never as it was when the
+// handler was made.
 func (i *Identity) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		// Normally stamped by wire3.Contract around the whole hub; stated
+		// here too so the answer is right wherever it is mounted.
+		w.Header().Set(wire3.Header, strconv.Itoa(wire3.Version))
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			wire3.Refuse(w, wire3.ReasonNotFound)
+			return
+		}
+		body, err := json.Marshal(IdentityResponse{AID: i.AID, KEL: base64.StdEncoding.EncodeToString(i.KEL), Wire: wire3.Version})
+		if err != nil {
+			wire3.Internal(w, err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		_, _ = w.Write([]byte(`{"aid":"` + i.AID + `","kel":"` + base64.StdEncoding.EncodeToString(i.KEL) + `"}`))
+		_, _ = w.Write(body)
 	})
 }

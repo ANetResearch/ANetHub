@@ -37,7 +37,7 @@ func signedPathRequest(t *testing.T, srvURL string, hubAID string, signer *ident
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ANet-Wire", "2")
+	req.Header.Set("X-ANet-Wire", wireHeader)
 	if signer != nil {
 		signV2(t, req, signer, action, hubAID, body, signingNow())
 	}

@@ -431,9 +431,9 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 
 // The version numbers and the authentication header names are part of the
 // contract too: the daemon sends these exact strings.
-func TestTheWire2VersionsAndHeadersArePinned(t *testing.T) {
-	if aghub.WireVersion != 2 {
-		t.Errorf("hub wire version %d, want 2", aghub.WireVersion)
+func TestTheWireVersionsAndHeadersArePinned(t *testing.T) {
+	if aghub.WireVersion != 3 {
+		t.Errorf("hub wire version %d, want 3", aghub.WireVersion)
 	}
 	if federation.ForwardVersion != 2 {
 		t.Errorf("federation forward version %d, want 2", federation.ForwardVersion)

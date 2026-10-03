@@ -27,9 +27,7 @@ func wiredHub(t *testing.T) (http.Handler, []string) {
 	}
 	srv0 := aghub.NewServer(store)
 	srv0.SetHubAID(id.AID)
-	root := http.NewServeMux()
-	root.Handle("/hub/identity", id.Handler())
-	root.Handle("/", srv0.Handler())
+	root := newRoot(id, srv0)
 	wired, closers, err := wireMounts(&hubDeps{data: dir, store: store, hubID: id, srv0: srv0, root: root})
 	t.Cleanup(func() {
 		for i := len(closers) - 1; i >= 0; i-- {
@@ -40,7 +38,7 @@ func wiredHub(t *testing.T) (http.Handler, []string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return root, wired
+	return hubHandler(root), wired
 }
 
 // get answers one GET against h.

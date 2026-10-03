@@ -6,9 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
-	"strconv"
+	"path"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 
 	"github.com/ANetResearch/ANetHub/internal/seamerr"
 	"github.com/ANetResearch/ANetHub/internal/version"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // Server is the Hub HTTP API over a Store.
@@ -207,66 +209,22 @@ func (s *Server) limitBody(next http.Handler) http.Handler {
 // is the point — two programs that never import each other still have to
 // agree, and a header is how they say so.
 //
-// Wire 2 (A2A-DESIGN §3.7, §18) is a breaking change: the relay carries
-// only sealed envelopes and every signed endpoint uses relayauth v2
-// headers. There is no fallback for wire-1 daemons.
+// Wire 3 (core CORE-V1) is a breaking change with no fallback: the
+// negotiation, the one error body and the strict request decoding are in
+// internal/wire3, shared with the federation module and /hub/identity.
 const (
-	wireVersion       = 2
-	wireVersionHeader = "X-ANet-Wire"
+	wireVersion       = wire3.Version
+	wireVersionHeader = wire3.Header
 )
 
 // WireVersion is the Hub wire contract version this build speaks.
 const WireVersion = wireVersion
 
 // RequiredAnet is the first anet release that speaks WireVersion. Every
-// refusal that tells a node to upgrade names it (the 426 below, the
-// missing relayauth v2 headers, a review that still carries content), so
-// the three cannot name different releases.
-const RequiredAnet = "0.2.0"
-
-// wireContract stamps this hub's contract version on every response,
-// turns away a caller speaking a newer one, and turns away a /relay/*
-// caller speaking an older one.
-//
-// A newer daemon is refused everywhere: it may send fields this hub will
-// silently drop, and a delegation that half-arrives is worse than one that
-// is plainly rejected.
-//
-// An older or absent version is refused on /relay/* with 426. A wire-1
-// daemon would post plaintext payloads the relay no longer stores and poll
-// for a response shape it cannot read; 426 with the required anet version
-// states the reason at the first request. Other routes stay open to such
-// callers: reads are unchanged, and the signed writes refuse a wire-1
-// body at their own authentication step.
-func wireContract(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set(wireVersionHeader, strconv.Itoa(wireVersion))
-		v := r.Header.Get(wireVersionHeader)
-		n, perr := strconv.Atoi(v)
-		if v != "" && perr == nil && n > wireVersion {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": fmt.Sprintf(
-					"this hub speaks wire contract %d, the caller speaks %d — upgrade the hub",
-					wireVersion, n),
-			})
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/relay/") && (v == "" || perr != nil || n < wireVersion) {
-			sent := v
-			if sent == "" {
-				sent = "none"
-			}
-			writeJSON(w, http.StatusUpgradeRequired, map[string]any{
-				"error": fmt.Sprintf(
-					"this hub's relay speaks wire contract %d and requires anet >= %s "+
-						"(the request declared %s: %s); upgrade the node", wireVersion, RequiredAnet, wireVersionHeader, sent),
-				"required_wire": wireVersion,
-			})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
+// refusal that tells a node to upgrade names it (the 426 of wire3.Contract,
+// the missing relayauth v2 headers, a review that still carries content),
+// so they cannot name different releases.
+const RequiredAnet = wire3.RequiredAnet
 
 // Handler builds the routed, CORS-enabled HTTP handler (the anetspace web is a browser origin).
 func (s *Server) Handler() http.Handler {
@@ -366,15 +324,29 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /research", s.hResearch)
 	// The self-contained web UI (starfield of the real registry). It has no chat: there is no guest
 	// mode, and delegating needs a local anet daemon. Other static assets fall through.
-	fileSrv := http.FileServer(http.FS(webRoot()))
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	//
+	// Everything no route above takes ends here: a GET or HEAD for a page
+	// asset is served, and anything else — an unknown path, or a known one
+	// with another method — is 404 not_found in the wire-3 error body, so
+	// a client reads one shape of refusal whatever it got wrong.
+	webFS := webRoot()
+	fileSrv := http.FileServer(http.FS(webFS))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			wire3.Refuse(w, wire3.ReasonNotFound)
+			return
+		}
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			s.hIndex(w, r)
 			return
 		}
+		if _, err := fs.Stat(webFS, strings.TrimPrefix(path.Clean(r.URL.Path), "/")); err != nil {
+			wire3.Refuse(w, wire3.ReasonNotFound)
+			return
+		}
 		fileSrv.ServeHTTP(w, r)
 	})
-	return cors(wireContract(s.limitBody(mux)))
+	return cors(wire3.Contract(s.limitBody(mux)))
 }
 
 // hIndex serves the Hub SPA (a self-contained page built from webui/: the directory, agent profiles
@@ -406,14 +378,15 @@ func (s *Server) hResearch(w http.ResponseWriter, r *http.Request) {
 
 // hLLMs serves the agent-onboarding manual, injecting this Hub's own origin into {{HUB_URL}} so the
 // copy-paste `anet hub-register <url>` / fetch commands target the exact Hub that answered the request
-// (works unchanged for the official Hub and any self-hosted deployment behind a TLS reverse proxy).
+// (works unchanged for the official Hub and any self-hosted deployment behind a TLS reverse proxy), and
+// RequiredAnet into {{REQUIRED_ANET}}, so the manual names the release the 426 names.
 func (s *Server) hLLMs(w http.ResponseWriter, r *http.Request) {
 	b, err := llmsTxt()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	out := strings.ReplaceAll(string(b), "{{HUB_URL}}", s.origin(r))
+	out := strings.NewReplacer("{{HUB_URL}}", s.origin(r), "{{REQUIRED_ANET}}", RequiredAnet).Replace(string(b))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	_, _ = w.Write([]byte(out))
@@ -1256,15 +1229,18 @@ func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// An empty body asks for everything from the start; anything else is
+	// decoded strictly (core CORE-E7).
 	var req RelayPollRequest
 	if len(a.Body) > 0 {
-		if err := json.Unmarshal(a.Body, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+		if err := wire3.DecodeStrict(a.Body, &req); err != nil {
+			wire3.RefuseDecode(w, err)
 			return
 		}
 	}
-	if req.AfterID < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "after_id must not be negative"})
+	if req.AfterID < 0 || req.Limit < 0 {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The members limit and after_id cannot be negative; fix them and send again."})
 		return
 	}
 	// Collecting mail is the liveness signal. Recorded here rather than
@@ -1275,7 +1251,7 @@ func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 	s.store.SeenPolling(a.AID)
 	msgs, err := s.store.RelayPoll(a.AID, req.AfterID, req.Limit, s.limits.PollBudget)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
 	out := RelayPollResponse{Messages: make([]RelayEnvelopeView, 0, len(msgs))}

@@ -24,7 +24,13 @@ package version
 // no longer fails "database is locked" under concurrent polls, and the
 // federation dedupe window is pruned through an index. It still requires anet
 // >= 0.2.0 (RequiredAnet); nodes and hubs of 0.2.0 and 0.2.1 interoperate.
-const V = "0.2.1"
+//
+// 0.3.0 speaks hub wire 3 and needs anet >= 0.3.0 (aghub.RequiredAnet):
+// every request and response states the wire, every error is one
+// {"reason", "error"} body, and request bodies are decoded strictly
+// (internal/wire3). There is no fallback and no migration: a 0.3.0 hub
+// starts on an empty data directory.
+const V = "0.3.0"
 
 // Commit and BuiltAt are stamped at build time:
 //

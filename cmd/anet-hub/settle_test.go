@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -198,7 +199,13 @@ func settleAt(t *testing.T, url string, p *payment.PaymentPayload, req *payment.
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := http.Post(url+"/x402/settle", "application/json", bytes.NewReader(body))
+	hreq, err := http.NewRequest(http.MethodPost, url+"/x402/settle", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+	hreq.Header.Set("X-ANet-Wire", strconv.Itoa(aghub.WireVersion))
+	resp, err := http.DefaultClient.Do(hreq)
 	if err != nil {
 		t.Fatal(err)
 	}
