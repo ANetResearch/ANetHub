@@ -393,12 +393,12 @@ func FuzzHubKeys(f *testing.F) {
 		case 3:
 			// Named for k, signed by somebody else.
 			now := uint64(time.Now().UnixMilli())
-			kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now+seal.KeyLifetimeMS)
+			kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 			if err != nil {
 				t.Fatal(err)
 			}
 			set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: k.AID(), Seq: seq,
-				Keys: []seal.EncKey{kp.Public}, IssuedAt: now}
+				Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: testMbox(t)}
 			signed, err := seal.SignEncKeySet(set, stranger.Sign)
 			if err != nil {
 				t.Fatal(err)

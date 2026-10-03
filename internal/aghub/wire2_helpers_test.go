@@ -187,12 +187,12 @@ func relayAck(t *testing.T, srv *httptest.Server, c *identity.Controller, ids ..
 func mintKeySet(t *testing.T, c *identity.Controller, seq uint64) ([]byte, *seal.KeyPair) {
 	t.Helper()
 	now := uint64(time.Now().UnixMilli())
-	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now+seal.KeyLifetimeMS)
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 	if err != nil {
 		t.Fatal(err)
 	}
 	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: seq,
-		Keys: []seal.EncKey{kp.Public}, IssuedAt: now}
+		Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: testMbox(t)}
 	signed, err := seal.SignEncKeySet(set, c.Sign)
 	if err != nil {
 		t.Fatal(err)

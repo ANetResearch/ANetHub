@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"flag"
 	"net/http"
@@ -109,12 +110,12 @@ func registerWithKeys(t *testing.T, h *fedHub) string {
 		t.Fatal(err)
 	}
 	now := uint64(time.Now().UnixMilli())
-	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now+seal.KeyLifetimeMS)
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 	if err != nil {
 		t.Fatal(err)
 	}
 	signed, err := seal.SignEncKeySet(&seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: 1,
-		Keys: []seal.EncKey{kp.Public}, IssuedAt: now}, c.Sign)
+		Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: seal.Mbox{Epoch: 1, Pub: mboxPub(t)}}, c.Sign)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,4 +174,15 @@ func TestTheTestSwitchTurnsOffOnlyTheFederatedKeyLookup(t *testing.T) {
 			t.Fatalf("the switched hub's own agent, asked there: %d, want 200", code)
 		}
 	})
+}
+
+// mboxPub is a fresh Ed25519 public key for a test key set's mailbox signing
+// key.
+func mboxPub(t *testing.T) []byte {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
 }
