@@ -24,14 +24,14 @@ type authRoute struct {
 var authRoutes = []authRoute{
 	{http.MethodPost, relayauth.ActionPoll, func(string) string { return "/relay/poll" }},
 	{http.MethodPost, relayauth.ActionAck, func(string) string { return "/relay/ack" }},
-	{http.MethodPost, relayauth.ActionSend, func(string) string { return "/relay/send" }},
+	{http.MethodPost, actionSend, func(string) string { return "/relay/send" }},
 	{http.MethodPost, relayauth.ActionProfile, func(string) string { return "/profile" }},
 	{http.MethodPost, relayauth.ActionKeys, func(a string) string { return "/agents/" + a + "/keys" }},
 	{http.MethodGet, relayauth.ActionBalance, func(a string) string { return "/agents/" + a + "/balance" }},
 	{http.MethodGet, relayauth.ActionLedger, func(a string) string { return "/agents/" + a + "/ledger" }},
 	{http.MethodGet, relayauth.ActionRedemptions, func(a string) string { return "/agents/" + a + "/redemptions" }},
 	{http.MethodPost, relayauth.ActionVisibility, func(a string) string { return "/agents/" + a + "/visibility" }},
-	{http.MethodPost, relayauth.ActionP2P, func(a string) string { return "/agents/" + a + "/p2p" }},
+	{http.MethodPost, actionP2P, func(a string) string { return "/agents/" + a + "/p2p" }},
 }
 
 // Tamper bits of FuzzHubRelayAuthV2.
@@ -222,7 +222,7 @@ func FuzzHubRelaySend(f *testing.F) {
 			perr == nil && outer.To == req.ToAID
 
 		before, _ := h.store.RelayPending(req.ToAID)
-		rec := h.signedDo(sender, relayauth.ActionSend, http.MethodPost, "/relay/send", "", body)
+		rec := h.signedDo(sender, actionSend, http.MethodPost, "/relay/send", "", body)
 		if !allowed(rec.Code, 200, 400, 404, 413, 507) {
 			t.Fatalf("send: unexpected %d %s", rec.Code, rec.Body.Bytes())
 		}

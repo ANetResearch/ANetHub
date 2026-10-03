@@ -6,8 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
 // Peer-to-peer rendezvous: the hub as a directory of dialable addresses.
@@ -121,7 +119,7 @@ func (s *Server) hP2PPublish(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not registered"})
 		return
 	}
-	a, ok := s.authSelf(w, r, relayauth.ActionP2P, signedBodyLimit)
+	a, ok := s.authSelf(w, r, actionP2PRetired, signedBodyLimit)
 	if !ok {
 		return
 	}

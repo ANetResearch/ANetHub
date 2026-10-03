@@ -15,7 +15,7 @@ import (
 
 func publishAddr(t *testing.T, srv *httptest.Server, c *identity.Controller, addr string) (int, []byte) {
 	t.Helper()
-	return signedDo(t, srv, c, relayauth.ActionP2P, http.MethodPost, "/agents/"+c.AID()+"/p2p",
+	return signedDo(t, srv, c, actionP2P, http.MethodPost, "/agents/"+c.AID()+"/p2p",
 		map[string]any{"addr": addr})
 }
 

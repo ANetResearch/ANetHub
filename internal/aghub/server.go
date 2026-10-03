@@ -1168,7 +1168,7 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a, ok := s.authRegistered(w, r, relayauth.ActionSend, s.limits.sendBodyLimit())
+	a, ok := s.authRegistered(w, r, actionSendRetired, s.limits.sendBodyLimit())
 	if !ok {
 		return
 	}
@@ -1305,8 +1305,24 @@ func (s *Server) hRelayAck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, RelayAckResponse{Acked: n})
 }
 
+// Retired relayauth actions: relayauth no longer defines them (wire 3 removes the signed send and
+// the rendezvous). The v0.2 routes still check them until their replacements land.
+const (
+	actionSendRetired = "send" // v030-todo(SS-4): relay v3 checks a session MAC or a capability
+	actionP2PRetired  = "p2p"  // v030-todo(SS-5): the rendezvous routes are removed
+)
+
+// TaskChallenge is the bytes a taskboard caller signs: the wire-1 challenge
+// "anet-relay/" + action + "/" + aid + "/" + decimal(ts), which relayauth no longer provides. The
+// board is its last user; its actions are all "task.*", so the bytes never begin like a relayauth
+// preimage ("anet-relay/v2/").
+// v030-todo(SS-4): the board gets a registered authentication form and this goes.
+func TaskChallenge(action, aid string, ts uint64) []byte {
+	return []byte("anet-relay/" + action + "/" + aid + "/" + strconv.FormatUint(ts, 10))
+}
+
 // VerifyAgentChallenge authenticates a wire-1 signed action challenge
-// (relayauth.Preimage in a JSON body) from a REGISTERED agent.
+// (TaskChallenge in a JSON body) from a REGISTERED agent.
 //
 // The hub's own endpoints use relayauth v2 headers since wire 2 (see
 // auth2.go). This remains for the taskboard module, which authenticates
@@ -1324,7 +1340,7 @@ func (st *Store) VerifyAgentChallenge(action, aid string, ts, keyStateSeq uint64
 }
 
 // verifyChallenge checks a signed action challenge against a specific KEL, within the replay window. The
-// caller signs relayauth.Preimage(action, aid, ts) with its current key; this rebuilds the identical
+// caller signs TaskChallenge(action, aid, ts) with its current key; this rebuilds the identical
 // bytes and verifies them, binding the signature to (action, aid) so it cannot be reused elsewhere.
 func verifyChallenge(kel []identity.SignedEvent, action, aid string, ts, keyStateSeq uint64, sigB64 string) error {
 	return verifyChallengeAt(kel, action, aid, ts, keyStateSeq, sigB64, uint64(time.Now().UnixMilli()))
@@ -1353,7 +1369,7 @@ func verifyChallengeAt(kel []identity.SignedEvent, action, aid string, ts, keySt
 	if err != nil {
 		return fmt.Errorf("sig not base64")
 	}
-	pre := relayauth.Preimage(action, aid, ts)
+	pre := TaskChallenge(action, aid, ts)
 	// A bad signature costs one verification, not a replay of the KEL
 	// (kelreplay.go) [redteam:F36].
 	if verr := plausibleSignature(kel, keyStateSeq, pre, sig); verr != nil {

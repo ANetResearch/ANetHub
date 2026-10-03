@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/taskboard"
@@ -48,7 +47,7 @@ func newAgent(t *testing.T, store *aghub.Store, name string) agent {
 // signed builds the auth fields for one action, optionally at a shifted time.
 func signed(a agent, action string, skew time.Duration) map[string]any {
 	ts := uint64(time.Now().Add(skew).UnixMilli())
-	sig, seq := a.ctrl.Sign(relayauth.Preimage(action, a.aid, ts))
+	sig, seq := a.ctrl.Sign(aghub.TaskChallenge(action, a.aid, ts))
 	return map[string]any{
 		"aid": a.aid, "ts": ts, "key_state_seq": seq,
 		"sig": base64.StdEncoding.EncodeToString(sig),
@@ -118,7 +117,7 @@ func TestRealKELChallengeFlow(t *testing.T) {
 	// unregistered identity rejected even with a valid self-signature
 	stranger, _ := identity.Incept()
 	ts := uint64(time.Now().UnixMilli())
-	sig, seq := stranger.Sign(relayauth.Preimage("task.claim", stranger.AID(), ts))
+	sig, seq := stranger.Sign(aghub.TaskChallenge("task.claim", stranger.AID(), ts))
 	if code, _ := post("/tasks/claim", map[string]any{
 		"aid": stranger.AID(), "ts": ts, "key_state_seq": seq,
 		"sig": base64.StdEncoding.EncodeToString(sig), "card_id": cardID,

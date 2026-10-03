@@ -109,7 +109,7 @@ func TestOneRegisteredAgentFillingTheReplayCacheStopsOnlyItself(t *testing.T) {
 	env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: recip.AID(), Suite: seal.SuiteX25519,
 		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("ct")}
 	envB, _ := env.Marshal()
-	if code, b, _ := do(victim, relayauth.ActionSend, "/relay/send",
+	if code, b, _ := do(victim, actionSendRetired, "/relay/send",
 		map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(envB)}, time.Now()); code != 200 {
 		t.Fatalf("victim send into a cache the attackers filled: %d %s", code, b)
 	}

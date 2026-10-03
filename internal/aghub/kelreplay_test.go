@@ -155,7 +155,7 @@ func TestABadSignatureDoesNotReplayTheKELItNames(t *testing.T) {
 
 	t.Run("taskboard challenge", func(t *testing.T) {
 		ts := uint64(time.Now().UnixMilli())
-		sig, seq := long.Sign(relayauth.Preimage("task.create", long.AID(), ts))
+		sig, seq := long.Sign(aghub.TaskChallenge("task.create", long.AID(), ts))
 		before := replays(counter)
 		if err := store.VerifyAgentChallenge("task.create", long.AID(), ts, seq,
 			base64.StdEncoding.EncodeToString(flipped(sig))); err == nil {
