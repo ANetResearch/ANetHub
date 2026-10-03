@@ -9,6 +9,9 @@ import (
 
 	"github.com/ANetResearch/ANetCore/wire"
 	"github.com/ANetResearch/ANetCore/wire/scan"
+
+	"github.com/ANetResearch/ANetHub/internal/hubid"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // ANetHub's half of the wire registry checks (ANetCore wire/registry.json).
@@ -45,8 +48,8 @@ func TestWireRegistry(t *testing.T) {
 }
 
 // wire3StrictDecode is the hub's strict JSON request decoder (CORE-E7: an unknown member is
-// 400 bad_request). v030-todo(CORE-4): set it to the decoding helper when it lands.
-var wire3StrictDecode func(body []byte, v any) error
+// 400 bad_request).
+var wire3StrictDecode = wire3.DecodeStrict
 
 // TestWire3JSONFields (CORE-S5): the request and response structs of the wire-3 endpoints have
 // exactly the registered JSON members (for a partial body: at least the members wire 3 adds),
@@ -87,7 +90,7 @@ func TestWire3JSONFields(t *testing.T) {
 		req("POST", "/agents/{aid}/keys", reflect.TypeFor[KeysPublishRequest](), "v030-todo(FS-3)"),
 		req("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
 		resp("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
-		resp("GET", "/hub/identity", nil, "v030-todo(SS-5)"),
+		resp("GET", "/hub/identity", reflect.TypeFor[hubid.IdentityResponse](), "v030-todo(SS-5)"),
 		resp("GET", "/hub/kels", nil, "v030-todo(KEL-7)"),
 		resp("GET", "/agents/{aid}/kel", nil, "v030-todo(KEL-5)"),
 		resp("GET", "/a2a/v1/agents", nil, "v030-todo(SS-5)"),
@@ -149,9 +152,6 @@ func TestWire3JSONFields(t *testing.T) {
 				t.Error(d)
 			}
 			if !rw.response && body.Strict {
-				if wire3StrictDecode == nil {
-					t.Skip("v030-todo(CORE-4)")
-				}
 				v := reflect.New(rw.typ).Interface()
 				if err := wire3StrictDecode([]byte(`{"zz_not_registered":1}`), v); err == nil {
 					t.Error("an unknown member was accepted (CORE-E7)")

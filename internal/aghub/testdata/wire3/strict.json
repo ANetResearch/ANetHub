@@ -1,0 +1,77 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "Strict decoding of a wire-3 JSON request (core CORE-E7), on POST /relay/poll signed as a registered agent: a member the route does not take, a member given twice, a member spelled in another case, a value of the wrong type, null, or data after the JSON value is 400 bad_request naming the member; a well-formed body, or none, is served.",
+  "setup": "hub",
+  "cases": [
+    {
+      "name": "the registered members are served",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"limit": 10, "after_id": 0}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"messages": []}}
+    },
+    {
+      "name": "an empty body asks for everything",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "text": ""},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"messages": []}}
+    },
+    {
+      "name": "an unknown member",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"limit": 10, "zz_not_registered": 1}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The request body has the member \"zz_not_registered\", which this route does not take; remove it and send again."}
+      }
+    },
+    {
+      "name": "a member in another case is unknown",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"Limit": 10}},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "bad_request", "error": "The request body has the member \"Limit\", which this route does not take; remove it and send again."}}
+    },
+    {
+      "name": "a member given twice",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"limit": 1, "limit": 1000}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The request body has the member \"limit\" more than once; give each member once and send again."}
+      }
+    },
+    {
+      "name": "a value of the wrong type",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"limit": "10"}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The member \"limit\" has the wrong type or is out of range; fix it and send again."}
+      }
+    },
+    {
+      "name": "a negative number for an unsigned member",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"after_id": -1}},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "null",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "text": "null"},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The request body is not one well-formed JSON object of the expected shape; fix it and send again."}
+      }
+    },
+    {
+      "name": "data after the JSON value",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "text": "{\"limit\": 1} {\"limit\": 2}"},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "bad_request"}}
+    }
+  ]
+}

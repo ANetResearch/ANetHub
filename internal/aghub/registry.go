@@ -38,8 +38,8 @@ import (
 // home hub they live on, unless the agent is registered here: an agent
 // registered here speaks for itself.
 //
-// The paths sit outside /relay/, so wireContract does not ask external
-// A2A clients for X-ANet-Wire.
+// The GET paths are read-only routes outside /relay/ and /fed/, so
+// wire3.Contract does not ask external A2A clients for X-ANet-Wire.
 
 // A2AAgentEntry is one entry of GET /a2a/v1/agents. Card is the agent's
 // card as it sent it; the other members are the hub's statements.

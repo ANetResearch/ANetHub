@@ -1,0 +1,137 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "X-ANet-Wire negotiation (core CORE-V1): every response states wire 3; a caller of an older wire, or of none, is refused with 426 wire_too_old (required_wire, required_anet) on every route that writes and on every /relay/* and /fed/* route, while read-only GET routes stay open; a newer caller is refused everywhere with 400 wire_too_new; GET /hub/identity states the wire (core 2.12.2). A request that passes reaches the routes, and one that no route takes is 404 not_found in the same error body (G1).",
+  "setup": "hub",
+  "cases": [
+    {
+      "name": "a POST without the header is refused with 426",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/register", "json": {"aid": "${alice}"}},
+      "response": {
+        "status": 426,
+        "headers": {"X-ANet-Wire": "3", "Retry-After": null},
+        "body": {"reason": "wire_too_old", "error": "This hub speaks hub wire 3 and needs anet 0.3.0 or later; update anet (anet update) and send again.", "required_wire": 3, "required_anet": "0.3.0"}
+      }
+    },
+    {
+      "name": "a POST declaring wire 2 is refused with 426",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "2"}, "json": {}},
+      "response": {"status": 426, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "wire_too_old", "required_wire": 3, "required_anet": "0.3.0"}}
+    },
+    {
+      "name": "a POST declaring something that is not a number is refused with 426",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/x402/settle", "headers": {"X-ANet-Wire": "three"}, "json": {}},
+      "response": {"status": 426, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "wire_too_old"}}
+    },
+    {
+      "name": "any other writing method is refused like a POST",
+      "cite": "CORE-V1",
+      "request": {"method": "PUT", "path": "/agents"},
+      "response": {"status": 426, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "wire_too_old"}}
+    },
+    {
+      "name": "a GET on the relay plane without the header is refused with 426",
+      "cite": "CORE-V1",
+      "request": {"method": "GET", "path": "/relay/poll"},
+      "response": {"status": 426, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "wire_too_old"}}
+    },
+    {
+      "name": "a GET on the federation plane declaring wire 2 is refused with 426",
+      "cite": "CORE-V1",
+      "request": {"method": "GET", "path": "/fed/v3/cards", "headers": {"X-ANet-Wire": "2"}},
+      "response": {"status": 426, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "wire_too_old"}}
+    },
+    {
+      "name": "a read-only GET without the header is served, and /hub/identity states the wire",
+      "cite": "CORE-V1, core 2.12.2",
+      "request": {"method": "GET", "path": "/hub/identity"},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"aid": "${hub}", "wire": 3}}
+    },
+    {
+      "name": "a read-only GET declaring wire 2 is served",
+      "cite": "CORE-V1",
+      "request": {"method": "GET", "path": "/stats", "headers": {"X-ANet-Wire": "2"}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}}
+    },
+    {
+      "name": "a HEAD is a read",
+      "cite": "CORE-V1",
+      "request": {"method": "HEAD", "path": "/stats"},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}}
+    },
+    {
+      "name": "the web page needs no header",
+      "cite": "CORE-V1",
+      "request": {"method": "GET", "path": "/"},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}}
+    },
+    {
+      "name": "a newer caller is refused on a read",
+      "cite": "CORE-V1",
+      "request": {"method": "GET", "path": "/agents", "headers": {"X-ANet-Wire": "4"}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "wire_too_new", "error": "This hub speaks hub wire 3, older than the caller's; ask the hub's operator to upgrade the hub, or use another hub."}
+      }
+    },
+    {
+      "name": "a newer caller is refused on a write",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "99"}, "json": {}},
+      "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "wire_too_new"}}
+    },
+    {
+      "name": "the header given twice is refused",
+      "cite": "CORE-V1",
+      "request": {"method": "GET", "path": "/agents", "headers": {"X-ANet-Wire": ["3", "3"]}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "X-ANet-Wire appears more than once; send it once, with the value 3."}
+      }
+    },
+    {
+      "name": "a CORS preflight passes without the header and states the wire",
+      "cite": "CORE-V1",
+      "request": {"method": "OPTIONS", "path": "/relay/send"},
+      "response": {"status": 204, "headers": {"X-ANet-Wire": "3"}}
+    },
+    {
+      "name": "a wire-3 request no route takes is 404 not_found",
+      "cite": "G1",
+      "request": {"method": "POST", "path": "/no/such/route", "headers": {"X-ANet-Wire": "3"}, "json": {}},
+      "response": {
+        "status": 404,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "not_found", "error": "This hub has no such route or resource; check the method, the path and the identifiers in it."}
+      }
+    },
+    {
+      "name": "a known path with another method is 404 not_found",
+      "cite": "G1",
+      "request": {"method": "GET", "path": "/relay/send", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 404, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "a POST to the web page is 404 not_found",
+      "cite": "G1",
+      "request": {"method": "POST", "path": "/", "headers": {"X-ANet-Wire": "3"}, "json": {}},
+      "response": {"status": 404, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "an unknown page is 404 not_found",
+      "cite": "G1",
+      "request": {"method": "GET", "path": "/no-such-page.html"},
+      "response": {"status": 404, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "/hub/identity takes only GET",
+      "cite": "G1",
+      "request": {"method": "POST", "path": "/hub/identity", "headers": {"X-ANet-Wire": "3"}, "json": {}},
+      "response": {"status": 404, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "not_found"}}
+    }
+  ]
+}

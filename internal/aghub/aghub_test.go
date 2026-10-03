@@ -105,7 +105,13 @@ var testHubStores sync.Map
 func post(t *testing.T, url string, body any) (int, []byte) {
 	t.Helper()
 	buf, _ := json.Marshal(body)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(buf))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ANet-Wire", wireHeader)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post %s: %v", url, err)
 	}
@@ -458,7 +464,7 @@ func TestWireContractVersionIsStated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if got := resp.Header.Get("X-ANet-Wire"); got != "2" {
+	if got := resp.Header.Get("X-ANet-Wire"); got != "3" {
 		t.Fatalf("every response must state the contract version, got %q", got)
 	}
 }

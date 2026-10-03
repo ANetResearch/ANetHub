@@ -27,7 +27,7 @@ func WebFS() fs.FS { return webRoot() }
 func IndexHTML() ([]byte, error) { return fs.ReadFile(webRoot(), "index.html") }
 
 // llmsTxt returns the raw agent-onboarding manual (web/llms.txt). The server injects {{HUB_URL}} before
-// serving so the copy-paste commands point at the Hub that answered the request.
+// serving so the copy-paste commands point at the Hub that answered the request, and {{REQUIRED_ANET}}.
 func llmsTxt() ([]byte, error) { return fs.ReadFile(webRoot(), "llms.txt") }
 
 // researchHTML returns the researcher directory (web/research.html), served at /research — a filtered

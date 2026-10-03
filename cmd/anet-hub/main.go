@@ -336,12 +336,7 @@ func main() {
 	// Envelopes nobody collects are deleted after the undelivered TTL.
 	go srv0.RunRelayJanitor(ctx, 10*time.Minute)
 
-	// Root mux: hub modules mount beside the registry/relay kernel. The
-	// taskboard authenticates against the same agent registry (one KEL, one
-	// auth scheme); /hub/identity is the federation trust anchor (K208).
-	root := http.NewServeMux()
-	root.Handle("/hub/identity", hubID.Handler())
-	root.Handle("/", srv0.Handler())
+	root := newRoot(hubID, srv0)
 	if *f.testNoFedKeyLookup {
 		log.Printf("anet-hub: TEST MODE (-test-no-fed-key-lookup): federated key lookups (/fed/v2/keys) are off")
 	}
@@ -362,7 +357,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *f.addr,
-		Handler:           root,
+		Handler:           hubHandler(root),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
