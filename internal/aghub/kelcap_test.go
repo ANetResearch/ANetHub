@@ -11,7 +11,6 @@ package aghub_test
 // JWKS is cached by the hash of the stored KEL (kelcap_internal_test.go).
 
 import (
-	"crypto/ed25519"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,21 +20,22 @@ import (
 	"github.com/ANetResearch/ANetCore/seal"
 )
 
-// bigKELController builds a valid KEL (icp + drt events, all self-signed;
-// drt does not change the signing key) whose CoreDet encoding reaches at
-// least targetBytes. An attacker mints these offline: each event is one
-// cheap signature. Size is sampled every 16 events to keep the builder
-// linear rather than re-marshalling the whole KEL each step.
+// bigKELController builds a valid KEL (icp + rot events; the attacker holds
+// every key of its own identity) whose CoreDet encoding reaches at least
+// targetBytes. An attacker mints these offline: each event is one cheap
+// signature. Size is sampled every 16 events to keep the builder linear
+// rather than re-marshalling the whole KEL each step.
 func bigKELController(t *testing.T, targetBytes int) *identity.Controller {
 	t.Helper()
 	c, err := identity.Incept()
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub, _, _ := ed25519.GenerateKey(nil)
+	ts := uint64(1)
 	for {
 		for i := 0; i < 16; i++ {
-			if err := c.Delegate(pub, 1); err != nil {
+			ts++
+			if err := c.Rotate(ts); err != nil {
 				t.Fatal(err)
 			}
 		}

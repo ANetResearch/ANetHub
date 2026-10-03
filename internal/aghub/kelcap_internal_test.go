@@ -1,7 +1,6 @@
 package aghub
 
 import (
-	"crypto/ed25519"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -64,10 +63,9 @@ func TestTheJWKSIsDerivedOncePerStoredKEL(t *testing.T) {
 	if n := derived.Load(); n != 1 {
 		t.Fatalf("21 requests for one KEL derived the JWKS %d times, want 1", n)
 	}
-	// The KEL grows (a drt adds a key state): the next request derives the
+	// The KEL grows (a rot adds a key state): the next request derives the
 	// new JWKS, once.
-	pub, _, _ := ed25519.GenerateKey(nil)
-	if err := c.Delegate(pub, 1); err != nil {
+	if err := c.Rotate(2); err != nil {
 		t.Fatal(err)
 	}
 	put()

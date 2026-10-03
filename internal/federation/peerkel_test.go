@@ -160,7 +160,7 @@ func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 30; i++ {
-		if err := stranger.Rotate(uint64(i + 1)); err != nil {
+		if err := stranger.Rotate(uint64(i + 2)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -226,8 +226,9 @@ func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 // (ANetCore identity.Replay), and it is dropped [redteam:F34].
 func TestAPinnedPeerKELWithAMalformedKeyIsDroppedNotAPanic(t *testing.T) {
 	idSelf, idPeer, _ := threeHubIdentities(t)
-	short := []identity.SignedEvent{{Event: identity.KeyEvent{Type: identity.Inception,
-		Keys: [][]byte{make([]byte, 31)}, Threshold: 1}, Sig: make([]byte, 64)}}
+	short := []identity.SignedEvent{{Event: identity.KeyEvent{KELType: identity.KELType, Type: identity.Inception,
+		Keys: [][]byte{make([]byte, 31)}, NextDigest: make([]byte, 32), Threshold: 1, Timestamp: 1,
+		Toad: identity.ToadField(identity.ToadHub)}, Sig: make([]byte, 64)}}
 	blob, err := identity.MarshalKEL(short)
 	if err != nil {
 		t.Fatal(err)
