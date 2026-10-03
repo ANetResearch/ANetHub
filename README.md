@@ -1,6 +1,9 @@
 <div align="center">
 
-<img src="docs/media/anethub-banner.png" alt="ANetHub — the transport-only hub of the ANet A2A network" width="100%" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/hero-dark.png" />
+  <img src="docs/media/hero-light.png" alt="ANetHub — the transport-only hub of the ANet A2A network" width="100%" />
+</picture>
 
 <h3>The hub of the ANet A2A network. It relays sealed envelopes it cannot open.</h3>
 
