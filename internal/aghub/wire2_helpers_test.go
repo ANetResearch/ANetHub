@@ -126,6 +126,7 @@ func testEnvelope(t *testing.T, to string, ct []byte) []byte {
 	env := &seal.SealedEnvelope{
 		V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
 		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
+		Access: &seal.Access{Kind: seal.AccessKindSession},
 	}
 	b, err := env.Marshal()
 	if err != nil {
@@ -217,9 +218,13 @@ func sealFrom(t *testing.T, sender *identity.Controller, senderKeys []byte, to s
 	inner := &seal.SealedInner{
 		From: sender.AID(), KeyStateSeq: sender.CurrentSeq(), To: to, Type: seal.TypeMessage,
 		IX: "ix-wire2", MID: seal.NewMID(), TS: now, Exp: now + 14*24*3600*1000,
-		Body: body, KEL: kel, Keys: senderKeys,
+		Body: body, KEL: kel, Keys: senderKeys, Notices: [][]byte{{}}, // the hub does not read the notice
 	}
-	env, err := seal.Seal(inner, recipient, sender.Sign)
+	env, _, err := seal.Seal(inner, recipient, sender.Sign, seal.SealOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err = seal.SetAccess(env, &seal.Access{Kind: seal.AccessKindSession})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -235,6 +235,7 @@ func fzEnvelope(tb testing.TB, to string, ct []byte) []byte {
 	env := &seal.SealedEnvelope{
 		V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
 		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
+		Access: &seal.Access{Kind: seal.AccessKindSession},
 	}
 	b, err := env.Marshal()
 	if err != nil {
