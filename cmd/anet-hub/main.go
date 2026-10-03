@@ -29,6 +29,7 @@ import (
 	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"github.com/ANetResearch/ANetHub/internal/version"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // storeDelivery adapts the hub kernel store to federation.LocalDelivery.
@@ -498,11 +499,15 @@ func clearOwed(dir, peerAID string, credits int64, reason, endpoint, payeeAID st
 	}
 	store.SetHubKey(id.Ctrl)
 
+	// Requests to the peer are hub requests: they state the wire (core
+	// CORE-V1), or a wire-3 peer answers the POST below with 426.
+	peer := &http.Client{Transport: wire3.Transport(nil)}
+
 	// What the peer says it is owed before we start, so the answer after
 	// can be checked against something rather than taken on faith.
 	owedBefore := int64(-1)
 	if endpoint != "" {
-		if resp, gerr := http.Get(strings.TrimSuffix(endpoint, "/") + "/x402/supply"); gerr == nil {
+		if resp, gerr := peer.Get(strings.TrimSuffix(endpoint, "/") + "/x402/supply"); gerr == nil {
 			var sup struct {
 				Supply struct {
 					Owed int64 `json:"owed_by_peers"`
@@ -541,7 +546,7 @@ func clearOwed(dir, peerAID string, credits int64, reason, endpoint, payeeAID st
 	if err != nil {
 		return err
 	}
-	resp, err := http.Post(strings.TrimSuffix(endpoint, "/")+"/federation/clear",
+	resp, err := peer.Post(strings.TrimSuffix(endpoint, "/")+"/federation/clear",
 		"application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("delivering to %s: %w", endpoint, err)

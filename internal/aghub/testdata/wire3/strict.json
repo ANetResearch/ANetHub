@@ -58,6 +58,16 @@
       "response": {"status": 400, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "bad_request"}}
     },
     {
+      "name": "a negative limit",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "json": {"limit": -1}},
+      "response": {
+        "status": 400,
+        "headers": {"X-ANet-Wire": "3"},
+        "body": {"reason": "bad_request", "error": "The members limit and after_id cannot be negative; fix them and send again."}
+      }
+    },
+    {
       "name": "null",
       "cite": "CORE-E7",
       "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"}, "text": "null"},

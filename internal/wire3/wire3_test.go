@@ -137,12 +137,18 @@ func TestContractNegotiation(t *testing.T) {
 }
 
 // A CORS preflight carries no custom header and no body: it is passed on,
-// and still answered with the wire header.
+// and still answered with the wire header. One that declares a newer wire
+// is refused like any request (wire_too_new on every route).
 func TestContractPassesPreflight(t *testing.T) {
 	next := &ok{}
 	rec := serve(Contract(next), http.MethodOptions, "/relay/send", nil)
 	if !next.ran || rec.Code != 200 || rec.Header().Get(Header) != "3" {
 		t.Fatalf("%d %v %q", rec.Code, next.ran, rec.Header().Get(Header))
+	}
+	next = &ok{}
+	rec = serve(Contract(next), http.MethodOptions, "/relay/send", map[string][]string{Header: {"4"}})
+	if next.ran || rec.Code != 400 || reasonOf(t, rec) != "wire_too_new" {
+		t.Fatalf("a newer preflight: %d %v %s", rec.Code, next.ran, rec.Body)
 	}
 }
 

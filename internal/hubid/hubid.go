@@ -76,17 +76,22 @@ type IdentityResponse struct {
 // Handler serves GET /hub/identity: the hub's AID + KEL so peers and agents
 // can verify hub-signed objects, and the wire it speaks. Any other method
 // is 404 not_found in the wire-3 error body.
+//
+// The body is built per request from the identity as it is then, so a KEL
+// that grows (a rotation) is served as it is, never as it was when the
+// handler was made.
 func (i *Identity) Handler() http.Handler {
-	body, err := json.Marshal(IdentityResponse{AID: i.AID, KEL: base64.StdEncoding.EncodeToString(i.KEL), Wire: wire3.Version})
-	if err != nil {
-		panic(err) // two strings and an int
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Normally stamped by wire3.Contract around the whole hub; stated
 		// here too so the answer is right wherever it is mounted.
 		w.Header().Set(wire3.Header, strconv.Itoa(wire3.Version))
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			wire3.Refuse(w, wire3.ReasonNotFound)
+			return
+		}
+		body, err := json.Marshal(IdentityResponse{AID: i.AID, KEL: base64.StdEncoding.EncodeToString(i.KEL), Wire: wire3.Version})
+		if err != nil {
+			wire3.Internal(w, err)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

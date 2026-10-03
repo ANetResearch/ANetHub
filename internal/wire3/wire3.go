@@ -18,14 +18,15 @@
 //     wire_too_old, with required_wire and required_anet) on every route
 //     that writes (any method but GET, HEAD and OPTIONS) and on every
 //     /relay/* and /fed/* route. Read-only GET routes stay open to browsers
-//     and people.
+//     and people, and a CORS preflight (OPTIONS) is not asked for it.
 //   - An error body is {"reason": <code>, "error": <one English sentence>,
 //     …more members}; a refusal that asks the caller to wait carries
 //     Retry-After. A daemon branches on reason only; error is shown only
 //     for a code it does not know.
 //   - A JSON request body is decoded strictly: a member the route does not
-//     take, a member given twice, U+0000 in any text, invalid UTF-8 or
-//     anything after the one JSON value is 400 bad_request.
+//     take, a member given twice, U+0000 in any text, invalid UTF-8,
+//     nesting deeper than MaxDepth or anything after the one JSON value is
+//     400 bad_request.
 package wire3
 
 import (
@@ -115,18 +116,16 @@ func gated(r *http.Request) bool {
 // package comment describes, and refuses U+0000 in the request path, the
 // query and the X-ANet-* headers before any handler parses them (CheckRequest).
 //
-// A CORS preflight (OPTIONS) is passed through untouched: a browser sends
-// it without custom headers and it carries no body.
+// A CORS preflight (OPTIONS) is not asked for the header: a browser sends
+// it without custom headers, and it carries no body. It is refused like
+// any other request when it declares a newer wire, the header twice, or
+// U+0000.
 //
 // Applying Contract twice is harmless: the second application sees a
 // request the first one let through and decides the same way.
 func Contract(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(Header, versionText)
-		if r.Method == http.MethodOptions {
-			next.ServeHTTP(w, r)
-			return
-		}
 		switch declaredWire(r) {
 		case declaredNewer:
 			Write(w, Refusal{Reason: ReasonWireTooNew})
@@ -136,7 +135,7 @@ func Contract(next http.Handler) http.Handler {
 				Error: Header + " appears more than once; send it once, with the value " + versionText + "."})
 			return
 		case declaredOlder:
-			if gated(r) {
+			if r.Method != http.MethodOptions && gated(r) {
 				Write(w, Refusal{Reason: ReasonWireTooOld})
 				return
 			}

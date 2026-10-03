@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 	"github.com/ANetResearch/ANetHub/internal/wire3/wire3test"
 )
 
@@ -54,5 +56,29 @@ func TestTheServedHubSpeaksWire3(t *testing.T) {
 		if tc.path == "/hub/identity" && tc.status == http.StatusOK && body["wire"] != float64(3) {
 			t.Errorf("/hub/identity does not state wire 3: %s", rec.Body)
 		}
+	}
+}
+
+// `anet-hub -clear … -peer-endpoint` talks to the peer hub itself: its
+// requests are hub requests and state the wire, so a wire-3 peer takes the
+// discharge instead of answering 426 (core CORE-V1).
+func TestClearStatesTheWireToThePeer(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	peer := httptest.NewServer(wire3.Contract(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.URL.Path+" "+r.Header.Get(wire3.Header))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"peer":"x","owed":245,"supply":{"owed_by_peers":250}}`))
+	})))
+	defer peer.Close()
+	if err := clearOwed(t.TempDir(), "did:anet:peer-hub", 5, "wire", peer.URL, ""); err != nil {
+		t.Fatalf("discharge to a wire-3 peer: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(seen, ", ") != "GET /x402/supply 3, POST /federation/clear 3" {
+		t.Fatalf("the peer saw %q", seen)
 	}
 }

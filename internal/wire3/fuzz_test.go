@@ -132,10 +132,10 @@ func duplicateMember(body []byte) string {
 
 // FuzzContract: whatever the method, path and wire header, every response
 // carries X-ANet-Wire: 3; a request reaches the handler only if it speaks
-// wire 3 or is a read outside the relay and federation planes, declares a
-// wire once and no newer one, and has no U+0000 in its path, query or
-// X-ANet-* headers; a refusal is a G1 body with a registered reason sent
-// with that reason's status.
+// wire 3, is a CORS preflight, or is a read outside the relay and
+// federation planes, declares a wire once and no newer one, and has no
+// U+0000 in its path, query or X-ANet-* headers; a refusal is a G1 body
+// with a registered reason sent with that reason's status.
 func FuzzContract(f *testing.F) {
 	f.Add(uint8(0), "/register", "3", "", false)
 	f.Add(uint8(1), "/agents", "", "", false)
@@ -168,14 +168,9 @@ func FuzzContract(f *testing.F) {
 		if got := rec.Header().Values(Header); len(got) != 1 || got[0] != "3" {
 			t.Fatalf("%s %s: %s %q", method, target, Header, got)
 		}
-		if method == http.MethodOptions {
-			if !next.ran {
-				t.Fatal("a preflight was refused")
-			}
-			return
-		}
 		d := declaredWire(req)
-		mayPass := d != declaredNewer && d != declaredTwice && (d == declaredCurrent || !gated(req)) && CheckRequest(req) == nil
+		preflight := method == http.MethodOptions
+		mayPass := d != declaredNewer && d != declaredTwice && (d == declaredCurrent || preflight || !gated(req)) && CheckRequest(req) == nil
 		if next.ran != mayPass {
 			t.Fatalf("%s %s wire %q twice %v home %q: handler ran %v, want %v", method, target, wire, twice, home, next.ran, mayPass)
 		}
