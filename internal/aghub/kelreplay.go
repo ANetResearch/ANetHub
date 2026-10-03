@@ -58,6 +58,11 @@ func plausibleSignature(kel []identity.SignedEvent, seq uint64, pre, sig []byte)
 	if seq >= uint64(len(kel)) {
 		return &identity.VErr{Reason: "KEY_STATE_DOWNGRADE", Detail: "declared key_state_seq beyond KEL"}
 	}
+	// The dip's own state holds no key: VerifyObject refuses it before any
+	// signature (KEL C-10 step 3), and so does this.
+	if kel[seq].Event.Type == identity.Deactivation {
+		return &identity.VErr{Reason: "REVOKED_KEY", Detail: "AID deactivated at this key_state_seq"}
+	}
 	var key []byte
 	for _, se := range kel[:seq+1] {
 		if t := se.Event.Type; (t == identity.Inception || t == identity.Rotation) && len(se.Event.Keys) > 0 {
