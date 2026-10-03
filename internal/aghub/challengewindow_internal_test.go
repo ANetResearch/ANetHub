@@ -23,7 +23,7 @@ func TestAChallengeDatedHalfTheClockAwayIsRefused(t *testing.T) {
 	}
 	const now = uint64(1_790_000_000_000)
 	sign := func(ts uint64) string {
-		sig, _ := c.Sign(relayauth.Preimage("task.create", c.AID(), ts))
+		sig, _ := c.Sign(TaskChallenge("task.create", c.AID(), ts))
 		return base64.StdEncoding.EncodeToString(sig)
 	}
 	for _, ts := range []uint64{now + 1<<63, now + 1<<63 + 1, now + 1<<62 + 1, now - relayauth.MaxSkewMillis - 1,

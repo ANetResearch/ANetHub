@@ -97,7 +97,7 @@ func FuzzTaskboardWrites(f *testing.F) {
 			if tamper&2 != 0 {
 				signer = actors[(int(steps[1])+1)%len(actors)]
 			}
-			sig, seq := signer.Sign(relayauth.Preimage(signAction, actor.AID(), ts))
+			sig, seq := signer.Sign(aghub.TaskChallenge(signAction, actor.AID(), ts))
 			if tamper&4 != 0 {
 				sig[int(steps[5])%len(sig)] ^= 1
 			}
@@ -180,7 +180,7 @@ func FuzzTaskboardChallengeTime(f *testing.F) {
 	f.Fuzz(func(t *testing.T, delta uint64) {
 		now := uint64(time.Now().UnixMilli())
 		ts := now + delta
-		sig, seq := c.Sign(relayauth.Preimage("task.create", c.AID(), ts))
+		sig, seq := c.Sign(aghub.TaskChallenge("task.create", c.AID(), ts))
 		body, _ := json.Marshal(map[string]any{"aid": c.AID(), "ts": ts, "key_state_seq": seq,
 			"sig": base64.StdEncoding.EncodeToString(sig), "title": "t", "taskdoc_cid": "bafy-t"})
 		rec := httptest.NewRecorder()

@@ -104,7 +104,7 @@ func TestAnotherAgentCannotPublishAnAgentsP2PAddress(t *testing.T) {
 	path := "/agents/" + agent.AID() + "/p2p"
 	body := rawBody(t, map[string]any{"addr": "tcp://198.51.100.7:4001"})
 	for _, claim := range []string{"", agent.AID()} {
-		req := signedPathRequest(t, srv.URL, hubAID, other, relayauth.ActionP2P, path, body, claim)
+		req := signedPathRequest(t, srv.URL, hubAID, other, actionP2P, path, body, claim)
 		if code, b, _ := send(t, req); code != http.StatusUnauthorized {
 			t.Errorf("another agent's signature (claim %q): %d %s, want 401", claim, code, b)
 		}
@@ -498,7 +498,7 @@ func TestARefusedRequestDoesNotSpendItsSignature(t *testing.T) {
 	body := rawBody(t, map[string]any{"to_aid": recip.AID(),
 		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("genuine")))})
 	genuine := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-	signV2(t, genuine, sender, relayauth.ActionSend, hubAIDOf(t, srv), body, signingNow())
+	signV2(t, genuine, sender, actionSend, hubAIDOf(t, srv), body, signingNow())
 
 	altered := rawBody(t, map[string]any{"to_aid": recip.AID(),
 		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("altered")))})

@@ -441,10 +441,12 @@ func TestTheWire2VersionsAndHeadersArePinned(t *testing.T) {
 	for _, pair := range [][2]string{
 		{relayauth.HeaderAID, "X-ANet-AID"}, {relayauth.HeaderTS, "X-ANet-TS"},
 		{relayauth.HeaderSeq, "X-ANet-Seq"}, {relayauth.HeaderSig, "X-ANet-Sig"},
-		{relayauth.ActionSend, "send"}, {relayauth.ActionPoll, "poll"}, {relayauth.ActionAck, "ack"},
+		// send and p2p are retired: relayauth no longer defines them (golden/relayauth_v3_test.go
+		// in ANetCore pins every action that remains).
+		{relayauth.ActionPoll, "poll"}, {relayauth.ActionAck, "ack"},
 		{relayauth.ActionRegister, "register"}, {relayauth.ActionProfile, "profile"},
 		{relayauth.ActionVisibility, "visibility"}, {relayauth.ActionDeregister, "deregister"},
-		{relayauth.ActionP2P, "p2p"}, {relayauth.ActionKeys, "keys"},
+		{relayauth.ActionKeys, "keys"},
 		// The recipient key lookup the daemon POSTs (ANet internal/hubapi
 		// KeysLookupPath pins the same path) [redteam:F3].
 		{aghub.KeysLookupPath, "/agents/keys:lookup"},

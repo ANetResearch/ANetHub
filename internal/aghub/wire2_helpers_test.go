@@ -137,7 +137,7 @@ func testEnvelope(t *testing.T, to string, ct []byte) []byte {
 // relaySend posts one envelope as sender.
 func relaySend(t *testing.T, srv *httptest.Server, sender *identity.Controller, to string, envelope []byte) (int, []byte, http.Header) {
 	t.Helper()
-	return send(t, signedRequest(t, srv, sender, relayauth.ActionSend, http.MethodPost, "/relay/send",
+	return send(t, signedRequest(t, srv, sender, actionSend, http.MethodPost, "/relay/send",
 		map[string]any{"to_aid": to, "envelope": base64.StdEncoding.EncodeToString(envelope)}))
 }
 
@@ -225,3 +225,10 @@ func sealFrom(t *testing.T, sender *identity.Controller, senderKeys []byte, to s
 	}
 	return env
 }
+
+// The relay v2 send and rendezvous actions, which relayauth no longer defines; the v0.2 routes
+// under test still check them.
+const (
+	actionSend = "send" // v030-todo(SS-4)
+	actionP2P  = "p2p"  // v030-todo(SS-5)
+)
