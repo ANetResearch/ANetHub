@@ -38,10 +38,8 @@ func CheckText(name, s string) error {
 // CheckRequest returns a *DecodeError when the request's path, its query
 // (decoded) or an X-ANet-* header contains U+0000.
 func CheckRequest(r *http.Request) error {
+	// Path is the decoded path, the one {aid} path values come from.
 	if err := CheckText("path", r.URL.Path); err != nil {
-		return err
-	}
-	if err := CheckText("path", r.URL.RawPath); err != nil {
 		return err
 	}
 	if q := r.URL.RawQuery; q != "" {

@@ -178,6 +178,10 @@ func DecodeStrict(body []byte, v any) error {
 			}
 			return &DecodeError{Kind: KindType, Member: member, Detail: err.Error()}
 		}
+		var se *json.SyntaxError
+		if errors.As(err, &se) { // the walk above would have refused it first
+			return &DecodeError{Kind: KindSyntax, Detail: err.Error()}
+		}
 		return &DecodeError{Kind: KindType, Detail: err.Error()}
 	}
 	return nil

@@ -1,17 +1,27 @@
 package aghub
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/wire"
 	"github.com/ANetResearch/ANetCore/wire/scan"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"github.com/ANetResearch/ANetHub/internal/wire3"
+	"github.com/ANetResearch/ANetHub/internal/wire3/wire3test"
 )
 
 // ANetHub's half of the wire registry checks (ANetCore wire/registry.json).
@@ -170,4 +180,127 @@ func TestWire3JSONFields(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The hub wire-3 contract fixtures (core §5.2 WIRE3-*), testdata/wire3/*.json; the format is
+// documented in internal/wire3/wire3test. A package that adds an endpoint or a refusal adds its
+// file there, and a setup here when the cases need more than the plain hub.
+
+// wire3Dir holds the fixture files.
+const wire3Dir = "testdata/wire3"
+
+// wire3Setups are the environments fixture files can name.
+var wire3Setups = map[string]wire3test.Setup{
+	"hub": wire3HubSetup,
+}
+
+// wire3HubSetup is a hub served the way anet-hub serves it (cmd/anet-hub newRoot and hubHandler):
+// /hub/identity beside the kernel, the whole root under wire3.Contract. One agent, alice, is
+// registered; ${hub} and ${alice} are their AIDs, and a case can sign as alice.
+func wire3HubSetup(t *testing.T) *wire3test.Env {
+	t.Helper()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := hubid.LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetHubKey(id.Ctrl)
+	s := NewServer(store)
+	s.SetHubAID(id.AID)
+	t.Cleanup(func() { store.Close() })
+	root := http.NewServeMux()
+	root.Handle("/hub/identity", id.Handler())
+	root.Handle("/", s.Handler())
+
+	alice, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kel, err := identity.MarshalKEL(alice.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgent(alice.AID(), "alice", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	signers := map[string]*identity.Controller{"alice": alice}
+	return &wire3test.Env{
+		Handler: wire3.Contract(root),
+		Vars:    map[string]string{"hub": id.AID, "alice": alice.AID()},
+		Sign: func(req *http.Request, body []byte, action, as string) error {
+			c, ok := signers[as]
+			if !ok {
+				return fmt.Errorf("no identity %q in this setup", as)
+			}
+			ts := uint64(wire3SigningNow().UnixMilli())
+			sig, seq := c.Sign(relayauth.PreimageV2(action, c.AID(), id.AID, ts, req.Method, req.URL.RequestURI(), body))
+			req.Header.Set(relayauth.HeaderAID, c.AID())
+			req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
+			req.Header.Set(relayauth.HeaderSeq, strconv.FormatUint(seq, 10))
+			req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
+			return nil
+		},
+	}
+}
+
+// wire3LastSigned is the X-ANet-TS of the last request a fixture signed. Two requests signed in
+// the same millisecond would be the same signature, which the replay cache refuses.
+var wire3LastSigned atomic.Int64
+
+// wire3SigningNow is now, at least one millisecond after the previous signature.
+func wire3SigningNow() time.Time {
+	for {
+		last := wire3LastSigned.Load()
+		now := time.Now().UnixMilli()
+		if now <= last {
+			now = last + 1
+		}
+		if wire3LastSigned.CompareAndSwap(last, now) {
+			return time.UnixMilli(now)
+		}
+	}
+}
+
+// wire3ErrorSamples are the extra members the error-body fixtures carry, for the codes that have
+// some. Public, made-up values.
+func wire3ErrorSamples() map[wire3.Reason]map[string]any {
+	seed := sha256.Sum256([]byte("wire3 fixture: proof-of-work challenge seed"))
+	return map[wire3.Reason]map[string]any{
+		wire3.ReasonTSStale:           {"floor": 1767225600000},
+		wire3.ReasonKeysRollback:      {"stored_seq": 7},
+		wire3.ReasonBucketTooNarrow:   {"max_bits": 12},
+		wire3.ReasonAdmissionRequired: {"aid": "bafyreigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi"},
+		wire3.ReasonPowRequired: {"challenge": map[string]any{
+			"seed": base64.RawURLEncoding.EncodeToString(seed[:]), "bits": 22, "not_after": 1767229200000}},
+	}
+}
+
+// TestWire3Fixtures runs every fixture file: the error body of each hub reason code (errors.json)
+// and the request/response cases (core CORE-V1 negotiation, CORE-E7, CORE-E9, and each area's
+// endpoints as they land).
+//
+// WIRE3_UPDATE=errors rewrites errors.json from wire3.Write, for a deliberate change of a
+// sentence or a member (review the diff: these bytes are what daemons are tested against).
+func TestWire3Fixtures(t *testing.T) {
+	if os.Getenv("WIRE3_UPDATE") == "errors" {
+		entries, err := wire3test.ErrorEntries(wire3ErrorSamples(), 30*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := &wire3test.File{
+			Format: wire3test.Format,
+			About: "The error body of every hub reason code (core §2.15.1, G1): the status, " +
+				"Retry-After for a status that asks the caller to wait (here written with 30 seconds), " +
+				"and {reason, error, ...} with the code's default sentence and its required members " +
+				"(sample values). Generated by WIRE3_UPDATE=errors go test -run TestWire3Fixtures.",
+			Errors: entries,
+		}
+		if err := wire3test.WriteFile(filepath.Join(wire3Dir, "errors.json"), f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wire3test.Run(t, wire3Dir, wire3Setups)
 }
