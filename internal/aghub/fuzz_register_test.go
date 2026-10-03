@@ -108,8 +108,10 @@ func FuzzHubRegister(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
+	start := uint64(time.Now().UnixMilli()) - 2*uint64(seal.MaxKELEvents)
 	for i := 0; i <= seal.MaxKELEvents; i++ {
-		if err := big.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+		// Each event's ts is after the previous one's (KEL v2).
+		if err := big.Rotate(start + uint64(i)); err != nil {
 			f.Fatal(err)
 		}
 	}
@@ -142,8 +144,9 @@ func FuzzHubRegister(f *testing.F) {
 				t.Fatal(err)
 			}
 			if who%4 == 2 {
+				now := uint64(time.Now().UnixMilli())
 				for i := 0; i < int(seq%3)+1; i++ {
-					if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+					if err := c.Rotate(now - 2 + uint64(i)); err != nil {
 						t.Fatal(err)
 					}
 				}
