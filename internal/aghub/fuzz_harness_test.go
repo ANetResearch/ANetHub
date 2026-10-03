@@ -100,7 +100,7 @@ func (f *fz) request(method, path, rawQuery string, body []byte) *http.Request {
 	req.URL.RawQuery = rawQuery
 	req.RequestURI = req.URL.RequestURI()
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ANet-Wire", "2")
+	req.Header.Set("X-ANet-Wire", wireHeader)
 	return req
 }
 

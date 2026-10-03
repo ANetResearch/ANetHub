@@ -15,11 +15,13 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
-// Helpers that speak wire 2 the way a daemon does: relayauth v2 headers
-// over the exact bytes sent, X-ANet-Wire: 2, sealed envelopes on the
-// relay.
+// Helpers that speak the hub wire the way a daemon does: relayauth v2
+// headers over the exact bytes sent, X-ANet-Wire: 3 (wireHeader), sealed
+// envelopes on the relay.
 
 // rawBody turns a test body into the bytes sent: nil is an empty body,
 // []byte is sent as is, anything else is JSON-encoded.
@@ -74,7 +76,10 @@ func signV2(t *testing.T, req *http.Request, c *identity.Controller, action, hub
 	req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
 }
 
-// newRequest builds an unsigned wire-2 request.
+// wireHeader is the X-ANet-Wire value every helper request declares.
+var wireHeader = strconv.Itoa(aghub.WireVersion)
+
+// newRequest builds an unsigned request.
 func newRequest(t *testing.T, srv *httptest.Server, method, path string, raw []byte) *http.Request {
 	t.Helper()
 	req, err := http.NewRequest(method, srv.URL+path, bytes.NewReader(raw))
@@ -82,7 +87,7 @@ func newRequest(t *testing.T, srv *httptest.Server, method, path string, raw []b
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ANet-Wire", "2")
+	req.Header.Set("X-ANet-Wire", wireHeader)
 	return req
 }
 

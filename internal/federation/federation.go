@@ -34,6 +34,7 @@ import (
 	"github.com/ANetResearch/ANetHub/internal/seamerr"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // MaxHop bounds transit (K208 §4.2).
@@ -280,7 +281,8 @@ CREATE TABLE IF NOT EXISTS fed_cursor_v2 (peer_aid TEXT PRIMARY KEY, cursor INTE
 		return nil, err
 	}
 	return &Service{cfg: cfg, id: id, local: local, db: db,
-		http:        &http.Client{Timeout: 10 * time.Second},
+		// Every request to a peer states the hub wire (core CORE-V1).
+		http:        &http.Client{Timeout: 10 * time.Second, Transport: wire3.Transport(nil)},
 		maxEnvelope: defaultMaxEnvelope, replay: newReplayGuard(),
 		a2aStreamStatus: map[string]int{}, kelFetches: map[string]*peerKELFetch{}}, nil
 }

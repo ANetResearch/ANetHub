@@ -38,12 +38,12 @@ func releaseAtLeast(t *testing.T, a, b string) bool {
 }
 
 // The hub's release number, the wire it speaks and the anet release its
-// refusals name have to agree. A wire-2 hub that called itself 0.1.x, or
+// refusals name have to agree. A wire-3 hub that called itself 0.2.x, or
 // that told nodes to upgrade to a release newer than itself, would give an
 // operator reading a 426 two numbers that cannot both be right.
 func TestTheVersionLineNamesTheWireAndTheAnetItNeeds(t *testing.T) {
-	if aghub.WireVersion != 2 || aghub.RequiredAnet != "0.2.0" {
-		t.Fatalf("wire %d / anet >= %s: wire 2 is the contract anet 0.2.0 introduced (A2A-DESIGN §18)",
+	if aghub.WireVersion != 3 || aghub.RequiredAnet != "0.3.0" {
+		t.Fatalf("wire %d / anet >= %s: wire 3 is the contract anet 0.3.0 introduced (core CORE-V1)",
 			aghub.WireVersion, aghub.RequiredAnet)
 	}
 	if !releaseAtLeast(t, version.V, aghub.RequiredAnet) {

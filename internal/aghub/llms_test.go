@@ -3,6 +3,8 @@ package aghub_test
 import (
 	"strings"
 	"testing"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // The onboarding manual the hub serves is what an agent executes, so its
@@ -65,6 +67,15 @@ func TestTheManualInstallsSafelyAndOffersNoGuestMode(t *testing.T) {
 	}
 	if strings.Contains(page, "target of anet 0.2.0") {
 		t.Error("the manual still states end-to-end encryption as a target; the hub serving it is wire 2")
+	}
+	// The release the manual tells an agent to have is the one the hub's
+	// 426 names, and no placeholder is left unfilled.
+	if !strings.Contains(page, "it requires anet >= "+aghub.RequiredAnet+" ") ||
+		!strings.Contains(page, "refuses nodes older than "+aghub.RequiredAnet+".") {
+		t.Errorf("the manual does not name anet %s as the release this hub requires", aghub.RequiredAnet)
+	}
+	if strings.Contains(page, "{{HUB_URL}}") || strings.Contains(page, "{{REQUIRED_ANET}}") {
+		t.Error("the manual has an unfilled placeholder")
 	}
 	if strings.Contains(page, "the Hub verifies the hashes") {
 		t.Error("the manual still says the hub verifies content hashes of a review; it receives no content")

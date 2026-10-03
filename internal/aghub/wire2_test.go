@@ -61,15 +61,15 @@ func openDB(t *testing.T, dir string) *sql.DB {
 	return db
 }
 
-// ---- 426 for wire-1 relay callers ----
+// ---- 426 for older relay callers ----
 
-// A daemon that does not declare wire 2 is refused on /relay/* with 426
+// A daemon that does not declare wire 3 is refused on /relay/* with 426
 // and told which anet release it needs; other routes stay readable.
 func TestTheRelayRefusesAnOlderWireWith426(t *testing.T) {
 	srv := newHub(t)
 	for _, tc := range []struct {
 		name, wire string
-	}{{"absent", ""}, {"wire 1", "1"}, {"garbage", "two"}} {
+	}{{"absent", ""}, {"wire 1", "1"}, {"wire 2", "2"}, {"garbage", "two"}} {
 		for _, path := range []string{"/relay/send", "/relay/poll", "/relay/ack"} {
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(`{}`))
 			if tc.wire != "" {
@@ -81,13 +81,15 @@ func TestTheRelayRefusesAnOlderWireWith426(t *testing.T) {
 				continue
 			}
 			var out struct {
-				Error string `json:"error"`
+				Reason       string `json:"reason"`
+				RequiredWire int    `json:"required_wire"`
+				RequiredAnet string `json:"required_anet"`
 			}
 			_ = json.Unmarshal(body, &out)
-			if !strings.Contains(out.Error, "anet >= 0.2.0") {
-				t.Errorf("%s %s: the refusal does not name the required release: %s", tc.name, path, body)
+			if out.Reason != "wire_too_old" || out.RequiredWire != 3 || out.RequiredAnet != "0.3.0" {
+				t.Errorf("%s %s: the refusal does not name the required wire and release: %s", tc.name, path, body)
 			}
-			if hdr.Get("X-ANet-Wire") != "2" {
+			if hdr.Get("X-ANet-Wire") != "3" {
 				t.Errorf("%s %s: the 426 does not state the hub's wire version", tc.name, path)
 			}
 		}
