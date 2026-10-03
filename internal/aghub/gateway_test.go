@@ -3,6 +3,7 @@ package aghub_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"github.com/ANetResearch/ANetHub/internal/voucherv1" // v030-todo(PAY-8): the voucher goes with the gateway
 	"net/http"
 	"strings"
 	"testing"
@@ -129,7 +130,7 @@ func TestTheGatewaySellsAccessAndNotTheWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := payment.UnmarshalVoucher(raw)
+	v, err := voucherv1.UnmarshalVoucher(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

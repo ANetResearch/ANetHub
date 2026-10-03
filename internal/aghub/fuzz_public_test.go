@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/anetcid"
-	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 )
 
 // publicRoute is one unauthenticated route: method and path with {aid}

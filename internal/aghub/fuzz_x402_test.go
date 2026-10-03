@@ -3,6 +3,7 @@ package aghub_test
 import (
 	"encoding/base64"
 	"encoding/json"
+	"github.com/ANetResearch/ANetHub/internal/voucherv1" // v030-todo(PAY-8): the voucher goes with the gateway
 	"math"
 	"net/http"
 	"strconv"
@@ -460,7 +461,7 @@ func FuzzHubX402Gateway(f *testing.F) {
 		if err != nil {
 			t.Fatalf("voucher not base64: %v", err)
 		}
-		v, err := payment.UnmarshalVoucher(raw)
+		v, err := voucherv1.UnmarshalVoucher(raw)
 		if err != nil {
 			t.Fatalf("voucher undecodable: %v", err)
 		}

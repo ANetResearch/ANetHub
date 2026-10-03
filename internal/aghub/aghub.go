@@ -31,9 +31,9 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/adp"
-	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
-	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
+	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
+	_ "modernc.org/sqlite"                                         // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
 
 // AgentView is an agent's public registry entry plus its aggregate rating. Agents are addressed purely
