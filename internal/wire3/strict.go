@@ -27,6 +27,7 @@ import (
 //     of two win, and a proxy or a second implementation might take the
 //     first);
 //   - no text, member names included, contains U+0000 (CORE-E9);
+//   - objects and arrays nest at most MaxDepth levels;
 //   - every value fits its field (the standard decoder's type checks).
 //
 // Any of these failing is 400 bad_request. Members of a map, of an
@@ -56,7 +57,20 @@ const (
 	KindType
 	// KindRead: the body could not be read (the connection broke).
 	KindRead
+	// KindDepth: objects and arrays nested deeper than MaxDepth.
+	KindDepth
 )
+
+// MaxDepth is how deeply objects and arrays may nest in a request body
+// (the body itself is level 1). No wire-3 request comes near it; the bound
+// keeps the walk's stack and the member paths it builds small whatever a
+// caller sends.
+const MaxDepth = 64
+
+// maxMemberPath bounds the member path a DecodeError carries. A path is
+// only ever quoted (64 bytes of it) or compared with a short member name,
+// so a longer one is cut here rather than built in full at every level.
+const maxMemberPath = 128
 
 // DecodeError is why a request was not accepted. It is always sent as 400
 // bad_request with the sentence Sentence() gives.
@@ -107,6 +121,9 @@ func (e *DecodeError) Sentence() string {
 		return "The member " + m + " has the wrong type or is out of range; fix it and send again."
 	case KindRead:
 		return "The request body could not be read in full; send the request again."
+	case KindDepth:
+		return "The request body nests objects and arrays more than " + strconv.Itoa(MaxDepth) +
+			" levels deep; send the shape this route takes."
 	}
 	return "The request body is not one well-formed JSON object of the expected shape; fix it and send again."
 }
@@ -143,25 +160,9 @@ func DecodeStrict(body []byte, v any) error {
 	if !utf8.Valid(body) {
 		return &DecodeError{Kind: KindUTF8}
 	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	wk := &walker{dec: dec, at: map[int64]string{}}
-	tok, err := dec.Token()
-	if err != nil {
-		return &DecodeError{Kind: KindSyntax, Detail: err.Error()}
-	}
 	target := deref(rv.Type().Elem())
-	if tok == nil {
-		return &DecodeError{Kind: KindSyntax, Detail: "null body"}
-	}
-	if (target.Kind() == reflect.Struct || target.Kind() == reflect.Map) && tok != json.Delim('{') {
-		return &DecodeError{Kind: KindSyntax, Detail: "the body is not a JSON object"}
-	}
-	if err := wk.value(tok, rv.Type().Elem(), ""); err != nil {
+	if err := walk(body, rv.Type().Elem(), target, nil); err != nil {
 		return err
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return &DecodeError{Kind: KindSyntax, Detail: "data after the JSON value"}
 	}
 
 	// The shape is proven (every member is one the type takes, under its
@@ -171,9 +172,13 @@ func DecodeStrict(body []byte, v any) error {
 		if errors.As(err, &te) {
 			// Name the member as the body spells it: the standard
 			// decoder's Field goes through embedded struct names and
-			// leaves out array indexes.
-			member, ok := wk.at[te.Offset]
-			if !ok {
+			// leaves out array indexes. A second walk finds the value
+			// that starts where the error is; only a refused body pays
+			// for it.
+			find := &finding{offset: te.Offset}
+			_ = walk(body, rv.Type().Elem(), target, find)
+			member := find.path
+			if !find.ok {
 				member = te.Field
 			}
 			return &DecodeError{Kind: KindType, Member: member, Detail: err.Error()}
@@ -187,37 +192,77 @@ func DecodeStrict(body []byte, v any) error {
 	return nil
 }
 
-// walker checks a token stream against a Go type.
-type walker struct {
-	dec *json.Decoder
-	// at maps the input offset just after each value's first token to the
-	// value's path, to name the member of a type error.
-	at map[int64]string
+// walk checks body, one JSON value of type t (target is t without
+// pointers), and that nothing follows it. With find non-nil it also
+// records the path of the value whose first token ends at find.offset.
+func walk(body []byte, t, target reflect.Type, find *finding) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	wk := &walker{dec: dec, find: find}
+	tok, err := dec.Token()
+	if err != nil {
+		return &DecodeError{Kind: KindSyntax, Detail: err.Error()}
+	}
+	if tok == nil {
+		return &DecodeError{Kind: KindSyntax, Detail: "null body"}
+	}
+	if (target.Kind() == reflect.Struct || target.Kind() == reflect.Map) && tok != json.Delim('{') {
+		return &DecodeError{Kind: KindSyntax, Detail: "the body is not a JSON object"}
+	}
+	if err := wk.value(tok, t, "", 1); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return &DecodeError{Kind: KindSyntax, Detail: "data after the JSON value"}
+	}
+	return nil
 }
 
-// next reads one value starting at its first token.
-func (w *walker) next(t reflect.Type, path string) error {
+// finding is the value a second walk looks for: the one whose first token
+// ends at offset (what json.UnmarshalTypeError.Offset points at).
+type finding struct {
+	offset int64
+	path   string
+	ok     bool
+}
+
+// walker checks a token stream against a Go type. It keeps no state per
+// value: what it holds at any time is bounded by MaxDepth levels of
+// member paths of at most maxMemberPath bytes, whatever the body.
+type walker struct {
+	dec  *json.Decoder
+	find *finding
+}
+
+// next reads one value starting at its first token, at nesting level depth.
+func (w *walker) next(t reflect.Type, path string, depth int) error {
 	tok, err := w.dec.Token()
 	if err != nil {
 		return &DecodeError{Kind: KindSyntax, Member: path, Detail: err.Error()}
 	}
-	return w.value(tok, t, path)
+	return w.value(tok, t, path, depth)
 }
 
-// value checks the value that starts with tok. t nil means "anything".
-func (w *walker) value(tok json.Token, t reflect.Type, path string) error {
-	w.at[w.dec.InputOffset()] = path
+// value checks the value that starts with tok, at nesting level depth (the
+// body is level 1). t nil means "anything".
+func (w *walker) value(tok json.Token, t reflect.Type, path string, depth int) error {
+	if f := w.find; f != nil && !f.ok && w.dec.InputOffset() == f.offset {
+		f.path, f.ok = path, true
+	}
 	t = deref(t)
 	if t != nil && opaque(t) {
 		t = nil
 	}
 	switch v := tok.(type) {
 	case json.Delim:
+		if depth > MaxDepth {
+			return &DecodeError{Kind: KindDepth, Detail: "nested deeper than " + strconv.Itoa(MaxDepth)}
+		}
 		switch v {
 		case '{':
-			return w.object(t, path)
+			return w.object(t, path, depth)
 		case '[':
-			return w.array(t, path)
+			return w.array(t, path, depth)
 		}
 		return &DecodeError{Kind: KindSyntax, Member: path, Detail: "unexpected " + v.String()}
 	case string:
@@ -228,7 +273,7 @@ func (w *walker) value(tok json.Token, t reflect.Type, path string) error {
 	return nil
 }
 
-func (w *walker) object(t reflect.Type, path string) error {
+func (w *walker) object(t reflect.Type, path string, depth int) error {
 	var fields map[string]reflect.Type // nil: members are not checked against a type
 	var elem reflect.Type
 	if t != nil {
@@ -266,7 +311,7 @@ func (w *walker) object(t reflect.Type, path string) error {
 				return &DecodeError{Kind: KindUnknownMember, Member: p}
 			}
 		}
-		if err := w.next(ft, p); err != nil {
+		if err := w.next(ft, p, depth+1); err != nil {
 			return err
 		}
 	}
@@ -276,13 +321,13 @@ func (w *walker) object(t reflect.Type, path string) error {
 	return nil
 }
 
-func (w *walker) array(t reflect.Type, path string) error {
+func (w *walker) array(t reflect.Type, path string, depth int) error {
 	var elem reflect.Type
 	if t != nil && (t.Kind() == reflect.Slice || t.Kind() == reflect.Array) {
 		elem = t.Elem()
 	}
 	for i := 0; w.dec.More(); i++ {
-		if err := w.next(elem, path+"["+strconv.Itoa(i)+"]"); err != nil {
+		if err := w.next(elem, index(path, i), depth+1); err != nil {
 			return err
 		}
 	}
@@ -292,11 +337,27 @@ func (w *walker) array(t reflect.Type, path string) error {
 	return nil
 }
 
+// join is the path of member key of the object at path, cut to
+// maxMemberPath bytes (a path already that long is not extended).
 func join(path, key string) string {
-	if path == "" {
-		return key
+	if len(path) >= maxMemberPath {
+		return path
 	}
-	return path + "." + key
+	if path != "" {
+		key = "." + key
+	}
+	if len(path)+len(key) > maxMemberPath {
+		key = key[:maxMemberPath-len(path)]
+	}
+	return path + key
+}
+
+// index is the path of element i of the array at path, cut like join.
+func index(path string, i int) string {
+	if len(path) >= maxMemberPath {
+		return path
+	}
+	return path + "[" + strconv.Itoa(i) + "]"
 }
 
 func memberOrBody(path string) string {
@@ -336,13 +397,21 @@ var fieldCache sync.Map // reflect.Type -> map[string]reflect.Type
 // jsonFields returns the JSON member names a struct takes, as
 // encoding/json reads them: exported fields under their tag name (or
 // their Go name), "-" skipped, the fields of untagged embedded structs
-// promoted (a shallower field wins).
+// promoted. Where embedding gives one name to several fields, the
+// shallowest wins, and among equally shallow ones the only one named by a
+// tag; if there is no such one, encoding/json reads none of them, so the
+// name is not a member here either (accepting it would drop its value
+// without a word).
 func jsonFields(t reflect.Type) map[string]reflect.Type {
 	if m, ok := fieldCache.Load(t); ok {
 		return m.(map[string]reflect.Type)
 	}
-	out := map[string]reflect.Type{}
-	depth := map[string]int{}
+	type candidate struct {
+		typ    reflect.Type
+		depth  int
+		tagged bool
+	}
+	cands := map[string][]candidate{}
 	var collect func(t reflect.Type, d int, visiting map[reflect.Type]bool)
 	collect = func(t reflect.Type, d int, visiting map[reflect.Type]bool) {
 		if visiting[t] {
@@ -366,17 +435,36 @@ func jsonFields(t reflect.Type) map[string]reflect.Type {
 			if !f.IsExported() {
 				continue
 			}
-			if name == "" {
+			tagged := name != ""
+			if !tagged {
 				name = f.Name
 			}
-			if prev, ok := depth[name]; ok && prev <= d {
-				continue
-			}
-			out[name] = f.Type
-			depth[name] = d
+			cands[name] = append(cands[name], candidate{f.Type, d, tagged})
 		}
 	}
 	collect(t, 0, map[reflect.Type]bool{})
+	out := map[string]reflect.Type{}
+	for name, cs := range cands {
+		shallowest := cs[0].depth
+		for _, c := range cs {
+			shallowest = min(shallowest, c.depth)
+		}
+		var at, tagged []candidate
+		for _, c := range cs {
+			if c.depth == shallowest {
+				at = append(at, c)
+				if c.tagged {
+					tagged = append(tagged, c)
+				}
+			}
+		}
+		switch {
+		case len(at) == 1:
+			out[name] = at[0].typ
+		case len(tagged) == 1:
+			out[name] = tagged[0].typ
+		}
+	}
 	fieldCache.Store(t, out)
 	return out
 }
