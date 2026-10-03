@@ -204,17 +204,19 @@ func fzJSON(tb testing.TB, v any) []byte {
 }
 
 // fzKeySet mints a signed encryption key set for c with sequence seq and
-// one key valid from now-60s for the key lifetime, shifted by shiftMS.
+// one key valid from now-60s for the longest key validity, shifted by
+// shiftMS; the set's issued_at moves with it, so a shifted set is one that
+// was valid when it was made.
 func fzKeySet(tb testing.TB, c *identity.Controller, seq uint64, shiftMS int64) ([]byte, *seal.KeyPair) {
 	tb.Helper()
 	now := uint64(time.Now().UnixMilli())
 	nb := uint64(int64(now-60_000) + shiftMS)
-	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, nb, nb+seal.KeyLifetimeMS)
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, nb, nb+seal.MaxKeyValidityMS)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: seq,
-		Keys: []seal.EncKey{kp.Public}, IssuedAt: now}
+		Keys: []seal.EncKey{kp.Public}, IssuedAt: nb + 60_000, Mbox: testMbox(tb)}
 	signed, err := seal.SignEncKeySet(set, c.Sign)
 	if err != nil {
 		tb.Fatal(err)

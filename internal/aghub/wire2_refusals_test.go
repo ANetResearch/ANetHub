@@ -176,11 +176,11 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	}
 	register(t, srv, c, "Agent", nil)
 	now := uint64(time.Now().UnixMilli())
-	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now+seal.KeyLifetimeMS)
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: 7, Keys: []seal.EncKey{kp.Public}, IssuedAt: now}
+	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: 7, Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: testMbox(t)}
 	before := signSet(t, c, set)
 	if code, b := publishKeys(t, srv, c, before); code != 200 {
 		t.Fatalf("first publish: %d %s", code, b)
