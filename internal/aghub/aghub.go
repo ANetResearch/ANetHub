@@ -536,7 +536,9 @@ func (s *Store) RegisterAgent(aid, name string, caps []string, kelBytes []byte, 
 // registration (adm, nil for none; hub-payment-privacy PAY-A1 step 10), in
 // the same transaction. admitted reports whether adm was written: false when
 // the AID was registered meanwhile by a concurrent registration, which wrote
-// its own.
+// its own. adm.via viaRegistered is an AID the gate let past because it was
+// registered: if its row has gone since, the registration is refused with
+// errDeregisteredMeanwhile rather than written without admission.
 func (s *Store) registerAgent(aid, name string, caps []string, kelBytes []byte, events []identity.SignedEvent,
 	adm *admissionWrite) (admitted bool, err error) {
 	if len(events) == 0 {
@@ -549,7 +551,7 @@ func (s *Store) registerAgent(aid, name string, caps []string, kelBytes []byte, 
 // row (PAY-A1 step 10): how it came in, and for a window the window whose
 // place it takes.
 type admissionWrite struct {
-	via    string // viaList, viaWindow or viaOpen
+	via    string // viaList, viaWindow or viaOpen; viaRegistered: no gate (registered at step 4)
 	window int64  // viaWindow: the window's id
 	now    time.Time
 }
@@ -617,7 +619,13 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 			return false, err
 		}
 	}
-	if adm != nil && !existed {
+	if adm != nil && adm.via == viaRegistered {
+		// The gate let it past as registered; deregistered since, it would
+		// come back here without passing the gate (PAY-A1 step 4).
+		if !existed {
+			return false, errDeregisteredMeanwhile
+		}
+	} else if adm != nil && !existed {
 		if err := s.writeAdmissionTx(tx, aid, adm); err != nil {
 			return false, err
 		}

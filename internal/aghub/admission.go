@@ -98,6 +98,11 @@ const (
 	trialGranted = "granted"
 )
 
+// viaRegistered marks a registration the gate let past because its AID was
+// registered at step 4 of PAY-A1. It is never written: it only asks the
+// write to find the row still there.
+const viaRegistered = "registered"
+
 // Ledger reasons of the two ways admission pays credit.
 const (
 	reasonAdmissionGrant = "admission grant"
@@ -137,6 +142,10 @@ var (
 	ErrUnknownMode   = errors.New("hub: the admission mode is open or closed")
 	errWindowFilled  = errors.New("hub: the sign-up window filled up")
 	errNotAdmitted   = errors.New("hub: the admission was revoked during the registration")
+	// errDeregisteredMeanwhile: the AID was registered when the gate let it
+	// past and was deregistered before the registration wrote (revoked,
+	// swept or left), so it is a newcomer the gate has not admitted.
+	errDeregisteredMeanwhile = errors.New("hub: the AID was deregistered during the registration")
 )
 
 // BadLineError is an admission file with a line that is not an AID. Nothing

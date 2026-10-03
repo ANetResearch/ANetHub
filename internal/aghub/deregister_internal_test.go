@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -117,8 +118,27 @@ func kelOf(t *testing.T, c *identity.Controller) []byte {
 func rotated(t *testing.T, c *identity.Controller, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		if err := c.Rotate(uint64(time.Now().UnixMilli()) + uint64(i)); err != nil {
+		if err := c.Rotate(kelTime()); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// lastKELTime is the last timestamp kelTime handed out.
+var lastKELTime atomic.Uint64
+
+// kelTime is a timestamp for a key event made now: after the inception just
+// made and after every event an earlier call stamped, since each event of a
+// key history must be later than the one before it (KEL v2).
+func kelTime() uint64 {
+	for {
+		last := lastKELTime.Load()
+		ts := uint64(time.Now().UnixMilli()) + 1
+		if ts <= last {
+			ts = last + 1
+		}
+		if lastKELTime.CompareAndSwap(last, ts) {
+			return ts
 		}
 	}
 }
@@ -153,7 +173,7 @@ func TestDeregTombstoneNeverShrinks(t *testing.T) {
 	}
 	short, _ := identity.Restore(mid) // icp, rot
 	fork, _ := identity.Restore(mid)
-	if err := fork.Rotate(uint64(time.Now().UnixMilli()) + 99); err != nil {
+	if err := fork.Rotate(kelTime()); err != nil {
 		t.Fatal(err)
 	}
 	for name, kel := range map[string][]byte{"shorter": kelOf(t, short), "forked": kelOf(t, fork)} {
@@ -347,8 +367,18 @@ func TestOutOfProcessDeregDropsSessions(t *testing.T) {
 	if live {
 		t.Error("the deregistered AID's session is still live")
 	}
+	// The watcher deletes the row right after the callbacks return, so it
+	// may still be there the moment the callback is seen.
 	var n int
-	if err := g.store.db.QueryRow(`SELECT COUNT(*) FROM dereg_event`).Scan(&n); err != nil || n != 0 {
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if err := g.store.db.QueryRow(`SELECT COUNT(*) FROM dereg_event`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 || time.Now().After(deadline) {
+			break
+		}
+	}
+	if n != 0 {
 		t.Errorf("dereg_event after the hub process handled it: %d rows", n)
 	}
 	// Its signed requests are refused from now on.

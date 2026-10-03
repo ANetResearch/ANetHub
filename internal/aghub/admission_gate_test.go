@@ -21,9 +21,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -437,13 +439,13 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 			g := newGateHub(t)
 			g.gateState(mode, nil)
 			c, _ := identity.Incept()
-			if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+			if err := c.Rotate(kelTime()); err != nil {
 				t.Fatal(err)
 			}
 			// It left this hub once, so its key history is a tombstone; a
 			// fork of it comes back.
 			snap, _ := c.Export()
-			if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+			if err := c.Rotate(kelTime()); err != nil {
 				t.Fatal(err)
 			}
 			kel, _ := identity.MarshalKEL(c.KEL())
@@ -451,7 +453,7 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 				t.Fatal(err)
 			}
 			fork, _ := identity.Restore(snap)
-			if err := fork.Rotate(uint64(time.Now().UnixMilli()) + 7); err != nil {
+			if err := fork.Rotate(kelTime()); err != nil {
 				t.Fatal(err)
 			}
 			code, out := g.register(fork, fork, g.pow(fork.AID(), "good"))
@@ -494,6 +496,110 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 			t.Errorf("the gate still holds %d window places", w)
 		}
 	})
+}
+
+// A registration the gate let past is refused when, before it writes, the
+// AID stopped being what let it past (PAY-A1 steps 4 and 10): a registered
+// AID deregistered meanwhile (revoked, swept or gone), or a listed AID whose
+// admission was revoked. Either is a newcomer the gate has not admitted, and
+// writing its row would undo the revocation.
+func TestARegistrationRacingARevocationIsRefused(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(g *gateHub, c *identity.Controller)
+		// meanwhile runs between the gate and the write, outside the
+		// store's mutex (the write holds it), as another process would.
+		meanwhile func(g *gateHub, c *identity.Controller) error
+	}{
+		{"registered_then_revoked",
+			func(g *gateHub, c *identity.Controller) {
+				if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
+					t.Fatal(err)
+				}
+				if code, out := g.register(c, c, nil); code != http.StatusOK {
+					t.Fatalf("register: %d %s", code, out["_raw"])
+				}
+			},
+			func(g *gateHub, c *identity.Controller) error {
+				_, err := dereg(g.store, c.AID(), DeregRevoked)
+				return err
+			}},
+		{"listed_then_revoked",
+			func(g *gateHub, c *identity.Controller) {
+				if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
+					t.Fatal(err)
+				}
+			},
+			func(g *gateHub, c *identity.Controller) error {
+				_, err := g.store.db.Exec(`DELETE FROM admitted WHERE aid=?`, c.AID())
+				return err
+			}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newGateHub(t)
+			c, _ := identity.Incept()
+			tc.setup(g, c)
+			calls := 0
+			g.store.clock = func() time.Time {
+				// The first read is the gate's (step 4), the second the
+				// write's (step 10).
+				if calls++; calls == 2 {
+					if err := tc.meanwhile(g, c); err != nil {
+						t.Error(err)
+					}
+				}
+				return g.now
+			}
+			code, out := g.register(c, c, nil)
+			g.store.clock = func() time.Time { return g.now }
+			if calls < 2 {
+				t.Fatalf("the registration read the clock %d time(s); the race was not set up", calls)
+			}
+			if code != http.StatusForbidden || out["reason"] != "admission_required" || out["aid"] != c.AID() {
+				t.Fatalf("a registration racing a revocation: %d %s, want 403 admission_required", code, out["_raw"])
+			}
+			if g.store.KnowsAgent(c.AID()) {
+				t.Fatal("the revoked AID is registered again")
+			}
+			// It is a newcomer now: the gate refuses it.
+			if code, out := g.register(c, c, nil); code != http.StatusForbidden || out["reason"] != "admission_required" {
+				t.Errorf("registering again after the revocation: %d %s", code, out["_raw"])
+			}
+		})
+	}
+}
+
+// The aid of a registration is a complete AID before anything uses it
+// (PAY-A1 step 3): otherwise a closed hub logs "to let it in: anet-hub admit
+// <aid>" with the sender's text in the line an operator copies into a shell,
+// and echoes it in admission_required.
+func TestARegistrationsAIDIsCheckedBeforeItIsUsed(t *testing.T) {
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	g := newGateHub(t)
+	c, _ := identity.Incept()
+	kel, _ := identity.MarshalKEL(c.KEL())
+	for _, aid := range []string{
+		"x; echo admitted",
+		c.AID() + "\nhub: forged line",
+		strings.ToUpper(c.AID()),
+		c.AID()[:58],
+	} {
+		raw, _ := json.Marshal(map[string]any{"aid": aid, "kel": base64.RawURLEncoding.EncodeToString(kel)})
+		replays := registerKELReplays.Load()
+		code, out := g.post(aid, c, raw)
+		if code != http.StatusBadRequest || out["reason"] != "bad_request" {
+			t.Errorf("aid %q: %d %s, want 400 bad_request", aid, code, out["_raw"])
+		}
+		if registerKELReplays.Load() != replays {
+			t.Errorf("aid %q: the key history was replayed", aid)
+		}
+	}
+	if strings.Contains(logged.String(), "echo admitted") || strings.Contains(logged.String(), "forged line") {
+		t.Errorf("the sender's text reached the log: %q", logged.String())
+	}
 }
 
 // The quota is per network and per UTC day: another /24 is not counted

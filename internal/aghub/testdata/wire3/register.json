@@ -40,6 +40,13 @@
       "response": {"status": 400, "body_has": {"reason": "bad_request"}}
     },
     {
+      "name": "an aid that is not a complete AID is bad_request",
+      "cite": "PAY-A1 step 3",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "bafy x; echo admitted", "kel": "${stranger_kel}"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
       "name": "a pow of the wrong shape is bad_request",
       "cite": "PAY-A1 step 3, §2.2",
       "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},

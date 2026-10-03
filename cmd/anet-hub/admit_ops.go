@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,7 +110,7 @@ func runAdmit(c *console, data string, args []string) int {
 	grant := fs.Int64("grant", 0, "credits paid when the AID first registers")
 	label := fs.String("label", "", "what the admission is for")
 	file := fs.String("file", "", "admit every AID in this file, one per line")
-	window := fs.String("window", "", "open a sign-up window for this long (e.g. 2h), or off")
+	window := fs.String("window", "", "open a sign-up window for this long (e.g. 2h or 3d, at most 7d), or off")
 	maxN := fs.Int("max", 0, "the most AIDs the sign-up window admits")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
@@ -192,7 +193,7 @@ func admitWindow(c *console, dir, window string, maxN int, maxSet bool, label st
 		}
 		return c.say("admit.window_closed", map[string]string{"n": num(w.Used)})
 	}
-	d, err := time.ParseDuration(window)
+	d, err := parseWindowLength(window)
 	if err != nil || !maxSet {
 		return c.usage(use)
 	}
@@ -216,6 +217,33 @@ func admitWindow(c *console, dir, window string, maxN int, maxSet bool, label st
 	}
 	return c.say("admit.window_open", map[string]string{
 		"time": c.timeText(time.UnixMilli(w.ClosesAt)), "n": num(w.Max)})
+}
+
+// errWindowLength is parseWindowLength's refusal; the operator is shown the
+// usage line.
+var errWindowLength = errors.New("window_length")
+
+// parseWindowLength reads the length of a sign-up window: a Go duration
+// ("2h", "90m") or a number of days, optionally followed by one ("3d",
+// "1d12h"), since a window is counted in days up to its limit of 7.
+func parseWindowLength(s string) (time.Duration, error) {
+	days, rest, ok := strings.Cut(s, "d")
+	if !ok {
+		return time.ParseDuration(s)
+	}
+	n, err := strconv.ParseUint(days, 10, 16)
+	if err != nil || days == "" || days[0] == '+' {
+		return 0, errWindowLength
+	}
+	d := time.Duration(n) * 24 * time.Hour
+	if rest == "" {
+		return d, nil
+	}
+	more, err := time.ParseDuration(rest)
+	if err != nil || more < 0 {
+		return 0, errWindowLength
+	}
+	return d + more, nil
 }
 
 // ---- admissions ----

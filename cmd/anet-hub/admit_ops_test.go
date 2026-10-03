@@ -182,7 +182,24 @@ func TestAdmitAWindow(t *testing.T) {
 	}
 	expectOut(t, cli(t, "en", "-data", dir, "admit", "--window", "off"),
 		sentenceOf("en", "admit.window_closed", map[string]string{"n": "0"}))
-	for _, args := range [][]string{{"--window", "169h", "--max", "5"}, {"--window", "1h", "--max", "10001"}, {"--window", "1h", "--max", "0"}} {
+	// A window is counted in days up to its limit, so days are taken too.
+	r = cli(t, "en", "-data", dir, "admit", "--window", "7d", "--max", "5")
+	if r.code != 0 || !strings.HasPrefix(r.stdout, "The sign-up window is open until ") {
+		t.Fatalf("a window of 7d: %+v", r)
+	}
+	expectOut(t, cli(t, "en", "-data", dir, "admit", "--window", "off"),
+		sentenceOf("en", "admit.window_closed", map[string]string{"n": "0"}))
+	for in, want := range map[string]time.Duration{"3d": 72 * time.Hour, "1d12h": 36 * time.Hour, "90m": 90 * time.Minute} {
+		if d, err := parseWindowLength(in); err != nil || d != want {
+			t.Errorf("parseWindowLength(%q) = %v, %v; want %v", in, d, err, want)
+		}
+	}
+	for _, in := range []string{"d", "-1d", "+1d", "1d-1h", "1dd", "x1d", "1.5d"} {
+		if d, err := parseWindowLength(in); err == nil {
+			t.Errorf("parseWindowLength(%q) = %v, want an error", in, d)
+		}
+	}
+	for _, args := range [][]string{{"--window", "169h", "--max", "5"}, {"--window", "8d", "--max", "5"}, {"--window", "1h", "--max", "10001"}, {"--window", "1h", "--max", "0"}} {
 		expectErr(t, cli(t, "en", append([]string{"-data", dir, "admit"}, args...)...), 1,
 			sentenceOf("en", "admit.window_too_big", nil))
 	}

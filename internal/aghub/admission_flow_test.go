@@ -284,12 +284,12 @@ func TestTheInactiveSweep(t *testing.T) {
 	g := newGateHub(t)
 	c, _ := identity.Incept()
 	for i := 0; i < 2; i++ {
-		if err := c.Rotate(uint64(time.Now().UnixMilli()) + uint64(i)); err != nil {
+		if err := c.Rotate(kelTime()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	snap, _ := c.Export()
-	if err := c.Rotate(uint64(time.Now().UnixMilli()) + 9); err != nil {
+	if err := c.Rotate(kelTime()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
@@ -298,13 +298,20 @@ func TestTheInactiveSweep(t *testing.T) {
 	if code, out := g.register(c, c, nil); code != http.StatusOK {
 		t.Fatalf("register: %d %s", code, out["_raw"])
 	}
-	// Three that are kept: one that polled, one with credit, one reviewed.
+	// Four that are kept: one that polled, one with credit, one reviewed
+	// here and one reviewed on a peer hub.
 	keep := map[string]func(aid string){
 		"polled": func(aid string) { g.store.SeenPolling(aid) },
 		"funded": func(aid string) { _ = g.store.Credit(aid, 1, "test") },
 		"reviewed": func(aid string) {
 			if _, err := g.store.db.Exec(`INSERT INTO review(interaction_id, subject_aid, reviewer_aid, rating, receipt_cid, completed_at, created_at, stored_at)
 			    VALUES(?,?,?,?,?,?,?,?)`, "ix-"+aid, aid, "someone", 5, "cid", 0, 0, "x"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"reviewed_on_a_peer": func(aid string) {
+			if _, err := g.store.db.Exec(`INSERT INTO fed_review(interaction_id, subject_aid, reviewer_aid, rating, receipt_cid, peer_aid, created_at, stored_at)
+			    VALUES(?,?,?,?,?,?,?,?)`, "fix-"+aid, aid, "someone", 5, "cid", "peer", 0, "x"); err != nil {
 				t.Fatal(err)
 			}
 		},

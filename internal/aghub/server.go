@@ -656,6 +656,15 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 			Error: "A registration carries aid and kel; add them and send again."})
 		return
 	}
+	// A complete AID, before it is hashed into a proof of work, echoed in
+	// admission_required or written to the log with the command an
+	// operator copies to admit it: anything else in that line would be
+	// the sender's text in the operator's shell.
+	if !ValidAID(req.AID) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The member \"aid\" is not a complete AID; send the agent's own AID as anet prints it."})
+		return
+	}
 	if auth.AID != req.AID {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
 			Error: relayauth.HeaderAID + " does not match the aid being registered; sign as the agent you register."})
@@ -684,7 +693,10 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	// too). A registered AID re-registers on every start and whenever its
 	// capabilities change, and is never gated (PAY-A2).
 	now := s.store.now()
-	var adm *admissionWrite
+	// An AID registered now passes no gate, but its row must still be
+	// there when step 10 writes: one deregistered meanwhile (revoked,
+	// swept, left) is a newcomer again, and only the gate admits those.
+	adm := &admissionWrite{via: viaRegistered}
 	var hold *gateHold
 	committed := false
 	defer func() {
@@ -797,7 +809,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, ErrKELNotExtended):
 			refuseKELExtension(w, err)
-		case errors.Is(err, errWindowFilled), errors.Is(err, errNotAdmitted):
+		case errors.Is(err, errWindowFilled), errors.Is(err, errNotAdmitted), errors.Is(err, errDeregisteredMeanwhile):
 			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonAdmissionRequired, Extra: map[string]any{"aid": req.AID}})
 		default:
 			wire3.Internal(w, err)
