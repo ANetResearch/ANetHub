@@ -101,7 +101,8 @@ func (s *Server) forwardSend(w http.ResponseWriter, r *http.Request, f fwdSend) 
 //   - 200 queued or duplicate: 200, with the home's rid, via_hub the home
 //     and recipient_quiet;
 //   - 404 unknown_destination: 404 recipient_unknown, and no other hub is
-//     tried (SI-17);
+//     tried (SI-17); the recipient's home is resolved afresh at its next
+//     use (resolveRecipient);
 //   - a refusal of passedThrough: the same status and reason, with the
 //     home's Retry-After; for 403 access_invalid (to a send under a
 //     credential: a first contact has none to refuse) the credential is kept
@@ -147,7 +148,7 @@ func (s *Server) forwardAnswer(w http.ResponseWriter, resp *http.Response, f fwd
 	}
 	switch {
 	case reason == wire3.ReasonUnknownDestination && resp.StatusCode == http.StatusNotFound:
-		s.fedState.forgetHome(f.to)
+		s.fedState.markStale(f.to, s.store.now())
 		wire3.Refuse(w, wire3.ReasonRecipientUnknown)
 	case reason == wire3.ReasonAccessInvalid && resp.StatusCode == http.StatusForbidden && f.capBody != nil:
 		s.fedState.putNegative(negKey{f.home, f.capBody.Owner, string(f.capBody.CapID)}, f.capBody.CapExp)
@@ -176,8 +177,8 @@ func retryAfterOf(resp *http.Response) time.Duration {
 // resolved (resolveOwner), the credential is not one its home refused
 // (SSR-H14a), and it was signed under the owner's current epoch, by that
 // key, and has not expired. A signature that does not verify under the key
-// held has the owner's resolution made again at its next use (§2.12). The revocations of a remote owner are its
-// home's to check. Every refusal is the one answer of SSR-H3 and costs one
+// held has the owner's resolution made again at its next use (§2.12). The
+// revocations of a remote owner are its home's to check. Every refusal is the one answer of SSR-H3 and costs one
 // verification (SSR-H3a), as for an owner registered here.
 func (s *Server) capPrecheckRemote(w http.ResponseWriter, r *http.Request, a *seal.Access, body *seal.CapBody, addr, hint string, now time.Time) (seal.Mbox, string, bool) {
 	c := a.Cap

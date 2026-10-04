@@ -70,6 +70,15 @@ const (
 	// of them at once (SSR-W21: a peer not answering in 5 seconds is
 	// missing from the answer).
 	PeerBucketWait = 5 * time.Second
+	// FedLookupMaxBits bounds the bucket this hub asks a peer for when it
+	// looks for one AID's directory entry (SSR-H12 step 4): at most this
+	// many bits of the AID's directory hash reach a peer, as at most this
+	// many of a daemon's own query do (DirQueryMaxBits, sealed-sender
+	// §2.12, §6.2), and fewer when the peer serves fewer (SSR-W19). Asked
+	// at the whole hash, every peer, the recipient's home or not, would
+	// learn which AID a sender here writes to; and a peer that states a
+	// dir_max_bits of 256 would learn it from every lookup.
+	FedLookupMaxBits = 10
 	// FedSourcePenalty is what a source hub's bucket loses for a forwarded
 	// credential the source hub should have refused itself (SSR-H15a).
 	FedSourcePenalty = 10
@@ -245,17 +254,11 @@ func (f *fedState) putHome(aid string, h homeInfo) {
 	f.homes.put(aid, h)
 }
 
-// forgetHome drops what is kept for aid.
-func (f *fedState) forgetHome(aid string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.homes.remove(aid)
-}
-
 // markStale has aid's resolution made again at its next use (SSR-H14a 2,
-// §2.12): after its home refused a credential, or a credential did not
-// verify under the mailbox key held. When nothing is kept for aid (its key
-// came from its federated card), a mark alone is kept.
+// §2.12): after its home refused a credential, or answered that aid is not
+// registered there, or a credential did not verify under the mailbox key
+// held. When nothing is kept for aid (its key came from its federated card),
+// a mark alone is kept.
 func (f *fedState) markStale(aid string, now time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -526,8 +529,12 @@ type resolvedEntry struct {
 }
 
 // lookupEntry finds aid's directory entry in the buckets of the given peers
-// (SSR-H12 step 4) and selects one by SSR-W22: every entry filed under aid's
-// hash is opened with aid and verified (verifyEntry), and the one with the
+// (SSR-H12 step 4) and selects one by SSR-W22. Each peer is asked for the
+// bucket of aid's hash at FedLookupMaxBits bits, or at its own dir_max_bits
+// when that is fewer, never for the hash itself: a peer learns a bucket, as
+// it does from a daemon's query, and not whom this hub looks for. Every
+// entry filed under aid's hash is opened with aid and verified
+// (verifyEntry), and the one with the
 // longest KEL wins; two that verify with KELs of which neither extends the
 // other are a fork, and nothing is resolved. Equal KELs are told apart by
 // the newer key set, then by the order of the peer table. fresh asks the
@@ -536,6 +543,10 @@ type resolvedEntry struct {
 func (s *Server) lookupEntry(ctx context.Context, aid string, peers []string, fresh bool) (*resolvedEntry, bool) {
 	h, err := dirbox.Hash(aid)
 	if err != nil || len(peers) == 0 {
+		return nil, false
+	}
+	prefix, err := dirbox.Prefix(h, FedLookupMaxBits)
+	if err != nil {
 		return nil, false
 	}
 	type found struct {
@@ -550,7 +561,7 @@ func (s *Server) lookupEntry(ctx context.Context, aid string, peers []string, fr
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			es, _ := s.peerBucket(ctx, peer, h, dirbox.HashBits, fresh)
+			es, _ := s.peerBucket(ctx, peer, prefix, FedLookupMaxBits, fresh)
 			results[i] = found{peer, es}
 		}()
 	}
@@ -559,6 +570,9 @@ func (s *Server) lookupEntry(ctx context.Context, aid string, peers []string, fr
 	var best *resolvedEntry
 	for _, r := range results {
 		for _, pe := range r.entries {
+			if !bytes.Equal(pe.h, h) {
+				continue // another AID of the same bucket
+			}
 			e, ok := s.verifyEntry(aid, r.peer, pe, now)
 			if !ok {
 				continue
@@ -586,7 +600,7 @@ func (s *Server) lookupEntry(ctx context.Context, aid string, peers []string, fr
 // the KEL replays to aid; the key set verifies against the KEL and carries a
 // mailbox key of a usable epoch; the A2A card, if any, verifies against the
 // KEL; the witness notice, if any, confirms the KEL's tip (KEL C-51, at
-// now, against the peers' key histories this hub holds).
+// now, against the peers' key histories this hub holds and its own).
 func (s *Server) verifyEntry(aid, peer string, pe peerEntry, now time.Time) (*resolvedEntry, bool) {
 	e, err := dirbox.Open(aid, pe.h, pe.box)
 	if err != nil || e.Home != peer {
@@ -615,6 +629,11 @@ func (s *Server) verifyEntry(aid, peer string, pe peerEntry, now time.Time) (*re
 	}
 	if len(e.Notice) > 0 {
 		hubKELs := func(hubAID string) ([]identity.SignedEvent, bool) {
+			// The witness may be this hub: an agent that named it as
+			// its witness and is now registered at a peer.
+			if c := s.store.hubKey; c != nil && hubAID == s.hubAID {
+				return c.KEL(), true
+			}
 			k, err := s.peerKEL(hubAID)
 			return k, err == nil
 		}
@@ -666,7 +685,11 @@ func (s *Server) cardHome(aid string) (home string, mbox seal.Mbox, ok bool) {
 // not registered here (SSR-H12 for kind 0): the hint when it names a peer,
 // the home of the recipient's federated card, the home last resolved, or
 // the home its directory entry names, asked of every peer. ok is false when
-// none is found: the recipient is unknown.
+// none is found: the recipient is unknown. After the home last resolved
+// answered that aid is not registered there (markStale), the peers are
+// asked afresh rather than through their answers of the last
+// BucketCacheTTL, which still name that home; at most once a minute for
+// one aid (HomeRefreshEvery), as for a credential's owner.
 func (s *Server) resolveRecipient(ctx context.Context, aid, hint string) (string, bool) {
 	if !s.delivering() {
 		return "", false
@@ -678,10 +701,12 @@ func (s *Server) resolveRecipient(ctx context.Context, aid, hint string) (string
 		return h, true
 	}
 	now := s.store.now()
-	if c, ok := s.fedState.home(aid, now); ok && !c.stale {
+	c, have := s.fedState.home(aid, now)
+	if have && !c.stale {
 		return c.home, true
 	}
-	e, ok := s.lookupEntry(ctx, aid, s.fed.DeliveryPeers(), false)
+	fresh := have && c.stale && s.fedState.mayRefresh(aid, now)
+	e, ok := s.lookupEntry(ctx, aid, s.fed.DeliveryPeers(), fresh)
 	if !ok {
 		return "", false
 	}

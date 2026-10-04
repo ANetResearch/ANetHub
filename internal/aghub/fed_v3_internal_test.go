@@ -248,6 +248,7 @@ func TestFedForwardOrder(t *testing.T) {
 		status int
 		reason string
 	}
+	g11 := b.issue(owner, seal.CapClassContact, time.Hour)
 	small := DefaultLimits()
 	small.MaxEnvelope = 64 << 10
 	full := bytes.Repeat([]byte{1}, int(small.MaxEnvelope)+1)
@@ -325,6 +326,9 @@ func TestFedForwardOrder(t *testing.T) {
 		{name: "11 first contacts", as: a, env: envelope(t, other.aid, []byte("11")),
 			before: func() { drain(b.srv.relay.firstContact, other.aid, firstContactRate(b.store.QuotaFor(other.aid))) },
 			status: 429, reason: "strangers_busy"},
+		{name: "11 the credential's bucket", as: a, env: withCap(t, envelope(t, owner.aid, []byte("11c")), g11),
+			before: func() { drain(b.srv.relay.caps, capKey(&g11.body), capRate(&g11.body)) },
+			status: 429, reason: "rate_limited"},
 	}
 	for _, s := range steps {
 		t.Run(s.name, func(t *testing.T) {

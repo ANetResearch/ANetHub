@@ -755,7 +755,7 @@ func (s *Service) PeerKEL(peerAID string) ([]identity.SignedEvent, error) {
 
 // Witness is what the kernel supplies so federation can pin peer heads.
 //
-// A seam rather than an import, like Directory and LocalDelivery: the
+// A seam rather than an import, like Directory and Kernel: the
 // kernel owns the chain and the signing key, federation owns the peers
 // and the polling. Neither needs to know how the other works.
 type Witness interface {
