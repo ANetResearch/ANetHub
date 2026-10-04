@@ -1,8 +1,9 @@
 // Package wire3 is the hub side of hub wire 3 that every route shares:
 // the X-ANet-Wire negotiation (Contract), the one error body every refusal
 // is written with (Refusal, Write), the hub reason codes (reasons.go), the
-// strict JSON request decoding (DecodeStrict, ReadStrict) and the U+0000
-// check of the text fields that reach a signature or a hash (CheckText).
+// strict JSON request decoding (DecodeStrict, ReadStrict), the one decoder
+// of the binary values in it (DecodeB64URL) and the U+0000 check of the
+// text fields that reach a signature or a hash (CheckText).
 //
 // It sits apart from internal/aghub so that the kernel, the federation
 // module and the hub identity endpoint use one implementation without
@@ -27,6 +28,8 @@
 //     take, a member given twice, U+0000 in any text, invalid UTF-8,
 //     nesting deeper than MaxDepth or anything after the one JSON value is
 //     400 bad_request.
+//   - A binary value is base64url without padding in its one spelling
+//     (DecodeB64URL); any other spelling is 400 bad_request.
 package wire3
 
 import (

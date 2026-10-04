@@ -59,6 +59,12 @@ const (
 	KindRead
 	// KindDepth: objects and arrays nested deeper than MaxDepth.
 	KindDepth
+	// KindB64URL: a binary value that is not base64url without padding in
+	// its one spelling (DecodeB64URL, core CORE-E5).
+	KindB64URL
+	// KindSize: a binary value of the wrong length (DecodeB64URLSize); Size
+	// is the length the member takes.
+	KindSize
 )
 
 // MaxDepth is how deeply objects and arrays may nest in a request body
@@ -80,6 +86,8 @@ type DecodeError struct {
 	// "items[2].dack"), or what CheckText was given ("path",
 	// "X-Anet-Home"); "" for the body as a whole.
 	Member string
+	// Size is the number of bytes the member takes (KindSize only).
+	Size int
 	// Detail is for the log only.
 	Detail string
 }
@@ -124,6 +132,11 @@ func (e *DecodeError) Sentence() string {
 	case KindDepth:
 		return "The request body nests objects and arrays more than " + strconv.Itoa(MaxDepth) +
 			" levels deep; send the shape this route takes."
+	case KindB64URL:
+		return "The member " + m + " is not base64url (the URL-safe alphabet, no padding, no white space); " +
+			"encode it that way and send again."
+	case KindSize:
+		return "The member " + m + " must be " + strconv.Itoa(e.Size) + " bytes; send a value of that length."
 	}
 	return "The request body is not one well-formed JSON object of the expected shape; fix it and send again."
 }
@@ -488,7 +501,7 @@ func ReadBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool
 }
 
 // RefuseDecode sends 400 bad_request for an error of DecodeStrict,
-// CheckText or CheckRequest, with that error's sentence.
+// DecodeB64URL, CheckText or CheckRequest, with that error's sentence.
 func RefuseDecode(w http.ResponseWriter, err error) {
 	var de *DecodeError
 	if !errors.As(err, &de) {
