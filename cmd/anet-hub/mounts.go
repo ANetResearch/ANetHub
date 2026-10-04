@@ -25,6 +25,7 @@ type hubDeps struct {
 // federation trust anchor (K208).
 func newRoot(id *hubid.Identity, srv0 *aghub.Server) *http.ServeMux {
 	root := http.NewServeMux()
+	id.DirMaxBits = srv0.DirMaxBits
 	root.Handle("/hub/identity", id.Handler())
 	root.Handle("/", srv0.Handler())
 	return root

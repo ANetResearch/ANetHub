@@ -48,7 +48,7 @@ type AgentView struct {
 	Listed       bool     `json:"listed"`            // true if it advertises a service (caps or profile) — only listed agents appear in the starfield/find
 	AvgRating    float64  `json:"avg_rating"`
 	ReviewCount  int      `json:"review_count"`
-	RegisteredAt string   `json:"registered_at"`
+	RegisteredAt string   `json:"registered_at"` // the UTC day of the first registration, as midnight (SSR-H18)
 	// HomeHub is set only on an agent learned from a peer hub: which hub
 	// it lives on, and so where work for it must be sent. Empty means
 	// this hub.
@@ -73,11 +73,25 @@ type AgentView struct {
 	// self-consistent and keeps what happened visible.
 	Registered bool `json:"registered"`
 	// LastSeen and Quiet report whether this agent is still collecting
-	// its mail. A directory that lists agents without saying which of
-	// them have stopped answering is a directory that sends people to
-	// wait on the dead.
+	// its mail (liveness.go: the hour of the last poll, and a boolean). A
+	// directory that lists agents without saying which of them have
+	// stopped answering is a directory that sends people to wait on the
+	// dead.
 	LastSeen string `json:"last_seen,omitempty"`
 	Quiet    bool   `json:"quiet,omitempty"`
+	// KEL and Keys are the agent's key history and encryption key set
+	// (seal.SignedEncKeySet), base64url (core G2), so that a reader of the
+	// listing can write to the agent without looking it up again by AID
+	// (sealed-sender SSR-H18). Keys is absent for an agent that has
+	// published none. Both are absent where the view is not a listing
+	// entry (/graph, a departed agent).
+	KEL  string `json:"kel,omitempty"`
+	Keys string `json:"keys,omitempty"`
+	// KeyStateNotice is the witness notice of the KEL's tip (NoticeWire,
+	// base64url), when there is one.
+	// v030-todo(KEL-5): the notice this hub issued as the agent's witness,
+	// or the one a peer's card stream carried.
+	KeyStateNotice string `json:"key_state_notice,omitempty"`
 }
 
 // ReviewView is one stored, verified review: the rating, the reviewer's comment and the anchors of
@@ -166,6 +180,11 @@ type Store struct {
 	// quotas is the operator's raised per-recipient quotas as the hub
 	// process last read them (quota.go).
 	quotas quotaCache
+	// dirBits is dir_max_bits as last computed (directory.go).
+	dirBits dirBitsCache
+	// dirNotice, when set, gives the witness notice a directory entry
+	// carries (directory.go dirNoticeOf).
+	dirNotice func(q rowQuerier, aid string) ([]byte, error)
 }
 
 // Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
@@ -246,7 +265,12 @@ func (s *Store) migrate() error {
 		   -- Unix ms; NULL for an account that never had a probation.
 		   probation_until INTEGER,
 		   -- none, pending or granted: the trial credit of PAY-A5.
-		   trial TEXT NOT NULL DEFAULT 'none'
+		   trial TEXT NOT NULL DEFAULT 'none',
+		   -- The agent's directory entry (directory.go): the hash it is
+		   -- filed under and the box sealed under its AID. NULL for an
+		   -- agent without one (no key set). A hash belongs to one AID.
+		   dir_hash BLOB UNIQUE,
+		   dir_box BLOB
 		 )`,
 		// No interaction content (A2A-DESIGN §9 row 评价). A table from
 		// before that change is rebuilt by migrateContentV2.
@@ -375,17 +399,6 @@ func (s *Store) migrate() error {
 		   peer_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
-		// The debtor side of the same relationship, keyed by payee rather
-		// than by hub: this hub settled a payment to an agent that banks
-		// elsewhere, so the credit left this ledger and is owed to
-		// whichever hub holds that agent. Keyed by payee because that is
-		// what the authorization names — which hub holds it is a fact this
-		// hub may not have.
-		`CREATE TABLE IF NOT EXISTS p2p_addr (
-		   aid  TEXT PRIMARY KEY,
-		   addr TEXT NOT NULL,
-		   at   TEXT NOT NULL
-		 )`,
 		// Key histories of agents that have left. Routing goes when an
 		// agent deregisters; proof does not. Without this the receipts
 		// and reviews the hub still serves became uncheckable against
@@ -395,6 +408,12 @@ func (s *Store) migrate() error {
 		   kel BLOB NOT NULL,
 		   at  TEXT NOT NULL
 		 )`,
+		// The debtor side of the same relationship, keyed by payee rather
+		// than by hub: this hub settled a payment to an agent that banks
+		// elsewhere, so the credit left this ledger and is owed to
+		// whichever hub holds that agent. Keyed by payee because that is
+		// what the authorization names — which hub holds it is a fact this
+		// hub may not have.
 		`CREATE TABLE IF NOT EXISTS hub_due (
 		   payee_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
@@ -624,6 +643,10 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 		}
 		admitted = true
 	}
+	// The key history may have grown (sealed-sender SSR-H17).
+	if err := s.refreshDirTx(tx, aid); err != nil {
+		return false, err
+	}
 	return admitted, tx.Commit()
 }
 
@@ -725,7 +748,7 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at,
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		 FROM agent a
 		 JOIN agent_cap c ON c.aid = a.aid
@@ -915,7 +938,7 @@ func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
 // profile contain it (case-insensitive) — the `find` backend. Pure requesters (registered but with no
 // caps/profile) are intentionally omitted so they do not clutter the starfield.
 func (s *Store) ListAgents(query string) ([]AgentView, error) {
-	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at,
+	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, ` + agentKeyColumns + `,
 	             COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 	      FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid`
 	var args []any
@@ -1026,7 +1049,7 @@ func (s *Store) departedView(aid string) (*AgentView, error) {
 // GetAgent returns one agent's entry + aggregate and its reviews (newest first).
 func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 	row := s.db.QueryRow(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at,
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		 FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		 WHERE a.aid=? GROUP BY a.aid`, aid)
@@ -1163,19 +1186,28 @@ func (s *Store) ReviewEdges() ([]Edge, error) {
 
 type scanner interface{ Scan(dest ...any) error }
 
+// agentKeyColumns are the key history and the key set scanAgent reads
+// after a.last_seen_at.
+const agentKeyColumns = `a.kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid)`
+
 func scanAgent(sc scanner) (AgentView, error) {
 	var av AgentView
 	var capsJSON string
 	var lastSeen sql.NullString
+	var kel, keys []byte
 	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme,
-		&av.RegisteredAt, &lastSeen, &av.AvgRating, &av.ReviewCount); err != nil {
+		&av.RegisteredAt, &lastSeen, &kel, &keys, &av.AvgRating, &av.ReviewCount); err != nil {
 		return av, err
 	}
 	// Every listing surface runs through this one function, so all of
-	// them agree about who is still collecting. Three copies of the same
-	// arithmetic would be three copies that drift.
+	// them agree about who is still collecting, and none of them states a
+	// time more precisely than SSR-H18 allows: the registration to the
+	// day, the last poll to the hour. Three copies of the same arithmetic
+	// would be three copies that drift.
 	live := livenessFrom(lastSeen.String, time.Now())
 	av.LastSeen, av.Quiet = live.LastSeen, live.Quiet
+	av.RegisteredAt = toTheDay(av.RegisteredAt)
+	av.KEL, av.Keys = b64url(kel), b64url(keys)
 	_ = json.Unmarshal([]byte(capsJSON), &av.Caps)
 	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
 	// profile text. A pure requester has none of these and stays out of the public listing.
@@ -1206,7 +1238,7 @@ func aidFromKEL(kel []identity.SignedEvent) (string, error) {
 func (s *Store) GraphNodeFor(aid string) AgentView {
 	row := s.db.QueryRow(
 		`SELECT a.aid, a.name, a.caps, a.summary, a.readme,
-		        a.registered_at, a.last_seen_at,
+		        a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		   FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		  WHERE a.aid=? GROUP BY a.aid`, aid)

@@ -78,11 +78,11 @@ func newFZ(tb testing.TB) *fz {
 	l := aghub.DefaultLimits()
 	l.SendRate, l.SendBurst = 1e6, 1<<30
 	l.RegisterPerMinute, l.RegisterBurst = 1e9, 1<<30
-	l.KeysLookupPerMinute, l.KeysLookupBurst = 1e9, 1<<30
 	l.MailboxMessages = 1 << 20
 	if err := s.SetLimits(l); err != nil {
 		tb.Fatal(err)
 	}
+	s.SetDirBucketRateForTest(1e9, 1<<30)
 	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		tb.Fatal(err)

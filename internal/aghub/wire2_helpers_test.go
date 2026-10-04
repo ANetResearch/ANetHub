@@ -236,9 +236,8 @@ func sealFrom(t *testing.T, sender *identity.Controller, senderKeys []byte, to s
 	return env
 }
 
-// The relay v2 send and rendezvous actions, which relayauth no longer defines; the v0.2 routes
-// under test still check them.
+// The relay v2 send action, which relayauth no longer defines; the v0.2 route under test still
+// checks it.
 const (
 	actionSend = "send" // v030-todo(SS-4)
-	actionP2P  = "p2p"  // v030-todo(SS-5)
 )

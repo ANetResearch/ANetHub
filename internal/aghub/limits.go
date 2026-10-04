@@ -42,32 +42,20 @@ type Limits struct {
 	// bucket on /register (429 + Retry-After when empty).
 	RegisterPerMinute float64
 	RegisterBurst     int
-	// KeysLookupPerMinute and KeysLookupBurst are the per-client-IP token
-	// bucket on the federated half of GET /agents/{aid}/keys: a lookup
-	// for an AID this hub does not hold, which it answers by asking every
-	// peer hub over /fed/v2/keys (429 + Retry-After when empty). The
-	// endpoint is unauthenticated, so without a bound one caller could
-	// make this hub send signed requests to its peers at whatever rate the
-	// caller chooses. Answers from local registrations and from synced
-	// cards are not limited.
-	KeysLookupPerMinute float64
-	KeysLookupBurst     int
 }
 
 // DefaultLimits returns the defaults of A2A-DESIGN §3.7.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxEnvelope:         96 << 20,
-		SendRate:            20,
-		SendBurst:           200,
-		MailboxMessages:     5000,
-		MailboxBytes:        1 << 30,
-		UndeliveredTTL:      14 * 24 * time.Hour,
-		PollBudget:          48 << 20,
-		RegisterPerMinute:   10,
-		RegisterBurst:       20,
-		KeysLookupPerMinute: 60,
-		KeysLookupBurst:     30,
+		MaxEnvelope:       96 << 20,
+		SendRate:          20,
+		SendBurst:         200,
+		MailboxMessages:   5000,
+		MailboxBytes:      1 << 30,
+		UndeliveredTTL:    14 * 24 * time.Hour,
+		PollBudget:        48 << 20,
+		RegisterPerMinute: 10,
+		RegisterBurst:     20,
 	}
 }
 
@@ -86,8 +74,6 @@ func (l Limits) Validate() error {
 		return fmt.Errorf("poll budget must be positive")
 	case l.RegisterPerMinute <= 0 || l.RegisterBurst <= 0:
 		return fmt.Errorf("register rate and burst must be positive")
-	case l.KeysLookupPerMinute <= 0 || l.KeysLookupBurst <= 0:
-		return fmt.Errorf("federated key lookup rate and burst must be positive")
 	}
 	return nil
 }

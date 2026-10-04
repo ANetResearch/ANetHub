@@ -144,10 +144,12 @@ func withdrawnAID(t *testing.T, e aghub.FedA2ACard) (aid, reason string) {
 // An agent's A2A card, once it opts into federation, reaches a peer hub
 // over /fed/v2/cards: it is listed in the peer's registry with the home
 // hub it lives on, served by the peer's card endpoint, found by skill,
-// named in /agents from the card, and its key set is answered by the
-// peer's /agents/{aid}/keys. Before the agent opts in, nothing travels.
+// named in /agents from the card, and its key history and key set travel
+// with the entry in the peer's registry (sealed-sender SSR-H18), not by the
+// peer's /agents/{aid}/keys, which answers for its own agents only. Before
+// the agent opts in, nothing travels.
 func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
-	a, b := federatedHubs(t, false, true)
+	a, b := federatedHubs(t, true)
 	agent, _ := twoAgents(t)
 	card := signA2A(t, agent, a2aCardFor(agent, 1, relayAt(b.srv.URL),
 		withSkills([]string{"echo", "Echo", "text"})))
@@ -204,20 +206,30 @@ func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
 	}
 
 	// A key set published later moves the card on the stream, and the
-	// peer answers key lookups from it.
+	// peer's registry entry carries it.
 	ks, _ := mintKeySet(t, agent, 1)
 	if code, body := publishKeys(t, b.srv, agent, ks); code != http.StatusOK {
 		t.Fatalf("publish keys: %d %s", code, body)
 	}
 	a.fed.SyncOnce(ctx)
-	code, body := getJSON(t, a.srv.URL+"/agents/"+agent.AID()+"/keys")
-	if code != http.StatusOK {
-		t.Fatalf("keys at A: %d %s", code, body)
+	entry = nil
+	for _, e := range registry(t, a.srv, "?skill=echo").Agents {
+		if e.AID == agent.AID() {
+			entry = &e
+		}
 	}
-	var view aghub.KeysView
-	_ = json.Unmarshal(body, &view)
-	if got, _ := base64.StdEncoding.DecodeString(view.KeySet); !bytes.Equal(got, ks) {
-		t.Fatal("A answered with another key set")
+	kel, _ := identity.MarshalKEL(agent.KEL())
+	if entry == nil || entry.Keys != base64.RawURLEncoding.EncodeToString(ks) ||
+		entry.KEL != base64.RawURLEncoding.EncodeToString(kel) {
+		t.Fatalf("A's registry entry does not carry the agent's key history and key set: %+v", entry)
+	}
+	// So does its /agents entry.
+	if v := directoryEntry(t, a.srv, "echo", agent.AID()); v == nil ||
+		v.Keys != base64.RawURLEncoding.EncodeToString(ks) || v.KEL != base64.RawURLEncoding.EncodeToString(kel) {
+		t.Fatalf("A's /agents entry does not carry the agent's key history and key set: %+v", v)
+	}
+	if code, body := getJSON(t, a.srv.URL+"/agents/"+agent.AID()+"/keys"); code != http.StatusNotFound {
+		t.Fatalf("keys at A of an agent registered at B: %d %s, want 404", code, body)
 	}
 }
 

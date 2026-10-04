@@ -122,8 +122,8 @@ var deregSteps = []deregStep{
 	// registers again, its daemon pushes them again when the registration
 	// answer counts none (sealed-sender SSR-D21).
 	{"revoked delivery credentials", execAID(`DELETE FROM cap_revocation WHERE owner = ?`)},
-	{"p2p address", execAID(`DELETE FROM p2p_addr WHERE aid = ?`)},
-	// The registry row last: the steps above may read it.
+	// The registry row last: the steps above may read it. The directory
+	// entry (dir_hash, dir_box; directory.go) goes with it.
 	{"registry row", execAID(`DELETE FROM agent WHERE aid = ?`)},
 }
 

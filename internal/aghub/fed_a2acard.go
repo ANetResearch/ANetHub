@@ -501,6 +501,19 @@ func b64(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
+// HomeHubOf is where an agent this hub knows only from a peer actually
+// banks, or empty if this hub holds no such card.
+//
+// Published so a caller holding an AID can be told where to ask. This hub
+// does not proxy the question.
+func (s *Store) HomeHubOf(aid string) string {
+	var home string
+	if err := s.db.QueryRow(`SELECT home FROM fed_a2a_card WHERE aid=? AND verified_at IS NOT NULL`, aid).Scan(&home); err != nil {
+		return ""
+	}
+	return home
+}
+
 // FedA2ACardKeys returns the key set and KEL of a listed A2A card learned
 // from a peer, or sql.ErrNoRows.
 func (s *Store) FedA2ACardKeys(aid string) (keyset, kel []byte, err error) {
@@ -512,9 +525,10 @@ func (s *Store) FedA2ACardKeys(aid string) (keyset, kel []byte, err error) {
 }
 
 // federatedA2AAgents is the /agents view of the listed A2A cards learned
-// from peers: the card's name and skill ids, and its home.
+// from peers: the card's name and skill ids, its home, and the key history
+// and key set the card arrived with (sealed-sender SSR-H18).
 func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
-	rows, err := s.db.Query(`SELECT aid, name, caps, home FROM fed_a2a_card WHERE verified_at IS NOT NULL`)
+	rows, err := s.db.Query(`SELECT aid, name, caps, home, kel, keys FROM fed_a2a_card WHERE verified_at IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -522,7 +536,8 @@ func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
 	var out []AgentView
 	for rows.Next() {
 		var aid, name, capsJSON, home string
-		if err := rows.Scan(&aid, &name, &capsJSON, &home); err != nil {
+		var kel, keys []byte
+		if err := rows.Scan(&aid, &name, &capsJSON, &home, &kel, &keys); err != nil {
 			return nil, err
 		}
 		var caps []string
@@ -532,7 +547,8 @@ func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
 		if capFilter != "" && !capsServe(caps, capFilter) {
 			continue
 		}
-		out = append(out, AgentView{AID: aid, Name: name, Caps: caps, Listed: len(caps) > 0, HomeHub: home})
+		out = append(out, AgentView{AID: aid, Name: name, Caps: caps, Listed: len(caps) > 0, HomeHub: home,
+			KEL: b64url(kel), Keys: b64url(keys)})
 	}
 	return out, rows.Err()
 }

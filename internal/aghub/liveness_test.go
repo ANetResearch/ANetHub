@@ -61,8 +61,9 @@ func TestPollingIsWhatSaysAnAgentIsStillThere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("last_seen is not a timestamp: %q", live.LastSeen)
 	}
-	if time.Since(seen) > time.Minute {
-		t.Errorf("last_seen is stale immediately: %s", live.LastSeen)
+	// Stated to the hour (sealed-sender SSR-H18): the hour of the poll.
+	if want := time.Now().UTC().Truncate(time.Hour); !seen.Equal(want) && !seen.Equal(want.Add(-time.Hour)) {
+		t.Errorf("last_seen is %s, not the hour of the poll just made", live.LastSeen)
 	}
 }
 

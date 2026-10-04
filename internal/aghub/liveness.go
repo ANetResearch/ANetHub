@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // Whether an agent is still collecting its mail.
@@ -67,16 +69,20 @@ func (s *Store) SeenPolling(aid string) {
 }
 
 // Liveness is what this hub knows about an agent still being there.
+//
+// It is published in every listing, so it says no more than a reader needs
+// (sealed-sender SSR-H18): the hour of the last poll and whether the agent is
+// quiet. A poll time to the second, or how long an agent has been quiet,
+// would tell anyone watching the listing when each agent comes and goes.
 type Liveness struct {
-	// LastSeen is when it last collected its mail, RFC3339. Empty means
-	// never since this was recorded — which includes every agent that
-	// registered before the column existed, and is why empty must read as
-	// "unknown" rather than "dead".
+	// LastSeen is the hour (RFC3339, minutes and seconds zero, UTC) in
+	// which it last collected its mail. Empty means never since this was
+	// recorded — which includes every agent that registered before the
+	// column existed, and is why empty must read as "unknown" rather than
+	// "dead".
 	LastSeen string `json:"last_seen,omitempty"`
 	// Quiet is true when nothing has been collected for QuietAfter.
 	Quiet bool `json:"quiet,omitempty"`
-	// QuietFor is how long, human-readable, when Quiet.
-	QuietFor string `json:"quiet_for,omitempty"`
 }
 
 // LivenessOf reports whether an agent is still collecting.
@@ -103,26 +109,39 @@ func livenessFrom(lastSeen string, now time.Time) Liveness {
 	}
 	t, err := time.Parse(time.RFC3339Nano, lastSeen)
 	if err != nil {
-		return Liveness{LastSeen: lastSeen}
+		// Not a time this hub wrote; it states nothing it cannot read.
+		return Liveness{}
 	}
-	out := Liveness{LastSeen: t.UTC().Format(time.RFC3339)}
-	if d := now.Sub(t); d > QuietAfter {
-		out.Quiet = true
-		out.QuietFor = roundDuration(d)
-	}
-	return out
+	return Liveness{LastSeen: t.UTC().Truncate(time.Hour).Format(time.RFC3339), Quiet: now.Sub(t) > QuietAfter}
 }
 
-// roundDuration renders a gap the way a person reads it.
-func roundDuration(d time.Duration) string {
-	switch {
-	case d >= 48*time.Hour:
-		return fmt.Sprintf("%d days", int(d.Hours()/24))
-	case d >= 2*time.Hour:
-		return fmt.Sprintf("%d hours", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+// toTheHour restates an RFC3339 time to the hour, UTC; "" for one that does
+// not parse.
+func toTheHour(stamp string) string {
+	t, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return ""
 	}
+	return t.UTC().Truncate(time.Hour).Format(time.RFC3339)
+}
+
+// toTheDay restates an RFC3339 time to its UTC day (midnight, in RFC3339);
+// "" for one that does not parse.
+func toTheDay(stamp string) string {
+	t, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return ""
+	}
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+}
+
+// b64url is b in base64url for a listing, "" for none.
+func b64url(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return wire3.EncodeB64URL(b)
 }
 
 // SetLastSeenForTest backdates an agent's last poll.

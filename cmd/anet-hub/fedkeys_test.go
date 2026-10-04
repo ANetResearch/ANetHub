@@ -122,13 +122,12 @@ func registerWithKeys(t *testing.T, h *fedHub) string {
 	return c.AID()
 }
 
-// The hub as main wires it asks its peers for the keys of an agent
-// registered at a peer whose card is not federated (A2A-DESIGN §3.9, [C32]),
-// and still answers for its own agents. The test switch that took this
-// lookup away (-test-no-fed-key-lookup) is gone with the other fixed values
-// of sealed-sender SSR-H20; the lookup itself goes when the directory
-// buckets replace it.
-func TestTheHubWiresTheFederatedKeyLookup(t *testing.T) {
+// A hub serves GET /agents/{aid}/keys for its own agents only (sealed-sender
+// §2.7, SSR-W16): the lookup it used to make at its peers, for anyone who
+// asked, went with every lookup by AID, and a sender now reads a peer's agent
+// from a directory bucket, which does not name it. Wired as main wires it, a
+// hub answers 404 for an agent registered at its peer, and its peer 200.
+func TestAHubServesKeysOnlyForItsOwnAgents(t *testing.T) {
 	keysAt := func(h *fedHub, aid string) int {
 		t.Helper()
 		resp, err := http.Get(h.url + "/agents/" + aid + "/keys")
@@ -139,12 +138,12 @@ func TestTheHubWiresTheFederatedKeyLookup(t *testing.T) {
 		return resp.StatusCode
 	}
 	a, b := newFedHubs(t)
-	if code := keysAt(a, registerWithKeys(t, b)); code != http.StatusOK {
-		t.Fatalf("keys of the peer's hub-local agent: %d, want 200", code)
+	atB := registerWithKeys(t, b)
+	if code := keysAt(a, atB); code != http.StatusNotFound {
+		t.Fatalf("keys of the peer's agent, asked here: %d, want 404", code)
 	}
-	own := registerWithKeys(t, a)
-	if code := keysAt(b, own); code != http.StatusOK {
-		t.Fatalf("the hub's own agent, asked at its peer: %d, want 200", code)
+	if code := keysAt(b, atB); code != http.StatusOK {
+		t.Fatalf("the peer's own agent, asked at the peer: %d, want 200", code)
 	}
 }
 

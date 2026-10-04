@@ -458,27 +458,26 @@ func FuzzHubKeys(f *testing.F) {
 			}
 		}
 
-		// The lookups, with the fuzzed body and path.
-		var lreq aghub.KeysLookupRequest
-		lerr := json.Unmarshal(lookup, &lreq)
-		for _, path := range []string{aghub.KeysLookupPath, aghub.KELLookupPath, aghub.CardLookupPath} {
+		// The lookups by AID in the body are gone (sealed-sender §2.7):
+		// whatever the body, they are 404.
+		for _, path := range []string{"/agents/keys:lookup", "/agents/kel:lookup", "/a2a/v1/agents/card:lookup"} {
 			rec := h.serve(h.request(http.MethodPost, path, "", lookup))
-			if !allowed(rec.Code, 200, 400, 404, 413) {
-				t.Fatalf("%s %q: unexpected %d %s", path, lookup, rec.Code, rec.Body.Bytes())
-			}
-			if rec.Code == http.StatusOK && (lerr != nil || lreq.AID == "") {
-				t.Fatalf("%s answered 200 for a body naming no AID: %q", path, lookup)
-			}
-			if rec.Code == http.StatusOK {
-				checkLookup(t, h, path, lreq.AID, rec.Body.Bytes())
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s %q: %d %s, want 404", path, lookup, rec.Code, rec.Body.Bytes())
 			}
 		}
-		for _, path := range []string{"/agents/" + url.PathEscape(getAID) + "/keys",
-			"/agents/" + url.PathEscape(getAID) + "/kel", "/a2a/v1/agents/" + url.PathEscape(getAID) + "/card",
-			"/agents/" + url.PathEscape(getAID) + "/jwks.json"} {
-			rec := h.serve(h.request(http.MethodGet, path, "", nil))
+		for _, r := range []struct{ kind, path string }{
+			{"keys", "/agents/" + url.PathEscape(getAID) + "/keys"},
+			{"kel", "/agents/" + url.PathEscape(getAID) + "/kel"},
+			{"card", "/a2a/v1/agents/" + url.PathEscape(getAID) + "/card"},
+			{"jwks", "/agents/" + url.PathEscape(getAID) + "/jwks.json"},
+		} {
+			rec := h.serve(h.request(http.MethodGet, r.path, "", nil))
 			if !allowed(rec.Code, 200, 301, 307, 400, 404) {
-				t.Fatalf("GET %s: unexpected %d %s", path, rec.Code, rec.Body.Bytes())
+				t.Fatalf("GET %s: unexpected %d %s", r.path, rec.Code, rec.Body.Bytes())
+			}
+			if rec.Code == http.StatusOK {
+				checkLookup(t, h, r.kind, getAID, rec.Body.Bytes())
 			}
 		}
 	})
@@ -497,11 +496,12 @@ func decodeSetSeq(raw []byte) *uint64 {
 	return &set.Seq
 }
 
-// checkLookup verifies a 200 lookup answer for aid.
-func checkLookup(t *testing.T, h *fz, path, aid string, body []byte) {
+// checkLookup verifies a 200 answer of a GET of aid's keys, kel or card
+// (kind; a JWKS is not checked here).
+func checkLookup(t *testing.T, h *fz, kind, aid string, body []byte) {
 	t.Helper()
-	switch path {
-	case aghub.KeysLookupPath:
+	switch kind {
+	case "keys":
 		var v aghub.KeysView
 		if err := json.Unmarshal(body, &v); err != nil || v.AID != aid {
 			t.Fatalf("keys lookup for %s answered %s", aid, body)
@@ -519,7 +519,7 @@ func checkLookup(t *testing.T, h *fz, path, aid string, body []byte) {
 		if _, err := seal.VerifyEncKeySet(signed, aid, kel, uint64(time.Now().UnixMilli())); err != nil {
 			t.Fatalf("keys lookup for %s served a set that does not verify for it: %v", aid, err)
 		}
-	case aghub.KELLookupPath:
+	case "kel":
 		var v struct {
 			AID string `json:"aid"`
 			KEL string `json:"kel"`
@@ -536,7 +536,7 @@ func checkLookup(t *testing.T, h *fz, path, aid string, body []byte) {
 		if err != nil || states[len(states)-1].AID != aid {
 			t.Fatalf("kel lookup for %s served a KEL that is not its own: %v", aid, err)
 		}
-	case aghub.CardLookupPath:
+	case "card":
 		kelBytes, err := h.store.AgentKEL(aid)
 		if err != nil {
 			t.Fatalf("card lookup served a card for %s, which is not registered", aid)

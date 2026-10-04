@@ -209,10 +209,10 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	// Path tampered: signed for one request target, sent with another
 	// spelling that routes to the same handler and the same agent. The
 	// signature covers the target as sent, so it no longer verifies.
-	pb := rawBody(t, map[string]any{"addr": "tcp://10.0.0.1:1"})
-	p := newRequest(t, srv, http.MethodPost, "/agents/"+sender.AID()+"/p2p", pb)
-	signV2(t, p, sender, actionP2P, hubAID, pb, signingNow())
-	p.URL.RawPath = "/agents/%" + strconv.FormatInt(int64(sender.AID()[0]), 16) + sender.AID()[1:] + "/p2p"
+	pb := rawBody(t, map[string]any{"visibility": aghub.VisibilityFederated})
+	p := newRequest(t, srv, http.MethodPost, "/agents/"+sender.AID()+"/visibility", pb)
+	signV2(t, p, sender, relayauth.ActionVisibility, hubAID, pb, signingNow())
+	p.URL.RawPath = "/agents/%" + strconv.FormatInt(int64(sender.AID()[0]), 16) + sender.AID()[1:] + "/visibility"
 	if code, b, _ := send(t, p); code != http.StatusUnauthorized {
 		t.Errorf("path tampered: %d %s, want 401", code, b)
 	}

@@ -2,13 +2,10 @@ package aghub_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
 	"testing"
 	"time"
 
@@ -18,15 +15,14 @@ import (
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/federation"
 )
 
 // Refusal paths of the wire-2 endpoints that the positive tests do not
-// reach: path-scoped authentication on visibility and p2p, the publisher
-// rule for a re-signed or tampered key set, the consumer rule for key sets
-// in the card stream, the poll budget and order, the atomic KEL check on
-// registration, per-address limits for IPv6 callers and for federated key
-// lookups, and the 507 a sender sees when the recipient's hub is full.
+// reach: path-scoped authentication on visibility, the publisher rule for a
+// re-signed or tampered key set, the consumer rule for key sets in the card
+// stream, the poll budget and order, the atomic KEL check on registration,
+// per-address limits for IPv6 callers, and the 507 a sender sees when the
+// recipient's hub is full.
 
 // signedPathRequest builds a request to path signed by signer for action,
 // optionally claiming another AID in X-ANet-AID.
@@ -91,30 +87,6 @@ func TestOnlyTheAgentCanChangeItsVisibility(t *testing.T) {
 	setVisibility(t, srv, agent, aghub.VisibilityPublic)
 	if v := stored(); v != aghub.VisibilityPublic {
 		t.Fatalf("the agent's own request did not take effect: %q", v)
-	}
-}
-
-// A p2p address is a statement about oneself: another registered agent's
-// valid signature does not publish an address for the agent in the path.
-func TestAnotherAgentCannotPublishAnAgentsP2PAddress(t *testing.T) {
-	srv := newHub(t)
-	agent, other := twoAgents(t)
-	register(t, srv, agent, "Agent", nil)
-	register(t, srv, other, "Other", nil)
-	hubAID := hubAIDOf(t, srv)
-	path := "/agents/" + agent.AID() + "/p2p"
-	body := rawBody(t, map[string]any{"addr": "tcp://198.51.100.7:4001"})
-	for _, claim := range []string{"", agent.AID()} {
-		req := signedPathRequest(t, srv.URL, hubAID, other, actionP2P, path, body, claim)
-		if code, b, _ := send(t, req); code != http.StatusUnauthorized {
-			t.Errorf("another agent's signature (claim %q): %d %s, want 401", claim, code, b)
-		}
-	}
-	if code, b := getJSON(t, srv.URL+path); code == http.StatusOK {
-		t.Fatalf("an address published by another agent is served: %s", b)
-	}
-	if code, b := publishAddr(t, srv, agent, "tcp://198.51.100.7:4001"); code != 200 {
-		t.Fatalf("control: the agent's own address: %d %s", code, b)
 	}
 }
 
@@ -379,59 +351,10 @@ func TestRegistrationIsRateLimitedPerIPv6Prefix(t *testing.T) {
 	}
 }
 
-// The federated half of GET /agents/{aid}/keys sends a signed request to
-// every peer for an unauthenticated caller, so it is limited per client
-// address; answers from local registrations are not.
-func TestFederatedKeyLookupsAreRateLimitedPerClient(t *testing.T) {
-	srv := newHub(t)
-	l := aghub.DefaultLimits()
-	l.KeysLookupPerMinute, l.KeysLookupBurst = 1, 1
-	if err := serverOf(t, srv).SetLimits(l); err != nil {
-		t.Fatal(err)
-	}
-	asked := 0
-	serverOf(t, srv).SetFederatedKeyLookup(func(_ context.Context, aid string, _ func(ks, kel []byte) error) ([]byte, []byte, string, error) {
-		asked++
-		return nil, nil, "", fmt.Errorf("every peer: %w", federation.ErrNoKeys)
-	})
-	local, _ := twoAgents(t)
-	register(t, srv, local, "Local", nil)
-	k, _ := mintKeySet(t, local, 1)
-	if code, b := publishKeys(t, srv, local, k); code != 200 {
-		t.Fatalf("publish: %d %s", code, b)
-	}
-	get := func(aid, ip string) (int, http.Header) {
-		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/agents/"+aid+"/keys", nil)
-		req.Header.Set("X-Real-IP", ip)
-		code, _, hdr := send(t, req)
-		return code, hdr
-	}
-	unknown := func() string { c, _ := identitytest.Hub(); return c.AID() }
-	if code, _ := get(unknown(), "203.0.113.5"); code != http.StatusNotFound {
-		t.Fatalf("first federated lookup: %d, want 404 from the peers", code)
-	}
-	code, hdr := get(unknown(), "203.0.113.5")
-	if code != http.StatusTooManyRequests {
-		t.Fatalf("second federated lookup from the same address: %d, want 429", code)
-	}
-	if ra, err := strconv.Atoi(hdr.Get("Retry-After")); err != nil || ra < 1 {
-		t.Errorf("Retry-After = %q", hdr.Get("Retry-After"))
-	}
-	if asked != 1 {
-		t.Errorf("the peers were asked %d times, want 1", asked)
-	}
-	if code, _ := get(local.AID(), "203.0.113.5"); code != http.StatusOK {
-		t.Errorf("a local agent's keys from the limited address: %d, want 200", code)
-	}
-	if code, _ := get(unknown(), "203.0.113.6"); code != http.StatusNotFound {
-		t.Errorf("a federated lookup from another address: %d, want 404", code)
-	}
-}
-
 // A full mailbox at the recipient's hub reaches the sender as 507, the
 // same answer a full local mailbox gives, not as a generic 502.
 func TestAFullMailboxAtThePeerHubIs507ForTheSender(t *testing.T) {
-	a, b := twoFederatedHubs(t, true)
+	a, b := twoFederatedHubs(t)
 	recip, sender := twoAgents(t)
 	register(t, b.srv, recip, "Provider", nil)
 	register(t, a.srv, sender, "Requester", nil)
