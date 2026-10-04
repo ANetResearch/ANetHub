@@ -42,14 +42,14 @@
   （`error` 级的行带 `client: <地址>` 与 `request: <请求行>`，`crit` 行发生在读请求之前，至多带地址），写在
   `/var/log/nginx/hub.error.log`，由主机 logrotate 对 `/var/log/nginx/*.log` 的规则轮转（Debian/Ubuntu 默认按天、
   保留 14 份并压缩），即至多保留 14 天。`internal/aghub/proxylog_test.go` 检查这两个文件。运营者改用自己的配置并
-  打开访问日志，就会持有上述记录。daemon 在给对端写之前查的加密公钥、卡片与验卡用的 KEL 都把 AID 放在
-  请求体（`POST /agents/keys:lookup`、`/a2a/v1/agents/card:lookup`、`/agents/kel:lookup`），请求行不含对端；对应的 `GET`
-  仍为旧 daemon 与读者保留，p2p 地址查询 `GET /agents/{aid}/p2p`（anetpeer）
-  仍在请求行里带对端 AID。
+  打开访问日志，就会持有上述记录。daemon 在给对端写之前不按 AID 查询：它向 `POST /directory:bucket`
+  要对端目录哈希一个短前缀（至多 10 位）的整桶条目，自己打开其中属于对端的那一条，请求行与请求体都不含
+  对端 AID 或完整的目录哈希。按 AID 查询的路由与 p2p 地址目录已删除；`GET /agents/{aid}/keys` 等带 AID 的
+  `GET` 只为读者保留。
 - 评价关系图：谁评价了谁、评分、评语（≤ 280 字符，由评价者签名公开）、回执中的 request_cid 与
   result_cid。anet 0.2.0 起这两个值的原像含 16 字节随机数（A2A-DESIGN §2 X4），不能用候选内容逐个
   计算比对来确认内容；更早版本签发的回执不含随机数，对低熵内容可以这样确认。
-- p2p 地址目录、活跃度（最后取信时间）。
+- 活跃度（最后取信时间；列表中只给到小时，注册时间只给到日）。
 - 付款元数据：结算、兑付记录与公开发放链中的金额、时间与 AID；hub 可以按付款方、收款方与时间把
   结算与公开评价关联。
 
