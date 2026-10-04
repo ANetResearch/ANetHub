@@ -223,6 +223,11 @@ func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
 		entry.KEL != base64.RawURLEncoding.EncodeToString(kel) {
 		t.Fatalf("A's registry entry does not carry the agent's key history and key set: %+v", entry)
 	}
+	// So does its /agents entry.
+	if v := directoryEntry(t, a.srv, "echo", agent.AID()); v == nil ||
+		v.Keys != base64.RawURLEncoding.EncodeToString(ks) || v.KEL != base64.RawURLEncoding.EncodeToString(kel) {
+		t.Fatalf("A's /agents entry does not carry the agent's key history and key set: %+v", v)
+	}
 	if code, body := getJSON(t, a.srv.URL+"/agents/"+agent.AID()+"/keys"); code != http.StatusNotFound {
 		t.Fatalf("keys at A of an agent registered at B: %d %s, want 404", code, body)
 	}

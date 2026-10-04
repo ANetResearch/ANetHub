@@ -20,6 +20,8 @@ import (
 	"github.com/ANetResearch/ANetCore/dirbox"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
+	"github.com/ANetResearch/ANetCore/relayauth"
+	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -376,12 +378,15 @@ func TestBucketPrefixFormat(t *testing.T) {
 			t.Errorf("%s: %d %s, want 400 %s", c.name, code, b, c.reason)
 		}
 	}
-	// A signed-looking request on the anonymous route.
-	req := newRequest(t, srv, http.MethodPost, "/directory:bucket", []byte(`{"prefix":"","bits":0}`))
-	req.Header.Set("X-ANet-AID", "bafyrei-whoever")
-	if code, b, _ := send(t, req); code != http.StatusBadRequest ||
-		!bytes.Contains(b, []byte(`"reason":"identity_headers_not_allowed"`)) {
-		t.Errorf("an identity header: %d %s", code, b)
+	// A signed-looking request on the anonymous route: each of the three
+	// headers that name a signer is refused on its own (CORE-K15).
+	for _, hdr := range []string{relayauth.HeaderAID, relayauth.HeaderSeq, relayauth.HeaderSig} {
+		req := newRequest(t, srv, http.MethodPost, "/directory:bucket", []byte(`{"prefix":"","bits":0}`))
+		req.Header.Set(hdr, "AA")
+		if code, b, _ := send(t, req); code != http.StatusBadRequest ||
+			!bytes.Contains(b, []byte(`"reason":"identity_headers_not_allowed"`)) {
+			t.Errorf("the identity header %s: %d %.200s, want 400 identity_headers_not_allowed", hdr, code, b)
+		}
 	}
 	// Every prefix of every width up to max_bits answers exactly its bucket.
 	all := bucketOK(t, srv, `{"prefix":"","bits":0}`)
@@ -787,6 +792,16 @@ func TestRegistryEntryPrecision(t *testing.T) {
 	if bytes.Contains(raw, []byte(`"kel"`)) || bytes.Contains(raw, []byte(`"keys"`)) {
 		t.Errorf("/graph carries key material: %s", raw)
 	}
+	// A poll time the hub cannot read is not repeated, at whatever
+	// precision it was written.
+	if _, err := store.DBForTest().Exec(`UPDATE agent SET last_seen_at='2026-10-04 12:34:56.789' WHERE aid=?`, c.AID()); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/agents", "/agents/" + c.AID(), "/a2a/v1/agents"} {
+		if _, raw := getJSON(t, srv.URL+path); bytes.Contains(raw, []byte("12:34")) {
+			t.Errorf("%s repeats an unreadable poll time: %s", path, raw)
+		}
+	}
 }
 
 // The routes that named an agent for a sender, or published where to dial
@@ -919,5 +934,151 @@ func TestMaxBitsCountsPeerCardsButBucketsDoNot(t *testing.T) {
 	}
 	if total != len(agents) {
 		t.Fatalf("the buckets hold %d entries, want this hub's %d", total, len(agents))
+	}
+}
+
+// SSR-H17, the key set: the same set re-signed after a rotation is stored
+// as unchanged, and the entry carries the new signature, the one that
+// verifies against the extended KEL. An entry left with the old signature
+// would hand every reader a key set it refuses.
+func TestDirEntryCarriesTheResignedKeySet(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	c, _ := twoAgents(t)
+	register(t, srv, c, "Agent", nil)
+	now := uint64(time.Now().UnixMilli())
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: 3, Keys: []seal.EncKey{kp.Public},
+		IssuedAt: now, Mbox: testMbox(t)}
+	before := signSet(t, c, set)
+	if code, b := publishKeys(t, srv, c, before); code != http.StatusOK {
+		t.Fatalf("publish: %d %s", code, b)
+	}
+	if e, _ := storedEntry(t, store, c.AID()); e == nil || !bytes.Equal(e.Keys, before) {
+		t.Fatal("the entry does not carry the key set")
+	}
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := registerCode(t, srv, c, "Agent", nil); code != http.StatusOK {
+		t.Fatalf("register after the rotation: %d %s", code, b)
+	}
+	after := signSet(t, c, set)
+	if bytes.Equal(after, before) {
+		t.Fatal("setup: the re-signed set has the same bytes")
+	}
+	code, b := publishKeys(t, srv, c, after)
+	var out aghub.KeysPublishResponse
+	if code != http.StatusOK || json.Unmarshal(b, &out) != nil || out.KeysStatus != aghub.KeysStatusUnchanged {
+		t.Fatalf("the same set re-signed: %d %s, want 200 unchanged", code, b)
+	}
+	kel, _ := identity.MarshalKEL(c.KEL())
+	if e, _ := storedEntry(t, store, c.AID()); e == nil || !bytes.Equal(e.Keys, after) || !bytes.Equal(e.KEL, kel) {
+		t.Fatal("the entry does not carry the re-signed key set over the extended KEL")
+	}
+}
+
+// SSR-H17, the card: a card that was delisted and is listed again in the
+// same bytes (AdmitA2ACard's unchanged path) is back in the entry.
+func TestDirEntryCarriesACardListedAgain(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	c, _ := twoAgents(t)
+	k1, _ := mintKeySet(t, c, 1)
+	body := registerBody(t, c, "Agent", nil)
+	body["enc_keys"] = base64.StdEncoding.EncodeToString(k1)
+	if code, b := registerFunded(t, srv, c, body); code != http.StatusOK {
+		t.Fatalf("register: %d %s", code, b)
+	}
+	card := signA2A(t, c, a2aCardFor(c, 1))
+	if out := registerA2A(t, srv, c, "Agent", nil, card); out.CardStatus != aghub.CardStatusOK {
+		t.Fatalf("card: %+v", out)
+	}
+	if e, _ := storedEntry(t, store, c.AID()); e == nil || !bytes.Equal(e.Card, card) {
+		t.Fatal("the entry does not carry the card")
+	}
+	// Delisted, as recheckA2ACard leaves a card that stopped verifying.
+	if _, err := store.DBForTest().Exec(`UPDATE agent_a2a_card SET verified_at=NULL WHERE aid=?`, c.AID()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RefreshDirEntry(c.AID()); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := storedEntry(t, store, c.AID()); e == nil || e.Card != nil {
+		t.Fatal("setup: the entry still carries the delisted card")
+	}
+	if out := registerA2A(t, srv, c, "Agent", nil, card); out.CardStatus != aghub.CardStatusUnchanged {
+		t.Fatalf("the same card again: %+v", out)
+	}
+	if e, _ := storedEntry(t, store, c.AID()); e == nil || !bytes.Equal(e.Card, card) {
+		t.Fatal("the card listed again is not back in the entry")
+	}
+}
+
+// SSR-W17 at the bound: an entry whose box is exactly 192 KiB is carried,
+// one byte more is left out and counted.
+func TestDirEntryTooLargeBoundary(t *testing.T) {
+	_, store, agents := dirHubWith(t, 1)
+	aid := agents[0].AID()
+	e, _ := storedEntry(t, store, aid)
+	if e == nil {
+		t.Fatal("no entry to start with")
+	}
+	boxLen := func(kelLen int) int {
+		x := *e
+		x.KEL = make([]byte, kelLen)
+		pt, err := x.Marshal()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(pt) + dirbox.Overhead
+	}
+	// A KEL of 64 KiB and more has a byte string head of the same length,
+	// so the box grows byte for byte with it.
+	n := 100 << 10
+	n += dirbox.MaxBoxLen - boxLen(n)
+	if boxLen(n) != dirbox.MaxBoxLen || boxLen(n+1) != dirbox.MaxBoxLen+1 {
+		t.Fatalf("setup: boxes of %d and %d bytes", boxLen(n), boxLen(n+1))
+	}
+	for _, c := range []struct {
+		kelLen  int
+		carried bool
+	}{{n, true}, {n + 1, false}, {n, true}} {
+		before := aghub.DirEntriesTooLarge()
+		if _, err := store.DBForTest().Exec(`UPDATE agent SET kel=? WHERE aid=?`,
+			bytes.Repeat([]byte{0xA7}, c.kelLen), aid); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RefreshDirEntry(aid); err != nil {
+			t.Fatal(err)
+		}
+		got, box := storedEntry(t, store, aid)
+		counted := aghub.DirEntriesTooLarge() - before
+		switch {
+		case c.carried && (got == nil || len(box) != c.kelLen-n+dirbox.MaxBoxLen || counted != 0):
+			t.Errorf("a box of %d bytes: filed %v (%d bytes), counted %d; want it filed", boxLen(c.kelLen), got != nil, len(box), counted)
+		case !c.carried && (got != nil || counted != 1):
+			t.Errorf("a box of %d bytes: filed %v, counted %d; want it left out and counted once", boxLen(c.kelLen), got != nil, counted)
+		}
+	}
+}
+
+// SSR-W18: the merged directory holds each agent once. A peer's card for an
+// agent registered here is the same entry, and counting it twice would
+// state buckets twice as full as they are.
+func TestMaxBitsCountsAnAgentOnce(t *testing.T) {
+	_, store, agents := dirHubWith(t, 60)
+	db := store.DBForTest()
+	for _, c := range agents {
+		if _, err := db.Exec(`INSERT INTO fed_a2a_card(aid, seq, payload_hash, card, kel, home, peer_aid, verified_at, stored_at)
+		    VALUES(?, 1, x'00', '{}', x'00', 'https://peer.example', 'peer', ?, ?)`,
+			c.AID(), time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store.ForgetDirMaxBitsForTest()
+	if max, err := store.DirMaxBits(); err != nil || max != 0 {
+		t.Fatalf("60 agents, each also known from a peer: max_bits %d (%v), want 0", max, err)
 	}
 }
