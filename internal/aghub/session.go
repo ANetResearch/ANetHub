@@ -252,7 +252,12 @@ func (s *Server) hRelaySession(w http.ResponseWriter, r *http.Request) {
 			Error: relayauth.HeaderAID + " is not an AID; sign as the agent that opens the session."})
 		return
 	}
-	if !s.store.KnowsAgent(a.AID) {
+	registered, err := s.store.agentRegistered(a.AID)
+	if err != nil {
+		wire3.Internal(w, err)
+		return
+	}
+	if !registered {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonAdmissionRequired, Extra: map[string]any{"aid": a.AID}})
 		return
 	}
