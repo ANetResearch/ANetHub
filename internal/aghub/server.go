@@ -12,11 +12,13 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/regpow"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -490,55 +492,93 @@ func (s *Server) hGraph(w http.ResponseWriter, _ *http.Request) {
 }
 
 // RegisterRequest is an agent's self-registration: its profile, its KEL
-// (base64 CoreDet-CBOR), optionally its signed cards and its encryption
-// key set.
+// (base64url CoreDet-CBOR, core G2), optionally its cards and its encryption
+// key set; for a newcomer, the proof of work a challenge asked for; or, with
+// check_only, only the question "would this hub take me" (core §2.12.2).
 //
 // The request is authenticated with relayauth v2 headers, action
 // "register", verified against the KEL in this body (the agent may not be
 // stored yet). The X-ANet-AID header must equal aid. Proof of key
 // possession is what stops a stranger who knows the public KEL from
 // overwriting the registration.
+//
+// It is decoded strictly (core CORE-E7): a member it does not list is 400
+// bad_request, except "invite", which is 400 invite_removed — hubs no longer
+// use invites, and a node still sending one is told so (LEC HN-5).
 type RegisterRequest struct {
 	AID     string   `json:"aid"`
 	Name    string   `json:"name"`
 	Caps    []string `json:"caps"`
 	Summary string   `json:"summary"`
 	Readme  string   `json:"readme"`
-	Pricing string   `json:"pricing"`
-	KEL     string   `json:"kel"` // base64(identity.MarshalKEL)
-	// Invite is an admission token, needed only when this hub requires
-	// one AND does not already know this AID. Empty from a node that was
-	// never given one, which is every node on a hub that admits openly.
-	Invite string `json:"invite"`
+	// Pricing and Card leave the request with the public prices and the
+	// signed ADP card (hub-payment-privacy §4.2.6); strict decoding then
+	// refuses them. v030-todo(PAY-8)
+	Pricing string `json:"pricing"`
+	KEL     string `json:"kel"` // base64url(identity.MarshalKEL)
 	// Card is the agent's own signed statement of what it offers (an ADP
-	// AgentCard). The authentication proves who is calling; only the card
-	// makes Name and Caps attributable to the agent rather than to this
-	// hub. Optional.
+	// AgentCard). v030-todo(PAY-8)
 	Card json.RawMessage `json:"card"`
 	// EncKeys is the agent's encryption key set: base64 (std) of the
 	// seal.SignedEncKeySet encoding (§3.1). Optional. A set that does not
 	// verify, or does not advance the stored one, is reported in
-	// keys_status and does not fail the registration.
+	// keys_status and does not fail the registration. v030-todo(FS-3):
+	// base64url (core G2).
 	EncKeys string `json:"enc_keys,omitempty"`
+	// PrevSeq is the key-set sequence number the agent last saw stored
+	// here. v030-todo(FS-3): required with enc_keys (PAY-A1 step 3) and
+	// compared and swapped (step 9).
+	PrevSeq *uint64 `json:"prev_seq,omitempty"`
 	// A2ACard is the agent's signed A2A AgentCard as a JSON object.
 	// Optional. It is verified against KEL and the stored card's
 	// params.seq, stored as the exact bytes received when admitted, and
 	// reported in card_status; it does not fail the registration (see
 	// a2acard.go).
 	A2ACard json.RawMessage `json:"a2a_card,omitempty"`
+	// PoW answers a pow_required challenge: needed only by a newcomer this
+	// hub admits through a sign-up window or open registration.
+	PoW *RegisterPoW `json:"pow,omitempty"`
+	// CheckOnly asks only whether this hub would take the AID: 200
+	// {status: admitted|open} or 403 admission_required. Nothing is
+	// written, no proof of work is asked, nothing is reserved (LEC HN-2).
+	CheckOnly bool `json:"check_only,omitempty"`
+}
+
+// RegisterPoW is a proof of work: the challenge's seed and the nonce found
+// for it, both base64url (hub-payment-privacy §2.2).
+type RegisterPoW struct {
+	Seed  string `json:"seed"`
+	Nonce string `json:"nonce"`
 }
 
 // RegisterResponse is the /register answer. keys_status and card_status
 // report the optional fields individually; keys_error and card_error
-// explain a status other than ok, unchanged or absent.
+// explain a status other than ok, unchanged or absent. probation_until (unix
+// ms) and trial (pending or granted) are there only for an account that
+// came in through a sign-up window or open registration.
 type RegisterResponse struct {
-	AID        string `json:"aid"`
-	Status     string `json:"status"`
-	KeysStatus string `json:"keys_status"`
-	KeysError  string `json:"keys_error,omitempty"`
-	CardStatus string `json:"card_status"`
-	CardError  string `json:"card_error,omitempty"`
+	AID            string  `json:"aid"`
+	Status         string  `json:"status"`
+	KeysStatus     string  `json:"keys_status"`
+	KeysError      string  `json:"keys_error,omitempty"`
+	CardStatus     string  `json:"card_status"`
+	CardError      string  `json:"card_error,omitempty"`
+	ProbationUntil *uint64 `json:"probation_until,omitempty"`
+	Trial          string  `json:"trial,omitempty"`
 }
+
+// CheckOnlyResponse is the /register answer to check_only: admitted (the
+// AID is registered here or on the admission list) or open (it may register
+// after a proof of work: open registration, or a sign-up window with room).
+type CheckOnlyResponse struct {
+	Status string `json:"status"`
+}
+
+// The check_only answers.
+const (
+	CheckAdmitted = "admitted"
+	CheckOpen     = "open"
+)
 
 // maxRegisterBody caps a registration, separately from limitBody.
 //
@@ -554,73 +594,132 @@ type RegisterResponse struct {
 // registration does not fit is refused with 413 rather than truncated.
 const maxRegisterBody = 1 << 20
 
+// registerKELReplays counts the KELs /register decoded and replayed. A test
+// reads it to show that a registration refused at the admission gate cost
+// no replay (PAY-A2, M-PAY-22).
+var registerKELReplays atomic.Int64
+
+// hRegister is POST /register, in the one order of hub-payment-privacy
+// PAY-A1. Each step refuses with its own code and costs no more than the
+// steps before it; nothing is written before step 10, and what step 4
+// reserved is given back when a later step refuses.
+//
+//	0  X-ANet-Wire (wire3.Contract, before this handler)
+//	1  the registration rate of the client's address
+//	2  the body: size, strict decoding, invite_removed before bad_request
+//	3  aid and kel present; X-ANet-AID == aid; caps; the pow's shape
+//	4  the admission gate, for an AID not registered here
+//	5  the KEL: decode, replay, derive the AID; the relayauth signature
+//	6  the KEL only extends what this hub holds (registered or departed);
+//	   a deactivated one is refused
+//	7  the witness is this hub (KEL H-1; not for check_only)
+//	8  check_only answers here
+//	9  the key set and the A2A card (reported per field; after the row)
+//	10 one transaction: the agent row and what admission writes beside it
+//	11 a refusal after step 4 gives the reservation back
 func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
-	// Per client IP, before anything else: an AID is one locally
+	// 1. Per client address, before anything else: an AID is one locally
 	// generated key pair, so without this the per-sender send limit is
 	// bypassed by registering a new sender (§2 X1, [C15f]).
 	if ok, wait := s.registerLimiter.allow(clientIP(r)); !ok {
-		w.Header().Set("Retry-After", retryAfter(wait))
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{
-			"error": "too many registrations from this address; retry later"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait,
+			Error: "Too many registrations from this address; retry after Retry-After."})
 		return
 	}
-	auth, err := parseV2Headers(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
-		return
-	}
+	// 2. The body, read whole because the signature covers these bytes.
 	body, f := readRawBody(w, r, maxRegisterBody)
 	if f != nil {
 		if f.code == http.StatusRequestEntityTooLarge {
-			writeJSON(w, f.code, map[string]string{
-				"error": fmt.Sprintf("registration body exceeds %d bytes", maxRegisterBody)})
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonTooLarge,
+				Error: fmt.Sprintf("A registration is at most %d bytes; send a smaller one.", maxRegisterBody)})
 			return
 		}
-		writeJSON(w, f.code, map[string]string{"error": f.Error()})
+		wire3.Refuse(w, wire3.ReasonBadRequest)
 		return
 	}
 	var req RegisterRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "aid + kel required"})
+	if err := wire3.DecodeStrict(body, &req); err != nil {
+		if carriesInvite(body) {
+			wire3.Refuse(w, wire3.ReasonInviteRemoved)
+			return
+		}
+		wire3.RefuseDecode(w, err)
+		return
+	}
+	// 3. What the request must carry, checked on the request alone.
+	auth, err := parseV2Headers(r)
+	if err != nil {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: sentence(err)})
 		return
 	}
 	if req.AID == "" || req.KEL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "aid + kel required"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "A registration carries aid and kel; add them and send again."})
+		return
+	}
+	// A complete AID, before it is hashed into a proof of work, echoed in
+	// admission_required or written to the log with the command an
+	// operator copies to admit it: anything else in that line would be
+	// the sender's text in the operator's shell.
+	if !ValidAID(req.AID) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The member \"aid\" is not a complete AID; send the agent's own AID as anet prints it."})
 		return
 	}
 	if auth.AID != req.AID {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": relayauth.HeaderAID + " does not match the aid being registered"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
+			Error: relayauth.HeaderAID + " does not match the aid being registered; sign as the agent you register."})
 		return
 	}
 	// The declared capability set is checked before the signature work:
 	// it is the cheapest check, it needs nothing but the request itself,
 	// and an oversized registration is the case worth rejecting cheaply.
 	if err := validateCaps(req.Caps); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: sentence(err)})
 		return
 	}
-	// On a hub that admits by invitation, a newcomer without a usable
-	// invite is refused next, before its KEL is replayed or its signature
-	// kept in the replay cache (Store.CheckInvite) [redteam:F4]. The invite
-	// is spent further down, after the signature. An AID this hub knows is
-	// not gated, as below; claiming one does not get a stranger past the
-	// signature.
-	if s.store.InviteRequired() && !s.store.KnowsAgent(req.AID) {
-		if err := s.store.CheckInvite(req.Invite, req.AID); err != nil {
-			// Logged as the refusal after the signature is (see there),
-			// saying that this AID is only claimed.
-			log.Printf("hub: registration refused for %s (claimed, not yet proven): %v", req.AID, err)
-			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": err.Error(),
-				"hint":  "ask this hub's operator for an invite, then register with --token",
-			})
+	var powSeed, powNonce []byte
+	if req.PoW != nil {
+		var e1, e2 error
+		powSeed, e1 = decodeB64URL(req.PoW.Seed)
+		powNonce, e2 = decodeB64URL(req.PoW.Nonce)
+		if e1 != nil || e2 != nil || len(powSeed) != 32 || len(powNonce) < 1 || len(powNonce) > regpow.MaxNonce {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+				Error: "The member \"pow\" must hold a 32-byte seed and a nonce of 1 to 32 bytes, both base64url; fix it and send again."})
 			return
 		}
 	}
-	kelBytes, err := base64.StdEncoding.DecodeString(req.KEL)
+	// 4. The admission gate, only for an AID this hub does not hold as a
+	// registration (one with only a tombstone in departed_kel is unknown
+	// too). A registered AID re-registers on every start and whenever its
+	// capabilities change, and is never gated (PAY-A2).
+	now := s.store.now()
+	// An AID registered now passes no gate, but its row must still be
+	// there when step 10 writes: one deregistered meanwhile (revoked,
+	// swept, left) is a newcomer again, and only the gate admits those.
+	adm := &admissionWrite{via: viaRegistered}
+	var hold *gateHold
+	committed := false
+	defer func() {
+		if !committed {
+			s.store.gate().release(hold)
+		}
+	}()
+	checkStatus := CheckAdmitted
+	if !s.store.KnowsAgent(req.AID) {
+		g := s.store.gate()
+		var refused bool
+		adm, hold, checkStatus, refused = s.admissionGate(w, r, &req, powSeed, powNonce, g, now)
+		if refused {
+			return
+		}
+	}
+	// 5. The KEL and the signature.
+	registerKELReplays.Add(1)
+	kelBytes, err := decodeB64URL(req.KEL)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel not base64"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
+			Error: "The member \"kel\" is not base64url; encode the key history without padding and send again."})
 		return
 	}
 	// The same caps every sender applies to a KEL it is handed
@@ -633,100 +732,99 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	// a longer KEL anyway, so the agent could not be written to.
 	kel, err := seal.ParseKEL(kelBytes)
 	if err != nil {
+		msg := "The key history does not decode; send the agent's own key history."
 		if seal.ReasonOf(err) == seal.ReasonKELTooLarge {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf(
-				"kel too long (%v): this hub, like every sender, accepts at most %d events and %d bytes",
-				err, seal.MaxKELEvents, seal.MaxKELBytes)})
-			return
+			msg = fmt.Sprintf("The key history is too long: this hub, like every sender, accepts at most %d events and %d bytes.",
+				seal.MaxKELEvents, seal.MaxKELBytes)
 		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel undecodable"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid, Error: msg})
 		return
 	}
 	derived, err := aidFromKEL(kel)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel invalid: " + err.Error()})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
+			Error: "The key history does not replay; send the agent's own key history."})
 		return
 	}
 	// The KEL must derive the claimed AID — a registration cannot claim an AID it does not control.
 	if derived != req.AID {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kel does not derive claimed aid"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
+			Error: "The key history does not derive the aid being registered; send that agent's own key history."})
 		return
 	}
 	// Proof of key possession, against the SUBMITTED KEL (the agent may
 	// not be stored yet).
 	if f := s.verifyV2(r, relayauth.ActionRegister, body, auth, kel); f != nil {
-		writeAuthFailure(w, f, "register authentication invalid: ")
+		writeAuthFailure(w, f)
 		return
 	}
-	// The KEL may only grow (§3.8). The registrant is the owner, so a
-	// shorter KEL than the one stored is not a stale cache: it is either
-	// an old copy being replayed or a rollback to before a rotation, and
-	// a KEL that disagrees with the stored one on some event is a fork.
-	// Accepting either would let whoever holds a superseded key take the
-	// registration back to the state that key controls.
-	if stored, err := s.store.KnownKEL(req.AID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	// 6. The KEL may only grow (§3.8), measured against the registration
+	// or, for an agent that left, the tombstone it left (PAY-O1). The
+	// registrant is the owner, so a shorter KEL than the one held is an old
+	// copy or a rollback to before a rotation, and one that disagrees on an
+	// event is a fork. Accepting either would let whoever holds a
+	// superseded key take the registration back to the state that key
+	// controls.
+	if held, err := s.store.KnownKEL(req.AID); err != nil {
+		wire3.Internal(w, err)
 		return
-	} else if stored != nil {
-		if err := identity.ExtendsKEL(stored, kel); err != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "the submitted KEL does not extend the one this hub holds: " + err.Error()})
+	} else if held != nil {
+		if err := identity.ExtendsKEL(held, kel); err != nil {
+			refuseKELExtension(w, err)
 			return
 		}
 	}
-	// Admission, after the signature and before anything is written.
-	//
-	// The order matters in both directions. After the challenge, because
-	// an invite spent by somebody who cannot prove they hold the key
-	// would be an invite burned by an attacker. Before the writes,
-	// because an agent that got a row and then failed admission is an
-	// agent this hub admitted.
-	//
-	// Only an AID this hub does not already know is gated — see
-	// invite.go for why re-registration is not.
-	firstTime := !s.store.KnowsAgent(req.AID)
-	if firstTime && s.store.InviteRequired() {
-		if err := s.store.RedeemInvite(req.Invite, req.AID); err != nil {
-			// A refusal is logged so an operator running a closed hub can
-			// see that someone was turned away. /register is rate-limited
-			// per client IP (Limits.RegisterPerMinute), which bounds how
-			// fast one address can append to this log.
-			log.Printf("hub: registration refused for %s: %v", req.AID, err)
-			// The use is consumed before the agent row is written, so a
-			// failure between here and PutAgent burns a use rather than
-			// admitting an agent nobody can account for. An operator can
-			// mint another invite; they cannot un-admit quietly.
-			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error": err.Error(),
-				"hint":  "ask this hub's operator for an invite, then register with it in ANET_INVITE (or --token-file: an agent writes the invite to a private file with its file tool, never into a shell command)",
-			})
-			return
-		}
+	if kel[len(kel)-1].Event.Type == identity.Deactivation {
+		wire3.Refuse(w, wire3.ReasonAIDDeactivated)
+		return
 	}
-	// The card, if one came, before the row it speaks for — so a
+	// v030-todo(KEL-5): R-9 and R-10 on the new events (kel_ts_out_of_window).
+	//
+	// 7. v030-todo(KEL-5): unless check_only, the tip names this hub as its
+	// only witness (toad = 1), or witness_not_this_hub.
+	//
+	// 8. check_only answers here: nothing is written and nothing reserved
+	// (none was: the gate reserves only for a real registration).
+	if req.CheckOnly {
+		writeJSON(w, http.StatusOK, CheckOnlyResponse{Status: checkStatus})
+		return
+	}
+	// 9 and 10. The card, if one came, before the row it speaks for — so a
 	// registration whose card is a forgery does not first take effect and
-	// then get rejected.
+	// then get rejected. v030-todo(PAY-8)
 	if len(req.Card) > 0 {
 		if err := s.store.AdmitCard(req.AID, req.Card, kel); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: sentence(err)})
 			return
 		}
 	}
-	// RegisterAgent repeats the KEL extension check inside the write
-	// transaction, for a concurrent registration of the same AID that
+	// One transaction: the row, and for a first registration how it came
+	// in and the list's grant. RegisterAgent repeats the KEL extension
+	// check inside it, for a concurrent registration of the same AID that
 	// wrote between the check above and this write.
-	if err := s.store.RegisterAgent(req.AID, req.Name, req.Caps, kelBytes, kel); err != nil {
-		if errors.Is(err, ErrKELNotExtended) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-			return
+	if adm != nil {
+		adm.now = now
+	}
+	admitted, err := s.store.registerAgent(req.AID, req.Name, req.Caps, kelBytes, kel, adm)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrKELNotExtended):
+			refuseKELExtension(w, err)
+		case errors.Is(err, errWindowFilled), errors.Is(err, errNotAdmitted), errors.Is(err, errDeregisteredMeanwhile):
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonAdmissionRequired, Extra: map[string]any{"aid": req.AID}})
+		default:
+			wire3.Internal(w, err)
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if admitted {
+		committed = true
+		s.store.gate().committed(hold)
 	}
 	// Optional profile carried on the registration (usually set later via /profile).
 	if req.Summary != "" || req.Readme != "" || req.Pricing != "" {
 		if err := s.store.PutProfile(req.AID, req.Summary, req.Readme, req.Pricing); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			wire3.Internal(w, err)
 			return
 		}
 	}
@@ -751,15 +849,140 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	if out.CardStatus == CardStatusOK {
 		logCardHome(req.AID, req.A2ACard, s.origin(r))
 	}
-	if firstTime {
-		// A grant on arrival, so a new node can try a paid capability
-		// before anyone has funded it. A network where nothing works
-		// until an operator notices you is a network nobody evaluates.
-		if err := s.store.GrantOnRegistration(req.AID); err != nil {
-			log.Printf("hub: registration grant for %s: %v", req.AID, err)
-		}
+	if st, err := s.store.trialStateOf(req.AID); err != nil {
+		log.Printf("hub: reading the probation of %s: %v", req.AID, err)
+	} else {
+		out.ProbationUntil, out.Trial = st.ProbationUntil, st.Trial
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// admissionGate is step 4 of PAY-A1 for an AID not registered here:
+//
+//	a. on the admission list: admitted, no proof of work, no quota, no
+//	   probation;
+//	b. open registration: check_only answers open; otherwise a proof of
+//	   work (one hash), then a place in today's quota at every level of the
+//	   client's network;
+//	c. closed, with a sign-up window open and not full: check_only answers
+//	   open; otherwise a proof of work, then one place of the window;
+//	d. otherwise 403 admission_required.
+//
+// It writes the refusal itself and reports refused; otherwise it returns
+// what the registration writes beside its row, the reservation to give
+// back if a later step refuses, and the check_only answer.
+func (s *Server) admissionGate(w http.ResponseWriter, r *http.Request, req *RegisterRequest,
+	seed, nonce []byte, g *admissionGate, now time.Time) (adm *admissionWrite, hold *gateHold, status string, refused bool) {
+	refuseAdmission := func() {
+		// Logged, so an operator running a closed hub sees who knocked and
+		// can admit it. /register is rate-limited per client address,
+		// which bounds how fast one address can add to this log; the
+		// address itself is never written (PAY-N7).
+		log.Printf("hub: registration refused for %s (claimed, not yet proven): not on the admission list; "+
+			"to let it in: anet-hub admit %s", req.AID, req.AID)
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonAdmissionRequired, Extra: map[string]any{"aid": req.AID}})
+	}
+	listed, err := s.store.isAdmitted(req.AID)
+	if err != nil {
+		wire3.Internal(w, err)
+		return nil, nil, "", true
+	}
+	if listed {
+		return &admissionWrite{via: viaList}, nil, CheckAdmitted, false
+	}
+	mode, err := s.store.AdmissionMode()
+	if err != nil {
+		wire3.Internal(w, err)
+		return nil, nil, "", true
+	}
+	var win Window
+	if mode != AdmissionOpen {
+		var open bool
+		if win, open, err = openWindow(s.store.db, now); err != nil {
+			wire3.Internal(w, err)
+			return nil, nil, "", true
+		}
+		if !open || win.Used >= win.Max {
+			refuseAdmission()
+			return nil, nil, "", true
+		}
+	}
+	if req.CheckOnly {
+		return nil, nil, CheckOpen, false
+	}
+	// The proof of work, before anything that costs this hub more than
+	// one hash (PAY-A2): the KEL replay and the signature come after.
+	if seed == nil || !g.checkPow(s.hubAID, req.AID, seed, nonce, now) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonPowRequired, Extra: map[string]any{"challenge": g.challenge(now)}})
+		return nil, nil, "", true
+	}
+	if mode == AdmissionOpen {
+		h, ok := g.reserveSignup(clientAddr(r), now)
+		if !ok {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRegistrationQuota, RetryAfter: untilTomorrow(now)})
+			return nil, nil, "", true
+		}
+		return &admissionWrite{via: viaOpen}, h, CheckOpen, false
+	}
+	h, ok := g.reserveWindow(win)
+	if !ok {
+		refuseAdmission()
+		return nil, nil, "", true
+	}
+	return &admissionWrite{via: viaWindow, window: win.ID}, h, CheckOpen, false
+}
+
+// carriesInvite reports whether a registration body has a top-level member
+// "invite" (hub-payment-privacy PAY-A1 step 2: invite_removed is answered
+// before any other unknown member).
+func carriesInvite(body []byte) bool {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(body, &m) != nil {
+		return false
+	}
+	_, ok := m["invite"]
+	return ok
+}
+
+// refuseKELExtension answers a KEL that does not extend the one held:
+// 409 kel_fork or kel_rollback.
+func refuseKELExtension(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, identity.ErrKELFork):
+		wire3.Refuse(w, wire3.ReasonKELFork)
+	case errors.Is(err, identity.ErrKELRollback):
+		wire3.Refuse(w, wire3.ReasonKELRollback)
+	default:
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
+			Error: "The key history does not replay; send the agent's own key history."})
+	}
+}
+
+// decodeB64URL decodes base64url without padding (core CORE-E5): a value
+// with "=", "+", "/" or white space is refused, so each value has one
+// spelling.
+func decodeB64URL(s string) ([]byte, error) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return nil, fmt.Errorf("not base64url: byte %d", i)
+		}
+	}
+	return base64.RawURLEncoding.Strict().DecodeString(s)
+}
+
+// sentence turns an internal error into the one English sentence of an
+// error body: capitalised, ending with a full stop.
+func sentence(err error) string {
+	m := strings.TrimPrefix(err.Error(), "hub: ")
+	if m == "" {
+		return ""
+	}
+	m = strings.ToUpper(m[:1]) + m[1:]
+	if !strings.HasSuffix(m, ".") {
+		m += "."
+	}
+	return m
 }
 
 // ProfileRequest updates an agent's self-authored profile. The request is
@@ -854,6 +1077,15 @@ func (s *Server) hUploadReview(w http.ResponseWriter, r *http.Request) {
 	detail, err := s.verify(rc, rv)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	// A new account on probation does not review yet (hub-payment-privacy
+	// PAY-A4): a reviewer is a counterparty that registered more than
+	// three days ago, or one an operator admitted. Checked after the
+	// review verified, so the answer says nothing about an account to a
+	// caller who does not hold one of its signed reviews.
+	if _, on := s.store.ProbationUntil(rv.ReviewerAID); on {
+		wire3.Refuse(w, wire3.ReasonProbation)
 		return
 	}
 	if err := s.store.PutReview(rv, detail); err != nil {

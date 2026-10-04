@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
+
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // relayauth v2 (A2A-DESIGN §3.7, [C31]).
@@ -255,13 +258,23 @@ type authFailure struct {
 
 func (f *authFailure) Error() string { return f.err.Error() }
 
-// writeAuthFailure answers a refusal, with Retry-After when it has one.
-// prefix, when set, is put before the reason.
-func writeAuthFailure(w http.ResponseWriter, f *authFailure, prefix string) {
-	if f.retryAfter > 0 {
-		w.Header().Set("Retry-After", retryAfter(f.retryAfter))
+// writeAuthFailure answers a refusal with the wire-3 error body (core G1):
+// 401 unauthorized, 413 too_large, 400 bad_request, 429 rate_limited with
+// Retry-After. The replay cache's "full" (503) has no code of its own and
+// is answered as rate_limited, a wait; RC1 removes it. v030-todo(PAY-7)
+func writeAuthFailure(w http.ResponseWriter, f *authFailure) {
+	reason := wire3.ReasonUnauthorized
+	switch f.code {
+	case http.StatusRequestEntityTooLarge:
+		reason = wire3.ReasonTooLarge
+	case http.StatusBadRequest:
+		reason = wire3.ReasonBadRequest
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		reason = wire3.ReasonRateLimited
+	case http.StatusInternalServerError:
+		reason = wire3.ReasonInternal
 	}
-	writeJSON(w, f.code, map[string]string{"error": prefix + f.Error()})
+	wire3.Write(w, wire3.Refusal{Reason: reason, Error: sentence(f), RetryAfter: f.retryAfter})
 }
 
 func unauthorized(format string, args ...any) *authFailure {
@@ -340,31 +353,39 @@ type authed struct {
 // The headers are checked, and the signer looked up, before the body is
 // read, so a request without authentication or from an unknown signer is
 // refused without this hub buffering its body.
+//
+// On success it also pays the account's trial credit when its probation is
+// over and the credit is still pending (hub-payment-privacy PAY-A5): any
+// signed request of the account is the moment to check, and the client's
+// network is what the day's budget is counted on.
 func (s *Server) authRegistered(w http.ResponseWriter, r *http.Request, action string, limit int64) (authed, bool) {
 	a, err := parseV2Headers(r)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: sentence(err)})
 		return authed{}, false
 	}
 	kelBytes, err := s.store.AgentKEL(a.AID)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "the signer " + a.AID + " is not registered here"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
+			Error: "The signer " + a.AID + " is not registered here; register first."})
 		return authed{}, false
 	}
 	kel, err := identity.UnmarshalKEL(kelBytes)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stored kel corrupt"})
+		wire3.Internal(w, fmt.Errorf("the stored key history of %s does not decode: %w", a.AID, err))
 		return authed{}, false
 	}
 	body, f := readRawBody(w, r, limit)
 	if f != nil {
-		writeJSON(w, f.code, map[string]string{"error": f.Error()})
+		writeAuthFailure(w, f)
 		return authed{}, false
 	}
 	if f := s.verifyV2(r, action, body, a, kel); f != nil {
-		writeAuthFailure(w, f, "")
+		writeAuthFailure(w, f)
 		return authed{}, false
+	}
+	if _, err := s.store.maybeGrantTrial(a.AID, clientAddr(r)); err != nil {
+		log.Printf("hub: trial credit of %s: %v", a.AID, err)
 	}
 	return authed{AID: a.AID, Body: body}, true
 }
@@ -374,8 +395,8 @@ func (s *Server) authRegistered(w http.ResponseWriter, r *http.Request, action s
 func (s *Server) authSelf(w http.ResponseWriter, r *http.Request, action string, limit int64) (authed, bool) {
 	aid := r.PathValue("aid")
 	if hdr, ok := singleHeader(r, relayauth.HeaderAID); ok && hdr != aid {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": relayauth.HeaderAID + " does not name the agent in the path; an agent acts only on itself"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
+			Error: relayauth.HeaderAID + " does not name the agent in the path; an agent acts only on itself."})
 		return authed{}, false
 	}
 	return s.authRegistered(w, r, action, limit)

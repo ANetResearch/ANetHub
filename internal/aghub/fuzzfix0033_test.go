@@ -15,6 +15,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
+	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -187,11 +188,22 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	if err := store.GrantCredit(payee.AID(), 1, "one more"); err == nil {
 		t.Error("an operator grant past the full supply was accepted")
 	}
-	// A registration at the bound is admitted without its grant.
+	// An admission grant past the full supply is refused with the admission,
+	// and a registration at the bound pays nothing anyway (PAY-A5).
 	late, _ := identity.Incept()
-	register(t, srv, late, "Late", nil)
+	admitForTest(t, srv, late.AID())
+	if code, b := signedDo(t, srv, late, relayauth.ActionRegister, http.MethodPost, "/register",
+		registerBody(t, late, "Late", nil)); code != http.StatusOK {
+		t.Fatalf("a registration at the full supply: %d %s", code, b)
+	}
 	if b := balanceOf(t, srv, late.AID()); b != 0 {
 		t.Errorf("a registration past the full supply was granted %d", b)
+	}
+	if _, err := store.Admit(late.AID(), 1, "", false); err == nil {
+		t.Error("an admission grant past the full supply was paid")
+	}
+	if b := balanceOf(t, srv, late.AID()); b != 0 {
+		t.Errorf("a refused admission grant credited %d", b)
 	}
 	code, b := getJSON(t, srv.URL+"/x402/supply")
 	if code != http.StatusOK {
@@ -256,10 +268,11 @@ func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 
 // issuanceRoom and the credit it admits are one step: grants arriving
 // together at the supply's bound do not each find room for themselves
-// (the review of an internal note, finding 3). GrantOnRegistration and
-// GrantCredit checked the room outside any transaction and wrote after, so
-// with room for one grant, concurrent grants were all made and
-// /x402/supply went back to "integer overflow".
+// (a fuzzing review of the hub, finding 3). The grants checked the room
+// outside any transaction and wrote after, so with room for one grant,
+// concurrent grants were all made and /x402/supply went back to "integer
+// overflow". Two kinds of grant race here: the operator's (GrantCredit) and
+// the admission grant an operator gives a registered AID (Admit --grant).
 //
 // A write transaction held on the database from outside the store lets
 // every grant reach its check before any of them can write, so the race
@@ -278,8 +291,8 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	}
 	stranger, _ := identity.Incept()
 	issued := supplyFull(t, srv).Issued
-	// Room for one grant of RegistrationGrant, not for two.
-	fill := uint64(math.MaxInt64 - issued - 3*aghub.RegistrationGrant/2)
+	// Room for one grant of testRegistrationFunds, not for two.
+	fill := uint64(math.MaxInt64 - issued - 3*testRegistrationFunds/2)
 	rec := &payment.Receipt{AuthID: "near-the-bound", Payer: "did:anet:their-user", PayTo: stranger.AID(),
 		Amount: fill, Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
 	if err := rec.Sign(peer); err != nil {
@@ -287,6 +300,20 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	}
 	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), rec); err != nil {
 		t.Fatalf("filling the supply to one grant short of the bound: %v", err)
+	}
+
+	const n = 16
+	admitted := make([]string, n)
+	for i := 0; i < n; i += 2 {
+		c, err := identity.Incept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		kel, _ := identity.MarshalKEL(c.KEL())
+		if err := store.PutAgent(c.AID(), "late", nil, kel); err != nil {
+			t.Fatal(err)
+		}
+		admitted[i] = c.AID()
 	}
 
 	hold, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=busy_timeout(15000)")
@@ -301,17 +328,15 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	if _, err := tx.Exec(`INSERT INTO credit_entry(aid, delta, reason, at) VALUES('hold', 0, 'hold', '')`); err != nil {
 		t.Fatal(err)
 	}
-	const n = 16
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			aid := fmt.Sprintf("did:anet:late-%02d", i)
 			if i%2 == 0 {
-				_ = store.GrantOnRegistration(aid)
+				_, _ = store.Admit(admitted[i], testRegistrationFunds, "", false)
 			} else {
-				_ = store.GrantCredit(aid, aghub.RegistrationGrant, "operator grant")
+				_ = store.GrantCredit(fmt.Sprintf("did:anet:late-%02d", i), testRegistrationFunds, "operator grant")
 			}
 		}(i)
 	}
@@ -327,7 +352,7 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("supply after %d concurrent grants at the bound: %v", n, err)
 	}
-	if want := issued + int64(fill) + aghub.RegistrationGrant; sup.Issued != want || !sup.ChainAgrees {
+	if want := issued + int64(fill) + testRegistrationFunds; sup.Issued != want || !sup.ChainAgrees {
 		t.Fatalf("supply after %d concurrent grants with room for one: %+v, want issued %d", n, sup, want)
 	}
 }

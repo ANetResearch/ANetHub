@@ -140,18 +140,28 @@ type Store struct {
 	// duplicate sequence number would make the chain unverifiable, and
 	// two concurrent grants are an ordinary thing to have.
 	issuance issuanceChain
-	// issueMu makes each creation of credit (GrantOnRegistration,
-	// GrantCredit, ClearFromPeer) one step with issuanceRoom, the check
-	// that it fits what the supply can add up to. The grants read the room
-	// and wrote in separate statements, so grants arriving together at the
-	// bound each found room for itself and the sum passed MaxInt64 anyway
-	// (the review of ANet an internal note). Taken before issuance.mu, never
+	// issueMu makes ClearFromPeer one step with issuanceRoom, the check
+	// that it fits what the supply can add up to: reading the room and
+	// writing in separate statements let issuances arriving together at the
+	// bound each find room for itself, and the sum passed MaxInt64 anyway
+	// (found by a fuzzing review of the hub). The grants (issueTx) check and
+	// write in one transaction instead. Taken before issuance.mu, never
 	// after it.
 	issueMu sync.Mutex
 	// quota bounds each recipient's undelivered messages (relay.go).
 	quota relayQuota
 	db    *sql.DB
 	mu    sync.Mutex
+	// clock is the time admission and the inactive sweep read (nil:
+	// time.Now). Tests move it forward.
+	clock func() time.Time
+	// admGate is the admission state that lives only in this process
+	// (admission.go): the proof-of-work key and today's counters.
+	gateOnce sync.Once
+	admGate  *admissionGate
+	// dereg holds the in-process callbacks run when an AID is
+	// deregistered, and whether this process is the hub (deregister.go).
+	dereg deregHooks
 }
 
 // Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
@@ -189,10 +199,11 @@ func Open(dir string) (*Store, error) {
 		messages: DefaultLimits().MailboxMessages,
 		bytes:    DefaultLimits().MailboxBytes,
 	}}
-	if err := s.migrateInvites(); err != nil {
+	if err := s.migrate(); err != nil {
+		db.Close()
 		return nil, err
 	}
-	if err := s.migrate(); err != nil {
+	if err := s.migrateAdmission(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -217,7 +228,15 @@ func (s *Store) migrate() error {
 		   readme TEXT NOT NULL DEFAULT '',
 		   pricing TEXT NOT NULL DEFAULT '',
 		   kel BLOB NOT NULL,
-		   registered_at TEXT NOT NULL
+		   registered_at TEXT NOT NULL,
+		   -- How the account came in (admission.go): list, window or
+		   -- open. A row written without a registration (PutAgent) reads
+		   -- as admitted by the operator.
+		   admitted_via TEXT NOT NULL DEFAULT 'list',
+		   -- Unix ms; NULL for an account that never had a probation.
+		   probation_until INTEGER,
+		   -- none, pending or granted: the trial credit of PAY-A5.
+		   trial TEXT NOT NULL DEFAULT 'none'
 		 )`,
 		// No interaction content (A2A-DESIGN §9 row 评价). A table from
 		// before that change is rebuilt by migrateContentV2.
@@ -488,7 +507,8 @@ func (s *Store) migrate() error {
 // derives this AID. anet models no availability class — an agent may always be offline (the relay is
 // store-and-forward), so nothing about "resident vs intermittent" is recorded.
 func (s *Store) PutAgent(aid, name string, caps []string, kel []byte) error {
-	return s.putAgent(aid, name, caps, kel, nil)
+	_, err := s.putAgent(aid, name, caps, kel, nil, nil)
+	return err
 }
 
 // ErrKELNotExtended is RegisterAgent's refusal of a KEL that does not
@@ -500,62 +520,95 @@ var ErrKELNotExtended = errors.New("hub: the submitted KEL does not extend the o
 // aid (the agent row, or the kept departed KEL) must be a prefix of events,
 // and that is checked in the same transaction as the write.
 //
-// hRegister also checks this before redeeming an invite, so that a
-// refused KEL costs nothing. That earlier check and the write are separate
+// hRegister also checks this before anything is written (PAY-A1 step 6),
+// so that a refused KEL costs nothing. That earlier check and the write are separate
 // statements, and two registrations for one AID can both pass it before
 // either writes; the later write would then replace a KEL that the other
 // had just extended, for example with a fork signed by a superseded key.
 // Checking again here, under the store mutex and inside the write
 // transaction, closes that interval.
 func (s *Store) RegisterAgent(aid, name string, caps []string, kelBytes []byte, events []identity.SignedEvent) error {
+	_, err := s.registerAgent(aid, name, caps, kelBytes, events, nil)
+	return err
+}
+
+// registerAgent is RegisterAgent with what admission writes beside a first
+// registration (adm, nil for none; hub-payment-privacy PAY-A1 step 10), in
+// the same transaction. admitted reports whether adm was written: false when
+// the AID was registered meanwhile by a concurrent registration, which wrote
+// its own. adm.via viaRegistered is an AID the gate let past because it was
+// registered: if its row has gone since, the registration is refused with
+// errDeregisteredMeanwhile rather than written without admission.
+func (s *Store) registerAgent(aid, name string, caps []string, kelBytes []byte, events []identity.SignedEvent,
+	adm *admissionWrite) (admitted bool, err error) {
 	if len(events) == 0 {
-		return fmt.Errorf("%w: empty KEL", ErrKELNotExtended)
+		return false, fmt.Errorf("%w: empty KEL", ErrKELNotExtended)
 	}
-	return s.putAgent(aid, name, caps, kelBytes, events)
+	return s.putAgent(aid, name, caps, kelBytes, events, adm)
+}
+
+// admissionWrite is what the first registration of an AID writes beside its
+// row (PAY-A1 step 10): how it came in, and for a window the window whose
+// place it takes.
+type admissionWrite struct {
+	via    string // viaList, viaWindow or viaOpen; viaRegistered: no gate (registered at step 4)
+	window int64  // viaWindow: the window's id
+	now    time.Time
 }
 
 // putAgent writes the agent row and its capability index. When extend is
-// non-nil, the KEL already held for aid must be a prefix of it.
-func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []identity.SignedEvent) error {
+// non-nil, the KEL already held for aid must be a prefix of it. When adm is
+// non-nil and the row is new, the admission columns are written too, and an
+// admission grant on the list is paid; all in one transaction.
+func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []identity.SignedEvent,
+	adm *admissionWrite) (admitted bool, err error) {
 	// The bound is enforced here as well as at the HTTP boundary, because
 	// this is where the index is written and it is the invariant the index
 	// depends on. The handler checks first so a caller gets 400 with the
 	// offending id named rather than 500.
 	if err := validateCaps(caps); err != nil {
-		return err
+		return false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	capsJSON, _ := json.Marshal(caps)
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := s.now().UTC().Format(time.RFC3339)
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	if extend != nil {
 		held, err := knownKEL(tx, aid)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if held != nil {
 			if err := identity.ExtendsKEL(held, extend); err != nil {
-				return fmt.Errorf("%w: %w", ErrKELNotExtended, err)
+				return false, fmt.Errorf("%w: %w", ErrKELNotExtended, err)
 			}
 		}
+	}
+	existed := false
+	var one int
+	switch err := tx.QueryRow(`SELECT 1 FROM agent WHERE aid=?`, aid).Scan(&one); {
+	case err == nil:
+		existed = true
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, err
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO agent(aid,name,caps,kel,registered_at) VALUES(?,?,?,?,?)
 		 ON CONFLICT(aid) DO UPDATE SET name=excluded.name, caps=excluded.caps, kel=excluded.kel`,
 		aid, name, string(capsJSON), kel, now); err != nil {
-		return err
+		return false, err
 	}
 	// Re-registering replaces the capability set rather than adding to it:
 	// a node that dropped a capability has stopped offering it, and a
 	// directory that kept answering yes would be sending work to a
 	// provider that will refuse it.
 	if _, err := tx.Exec(`DELETE FROM agent_cap WHERE aid=?`, aid); err != nil {
-		return err
+		return false, err
 	}
 	for _, c := range caps {
 		c = strings.TrimSpace(c)
@@ -563,10 +616,22 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 			continue
 		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO agent_cap(aid,cap) VALUES(?,?)`, aid, c); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return tx.Commit()
+	if adm != nil && adm.via == viaRegistered {
+		// The gate let it past as registered; deregistered since, it would
+		// come back here without passing the gate (PAY-A1 step 4).
+		if !existed {
+			return false, errDeregisteredMeanwhile
+		}
+	} else if adm != nil && !existed {
+		if err := s.writeAdmissionTx(tx, aid, adm); err != nil {
+			return false, err
+		}
+		admitted = true
+	}
+	return admitted, tx.Commit()
 }
 
 // Bounds on what one registration may put into the capability index.

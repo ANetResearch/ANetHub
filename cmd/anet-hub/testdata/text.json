@@ -1,0 +1,195 @@
+{
+  "format": "hub-text/1",
+  "about": "Every sentence anet-hub prints (cmd/anet-hub/text.go), in both languages, with its class (C refusal, I result), exit code and next step. Regenerate with HUBTEXT_UPDATE=1 go test -run TestHubTextJSON ./cmd/anet-hub and review the diff.",
+  "rows": [
+    {
+      "key": "admit.ok",
+      "class": "I",
+      "exit": 0,
+      "zh": "已准入 {aid}；对方运行 anet hub-register 后会自动完成注册。",
+      "en": "Admitted {aid}; it finishes joining on its own once it runs anet hub-register."
+    },
+    {
+      "key": "admit.ok.grant",
+      "class": "I",
+      "exit": 0,
+      "zh": "已准入 {aid}；附赠 {n} credits 在它首次注册时到账。",
+      "en": "Admitted {aid}; the {n}-credit grant is paid when it first registers."
+    },
+    {
+      "key": "admit.ok.registered",
+      "class": "I",
+      "exit": 0,
+      "zh": "{aid} 已在本 hub 注册，已准入并结束其见习期。",
+      "en": "{aid} is already registered here; it is now admitted and off probation."
+    },
+    {
+      "key": "admit.ok.registered_grant",
+      "class": "I",
+      "exit": 0,
+      "zh": "{aid} 已在本 hub 注册，已准入并结束其见习期；附赠 {n} credits 已到账。",
+      "en": "{aid} is already registered here; it is now admitted and off probation, and the {n}-credit grant has been paid."
+    },
+    {
+      "key": "admit.already_granted",
+      "class": "I",
+      "exit": 0,
+      "zh": "{aid} 的附赠已经发过，这次不再发放；准入保持不变。",
+      "en": "{aid} already received its grant, so none is paid this time; the admission stays."
+    },
+    {
+      "key": "admit.file_ok",
+      "class": "I",
+      "exit": 0,
+      "zh": "已准入 {n} 个 AID（来自 {path}），其中 {m} 个已注册。",
+      "en": "Admitted {n} AIDs from {path}; {m} of them are already registered."
+    },
+    {
+      "key": "admit.window_open",
+      "class": "I",
+      "exit": 0,
+      "zh": "报名窗口已开放到 {time}（至多 {n} 个；需要工作量证明，新账户有 72 小时见习期）。",
+      "en": "The sign-up window is open until {time} (at most {n}; proof of work required; new accounts are on probation for 72 hours)."
+    },
+    {
+      "key": "admit.window_closed",
+      "class": "I",
+      "exit": 0,
+      "zh": "报名窗口已关闭（这次进来 {n} 个）。",
+      "en": "The sign-up window is closed ({n} joined through it)."
+    },
+    {
+      "key": "admit.window_exists",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "command",
+      "next": "anet-hub admit --window off",
+      "zh": "已有开放中的报名窗口（到 {time}）；要换一个，请先运行 anet-hub admit --window off。",
+      "en": "A sign-up window is already open (until {time}); to replace it, run anet-hub admit --window off first."
+    },
+    {
+      "key": "admit.bad_aid",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "不是合法的 AID：{value}；请复制对方 anet hub-register 打印的完整 AID 后重试。",
+      "en": "Not a valid AID: {value}; copy the full AID that anet hub-register printed on their side and try again."
+    },
+    {
+      "key": "admit.file_bad_line",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "第 {n} 行不是合法的 AID，整个文件都没有导入；改正后重试。",
+      "en": "Line {n} is not a valid AID, so nothing from the file was imported; fix it and try again."
+    },
+    {
+      "key": "admit.window_too_big",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "报名窗口至多 7 天、至多 10000 个；请缩小后重试。",
+      "en": "A sign-up window lasts at most 7 days and takes at most 10000; reduce it and try again."
+    },
+    {
+      "key": "admissions.revoked",
+      "class": "I",
+      "exit": 0,
+      "zh": "已撤销 {aid} 的准入。",
+      "en": "Revoked the admission of {aid}."
+    },
+    {
+      "key": "admissions.revoked_registered",
+      "class": "I",
+      "exit": 0,
+      "zh": "已撤销 {aid} 的准入并注销它；余额 {n} credits 仍记在账上。",
+      "en": "Revoked the admission of {aid} and deregistered it; its {n} credits stay on the ledger."
+    },
+    {
+      "key": "admissions.not_listed",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "command",
+      "next": "anet-hub admissions",
+      "zh": "{aid} 不在准入名单里；用 anet-hub admissions 查看名单。",
+      "en": "{aid} is not on the admission list; see the list with anet-hub admissions."
+    },
+    {
+      "key": "admission.open",
+      "class": "I",
+      "exit": 0,
+      "zh": "注册方式：开放（工作量证明 + 按网段的每日名额 + 72 小时见习）。",
+      "en": "Sign-up: open (proof of work, daily quota per network, 72-hour probation)."
+    },
+    {
+      "key": "admission.closed",
+      "class": "I",
+      "exit": 0,
+      "zh": "注册方式：只接受准入名单（anet-hub admit）。",
+      "en": "Sign-up: admission list only (anet-hub admit)."
+    },
+    {
+      "key": "grant.ok",
+      "class": "I",
+      "exit": 0,
+      "zh": "已给 {aid} 发放 {n} credits（原因：{name}），余额 {m}。",
+      "en": "Granted {n} credits to {aid} ({name}); balance now {m}."
+    },
+    {
+      "key": "grant.unknown_aid",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "{aid} 没有在本 hub 注册，没有发放；请核对 AID 后重试。",
+      "en": "{aid} is not registered here, so nothing was granted; check the AID and try again."
+    },
+    {
+      "key": "clear.ok",
+      "class": "I",
+      "exit": 0,
+      "zh": "已向 {peer} 结清 {n} credits；本 hub 仍欠它 {m}。",
+      "en": "Paid {n} credits to {peer}; this hub still owes it {m}."
+    },
+    {
+      "key": "clear.over_due",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "command",
+      "next": "anet-hub due",
+      "zh": "本 hub 只欠 {peer} {m} credits，不能结清 {n}；请用 anet-hub due 查看。",
+      "en": "This hub owes {peer} only {m} credits, so {n} cannot be cleared; see anet-hub due."
+    },
+    {
+      "key": "hub_flag_removed",
+      "class": "C",
+      "exit": 2,
+      "next_kind": "command",
+      "next": "anet-hub {subcommand}",
+      "zh": "{flag} 已改为子命令；请运行 anet-hub {subcommand}。",
+      "en": "{flag} is now a subcommand; run anet-hub {subcommand}."
+    },
+    {
+      "key": "hub_flag_removed.none",
+      "class": "C",
+      "exit": 2,
+      "next_kind": "change_input",
+      "zh": "{flag} 已删除，没有替代（账目只保留 14 天，不再有需要修复的缺口）；请删去这个参数。",
+      "en": "{flag} was removed with no replacement (the ledger keeps 14 days, so there is no gap to repair); remove it from the command."
+    },
+    {
+      "key": "redemptions.summary",
+      "class": "I",
+      "exit": 0,
+      "zh": "最近 14 天共 {n} 笔兑付，合计 {m} credits；更早的明细已删除，请在 14 天内处理。",
+      "en": "{n} redemptions in the last 14 days, {m} credits in total; older records are deleted, so handle each within 14 days."
+    },
+    {
+      "key": "data.missing",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "{path} 里没有 hub 数据，什么都没有改；请用 --data 指向 anet-hub 运行时用的目录后重试。",
+      "en": "There is no hub data in {path}, so nothing was changed; point --data at the directory anet-hub runs with and try again."
+    }
+  ]
+}

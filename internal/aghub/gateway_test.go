@@ -145,8 +145,8 @@ func TestTheGatewaySellsAccessAndNotTheWork(t *testing.T) {
 	// 4. The credit moved, and to the seller — not to the hub. Both
 	// started with the registration grant on top of what they were
 	// funded, which is why the numbers are not 500 and 0.
-	wantBuyer := int64(500 + aghub.RegistrationGrant - 120)
-	wantSeller := int64(aghub.RegistrationGrant + 120)
+	wantBuyer := int64(500 + testRegistrationFunds - 120)
+	wantSeller := int64(testRegistrationFunds + 120)
 	if got := balanceOf(t, srv, buyer.AID()); got != wantBuyer {
 		t.Errorf("buyer balance = %d, want %d", got, wantBuyer)
 	}
@@ -245,7 +245,7 @@ func TestTheGatewayWillNotSellBelowThePublishedPrice(t *testing.T) {
 	if resp.StatusCode != http.StatusPaymentRequired {
 		t.Fatalf("underpaying = %d, want 402", resp.StatusCode)
 	}
-	untouched := int64(500 + aghub.RegistrationGrant)
+	untouched := int64(500 + testRegistrationFunds)
 	if got := balanceOf(t, srv, buyer.AID()); got != untouched {
 		t.Errorf("an underpayment moved credit: balance = %d, want %d", got, untouched)
 	}

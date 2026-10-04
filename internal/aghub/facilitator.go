@@ -15,6 +15,8 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
+
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // This hub is an x402 facilitator for its own credit rail.
@@ -46,6 +48,12 @@ const creditDecimals = 0
 type Balance struct {
 	AID     string `json:"aid"`
 	Credits int64  `json:"credits"`
+	// ProbationUntil (unix ms) and Trial (pending or granted) are there
+	// only for an account that came in through a sign-up window or open
+	// registration (hub-payment-privacy §2.2): when its probation ends, and
+	// where its 20 trial credits stand.
+	ProbationUntil *uint64 `json:"probation_until,omitempty"`
+	Trial          string  `json:"trial,omitempty"`
 }
 
 // Credit adds to an agent's balance — how a hub operator funds an
@@ -56,31 +64,66 @@ type Balance struct {
 // is what makes Supply computable instead of asserted — the rows across
 // the whole ledger sum to zero, so "what this hub owes its users" is
 // arithmetic anyone can repeat rather than a number the hub reports.
+//
+// One transaction: the hub row's entry, the issuance record, the balance
+// and the account's entry are written together or not at all.
 func (s *Store) Credit(aid string, amount int64, reason string) error {
 	if amount == 0 {
 		return nil
 	}
-	if s.hubAID != "" && aid != s.hubAID {
-		if err := s.entry(s.hubAID, -amount, reasonIssued+":"+reason); err != nil {
-			return err
-		}
-		// On the signed chain before the balance moves. A grant recorded
-		// only in the balance table is a grant nothing outside this hub
-		// attests to, which is the gap this chain exists to close.
-		if err := s.appendIssuance(EvCreditIssued, aid, amount, reason); err != nil {
-			return err
-		}
-	}
-	_, err := s.db.Exec(
-		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
-		 ON CONFLICT(aid) DO UPDATE SET credits = credits + excluded.credits`, aid, amount)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
-		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
-		aid, amount, reason, time.Now().UTC().Format(time.RFC3339Nano))
+	defer tx.Rollback()
+	if err := s.creditTx(tx, aid, amount, reason); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// creditTx is Credit inside tx. It does not check that the issuance fits
+// the supply's bound; issueTx does.
+func (s *Store) creditTx(tx *sql.Tx, aid string, amount int64, reason string) error {
+	if amount == 0 {
+		return nil
+	}
+	at := time.Now().UTC().Format(time.RFC3339Nano)
+	if s.hubAID != "" && aid != s.hubAID {
+		if _, err := tx.Exec(`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
+			s.hubAID, -amount, reasonIssued+":"+reason, at); err != nil {
+			return err
+		}
+		// On the signed chain with the balance. A grant recorded only in
+		// the balance table is a grant nothing outside this hub attests
+		// to, which is the gap this chain exists to close.
+		if err := s.appendIssuanceTx(tx, EvCreditIssued, aid, amount, reason); err != nil {
+			return err
+		}
+	}
+	if err := addToRow(tx, "credit_balance", "aid", "credits", aid, amount); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
+		aid, amount, reason, at)
 	return err
+}
+
+// issueTx creates amount credits for aid inside tx: a supply event (an
+// operator's grant, an admission grant, a trial credit). It is refused when
+// it would take what this hub has issued past what its supply can add up to
+// (issuanceRoom); the transaction is the serialisation, so concurrent
+// issuance cannot pass the check together.
+func (s *Store) issueTx(tx *sql.Tx, aid string, amount int64, reason string) error {
+	if amount <= 0 {
+		return fmt.Errorf("an issuance must be positive, got %d", amount)
+	}
+	if s.hubAID != "" && aid != s.hubAID {
+		if err := issuanceRoom(tx, s.hubAID, amount); err != nil {
+			return err
+		}
+	}
+	return s.creditTx(tx, aid, amount, reason)
 }
 
 // Balance reads one.
@@ -1287,78 +1330,51 @@ func (s *Server) hBalance(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := s.store.Balance(a.AID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, Balance{AID: a.AID, Credits: n})
+	st, err := s.store.trialStateOf(a.AID)
+	if err != nil {
+		wire3.Internal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, Balance{AID: a.AID, Credits: n, ProbationUntil: st.ProbationUntil, Trial: st.Trial})
 }
 
 // ---- how credit gets into the system ----
 
-// RegistrationGrant is what a newly registered agent is given, so it can
-// try a paid capability before anyone has funded it.
-//
-// A network where nothing works until an operator notices you is a
-// network nobody evaluates. The number is small on purpose: enough to
-// find out whether this is useful, not enough to be worth farming
-// identities for — and an identity is free to mint, so the grant must
-// never be worth more than the effort of minting one.
-const RegistrationGrant = 100
-
-// grantOnRegistration credits a first-time registrant.
-//
-// First time only, keyed on the agent row rather than a separate flag: an
-// agent re-registering is the same agent, and paying out again for a
-// changed capability list would make re-registration a faucet.
-func (s *Store) GrantOnRegistration(aid string) error {
-	s.issueMu.Lock()
-	defer s.issueMu.Unlock()
-	var entries int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(1) FROM credit_entry WHERE aid=? AND reason=?`,
-		aid, "registration grant").Scan(&entries); err != nil {
-		return err
-	}
-	if entries > 0 {
-		return nil
-	}
-	// The grant is issuance like any other; at the supply's bound it is
-	// skipped (the caller logs this) rather than breaking /x402/supply.
-	if s.hubAID != "" {
-		if err := issuanceRoom(s.db, s.hubAID, RegistrationGrant); err != nil {
-			return err
-		}
-	}
-	return s.Credit(aid, RegistrationGrant, "registration grant")
-}
-
-// GrantCredit is the operator's way in. Everything else that creates
-// credit on this ledger is either this or the registration grant, which
-// is what makes the total supply something an operator can account for.
+// GrantCredit is the operator's way in (anet-hub grant). It is a supply
+// event like the other two ways credit is created on purpose here, the
+// admission grant and the trial credit (admission.go); registration itself
+// pays nothing (PAY-A5).
 func (s *Store) GrantCredit(aid string, amount int64, reason string) error {
 	if amount <= 0 {
 		return fmt.Errorf("a grant must be positive, got %d", amount)
 	}
-	s.issueMu.Lock()
-	defer s.issueMu.Unlock()
-	// Checked before anything is written: Credit records the issuance
-	// first, and a balance SQLite could only hold as a REAL would leave the
-	// account unreadable (addToRow) [redteam:si9].
-	if bal, err := s.Balance(aid); err != nil {
-		return err
-	} else if bal > math.MaxInt64-amount {
-		return fmt.Errorf("%s holds %d; a grant of %d would take it past %d, the most this ledger can hold",
-			aid, bal, amount, int64(math.MaxInt64))
-	}
-	if s.hubAID != "" && aid != s.hubAID {
-		if err := issuanceRoom(s.db, s.hubAID, amount); err != nil {
-			return err
-		}
-	}
 	if reason == "" {
 		reason = "operator grant"
 	}
-	return s.Credit(aid, amount, reason)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Checked before anything is written: a balance SQLite could only hold
+	// as a REAL would leave the account unreadable (addToRow)
+	// [redteam:si9].
+	var bal int64
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT credits FROM credit_balance WHERE aid=?), 0)`, aid).
+		Scan(&bal); err != nil {
+		return err
+	}
+	if bal > math.MaxInt64-amount {
+		return fmt.Errorf("%s holds %d; a grant of %d would take it past %d, the most this ledger can hold",
+			aid, bal, amount, int64(math.MaxInt64))
+	}
+	if err := s.issueTx(tx, aid, amount, reason); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // LedgerEntries returns an account's movements, newest last.

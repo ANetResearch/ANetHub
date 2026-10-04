@@ -1,0 +1,22 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /register on an open hub whose daily quota for the client's network is spent (hub-payment-privacy PAY-A1 step 4b, PAY-A3, §2.2): with a good proof of work the answer is 429 registration_quota, with Retry-After until the next UTC midnight; check_only still answers open.",
+  "setup": "register_quota",
+  "cases": [
+    {
+      "name": "the network's places of the day are spent",
+      "cite": "PAY-A3, §2.2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "pow": {"seed": "${pow_seed}", "nonce": "${stranger_nonce}"}}},
+      "response": {"status": 429, "headers": {"X-ANet-Wire": "3", "Retry-After": "*"},
+        "body": {"reason": "registration_quota", "error": "Today's sign-ups from your network are used up; retry after Retry-After, or ask the operator to run anet-hub admit <AID>."}}
+    },
+    {
+      "name": "check_only takes no place and answers open",
+      "cite": "§2.2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "check_only": true}},
+      "response": {"status": 200, "body": {"status": "open"}}
+    }
+  ]
+}

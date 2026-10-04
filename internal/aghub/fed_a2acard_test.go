@@ -16,7 +16,6 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/federation"
@@ -480,7 +479,7 @@ func TestTheADPAndA2ACardStreamsCoexist(t *testing.T) {
 	body := registerBody(t, agent, "ADP name", []string{"adp.cap"})
 	body["card"] = mintCard(t, agent, "ADP name", []string{"adp.cap"})
 	body["a2a_card"] = signA2A(t, agent, a2aCardFor(agent, 1))
-	if code, b := signedDo(t, hub.srv, agent, relayauth.ActionRegister, http.MethodPost, "/register", body); code != http.StatusOK {
+	if code, b := registerFunded(t, hub.srv, agent, body); code != http.StatusOK {
 		t.Fatalf("register: %d %s", code, b)
 	}
 	setVisibility(t, hub.srv, agent, aghub.VisibilityFederated)

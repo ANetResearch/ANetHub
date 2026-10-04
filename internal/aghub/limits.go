@@ -201,6 +201,21 @@ func retryAfter(d time.Duration) string {
 // key per full address would give one client an unbounded number of
 // buckets. The cost: clients that share one /64 share one bucket.
 func clientIP(r *http.Request) string {
+	ip := clientAddr(r)
+	if ip == nil {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		return host
+	}
+	return rateKeyOf(ip)
+}
+
+// clientAddr is the client's address by the rule of clientIP, or nil when
+// the connection's address does not parse. The registration quota and the
+// trial budget key on its networks (admission.go).
+func clientAddr(r *http.Request) net.IP {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
@@ -213,10 +228,7 @@ func clientIP(r *http.Request) string {
 			}
 		}
 	}
-	if ip == nil {
-		return host
-	}
-	return rateKeyOf(ip)
+	return ip
 }
 
 // rateKeyOf is the per-address rate-limit key: the address itself for

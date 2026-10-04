@@ -14,8 +14,6 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
-
-	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // Two payers settle 100 each, at once, to a payee 150 short of what a
@@ -62,8 +60,8 @@ func TestSpotConcurrentSettlementsCannotTogetherPassWhatALedgerHolds(t *testing.
 			if _, ok := r.Extensions[payment.ExtReceipt]; ok {
 				t.Errorf("payer %d: a refused settlement carried a signed receipt", i)
 			}
-			if got := balanceOf(t, w.srv, payers[i].AID()); got != aghub.RegistrationGrant {
-				t.Errorf("refused payer %d balance = %d, want %d", i, got, aghub.RegistrationGrant)
+			if got := balanceOf(t, w.srv, payers[i].AID()); got != testRegistrationFunds {
+				t.Errorf("refused payer %d balance = %d, want %d", i, got, testRegistrationFunds)
 			}
 		}
 	}

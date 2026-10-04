@@ -118,11 +118,11 @@ func addToRow(ex execer, table, keyCol, col, key string, delta int64) error {
 // "integer overflow" from then on (found by FuzzHubClearFromPeer, ANet
 // an internal note). Bounding the total issued keeps every sum Supply
 // takes inside int64. Every way credit is created checks it: a peer's
-// receipt (ClearFromPeer), an operator's grant (GrantCredit) and the
-// registration grant (GrantOnRegistration), each holding Store.issueMu
-// from the check to the write, so that concurrent issuance cannot pass the
-// check together. Store.Credit, the primitive under the two grants, does
-// neither, so a new caller of it must.
+// receipt (ClearFromPeer, holding Store.issueMu from the check to the
+// write), and the operator's grant, the admission grant and the trial
+// credit (Store.issueTx, the check and the write in one transaction), so
+// that concurrent issuance cannot pass the check together. Store.Credit
+// and creditTx do not check, so a new caller of them must.
 func issuanceRoom(q rowQuerier, hubAID string, amt int64) error {
 	var issued int64
 	if err := q.QueryRow(`SELECT COALESCE(SUM(delta),0) FROM credit_entry WHERE aid=? AND delta<0`,

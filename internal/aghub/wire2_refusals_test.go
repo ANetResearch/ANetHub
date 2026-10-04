@@ -192,7 +192,7 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	}
 	body := registerBody(t, c, "Agent", nil)
 	body["enc_keys"] = base64.StdEncoding.EncodeToString(broken)
-	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	code, b := registerFunded(t, srv, c, body)
 	var reg aghub.RegisterResponse
 	_ = json.Unmarshal(b, &reg)
 	if code != 200 || reg.KeysStatus != aghub.KeysStatusInvalid {
@@ -318,7 +318,7 @@ func TestLeavingRemovesTheA2ACard(t *testing.T) {
 	c, _ := twoAgents(t)
 	body := registerBody(t, c, "Agent", nil)
 	body["a2a_card"] = signA2A(t, c, a2aCardFor(c, 1))
-	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	code, b := registerFunded(t, srv, c, body)
 	if code != 200 {
 		t.Fatalf("register: %d %s", code, b)
 	}
@@ -400,6 +400,7 @@ func TestRegistrationIsRateLimitedPerIPv6Prefix(t *testing.T) {
 	}
 	reg := func(ip string) int {
 		c, _ := identity.Incept()
+		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))
 		req.Header.Set("X-Real-IP", ip)

@@ -205,7 +205,7 @@ func TestTheGatewayWillNotQuoteAPriceTheProviderDidNotSign(t *testing.T) {
 	if got := balanceOf(t, srv, buyer.AID()); got != before {
 		t.Errorf("an unverifiable card still moved credit: balance %d, want %d", got, before)
 	}
-	if got := balanceOf(t, srv, seller.AID()); got != int64(aghub.RegistrationGrant) {
+	if got := balanceOf(t, srv, seller.AID()); got != int64(testRegistrationFunds) {
 		t.Errorf("seller was paid on an unverifiable card: balance %d", got)
 	}
 }

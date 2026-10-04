@@ -147,7 +147,36 @@ func registerWithCard(t *testing.T, srv *httptest.Server, c *identity.Controller
 	if len(card) > 0 {
 		body["card"] = card
 	}
-	return signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	return registerFunded(t, srv, c, body)
+}
+
+// testRegistrationFunds is what the test fixtures grant an agent when it
+// first registers here. Registration itself pays nothing (hub-payment-privacy
+// PAY-A5); a fixture that wants a funded account grants it explicitly, here.
+const testRegistrationFunds = 100
+
+// registerFunded is the fixture's registration: the operator admits the AID
+// (a new hub admits only its list), the agent registers with body, and a
+// first registration is funded with testRegistrationFunds.
+func registerFunded(t *testing.T, srv *httptest.Server, c *identity.Controller, body map[string]any) (int, []byte) {
+	t.Helper()
+	store := storeOf(t, srv)
+	first := !store.KnowsAgent(c.AID())
+	admitForTest(t, srv, c.AID())
+	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	if code == http.StatusOK && first && store.KnowsAgent(c.AID()) {
+		fundAgent(t, srv, c.AID(), testRegistrationFunds)
+	}
+	return code, b
+}
+
+// admitForTest puts aid on the test hub's admission list, as the operator
+// does with anet-hub admit.
+func admitForTest(t *testing.T, srv *httptest.Server, aid string) {
+	t.Helper()
+	if _, err := storeOf(t, srv).Admit(aid, 0, "", false); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // registerBody is a /register body for c, without authentication (that
@@ -160,7 +189,7 @@ func registerBody(t *testing.T, c *identity.Controller, name string, caps []stri
 	}
 	return map[string]any{
 		"aid": c.AID(), "name": name, "caps": caps,
-		"kel": base64.StdEncoding.EncodeToString(kelB),
+		"kel": base64.RawURLEncoding.EncodeToString(kelB),
 	}
 }
 
@@ -360,7 +389,7 @@ func TestRegisterRequiresSignature(t *testing.T) {
 	kelB, _ := identity.MarshalKEL(c.KEL())
 	// no ts/sig
 	if code, _ := post(t, srv.URL+"/register", map[string]any{
-		"aid": c.AID(), "name": "NoSig", "kel": base64.StdEncoding.EncodeToString(kelB),
+		"aid": c.AID(), "name": "NoSig", "kel": base64.RawURLEncoding.EncodeToString(kelB),
 	}); code == 200 {
 		t.Fatal("register without a signed challenge must be rejected")
 	}
@@ -443,8 +472,9 @@ func TestRegisterAidKelMismatchRejected(t *testing.T) {
 	a, _ := identity.Incept()
 	b, _ := identity.Incept()
 	kelB, _ := identity.MarshalKEL(b.KEL()) // b's KEL under a's claimed AID
+	admitForTest(t, srv, a.AID())
 	code, body := signedDo(t, srv, a, relayauth.ActionRegister, http.MethodPost, "/register", map[string]any{
-		"aid": a.AID(), "kel": base64.StdEncoding.EncodeToString(kelB),
+		"aid": a.AID(), "kel": base64.RawURLEncoding.EncodeToString(kelB),
 	})
 	if code != http.StatusBadRequest || !strings.Contains(string(body), "does not derive") {
 		t.Fatalf("aid/kel mismatch must be refused as such: %d %s", code, body)
@@ -971,7 +1001,7 @@ func TestCreditSettlement(t *testing.T) {
 	hubAID := hubAIDOf(t, srv)
 	// Registering already granted each of them something, so the sums
 	// below start from the grant rather than from zero.
-	grant := int64(aghub.RegistrationGrant)
+	grant := int64(testRegistrationFunds)
 	fundAgent(t, srv, payer.AID(), 500)
 
 	auth := signedAuth(t, payer, payee.AID(), 120, hubAID, "ix-1")
@@ -1044,7 +1074,7 @@ func TestPaymentRefusals(t *testing.T) {
 	}
 
 	// More than the registration grant, and nothing else funded.
-	over := uint64(aghub.RegistrationGrant + 1)
+	over := uint64(testRegistrationFunds + 1)
 	broke := settle(creditPayload(t, signedAuth(t, payer, payee.AID(), over, hubAID, "ix-a"), payee.AID(), payment.CreditNetwork(hubAID)))
 	if broke.Success || broke.ErrorReason != payment.ReasonInsufficientFunds {
 		t.Errorf("an unfunded payment settled: %+v", broke)
@@ -1170,13 +1200,13 @@ func TestRegistrationGrantsCreditOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	register(t, srv, c, "Newcomer", []string{"x"})
-	if got := balanceOf(t, srv, c.AID()); got != aghub.RegistrationGrant {
-		t.Fatalf("a new agent has %d credits, want %d", got, aghub.RegistrationGrant)
+	if got := balanceOf(t, srv, c.AID()); got != testRegistrationFunds {
+		t.Fatalf("a new agent has %d credits, want %d", got, testRegistrationFunds)
 	}
 	// Re-registering is the same agent, not a faucet.
 	register(t, srv, c, "Newcomer", []string{"x", "y"})
 	register(t, srv, c, "Newcomer", []string{"z"})
-	if got := balanceOf(t, srv, c.AID()); got != aghub.RegistrationGrant {
+	if got := balanceOf(t, srv, c.AID()); got != testRegistrationFunds {
 		t.Errorf("re-registration paid out again: %d", got)
 	}
 }

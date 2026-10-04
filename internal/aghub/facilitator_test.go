@@ -374,7 +374,7 @@ func TestAFailedSettlementLeavesTheBindingFree(t *testing.T) {
 	register(t, srv, payee, "Payee", nil)
 	own := payment.CreditNetwork(hubAIDOf(t, srv))
 	now := time.Now().UnixMilli()
-	amount := uint64(aghub.RegistrationGrant + 50)
+	amount := uint64(testRegistrationFunds + 50)
 	req := requirementsFor(payee.AID(), amount, own)
 	const bind = "pay-bind-rollback"
 
@@ -436,8 +436,8 @@ func TestEveryRefusalCarriesAReasonConstant(t *testing.T) {
 		{"another hub's ledger", creditPayload(t, authFor(t, payer, payee.AID(), 5, payment.CreditNetwork("did:anet:x"), "", "f-1", now-1000, now+60_000),
 			payee.AID(), payment.CreditNetwork("did:anet:x")), requirementsFor(payee.AID(), 5, payment.CreditNetwork("did:anet:x")),
 			payment.ReasonNetworkMismatch},
-		{"insufficient funds", creditPayload(t, signedAuth(t, payer, payee.AID(), aghub.RegistrationGrant+1, hubAID, "i-1"), payee.AID(), own),
-			req(aghub.RegistrationGrant + 1), payment.ReasonInsufficientFunds},
+		{"insufficient funds", creditPayload(t, signedAuth(t, payer, payee.AID(), testRegistrationFunds+1, hubAID, "i-1"), payee.AID(), own),
+			req(testRegistrationFunds + 1), payment.ReasonInsufficientFunds},
 	} {
 		_, sr := settleCall(t, srv, c.p, c.req)
 		if sr.Success || sr.ErrorReason != c.reason {
@@ -607,7 +607,7 @@ func TestLedgerReadsAreForTheAccountHolderOnly(t *testing.T) {
 	code, body := ownerGet(t, srv, owner, relayauth.ActionBalance, base+"/balance")
 	var bal aghub.Balance
 	if code != http.StatusOK || json.Unmarshal(body, &bal) != nil || bal.AID != owner.AID() ||
-		bal.Credits != aghub.RegistrationGrant {
+		bal.Credits != testRegistrationFunds {
 		t.Errorf("owner balance = %d %s", code, body)
 	}
 }

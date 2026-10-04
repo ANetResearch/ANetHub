@@ -165,7 +165,7 @@ func TestAReaderCanRecomputeTheSupplyFromTheChain(t *testing.T) {
 		}
 		issued += toInt64(p["amount"])
 	}
-	want := int64(700 + aghub.RegistrationGrant)
+	want := int64(700 + testRegistrationFunds)
 	if issued != want {
 		t.Errorf("recomputed issued = %d, want %d", issued, want)
 	}

@@ -61,7 +61,7 @@ func TestARegistrationWithAKELPastTheMessagePathCapIsRefused(t *testing.T) {
 		t.Fatalf("test did not build a KEL past the cap: %d bytes", len(kelB))
 	}
 	code, b := registerWithCard(t, srv, attacker, "big", nil, nil)
-	if code != http.StatusBadRequest || !strings.Contains(string(b), "kel too long") {
+	if code != http.StatusBadRequest || !strings.Contains(string(b), `"kel_invalid"`) || !strings.Contains(string(b), "too long") {
 		t.Fatalf("register with a %d-event, %d-byte KEL: %d %s, want 400 kel too long",
 			len(attacker.KEL()), len(kelB), code, b)
 	}

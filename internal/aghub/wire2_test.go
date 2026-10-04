@@ -800,7 +800,7 @@ func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 		for k, v := range extra {
 			body[k] = v
 		}
-		code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+		code, b := registerFunded(t, srv, c, body)
 		var out aghub.RegisterResponse
 		_ = json.Unmarshal(b, &out)
 		return code, out
@@ -935,6 +935,7 @@ func TestRegistrationIsRateLimitedPerClientIP(t *testing.T) {
 	}
 	reg := func(ip string) (int, http.Header) {
 		c, _ := identity.Incept()
+		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))
 		req.Header.Set("X-Real-IP", ip)

@@ -86,14 +86,14 @@ func indexInvariants(t *testing.T, h *fz, aid string) {
 // another agent's, mutated, or raw fuzz bytes. The request is always
 // signed by the registrant. Properties:
 //
-//   - the answer is 200, 400, 401, 409 or 413, never a 5xx;
+//   - the answer is 200, 400, 401, 403, 409 or 413, never a 5xx;
 //   - 200 only for a KEL that replays to the AID claimed, and the hub
 //     then holds exactly that KEL;
 //   - an A2A card is listed only if it verifies against that KEL, and the
 //     skill and tag indexes hold nothing for an agent without one;
 //   - a key set is stored only if it verifies for the agent;
 //   - a refused first registration leaves no agent, card or balance
-//     behind, and a first registration is granted exactly once;
+//     behind, and a registration pays no credit;
 //   - the ledger invariants hold.
 func FuzzHubRegister(f *testing.F) {
 	h := newFZ(f)
@@ -179,7 +179,7 @@ func FuzzHubRegister(f *testing.F) {
 		body := map[string]any{
 			"aid": c.AID(), "name": name, "caps": caps,
 			"summary": summary, "readme": readme, "pricing": pricing,
-			"kel": base64.StdEncoding.EncodeToString(kel),
+			"kel": base64.RawURLEncoding.EncodeToString(kel),
 		}
 		switch cardMode % 5 {
 		case 1:
@@ -267,7 +267,7 @@ func FuzzHubRegister(f *testing.F) {
 
 		balBefore := h.balance(t, c.AID())
 		rec := h.register(c, raw)
-		if !allowed(rec.Code, 200, 400, 401, 409, 413) {
+		if !allowed(rec.Code, 200, 400, 401, 403, 409, 413) {
 			t.Fatalf("register: unexpected %d %s", rec.Code, rec.Body.Bytes())
 		}
 		defer indexInvariants(t, h, c.AID())
@@ -291,7 +291,7 @@ func FuzzHubRegister(f *testing.F) {
 		if err := json.Unmarshal(raw, &sent); err != nil {
 			t.Fatalf("a body that does not decode was registered: %v", err)
 		}
-		sentKEL, err := base64.StdEncoding.DecodeString(sent.KEL)
+		sentKEL, err := base64.RawURLEncoding.DecodeString(sent.KEL)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,8 +307,9 @@ func FuzzHubRegister(f *testing.F) {
 		if err != nil || !bytes.Equal(stored, sentKEL) {
 			t.Fatalf("the hub holds another KEL than the one registered: %v", err)
 		}
-		if fresh && h.balance(t, c.AID())-balBefore != aghub.RegistrationGrant {
-			t.Fatalf("first registration granted %d", h.balance(t, c.AID())-balBefore)
+		// Registration pays nothing (hub-payment-privacy PAY-A5).
+		if fresh && h.balance(t, c.AID()) != balBefore {
+			t.Fatalf("first registration paid %d credits", h.balance(t, c.AID())-balBefore)
 		}
 		if !fresh && h.balance(t, c.AID()) != balBefore {
 			t.Fatalf("re-registration moved the balance %d -> %d", balBefore, h.balance(t, c.AID()))
