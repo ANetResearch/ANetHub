@@ -95,7 +95,8 @@ func (f *fuzzFed) serve(req *http.Request) *httptest.ResponseRecorder {
 func FuzzFedForward(f *testing.F) {
 	ff := newFuzzFed(f)
 	good, err := (&seal.SealedEnvelope{V: seal.EnvelopeVersion, To: "aid:bob", Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("hello")}).Marshal()
+		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("hello"),
+		Access: &seal.Access{Kind: seal.AccessKindSession}}).Marshal()
 	if err != nil {
 		f.Fatal(err)
 	}

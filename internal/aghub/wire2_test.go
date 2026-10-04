@@ -351,7 +351,8 @@ func TestAnOversizedEnvelopeIs413(t *testing.T) {
 	recip, sender := twoAgents(t)
 	register(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
-	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), bytes.Repeat([]byte("x"), 900))); code != 200 {
+	// 880 bytes of ct leave room for the outer header with its access (key 7) under 1024.
+	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), bytes.Repeat([]byte("x"), 880))); code != 200 {
 		t.Fatalf("an envelope under the limit: %d %s", code, b)
 	}
 	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), bytes.Repeat([]byte("x"), 1100))); code != http.StatusRequestEntityTooLarge {
@@ -913,7 +914,7 @@ func TestARealSealedMessageCrossesTheRelay(t *testing.T) {
 	}
 	p := relayPoll(t, srv, recip)
 	got, _ := base64.StdEncoding.DecodeString(p.Messages[0].Envelope)
-	opened, err := seal.Open(got, recip.AID(), seal.StaticKeyRing{kp})
+	opened, err := seal.Open(got, recip.AID(), seal.StaticKeyRing{kp}, nil)
 	if err != nil {
 		t.Fatalf("the recipient cannot open what the relay delivered: %v", err)
 	}

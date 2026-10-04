@@ -175,7 +175,7 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 		t.Fatalf("B's mailbox: %+v", p.Messages)
 	}
 	got, _ := base64.StdEncoding.DecodeString(p.Messages[0].Envelope)
-	opened, err := seal.Open(got, recip.AID(), seal.StaticKeyRing{kp})
+	opened, err := seal.Open(got, recip.AID(), seal.StaticKeyRing{kp}, nil)
 	if err != nil || string(opened.Inner.Body) != "cross-hub task" {
 		t.Fatalf("open at the recipient: %v", err)
 	}

@@ -29,8 +29,8 @@ func TestStoreDeliveryMapsRelayRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	env := func(ct string) []byte {
-		b, err := (&seal.SealedEnvelope{V: 1, To: c.AID(), Suite: seal.SuiteX25519,
-			KID: bytes.Repeat([]byte{7}, 16), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct)}).Marshal()
+		b, err := (&seal.SealedEnvelope{V: seal.EnvelopeVersion, To: c.AID(), Suite: seal.SuiteX25519,
+			KID: bytes.Repeat([]byte{7}, 16), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct), Access: &seal.Access{Kind: seal.AccessKindSession}}).Marshal()
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -130,7 +130,8 @@ func (f *fakeLocal) setQuota(n int) {
 func fedEnv(t *testing.T, to, ct string) []byte {
 	t.Helper()
 	env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct)}
+		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct),
+		Access: &seal.Access{Kind: seal.AccessKindSession}}
 	b, err := env.Marshal()
 	if err != nil {
 		t.Fatal(err)
