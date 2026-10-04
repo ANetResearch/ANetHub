@@ -174,7 +174,7 @@ func (s *Service) askKeys(ctx context.Context, p *Peer, aid string) (keyset, kel
 	}
 	ts := uint64(time.Now().UnixMilli())
 	pre := relayauth.PreimageV2(actionFedKeys, s.id.AID, p.AID, ts, http.MethodGet, req.URL.RequestURI(), nil)
-	sig, seq := s.id.Sign(pre)
+	sig, seq := s.id.Ctrl.Sign(pre)
 	req.Header.Set(relayauth.HeaderAID, s.id.AID)
 	req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
 	req.Header.Set(relayauth.HeaderSeq, strconv.FormatUint(seq, 10))

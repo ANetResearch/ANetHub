@@ -17,6 +17,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
@@ -210,7 +211,7 @@ func TestAKeyLookupMustBeSignedByAPeer(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, r.bSrv.URL+path, nil)
 		if signer != nil {
 			ts := signingTS()
-			sig, seq := signer.Sign(relayauth.PreimageV2(actionFedKeys, signer.AID, answering, ts,
+			sig, seq := signer.Ctrl.Sign(relayauth.PreimageV2(actionFedKeys, signer.AID, answering, ts,
 				http.MethodGet, req.URL.RequestURI(), nil))
 			req.Header.Set(relayauth.HeaderAID, signer.AID)
 			req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
@@ -256,7 +257,7 @@ func TestAKeyLookupMustBeSignedByAPeer(t *testing.T) {
 	// Replay: the same signed request twice.
 	req, _ := http.NewRequest(http.MethodGet, r.bSrv.URL+"/fed/v2/keys/aid:bob", nil)
 	ts := signingTS()
-	sig, seq := r.aid.Sign(relayauth.PreimageV2(actionFedKeys, r.aid.AID, r.bid.AID, ts, http.MethodGet, req.URL.RequestURI(), nil))
+	sig, seq := r.aid.Ctrl.Sign(relayauth.PreimageV2(actionFedKeys, r.aid.AID, r.bid.AID, ts, http.MethodGet, req.URL.RequestURI(), nil))
 	for i, want := range []int{http.StatusOK, http.StatusUnauthorized} {
 		again, _ := http.NewRequest(http.MethodGet, r.bSrv.URL+"/fed/v2/keys/aid:bob", nil)
 		again.Header.Set(relayauth.HeaderAID, r.aid.AID)
@@ -279,7 +280,7 @@ func TestAKeyLookupMustBeSignedByAPeer(t *testing.T) {
 // A card entry carries the agent's key set to the pulling hub.
 func TestTheCardStreamCarriesKeys(t *testing.T) {
 	dir := t.TempDir()
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

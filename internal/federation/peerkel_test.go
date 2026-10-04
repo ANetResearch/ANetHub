@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
@@ -155,12 +156,12 @@ func TestAMisPinnedPeerKELIsDroppedWhenTheServiceOpens(t *testing.T) {
 // replayed [redteam:F34].
 func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 	idSelf, idPeer, _ := threeHubIdentities(t)
-	stranger, err := identity.Incept()
+	stranger, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 30; i++ {
-		if err := stranger.Rotate(uint64(i + 2)); err != nil {
+		if err := identitytest.Rotate(stranger, uint64(i+2)); err != nil {
 			t.Fatal(err)
 		}
 	}

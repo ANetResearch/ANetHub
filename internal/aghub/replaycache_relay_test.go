@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -49,7 +50,7 @@ func TestOneRegisteredAgentFillingTheReplayCacheStopsOnlyItself(t *testing.T) {
 	defer srv.Close()
 
 	mk := func() *identity.Controller {
-		c, err := identity.Incept()
+		c, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -177,7 +178,7 @@ func TestAStrangerAtAClosedHubLeavesNothingInTheReplayCache(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := 0; i < 20; i++ {
-			c, err := identity.Incept()
+			c, err := identitytest.Hub()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,7 +194,7 @@ func TestAStrangerAtAClosedHubLeavesNothingInTheReplayCache(t *testing.T) {
 	}
 
 	// An admitted newcomer registers, and its signature is kept.
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	if _, err := store.Admit(c.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}

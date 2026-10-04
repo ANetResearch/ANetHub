@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -315,7 +316,7 @@ func TestKeysTravelWithTheCardAndAreVerifiedOnArrival(t *testing.T) {
 // held for the agent is refused (§3.8).
 func TestAFederatedCardCannotRollBackOrForkTheKEL(t *testing.T) {
 	hub := newFedHub(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +324,7 @@ func TestAFederatedCardCannotRollBackOrForkTheKEL(t *testing.T) {
 	before, _ := identity.Restore(blob)
 	forked, _ := identity.Restore(blob)
 	federate(t, hub, agent, "Agent", []string{"work.do"})
-	if err := agent.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	register(t, hub.srv, agent, "Agent", []string{"work.do"})
@@ -344,7 +345,7 @@ func TestAFederatedCardCannotRollBackOrForkTheKEL(t *testing.T) {
 	if err == nil || !errors.Is(err, identity.ErrKELRollback) {
 		t.Fatalf("a newer card over the pre-rotation KEL: %v, want a rollback refusal", err)
 	}
-	if err := forked.Rotate(uint64(time.Now().UnixMilli()) + 7); err != nil {
+	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+7); err != nil {
 		t.Fatal(err)
 	}
 	err = peer.AdmitFedCard(homePeerAID, entryFor(forked))
@@ -352,7 +353,7 @@ func TestAFederatedCardCannotRollBackOrForkTheKEL(t *testing.T) {
 		t.Fatalf("a card over a forked KEL: %v, want a fork refusal", err)
 	}
 	// The agent itself, rotating further, still goes through.
-	if err := agent.Rotate(uint64(time.Now().UnixMilli()) + 11); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())+11); err != nil {
 		t.Fatal(err)
 	}
 	if err := peer.AdmitFedCard(homePeerAID, entryFor(agent)); err != nil {

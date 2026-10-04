@@ -17,6 +17,7 @@ import (
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -137,7 +138,7 @@ func (f *fz) signedDo(c *identity.Controller, action, method, path, rawQuery str
 // pair (nil without keys).
 func (f *fz) agent(tb testing.TB, name string, caps []string, withKeys bool) (*identity.Controller, *seal.KeyPair) {
 	tb.Helper()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -257,7 +258,7 @@ func fzA2ACard(tb testing.TB, c *identity.Controller, seq uint64, edits ...func(
 	if err != nil {
 		tb.Fatal(err)
 	}
-	out, err := a2acard.SignWithController(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
+	out, err := a2acard.SignWithSnapshot(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -273,7 +274,7 @@ func fzA2ACardOrRaw(tb testing.TB, c *identity.Controller, seq uint64, edits ...
 	if err != nil {
 		tb.Fatal(err)
 	}
-	out, err := a2acard.SignWithController(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
+	out, err := a2acard.SignWithSnapshot(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
 	if err != nil {
 		return b
 	}

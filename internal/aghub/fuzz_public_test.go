@@ -9,6 +9,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 )
 
@@ -54,7 +55,7 @@ func FuzzHubPublicRoutes(f *testing.F) {
 	h := newFZ(f)
 	prov, _ := h.agent(f, "fuzz-provider", []string{"work.do"}, false)
 	req, _ := h.agent(f, "fuzz-reviewer", nil, false)
-	stranger, _ := identity.Incept()
+	stranger, _ := identitytest.Hub()
 	f.Add(uint8(0), "", "", []byte(`{"receipt":"AAAA","review":"AAAA"}`), uint8(0), int64(5), "fine", "ix-1")
 	f.Add(uint8(0), "", "", []byte(nil), uint8(1), int64(5), "fine", "ix-2")
 	f.Add(uint8(0), "", "", []byte(nil), uint8(2), int64(0), "", "ix-3")

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -307,7 +308,7 @@ func TestAnUnholdableAmountCannotBeRedeemed(t *testing.T) {
 // is another door onto the same settlement.
 func TestTheGatewayCannotSettleAnUnholdableAmount(t *testing.T) {
 	eachAmount(t, overflowAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		seller, err := identity.Incept()
+		seller, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,7 +363,7 @@ func TestTheGatewayDoesNotQuoteAnUnholdablePrice(t *testing.T) {
 	srv := newHub(t)
 	for _, price := range []any{payment.Amount(1 << 63), payment.Amount(math.MaxUint64),
 		payment.Amount(math.MaxUint64 - 999), "0", float64(1 << 63), float64(1 << 64), 1e30} {
-		seller, err := identity.Incept()
+		seller, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -389,11 +390,11 @@ func TestTheGatewayDoesNotQuoteAnUnholdablePrice(t *testing.T) {
 // forwarding and does not depend on the peer to get it right.
 func TestAnUnholdableAmountIsNotForwardedToAPeer(t *testing.T) {
 	eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
-		foreignPayer, err := identity.Incept() // banks on the peer, never registered here
+		foreignPayer, err := identitytest.Hub() // banks on the peer, never registered here
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -440,11 +441,11 @@ func TestAnUnholdableAmountIsNotForwardedToAPeer(t *testing.T) {
 // cannot hold. It is not cleared against the local payee.
 func TestAPeerReceiptForAnUnholdableAmountIsNotClearedForAForwardedPayment(t *testing.T) {
 	eachAmount(t, overflowAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
-		foreignPayer, err := identity.Incept()
+		foreignPayer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -480,7 +481,7 @@ func TestAPeerReceiptForAnUnholdableAmountIsNotClearedForAForwardedPayment(t *te
 // turns negative debited the local payee and the peer's debt to us.
 func TestAPeerReceiptForAnUnholdableAmountIsNotCleared(t *testing.T) {
 	eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -511,7 +512,7 @@ func TestAPeerReceiptForAnUnholdableAmountIsNotCleared(t *testing.T) {
 // debt by 1000.
 func TestAPeerDischargeForAnUnholdableAmountIsRefused(t *testing.T) {
 	eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,7 +558,7 @@ func TestAPeerDischargeForAnUnholdableAmountIsRefused(t *testing.T) {
 // itself is tested in cmd/anet-hub.)
 func TestAnOperatorCannotDischargeAnUnholdableAmount(t *testing.T) {
 	w := newOverflowWorld(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +678,7 @@ func peerReceipt(t *testing.T, peer *identity.Controller, authID, payTo string, 
 
 func TestPeerReceiptsInRangeCannotSumPastWhatALedgerHolds(t *testing.T) {
 	w := newOverflowWorld(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,11 +766,11 @@ func TestASettlementThatWouldOverflowThePayeeMovesNothing(t *testing.T) {
 // local payee and added to what the peer owes.
 func TestAPeerReceiptForMoreThanTheForwardedAuthorizationIsNotCleared(t *testing.T) {
 	w := newOverflowWorld(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreignPayer, err := identity.Incept()
+	foreignPayer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

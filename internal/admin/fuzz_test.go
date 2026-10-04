@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -33,7 +34,7 @@ func FuzzAdminAPI(f *testing.F) {
 	}
 	var aids []string
 	for i := 0; i < 3; i++ {
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		kel, _ := identity.MarshalKEL(c.KEL())
 		if err := hs.PutAgent(c.AID(), "agent", []string{"echo"}, kel); err != nil {
 			f.Fatal(err)

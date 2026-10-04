@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -47,7 +48,7 @@ func FuzzTaskboardWrites(f *testing.F) {
 	h := taskboard.NewServer(board, hub).Handler()
 	var actors []*identity.Controller
 	for i := 0; i < 3; i++ {
-		c, err := identity.Incept()
+		c, err := identitytest.Hub()
 		if err != nil {
 			f.Fatal(err)
 		}
@@ -162,7 +163,7 @@ func FuzzTaskboardChallengeTime(f *testing.F) {
 	}
 	f.Cleanup(func() { board.Close() })
 	h := taskboard.NewServer(board, hub).Handler()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		f.Fatal(err)
 	}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -115,7 +116,7 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	recip, sender := twoAgents(t)
 	register(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
-	stranger, _ := identity.Incept() // never registered
+	stranger, _ := identitytest.Hub() // never registered
 	hubAID := hubAIDOf(t, srv)
 	env := testEnvelope(t, recip.AID(), nil)
 	body := rawBody(t, map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(env)})
@@ -649,7 +650,7 @@ func TestAWire1RelayTableIsMigrated(t *testing.T) {
 // accepted.
 func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +667,7 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	register(t, srv, c, "Agent", nil)
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if code, b := registerWithCard(t, srv, c, "Agent", nil, nil); code != 200 {
@@ -681,7 +682,7 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 		t.Errorf("a rolled-back KEL: %d %s, want 409 naming the rollback", code, b)
 	}
 	// Fork: the same pre-rotation state rotated differently.
-	if err := forked.Rotate(uint64(time.Now().UnixMilli()) + 1); err != nil {
+	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+1); err != nil {
 		t.Fatal(err)
 	}
 	code, b = registerWithCard(t, srv, forked, "Agent", nil, nil)
@@ -934,7 +935,7 @@ func TestRegistrationIsRateLimitedPerClientIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := func(ip string) (int, http.Header) {
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 
@@ -38,8 +39,8 @@ func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 	}
 	defer hs.Close()
 
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := identitytest.Hub()
+	req, _ := identitytest.Hub()
 	provKEL, _ := identity.MarshalKEL(prov.KEL())
 	reqKEL, _ := identity.MarshalKEL(req.KEL())
 	if err := hs.PutAgent(prov.AID(), "测试供给方", []string{"echo", "translate"}, provKEL); err != nil {
@@ -785,7 +786,7 @@ func TestRestoringFromAnOldSchemaBackup(t *testing.T) {
 	}
 	var aids []string
 	for i := 0; i < 3; i++ {
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		kel, _ := identity.MarshalKEL(c.KEL())
 		if _, err := db.Exec(`INSERT INTO agent(aid,name,caps,summary,readme,pricing,guest_quota,kel,registered_at)
 		     VALUES(?,?,?,?,?,?,?,?,?)`, c.AID(), fmt.Sprintf("old-%d", i), `["x.y"]`, "s", "", "",
@@ -831,7 +832,7 @@ func TestRestoringFromAnOldSchemaBackup(t *testing.T) {
 	}
 	// An archived row written before the removal carries guest_quota too,
 	// and restores the same way.
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	kel, _ := identity.MarshalKEL(c.KEL())
 	row, _ := json.Marshal(map[string]any{"aid": c.AID(), "name": "archived", "caps": "[]",
 		"guest_quota": 5, "kel_b64": encB64(kel), "registered_at": "2026-07-19T00:00:00Z"})

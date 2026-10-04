@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 )
 
@@ -23,7 +24,7 @@ import (
 // signed, and the payee's balance still reads as an integer.
 func TestSpotConcurrentSettlementsCannotTogetherPassWhatALedgerHolds(t *testing.T) {
 	w := newOverflowWorld(t)
-	third, err := identity.Incept()
+	third, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

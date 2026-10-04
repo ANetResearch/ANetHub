@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 	"io"
 	"net/http"
@@ -300,7 +301,7 @@ func signedEnvelope(t *testing.T, r *rig, mutate func(*Envelope, []byte) []byte)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, seq := r.aid.Sign(pre)
+	sig, seq := r.aid.Ctrl.Sign(pre)
 	env.Sig, env.KeyStateSeq = base64.StdEncoding.EncodeToString(sig), seq
 	return env
 }
@@ -368,7 +369,7 @@ func TestPayloadCIDMismatch(t *testing.T) {
 func TestDirectoryFederation(t *testing.T) {
 	dir := t.TempDir()
 
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

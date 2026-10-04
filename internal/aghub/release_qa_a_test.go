@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -20,7 +21,7 @@ import (
 
 func mustIncept(t *testing.T) *identity.Controller {
 	t.Helper()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func agentNames(agents []aghub.AgentView) []string {
 // ?cap=text.*.
 func TestCapabilityMatchingIsCaseSensitiveWithAndWithoutTheStar(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

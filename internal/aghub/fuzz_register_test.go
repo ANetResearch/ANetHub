@@ -16,6 +16,7 @@ import (
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -98,20 +99,20 @@ func indexInvariants(t *testing.T, h *fz, aid string) {
 func FuzzHubRegister(f *testing.F) {
 	h := newFZ(f)
 	regular, _ := h.agent(f, "fuzz-regular", []string{"fuzz.reg"}, true)
-	stranger, err := identity.Incept()
+	stranger, err := identitytest.Hub()
 	if err != nil {
 		f.Fatal(err)
 	}
 	// A KEL past seal.MaxKELEvents, built once: no sender accepts it, and
 	// neither may /register [redteam:F36].
-	big, err := identity.Incept()
+	big, err := identitytest.Hub()
 	if err != nil {
 		f.Fatal(err)
 	}
 	start := uint64(time.Now().UnixMilli()) - 2*uint64(seal.MaxKELEvents)
 	for i := 0; i <= seal.MaxKELEvents; i++ {
 		// Each event's ts is after the previous one's (KEL v2).
-		if err := big.Rotate(start + uint64(i)); err != nil {
+		if err := identitytest.Rotate(big, start+uint64(i)); err != nil {
 			f.Fatal(err)
 		}
 	}
@@ -140,13 +141,13 @@ func FuzzHubRegister(f *testing.F) {
 		// (re-registration), or a new identity rotated a few times.
 		c := regular
 		if who%4 != 1 {
-			if c, err = identity.Incept(); err != nil {
+			if c, err = identitytest.Hub(); err != nil {
 				t.Fatal(err)
 			}
 			if who%4 == 2 {
 				now := uint64(time.Now().UnixMilli())
 				for i := 0; i < int(seq%3)+1; i++ {
-					if err := c.Rotate(now - 2 + uint64(i)); err != nil {
+					if err := identitytest.Rotate(c, now-2+uint64(i)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -361,7 +362,7 @@ func FuzzHubKeys(f *testing.F) {
 	}())); rec.Code != http.StatusOK {
 		f.Fatalf("register with card: %d %s", rec.Code, rec.Body.Bytes())
 	}
-	stranger, _ := identity.Incept()
+	stranger, _ := identitytest.Hub()
 
 	f.Add(uint8(0), uint64(2), int64(0), []byte(nil), []byte(`{"aid":"`+k.AID()+`"}`), k.AID())
 	f.Add(uint8(0), uint64(1), int64(0), []byte(nil), []byte(`{"aid":"`+other.AID()+`"}`), other.AID())

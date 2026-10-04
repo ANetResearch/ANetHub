@@ -13,6 +13,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -104,11 +105,11 @@ func replaceStoredCard(t *testing.T, dir, aid string, card json.RawMessage) {
 // and a funded buyer.
 func sellerAndBuyer(t *testing.T, srv *httptest.Server) (seller, buyer *identity.Controller) {
 	t.Helper()
-	seller, err := identity.Incept()
+	seller, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyer, err = identity.Incept()
+	buyer, err = identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +277,7 @@ func TestTheGatewayWillNotSendTheBuyerToAnAddressTheProviderDidNotSign(t *testin
 func TestTheGatewayRefusesACardThatSpeaksForAnotherAgent(t *testing.T) {
 	srv, dir := newHubWithDir(t)
 	seller, _ := sellerAndBuyer(t, srv)
-	other, err := identity.Incept()
+	other, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 )
 
@@ -27,7 +28,7 @@ import (
 // rather than re-marshalling the whole KEL each step.
 func bigKELController(t *testing.T, targetBytes int) *identity.Controller {
 	t.Helper()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +36,7 @@ func bigKELController(t *testing.T, targetBytes int) *identity.Controller {
 	for {
 		for i := 0; i < 16; i++ {
 			ts++
-			if err := c.Rotate(ts); err != nil {
+			if err := identitytest.Rotate(c, ts); err != nil {
 				t.Fatal(err)
 			}
 		}

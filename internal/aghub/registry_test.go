@@ -18,6 +18,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -91,7 +92,7 @@ func signA2A(t *testing.T, signer *identity.Controller, card map[string]any) jso
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := a2acard.SignWithController(b, signer, "https://hub.example.org/agents/"+signer.AID()+"/jwks.json")
+	out, err := a2acard.SignWithSnapshot(b, signer, "https://hub.example.org/agents/"+signer.AID()+"/jwks.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +251,7 @@ func TestA2ACardRejections(t *testing.T) {
 		{name: "key retired by a rotation", status: aghub.CardStatusInvalid, code: a2acard.CodeKeyNotCurrent,
 			card: func(t *testing.T, c, _ *identity.Controller) json.RawMessage {
 				card := signA2A(t, c, a2aCardFor(c, 1))
-				if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+				if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 					t.Fatal(err)
 				}
 				return card // registered with the rotated KEL
@@ -336,7 +337,7 @@ func TestTheRegistryFiltersAndPages(t *testing.T) {
 			withSkills([]string{"summarize", "Summarize", "ml"})(m)
 		},
 	} {
-		c, err := identity.Incept()
+		c, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -526,7 +527,7 @@ func TestTheJWKSListsOnlyTheActiveKeyStates(t *testing.T) {
 	if got := kids(); strings.Join(got, ",") != a2acard.KID(c.AID(), 0) {
 		t.Fatalf("before rotation: %v", got)
 	}
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	registerA2A(t, srv, c, "Agent", nil, nil)
@@ -550,7 +551,7 @@ func TestOnlyVerifiedCardsAreListed(t *testing.T) {
 	if out := registerA2A(t, srv, c, "Declared", []string{"declared.cap"}, signA2A(t, c, body)); out.CardStatus != aghub.CardStatusOK {
 		t.Fatalf("card: %+v", out)
 	}
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if out := registerA2A(t, srv, c, "Declared", []string{"declared.cap"}, nil); out.CardStatus != aghub.CardStatusAbsent {

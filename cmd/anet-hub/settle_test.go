@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -155,9 +156,9 @@ func newCrossHubRig(t *testing.T) *crossHubRig {
 	t.Cleanup(httpA.Close)
 
 	r := &crossHubRig{a: storeA, aID: idA, aURL: httpA.URL, b: b, netB: payment.CreditNetwork(idB.AID)}
-	r.payer, _ = identity.Incept()
-	r.payee, _ = identity.Incept()
-	r.other, _ = identity.Incept()
+	r.payer, _ = identitytest.Hub()
+	r.payee, _ = identitytest.Hub()
+	r.other, _ = identitytest.Hub()
 	putAgent(t, storeB, r.payer)
 	putAgent(t, storeA, r.payee)
 	putAgent(t, storeA, r.other)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -48,11 +49,11 @@ func sellableCard(t *testing.T, c *identity.Controller, name string, caps []stri
 // The gateway: 402, then a voucher. Never a result.
 func TestTheGatewaySellsAccessAndNotTheWork(t *testing.T) {
 	srv := newHub(t)
-	seller, err := identity.Incept()
+	seller, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyer, err := identity.Incept()
+	buyer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,11 +160,11 @@ func TestTheGatewaySellsAccessAndNotTheWork(t *testing.T) {
 // What the gateway must refuse to sell.
 func TestTheGatewayRefusesToSellWhatItCannot(t *testing.T) {
 	srv := newHub(t)
-	unreachable, err := identity.Incept()
+	unreachable, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	free, err := identity.Incept()
+	free, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,11 +216,11 @@ func TestTheGatewayRefusesToSellWhatItCannot(t *testing.T) {
 // than the published price must not walk away with a full voucher.
 func TestTheGatewayWillNotSellBelowThePublishedPrice(t *testing.T) {
 	srv := newHub(t)
-	seller, err := identity.Incept()
+	seller, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyer, err := identity.Incept()
+	buyer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

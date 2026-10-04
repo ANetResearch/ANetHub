@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 )
 
 // deleteAgentRe matches SQL that deletes rows of the agent table (and not
@@ -118,7 +119,7 @@ func kelOf(t *testing.T, c *identity.Controller) []byte {
 func rotated(t *testing.T, c *identity.Controller, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		if err := c.Rotate(kelTime()); err != nil {
+		if err := identitytest.Rotate(c, kelTime()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -163,7 +164,7 @@ func dereg(s *Store, aid, why string) (DeregResult, error) {
 // (PAY-O1 step 2; M-PAY-44).
 func TestDeregTombstoneNeverShrinks(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	rotated(t, c, 1)
 	mid, _ := c.Export()
 	rotated(t, c, 1)
@@ -173,7 +174,7 @@ func TestDeregTombstoneNeverShrinks(t *testing.T) {
 	}
 	short, _ := identity.Restore(mid) // icp, rot
 	fork, _ := identity.Restore(mid)
-	if err := fork.Rotate(kelTime()); err != nil {
+	if err := identitytest.Rotate(fork, kelTime()); err != nil {
 		t.Fatal(err)
 	}
 	for name, kel := range map[string][]byte{"shorter": kelOf(t, short), "forked": kelOf(t, fork)} {
@@ -211,7 +212,7 @@ func TestDeregTombstoneNeverShrinks(t *testing.T) {
 // reason is refused.
 func TestDeregisterTxOfAnUnknownAID(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	before := g.dump()
 	if _, err := dereg(g.store, c.AID(), DeregOperator); !errors.Is(err, ErrNotRegistered) {
 		t.Fatalf("deregistering an unknown AID: %v", err)
@@ -232,7 +233,7 @@ func TestDeregisterTxOfAnUnknownAID(t *testing.T) {
 func TestDeregisterTxKeepsTheAdmissionUnlessRevoked(t *testing.T) {
 	for _, why := range []string{DeregSelf, DeregDip, DeregRevoked, DeregInactive, DeregOperator} {
 		g := newGateHub(t)
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
 			t.Fatal(err)
 		}
@@ -257,7 +258,7 @@ func TestDeregisterTxKeepsTheAdmissionUnlessRevoked(t *testing.T) {
 // its dereg_event row; the hub process starts with an empty dereg_event.
 func TestInProcessDeregRunsTheCallbacks(t *testing.T) {
 	g := newGateHub(t)
-	stale, _ := identity.Incept()
+	stale, _ := identitytest.Hub()
 	if _, err := g.store.db.Exec(`INSERT INTO dereg_event(aid, at) VALUES(?, 1)`, stale.AID()); err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +274,7 @@ func TestInProcessDeregRunsTheCallbacks(t *testing.T) {
 	if err := g.store.db.QueryRow(`SELECT COUNT(*) FROM dereg_event`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("dereg_event after the hub process started: %d rows (%v)", n, err)
 	}
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	if err := g.store.PutAgent(c.AID(), "n", nil, kelOf(t, c)); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +320,7 @@ func TestMain(m *testing.M) {
 // test callback stands for "drop this AID's sessions".
 func TestOutOfProcessDeregDropsSessions(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}

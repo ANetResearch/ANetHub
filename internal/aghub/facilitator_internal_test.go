@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 )
 
@@ -20,10 +21,10 @@ func settlementStore(t *testing.T) (*Store, *identity.Controller, *identity.Cont
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	hub, _ := identity.Incept()
+	hub, _ := identitytest.Hub()
 	s.SetHubKey(hub)
-	payer, _ := identity.Incept()
-	payee, _ := identity.Incept()
+	payer, _ := identitytest.Hub()
+	payee, _ := identitytest.Hub()
 	for _, c := range []*identity.Controller{payer, payee} {
 		kel, err := identity.MarshalKEL(c.KEL())
 		if err != nil {
@@ -192,7 +193,7 @@ func TestUpgradingAHubWithDuplicateBindingsKeepsTheFirstAsHolder(t *testing.T) {
 // row that already exists is "already cleared".
 func TestAClearingThatCannotBeRecordedIsNotReportedAsDone(t *testing.T) {
 	s, _, payer, payee := settlementStore(t)
-	peer, _ := identity.Incept()
+	peer, _ := identitytest.Hub()
 	network := payment.CreditNetwork(peer.AID())
 	now := time.Now().UnixMilli()
 	auth := &payment.Authorization{PayTo: payee.AID(), Amount: 25, Network: network, Nonce: "clr-1",

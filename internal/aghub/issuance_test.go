@@ -10,7 +10,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/ael"
 	"github.com/ANetResearch/ANetCore/coredet"
-	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -26,7 +26,7 @@ import (
 // nothing outside the hub attested to it.
 func TestEverySupplyChangeIsOnTheSignedChain(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestEverySupplyChangeIsOnTheSignedChain(t *testing.T) {
 // and publishing both is what makes the comparison possible.
 func TestSupplyPublishesBothDerivationsAndWhetherTheyAgree(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestSupplyPublishesBothDerivationsAndWhetherTheyAgree(t *testing.T) {
 // the hub's own arithmetic.
 func TestAReaderCanRecomputeTheSupplyFromTheChain(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func supplyFull(t *testing.T, srv *httptest.Server) aghub.Supply {
 // actually attested.
 func TestAnUpgradedHubOpensItsChainAtTheOutstandingBalance(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestAnUpgradedHubOpensItsChainAtTheOutstandingBalance(t *testing.T) {
 // reported false disagreement on exactly this shape.
 func TestOpeningReconcilesOnAHubThatHadAlreadyRedeemed(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestOpeningReconcilesOnAHubThatHadAlreadyRedeemed(t *testing.T) {
 // whether there is a head to pin would read that as "nothing yet".
 func TestAOneRecordChainReportsItsSequence(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

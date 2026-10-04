@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
@@ -36,7 +37,7 @@ import (
 // takes the same authorization.
 func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	payer, err := identity.Incept()
+	payer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,11 +82,11 @@ func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 // this hub as payee, and clearing it would credit the hub's own row.
 func TestAPaymentToTheHubIsNotForwardedToAPeer(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	payer, err := identity.Incept()
+	payer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,11 +113,11 @@ func TestAPaymentToTheHubIsNotForwardedToAPeer(t *testing.T) {
 func TestAPeerReceiptPayingThisHubIsNotCleared(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payer, _ := identity.Incept()
+	payer, _ := identitytest.Hub()
 	rec := &payment.Receipt{AuthID: "peer-auth-to-hub", Payer: payer.AID(), PayTo: hubAID, Amount: 10,
 		Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
 	if err := rec.Sign(peer); err != nil {
@@ -147,11 +148,11 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	payer, payee := twoAgents(t)
 	register(t, srv, payer, "Payer", nil)
 	register(t, srv, payee, "Payee", nil)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stranger, _ := identity.Incept()
+	stranger, _ := identitytest.Hub()
 	receipt := func(id, payTo string, amount uint64) *payment.Receipt {
 		rec := &payment.Receipt{AuthID: id, Payer: "did:anet:their-user", PayTo: payTo, Amount: amount,
 			Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
@@ -190,7 +191,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	}
 	// An admission grant past the full supply is refused with the admission,
 	// and a registration at the bound pays nothing anyway (PAY-A5).
-	late, _ := identity.Incept()
+	late, _ := identitytest.Hub()
 	admitForTest(t, srv, late.AID())
 	if code, b := signedDo(t, srv, late, relayauth.ActionRegister, http.MethodPost, "/register",
 		registerBody(t, late, "Late", nil)); code != http.StatusOK {
@@ -217,7 +218,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 // boundary seed).
 func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	register(t, srv, c, "Grantee", nil) // one issuance on the chain
 	for _, from := range []string{"18446744073709551615", "9223372036854775808", "9223372036854775807"} {
 		code, b := getJSON(t, srv.URL+"/x402/issuance?from="+from)
@@ -240,7 +241,7 @@ func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 // is kept; 2^63-1 itself still stores.
 func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	register(t, srv, c, "Keys", nil)
 	raw, _ := mintKeySet(t, c, 1)
 	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
@@ -285,11 +286,11 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 		t.Fatal("no store for this hub")
 	}
 	store := v.(*aghub.Store)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stranger, _ := identity.Incept()
+	stranger, _ := identitytest.Hub()
 	issued := supplyFull(t, srv).Issued
 	// Room for one grant of testRegistrationFunds, not for two.
 	fill := uint64(math.MaxInt64 - issued - 3*testRegistrationFunds/2)
@@ -305,7 +306,7 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	const n = 16
 	admitted := make([]string, n)
 	for i := 0; i < n; i += 2 {
-		c, err := identity.Incept()
+		c, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
