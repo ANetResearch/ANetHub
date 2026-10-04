@@ -666,12 +666,14 @@ func TestOriginNegativeCachesRefusedCap(t *testing.T) {
 	}
 	// Kept until cap_exp; past it the credential is refused for its
 	// expiry, and the entry is dropped.
-	a.advance(9 * time.Minute)
+	// The hubs' clocks stand still from when each was made, so A's is set
+	// against the credential's cap_exp, not moved by a fixed amount.
+	advanceTo(a, g.body.CapExp-uint64(time.Minute.Milliseconds()))
 	expectRefusal(t, send("3"), 403, "access_invalid")
 	if b.forwards() != 1 {
 		t.Fatalf("the refusal was forgotten before cap_exp: %d forwards", b.forwards())
 	}
-	a.advance(time.Minute + time.Second + time.Duration(seal.CapExpGraceMS)*time.Millisecond)
+	advanceTo(a, g.body.CapExp+seal.CapExpGraceMS+1000)
 	expectRefusal(t, send("4"), 403, "access_invalid")
 	if b.forwards() != 1 {
 		t.Fatalf("an expired credential was forwarded: %d forwards", b.forwards())
@@ -1017,7 +1019,7 @@ func TestKind1RemoteStep2ConstantVerifyCount(t *testing.T) {
 		check(name, env)
 	}
 	forwards := b.forwards()
-	a.advance(2*time.Second + time.Duration(seal.CapExpGraceMS)*time.Millisecond)
+	advanceTo(a, expiring.body.CapExp+seal.CapExpGraceMS+1000)
 	check("an expiry", withCap(t, envelope(t, owner.aid, []byte("x")), expiring))
 	if b.forwards() != forwards {
 		t.Fatalf("a refusal of step 2 was forwarded")
@@ -1229,5 +1231,12 @@ func TestAPeersEndlessBucketIsNoAnswer(t *testing.T) {
 				t.Fatalf("the peer was asked %d pages, want %d", got, want)
 			}
 		})
+	}
+}
+
+// advanceTo moves nd's clock forward to the unix-ms time at (not back).
+func advanceTo(nd *fedNode, at uint64) {
+	if now := nd.nowMS(); at > now {
+		nd.advance(time.Duration(at-now) * time.Millisecond)
 	}
 }
