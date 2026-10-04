@@ -11,10 +11,10 @@ import (
 	"testing"
 )
 
-// KEL C-23: Controller.CurrentPrivateKey is deleted; no identifier of that name exists anywhere in
-// this repository, tests included. The hub signs through its identity's Controller (an
-// identity.Signer) and never holds the key itself.
-func TestNoCurrentPrivateKey(t *testing.T) {
+// repoFiles parses every Go file of this repository, skipping testdata and hidden directories, and
+// calls fn with each and whether it is a test file.
+func repoFiles(t *testing.T, fn func(fset *token.FileSet, f *ast.File, isTest bool)) {
+	t.Helper()
 	root, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -49,12 +49,7 @@ func TestNoCurrentPrivateKey(t *testing.T) {
 			return err
 		}
 		files++
-		ast.Inspect(f, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok && id.Name == "CurrentPrivateKey" {
-				t.Errorf("%s: identifier CurrentPrivateKey (KEL C-23 deletes it)", fset.Position(id.Pos()))
-			}
-			return true
-		})
+		fn(fset, f, strings.HasSuffix(p, "_test.go"))
 		return nil
 	})
 	if err != nil {
@@ -63,4 +58,35 @@ func TestNoCurrentPrivateKey(t *testing.T) {
 	if files < 10 {
 		t.Fatalf("parsed %d files: the check looks at nothing", files)
 	}
+}
+
+// KEL C-23: Controller.CurrentPrivateKey is deleted; no identifier of that name exists anywhere in
+// this repository, tests included. The hub signs through its identity's Controller (an
+// identity.Signer) and never holds the key itself.
+func TestNoCurrentPrivateKey(t *testing.T) {
+	repoFiles(t, func(fset *token.FileSet, f *ast.File, _ bool) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == "CurrentPrivateKey" {
+				t.Errorf("%s: identifier CurrentPrivateKey (KEL C-23 deletes it)", fset.Position(id.Pos()))
+			}
+			return true
+		})
+	})
+}
+
+// KEL C-31, C-32: the hub holds no next key beyond its icp's hot key. ANetCore's
+// identity/identitytest keeps the next keys of the test identities it rotates in process memory,
+// so no non-test file of this repository imports it.
+func TestIdentitytestOnlyInTests(t *testing.T) {
+	const identitytest = "github.com/ANetResearch/ANetCore/identity/identitytest"
+	repoFiles(t, func(fset *token.FileSet, f *ast.File, isTest bool) {
+		if isTest {
+			return
+		}
+		for _, imp := range f.Imports {
+			if strings.Trim(imp.Path.Value, "`\"") == identitytest {
+				t.Errorf("%s: imports %s, which is for tests only", fset.Position(imp.Pos()), identitytest)
+			}
+		}
+	})
 }
