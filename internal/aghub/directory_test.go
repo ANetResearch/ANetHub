@@ -659,6 +659,17 @@ func TestDirBoxRecomputedOnChange(t *testing.T) {
 	if e.Card != nil {
 		t.Fatal("the entry still carries a card that no longer verifies")
 	}
+	// Extended again, with nothing else changing: no card to delist and
+	// no key set, only the registration.
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())+1); err != nil {
+		t.Fatal(err)
+	}
+	kel3, _ := identity.MarshalKEL(c.KEL())
+	register(t, srv, c, "Agent", nil)
+	if e, _ = storedEntry(t, store, c.AID()); !bytes.Equal(e.KEL, kel3) {
+		t.Fatal("the entry does not carry the key history a registration extended")
+	}
+	kel2 = kel3
 	// 5. a new witness notice.
 	notice := []byte("a notice for the tip")
 	store.SetDirNoticeForTest(func(aid string) []byte {
