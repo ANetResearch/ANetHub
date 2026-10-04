@@ -46,8 +46,9 @@ type fedNode struct {
 	// down makes the hub answer every request 503 without the wire
 	// header, as a reverse proxy in front of a hub that is down does.
 	down atomic.Bool
-	// answer, when set, answers /fed/v3/forward in place of the hub.
-	answer http.HandlerFunc
+	// answer, when set, answers /fed/v3/forward in place of the hub, and
+	// bucket /fed/v3/directory:bucket.
+	answer, bucket http.HandlerFunc
 }
 
 // fedNet is hubs peered for delivery, each with each other one.
@@ -105,7 +106,7 @@ func (nd *fedNode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	nd.mu.Lock()
 	nd.hits[r.URL.Path]++
-	root, answer := nd.root, nd.answer
+	root, answer, bucket := nd.root, nd.answer, nd.bucket
 	if r.URL.Path == "/fed/v3/forward" {
 		var dump bytes.Buffer
 		_ = r.Header.Write(&dump)
@@ -117,6 +118,10 @@ func (nd *fedNode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	nd.mu.Unlock()
 	if answer != nil && r.URL.Path == "/fed/v3/forward" {
 		answer(w, r)
+		return
+	}
+	if bucket != nil && r.URL.Path == "/fed/v3/directory:bucket" {
+		bucket(w, r)
 		return
 	}
 	root.ServeHTTP(w, r)
@@ -1176,5 +1181,48 @@ func TestAMovedOwnerIsFoundAgainAfterARefusal(t *testing.T) {
 	}
 	if rec := send("found at C"); rec.Code != 200 || c.forwards() != 1 || b.forwards() != 2 {
 		t.Fatalf("after the refusal: %d %s; forwards at B %d, at C %d", rec.Code, rec.Body, b.forwards(), c.forwards())
+	}
+}
+
+// TestAPeersEndlessBucketIsNoAnswer (SSR-W21): a peer whose bucket does not
+// move on from one page to the next, or goes on for more than
+// PeerBucketMaxPages pages, is taken as not answering: the merged bucket
+// is partial, and the asking ends.
+func TestAPeersEndlessBucketIsNoAnswer(t *testing.T) {
+	for _, moving := range []bool{false, true} {
+		t.Run(fmt.Sprint("moving ", moving), func(t *testing.T) {
+			net := newFedNet(t, 2)
+			a, c := net.nodes[0], net.nodes[1]
+			a.agent()
+			var n atomic.Int64
+			c.mu.Lock()
+			c.bucket = func(w http.ResponseWriter, _ *http.Request) {
+				i := n.Add(1)
+				h := make([]byte, dirbox.HashLen)
+				if moving {
+					h[30], h[31] = byte(i>>8), byte(i)
+				}
+				e := base64.RawURLEncoding.EncodeToString(h)
+				w.Header().Set(wire3.Header, "3")
+				writeJSON(w, http.StatusOK, map[string]any{"max_bits": 0, "next": e,
+					"entries": []map[string]string{{"h": e, "box": "AAAA"}}})
+			}
+			c.mu.Unlock()
+			req := httptest.NewRequest(http.MethodPost, "http://hub.test/directory:bucket", strings.NewReader(`{"prefix":"","bits":0}`))
+			req.Header.Set(wire3.Header, "3")
+			req.Header.Set("Content-Type", "application/json")
+			rec := a.serve(req, "192.0.2.78")
+			var out DirBucketResponse
+			if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil || !out.Partial || len(out.Entries) != 1 {
+				t.Fatalf("%d %s; want A's own entry and partial", rec.Code, rec.Body)
+			}
+			want := int64(2)
+			if moving {
+				want = PeerBucketMaxPages
+			}
+			if got := n.Load(); got != want {
+				t.Fatalf("the peer was asked %d pages, want %d", got, want)
+			}
+		})
 	}
 }

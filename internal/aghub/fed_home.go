@@ -62,8 +62,14 @@ const (
 	// BucketCacheBytes bounds the peers' answers kept, all together.
 	BucketCacheBytes = 64 << 20
 	// PeerBucketMaxBytes bounds one peer's answer for one bucket, all its
-	// pages together; a larger answer is taken as no answer.
+	// pages together, and PeerBucketMaxPages the pages; a larger answer is
+	// taken as no answer.
 	PeerBucketMaxBytes = 16 << 20
+	PeerBucketMaxPages = 64
+	// PeerBucketWait bounds the asking of the peers for one bucket, all
+	// of them at once (SSR-W21: a peer not answering in 5 seconds is
+	// missing from the answer).
+	PeerBucketWait = 5 * time.Second
 	// FedSourcePenalty is what a source hub's bucket loses for a forwarded
 	// credential the source hub should have refused itself (SSR-H15a).
 	FedSourcePenalty = 10
@@ -404,7 +410,12 @@ var errNoBucket = errors.New("hub: the peer did not answer for the bucket")
 func (s *Server) askPeerBucket(ctx context.Context, peer string, prefix []byte, bits int) (*bucketAnswer, int, error) {
 	a := &bucketAnswer{}
 	cursor := ""
-	for {
+	var after []byte
+	for pages := 0; ; pages++ {
+		if pages == PeerBucketMaxPages {
+			log.Printf("hub: federation peer %s answered a bucket in more than %d pages; it is left out of the merged bucket", peer, PeerBucketMaxPages)
+			return nil, -1, errNoBucket
+		}
 		body, err := json.Marshal(DirBucketRequest{Prefix: ptr(wire3.EncodeB64URL(prefix)), Bits: ptr(uint(bits)), Cursor: cursor})
 		if err != nil {
 			return nil, -1, err
@@ -434,8 +445,13 @@ func (s *Server) askPeerBucket(ctx context.Context, peer string, prefix []byte, 
 		if err != nil {
 			return nil, -1, err
 		}
-		s.fedState.setBits(peer, int(page.maxBits))
-		a.entries = append(a.entries, page.entries...)
+		s.fedState.setBits(peer, int(min(page.maxBits, dirbox.HashBits)))
+		for _, e := range page.entries {
+			// Each page starts after the hash the previous one ended at.
+			if after == nil || bytes.Compare(e.h, after) > 0 {
+				a.entries = append(a.entries, e)
+			}
+		}
 		a.size += len(raw)
 		if a.size > PeerBucketMaxBytes {
 			log.Printf("hub: federation peer %s answered a bucket with more than %d bytes; it is left out of the merged bucket", peer, PeerBucketMaxBytes)
@@ -444,6 +460,10 @@ func (s *Server) askPeerBucket(ctx context.Context, peer string, prefix []byte, 
 		if page.next == nil {
 			return a, -1, nil
 		}
+		if after != nil && bytes.Compare(page.next, after) <= 0 {
+			return nil, -1, errors.New("hub: a peer's bucket does not move on from one page to the next")
+		}
+		after = page.next
 		cursor = wire3.EncodeB64URL(page.next)
 	}
 }
@@ -523,6 +543,8 @@ func (s *Server) lookupEntry(ctx context.Context, aid string, peers []string, fr
 		entries []peerEntry
 	}
 	results := make([]found, len(peers))
+	ctx, cancel := context.WithTimeout(ctx, PeerBucketWait)
+	defer cancel()
 	var wg sync.WaitGroup
 	for i, peer := range peers {
 		wg.Add(1)
@@ -738,7 +760,7 @@ func (s *Server) mergedBucket(ctx context.Context, prefix []byte, bits int, afte
 	peers := s.fed.DeliveryPeers()
 	got := make([][]peerEntry, len(peers))
 	failed := make([]bool, len(peers))
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, PeerBucketWait)
 	defer cancel()
 	var wg sync.WaitGroup
 	for i, peer := range peers {
