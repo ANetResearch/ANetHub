@@ -1,6 +1,7 @@
 package aghub
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"testing"
 	"time"
@@ -23,8 +24,12 @@ func wire3DirectorySetup(t *testing.T) *wire3test.Env {
 	t.Helper()
 	env, store, signers := wire3Hub(t)
 	alice := signers["alice"]
+	mboxPub, _, err := ed25519.GenerateKey(nil) // a real key: one of small order is refused (core CORE-K8a)
+	if err != nil {
+		t.Fatal(err)
+	}
 	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: alice.AID(), Seq: 1, IssuedAt: uint64(time.Now().UnixMilli()),
-		Mbox: seal.Mbox{Epoch: 1, Pub: make([]byte, 32)}}
+		Mbox: seal.Mbox{Epoch: 1, Pub: mboxPub}}
 	now := uint64(time.Now().UnixMilli())
 	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 	if err != nil {
