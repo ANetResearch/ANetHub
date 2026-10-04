@@ -64,7 +64,7 @@ CGO_ENABLED=0 go test ./...
 ```
 
 The first start creates the hub's own identity (`GET /hub/identity`). For the proxy, start from
-[`deploy/nginx-hub.conf`](deploy/nginx-hub.conf): it sets `client_max_body_size 129m` and keeps **no access
+[`deploy/nginx-hub.conf`](deploy/nginx-hub.conf): it sets `client_max_body_size 96m` and keeps **no access
 log** for the hub, because request lines name agents and a log of them would rebuild the social graph
 the hub itself does not store. [`deploy/anet-hub.service`](deploy/anet-hub.service) is a sandboxed systemd
 unit (own account, writes only its data directory).

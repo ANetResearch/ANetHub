@@ -1,27 +1,37 @@
 package aghub
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/seal"
 )
 
-// Relay storage, wire 2 (A2A-DESIGN §3.7, §9 row "relay 存储", SI-2).
+// Relay storage, wire 3 (sealed-sender §3.1, core §2.16, SI-2).
 //
-// A relay row is a sealed envelope waiting for its recipient and nothing
-// else: id, to_aid, size, created_at and the envelope bytes. The sender,
-// the message kind and the interaction id are inside the ciphertext and
-// are not stored here; the hub learns the sender at send time from the
-// authentication header and uses it only for rate limiting (§2 X1).
+// A relay row is a sealed envelope waiting for its recipient: the recipient,
+// the envelope's digest, the class of the credential it came under and, for a
+// delivery credential, that credential's id, its size, when it was queued,
+// its outer expiry and the envelope bytes. It has no sender, no message kind,
+// no interaction id and no key id: the sender of a first contact is known to
+// this hub only for the length of the request (the session), and a send
+// under a delivery credential names no sender at all.
 //
-// A row exists only while it is undelivered. Ack deletes it, and rows
-// that nobody collects are deleted after the undelivered TTL. The store is
-// opened with PRAGMA secure_delete=ON, so SQLite overwrites deleted row
-// content and freed pages with zeros instead of leaving them in the file.
+// Two ids, for two readers: id is the recipient's cursor and what it acks;
+// rid, sixteen random bytes, is what the sender is told and later asks about
+// (/relay/status). Neither can be derived from the other.
+//
+// A row exists only while it is undelivered. Ack deletes it, and rows that
+// nobody collects are deleted after the undelivered TTL. The store is opened
+// with PRAGMA secure_delete=ON, so SQLite overwrites deleted row content and
+// freed pages with zeros instead of leaving them in the file.
+//
+// relay_redelivery counts how often one env_digest was queued within a day
+// (§4.2.1 step 9): a sender retrying an envelope its recipient already took
+// is answered as a new message, but only three times a day.
 
 // RelayMessage is one queued envelope.
 type RelayMessage struct {
@@ -32,38 +42,79 @@ type RelayMessage struct {
 	Payload   []byte
 }
 
-// ErrMailboxFull is returned by RelayEnqueue when the recipient's
-// undelivered messages have reached the message or byte quota. The HTTP
-// layer answers 507.
+// ErrMailboxFull is RelayEnqueue's refusal when the recipient's undelivered
+// messages have reached the message or byte quota of the whole mailbox
+// (§4.2.2). The HTTP layer answers 507 mailbox_full.
 var ErrMailboxFull = errors.New("hub: recipient mailbox full")
 
-// ErrBadEnvelope is returned by RelayEnqueue when the bytes are not a
-// structurally valid sealed envelope addressed to the recipient. The HTTP
-// layer answers 400.
+// ErrStrangersBusy is RelayEnqueue's refusal of a non-contact envelope when
+// the recipient's non-contact share is full, or the delivery credential it
+// came under already has MaxStrangerCapRows rows waiting (§4.2.2). Contact
+// mail still fits. The HTTP layer answers 429 strangers_busy.
+var ErrStrangersBusy = errors.New("hub: the recipient's share for non-contacts is full")
+
+// ErrBadEnvelope is the refusal of bytes that are not a structurally valid
+// sealed envelope addressed to the recipient (QueueEnvelope). The HTTP layer
+// answers 400.
 var ErrBadEnvelope = errors.New("hub: not a sealed envelope for this recipient")
 
-// relayQuota is the per-recipient bound on undelivered messages.
+// RedeliveryLimitedError is RelayEnqueue's refusal of an env_digest already
+// queued MaxRedeliveries times in its RedeliveryWindow (§4.2.1 step 9). Wait
+// is what is left of the window. The HTTP layer answers 429
+// redelivery_limited.
+type RedeliveryLimitedError struct{ Wait time.Duration }
+
+func (e *RedeliveryLimitedError) Error() string {
+	return fmt.Sprintf("hub: this envelope was queued %d times in %s", MaxRedeliveries, RedeliveryWindow)
+}
+
+// relayQuota is the per-recipient bound on undelivered messages, of the
+// whole mailbox (Limits).
 type relayQuota struct {
 	messages int
 	bytes    int64
 }
 
-// CheckEnvelope is the hub's structural check on an envelope before it is
-// relayed (§3.7): seal.ParseOuter (v == 1, a known suite, a 16-byte kid,
-// an enc of the suite's length, a non-empty ct) and outer.to == toAID.
-// The hub does not open the envelope and cannot; this only refuses bytes
-// that no recipient could open, so that plaintext or misaddressed payloads
-// are not stored.
-func CheckEnvelope(toAID string, envelope []byte) error {
+// RelayItem is one envelope to queue (§4.2.1 step 10).
+type RelayItem struct {
+	To       string
+	Envelope []byte
+	// Digest is env_digest (core L4), the key of deduplication and of the
+	// redelivery count.
+	Digest [32]byte
+	// Class is seal.CapClassContact or seal.CapClassStranger: the class of
+	// the delivery credential, and stranger for a first contact (kind 0).
+	Class uint64
+	// CapID is the delivery credential's id; nil for a first contact.
+	CapID []byte
+	// Exp is outer key 8, nil when absent.
+	Exp *uint64
+}
+
+// Queued is what RelayEnqueue did: queued a new row, or found the same
+// envelope already waiting (Duplicate) and queued nothing.
+type Queued struct {
+	ID        int64
+	RID       []byte
+	Duplicate bool
+}
+
+// RIDLen is the length of a relay id (core §2.16).
+const RIDLen = 16
+
+// CheckEnvelope is the hub's structural check on an envelope it did not take
+// through /relay/send: seal.ParseOuter (v2, a known suite, a 16-byte kid, an
+// enc of the suite's length, a non-empty ct, a well-formed access) and
+// outer.to == toAID. The hub does not open the envelope and cannot.
+func CheckEnvelope(toAID string, envelope []byte) (*seal.SealedEnvelope, error) {
 	outer, err := seal.ParseOuter(envelope)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrBadEnvelope, err)
+		return nil, fmt.Errorf("%w: %v", ErrBadEnvelope, err)
 	}
 	if outer.To != toAID {
-		return fmt.Errorf("%w: envelope is addressed to %s, the request names %s",
-			ErrBadEnvelope, outer.To, toAID)
+		return nil, fmt.Errorf("%w: the envelope is addressed to another recipient than the request names", ErrBadEnvelope)
 	}
-	return nil
+	return outer, nil
 }
 
 // SetRelayQuota sets the per-recipient bound on undelivered messages.
@@ -79,49 +130,180 @@ func (s *Store) SetRelayQuota(messages int, bytes int64) {
 	}
 }
 
-// RelayEnqueue queues a sealed envelope for toAID and returns its id.
-//
-// The envelope is checked structurally (CheckEnvelope) and against the
-// recipient's quota in the same transaction as the insert, so two
-// concurrent sends cannot both pass a quota that only one of them fits
-// under.
-func (s *Store) RelayEnqueue(toAID string, envelope []byte) (int64, error) {
-	if toAID == "" || len(envelope) == 0 {
-		return 0, fmt.Errorf("%w: to_aid and envelope are required", ErrBadEnvelope)
+// RelayQueued is step 7 of /relay/send: the rid of the undelivered row of
+// (to, digest), if there is one. It writes nothing.
+func (s *Store) RelayQueued(to string, digest [32]byte) (rid []byte, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT rid FROM relay_message WHERE to_aid=? AND env_digest=?`, to, digest[:]).Scan(&rid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
 	}
-	if err := CheckEnvelope(toAID, envelope); err != nil {
-		return 0, err
+	if err != nil {
+		return nil, false, err
+	}
+	return rid, true, nil
+}
+
+// RelayEnqueue is steps 9 and 10 of /relay/send, in one write transaction:
+//
+//  1. the same envelope already waiting for the recipient (step 7 again, for
+//     a send that raced this one): Duplicate, nothing written;
+//  2. the envelope queued MaxRedeliveries times within RedeliveryWindow:
+//     *RedeliveryLimitedError;
+//  3. the kid (FS-H1): v030-todo(FS-3);
+//  4. the mailbox: the whole of it (ErrMailboxFull), then for a non-contact
+//     envelope the non-contact share and the credential's rows
+//     (ErrStrangersBusy);
+//  5. the row, with a new random rid, and the redelivery count.
+//
+// Contact mail counts only against the whole mailbox: a full non-contact
+// share never keeps it out (SSR-H4, SI-14).
+func (s *Store) RelayEnqueue(it RelayItem) (Queued, error) {
+	if it.To == "" || len(it.Envelope) == 0 {
+		return Queued{}, fmt.Errorf("%w: a recipient and an envelope are required", ErrBadEnvelope)
+	}
+	if it.Class != seal.CapClassContact && it.Class != seal.CapClassStranger {
+		return Queued{}, fmt.Errorf("hub: class %d is neither contact nor stranger", it.Class)
+	}
+	if it.Class == seal.CapClassContact && it.CapID == nil {
+		return Queued{}, errors.New("hub: contact mail comes only under a delivery credential")
+	}
+	q := s.QuotaFor(it.To)
+	rid := make([]byte, RIDLen)
+	if _, err := rand.Read(rid); err != nil {
+		return Queued{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, err
+		return Queued{}, err
 	}
 	defer tx.Rollback()
+	// The time the row is accepted at is read inside the transaction
+	// (core §2.16 created_at).
+	now := s.now()
+	nowMS := now.UnixMilli()
+	var held []byte
+	switch err := tx.QueryRow(`SELECT rid FROM relay_message WHERE to_aid=? AND env_digest=?`,
+		it.To, it.Digest[:]).Scan(&held); {
+	case err == nil:
+		return Queued{RID: held, Duplicate: true}, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return Queued{}, err
+	}
+	var count, windowStart int64
+	inWindow := false
+	switch err := tx.QueryRow(`SELECT count, window_start FROM relay_redelivery WHERE env_digest=?`,
+		it.Digest[:]).Scan(&count, &windowStart); {
+	case err == nil:
+		end := windowStart + RedeliveryWindow.Milliseconds()
+		if nowMS < end {
+			inWindow = true
+			if count >= MaxRedeliveries {
+				return Queued{}, &RedeliveryLimitedError{Wait: time.Duration(end-nowMS) * time.Millisecond}
+			}
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return Queued{}, err
+	}
+	// v030-todo(FS-3): the kid of the envelope against the recipient's key
+	// set (FS-H1, 409 kid_stale), here: after the duplicate check, before
+	// the capacity (core G23).
+	size := int64(len(it.Envelope))
 	var n int
 	var total int64
-	if err := tx.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(size),0) FROM relay_message WHERE to_aid=?`,
-		toAID).Scan(&n, &total); err != nil {
-		return 0, err
+	if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size),0) FROM relay_message WHERE to_aid=?`,
+		it.To).Scan(&n, &total); err != nil {
+		return Queued{}, err
 	}
-	size := int64(len(envelope))
 	if n+1 > s.quota.messages || total+size > s.quota.bytes {
-		return 0, fmt.Errorf("%w: %d messages / %d bytes undelivered, limit %d messages / %d bytes",
+		return Queued{}, fmt.Errorf("%w: %d messages / %d bytes undelivered, limit %d messages / %d bytes",
 			ErrMailboxFull, n, total, s.quota.messages, s.quota.bytes)
 	}
-	res, err := tx.Exec(
-		`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES(?,?,?,?)`,
-		toAID, size, time.Now().UnixMilli(), envelope)
+	if it.Class == seal.CapClassStranger {
+		if err := tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size),0) FROM relay_message WHERE to_aid=? AND class=?`,
+			it.To, seal.CapClassStranger).Scan(&n, &total); err != nil {
+			return Queued{}, err
+		}
+		if int64(n)+1 > q.NonContactMsgs || total+size > q.NonContactBytes {
+			return Queued{}, fmt.Errorf("%w: %d messages / %d bytes from non-contacts undelivered, share %d messages / %d bytes",
+				ErrStrangersBusy, n, total, q.NonContactMsgs, q.NonContactBytes)
+		}
+		if it.CapID != nil {
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM relay_message WHERE to_aid=? AND cap_id=?`,
+				it.To, it.CapID).Scan(&n); err != nil {
+				return Queued{}, err
+			}
+			if n+1 > MaxStrangerCapRows {
+				return Queued{}, fmt.Errorf("%w: %d messages undelivered under one credential, at most %d",
+					ErrStrangersBusy, n, MaxStrangerCapRows)
+			}
+		}
+	}
+	var exp any
+	if it.Exp != nil {
+		if *it.Exp > uint64(1<<63-1) {
+			return Queued{}, fmt.Errorf("%w: exp %d is beyond what this hub stores", ErrBadEnvelope, *it.Exp)
+		}
+		exp = int64(*it.Exp)
+	}
+	var capID any
+	if it.CapID != nil {
+		capID = it.CapID
+	}
+	res, err := tx.Exec(`INSERT INTO relay_message(rid, to_aid, env_digest, class, cap_id, size, created_at, exp, payload)
+	                     VALUES(?,?,?,?,?,?,?,?,?)`,
+		rid, it.To, it.Digest[:], it.Class, capID, size, nowMS, exp, it.Envelope)
 	if err != nil {
-		return 0, err
+		return Queued{}, err
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
-		return 0, err
+		return Queued{}, err
 	}
-	return id, tx.Commit()
+	if inWindow {
+		_, err = tx.Exec(`UPDATE relay_redelivery SET count=count+1 WHERE env_digest=?`, it.Digest[:])
+	} else {
+		_, err = tx.Exec(`INSERT INTO relay_redelivery(env_digest, count, window_start) VALUES(?,1,?)
+		                  ON CONFLICT(env_digest) DO UPDATE SET count=1, window_start=excluded.window_start`,
+			it.Digest[:], nowMS)
+	}
+	if err != nil {
+		return Queued{}, err
+	}
+	if enqueueFault != nil {
+		if err := enqueueFault(); err != nil {
+			return Queued{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Queued{}, err
+	}
+	return Queued{ID: id, RID: rid}, nil
+}
+
+// enqueueFault, when a test sets it, runs after RelayEnqueue wrote the row
+// and the redelivery count and before it commits: an error stands for the
+// process dying there (P-SS-1). Nil outside tests.
+var enqueueFault func() error
+
+// QueueEnvelope queues an envelope for toAID that reached this hub without
+// a credential checked here: the federation v2 forward of a peer hub
+// (v030-todo(SS-6): /fed/v3/forward checks the credential and calls
+// RelayEnqueue), an operator tool, a test. It is checked structurally
+// (CheckEnvelope) and queued as non-contact mail, the class that cannot
+// crowd out the recipient's contacts.
+func (s *Store) QueueEnvelope(toAID string, envelope []byte) (Queued, error) {
+	outer, err := CheckEnvelope(toAID, envelope)
+	if err != nil {
+		return Queued{}, err
+	}
+	digest, err := seal.EnvDigest(envelope)
+	if err != nil {
+		return Queued{}, fmt.Errorf("%w: %v", ErrBadEnvelope, err)
+	}
+	return s.RelayEnqueue(RelayItem{To: toAID, Envelope: envelope, Digest: digest,
+		Class: seal.CapClassStranger, Exp: outer.Exp})
 }
 
 // RelayPoll returns undelivered envelopes for toAID with an id above
@@ -133,10 +315,10 @@ func (s *Store) RelayEnqueue(toAID string, envelope []byte) (int64, error) {
 // afterID is the recipient's cursor (A2A-DESIGN §3.7, decision Q1). A
 // daemon leaves an envelope it could not process yet in the mailbox (§3.6,
 // class T), and without a cursor the oldest such envelopes fill every
-// answer: anyone registered could hold back a node's newer mail by sending
-// it a page of messages for interactions it does not know. With afterID
-// the daemon reads on past them and returns to the head later. Ids only
-// grow (AUTOINCREMENT), so "above afterID" is "queued after it".
+// answer: anyone could hold back a node's newer mail by sending it a page
+// of messages for interactions it does not know. With afterID the daemon
+// reads on past them and returns to the head later. Ids only grow
+// (AUTOINCREMENT), so "above afterID" is "queued after it".
 func (s *Store) RelayPoll(toAID string, afterID int64, limit int, budget int64) ([]RelayMessage, error) {
 	if limit <= 0 {
 		limit = 100
@@ -208,8 +390,9 @@ func (s *Store) RelayPending(toAID string) (int, error) {
 
 // PurgeExpiredRelay deletes envelopes queued before now - ttl and returns
 // how many were deleted. A message that nobody collected within the TTL is
-// not going to be opened: the sender sets exp = ts + 14 days (§3.5), and
-// the recipient refuses an inner past exp.
+// not going to be opened: the sender sets exp = ts + 14 days, and the
+// recipient refuses an inner past exp. It also deletes the redelivery
+// counts whose window has closed.
 func (s *Store) PurgeExpiredRelay(ttl time.Duration, now time.Time) (int, error) {
 	if ttl <= 0 {
 		return 0, fmt.Errorf("hub: relay TTL must be positive")
@@ -222,148 +405,68 @@ func (s *Store) PurgeExpiredRelay(ttl time.Duration, now time.Time) (int, error)
 		return 0, err
 	}
 	n, _ := res.RowsAffected()
+	if _, err := s.db.Exec(`DELETE FROM relay_redelivery WHERE window_start <= ?`,
+		now.Add(-RedeliveryWindow).UnixMilli()); err != nil {
+		return int(n), err
+	}
 	return int(n), nil
 }
 
-// relayTableV2 is the wire-2 relay table. The small columns come before
-// payload on purpose: SQLite stores the tail of a large record in overflow
-// pages, and a column placed after a multi-megabyte payload can only be
-// read by walking that overflow chain. The quota check reads size for
-// every queued message of a recipient, so size must sit in the local part
-// of the record.
-const relayTableV2 = `CREATE TABLE IF NOT EXISTS relay_message (
-   id INTEGER PRIMARY KEY AUTOINCREMENT,
-   to_aid TEXT NOT NULL,
-   size INTEGER NOT NULL,
-   created_at INTEGER NOT NULL,
-   payload BLOB NOT NULL
- )`
-
-// relayIndexesV2 are created after migrateRelayV2, because the wire-1
-// table had an index of the same purpose over columns that no longer
-// exist.
-var relayIndexesV2 = []string{
-	`CREATE INDEX IF NOT EXISTS idx_relay_to ON relay_message(to_aid, id)`,
-	`CREATE INDEX IF NOT EXISTS idx_relay_created ON relay_message(created_at)`,
+// relayTables are the wire-3 relay tables (core §2.16). The small columns
+// of relay_message come before payload on purpose: SQLite stores the tail
+// of a large record in overflow pages, and a column placed after a
+// multi-megabyte payload can only be read by walking that overflow chain.
+// The capacity checks read size and class for every queued message of a
+// recipient, so they must sit in the local part of the record.
+var relayTables = []string{
+	`CREATE TABLE IF NOT EXISTS relay_message (
+	   id INTEGER PRIMARY KEY AUTOINCREMENT,
+	   rid BLOB NOT NULL UNIQUE,
+	   to_aid TEXT NOT NULL,
+	   env_digest BLOB NOT NULL,
+	   class INTEGER NOT NULL,
+	   cap_id BLOB,
+	   size INTEGER NOT NULL,
+	   created_at INTEGER NOT NULL,
+	   exp INTEGER,
+	   payload BLOB NOT NULL,
+	   UNIQUE(to_aid, env_digest)
+	 )`,
+	`CREATE TABLE IF NOT EXISTS relay_redelivery (
+	   env_digest BLOB PRIMARY KEY,
+	   count INTEGER NOT NULL,
+	   window_start INTEGER NOT NULL
+	 ) WITHOUT ROWID`,
 }
 
-// migrateRelayV2 rebuilds a wire-1 relay_message table into the wire-2
-// shape, empty.
-//
-// No wire-1 row is carried over, delivered or not. Every one of them is a
-// wire-1 plaintext payload — a delegation, a chat body, a deliverable — and
-// SI-1 says the hub's disk holds no task content. An undelivered one is
-// also of no use to anybody: a wire-2 daemon cannot open it and refuses it
-// as undecodable (§3.6 step 1, class P), and a wire-1 daemon is refused by
-// this hub with 426 before it can poll. Copying them, as this migration
-// first did, kept that plaintext on disk until the recipient came back or
-// the 14-day TTL ran out, and the §9 cleanup script could only find them
-// if the operator supplied the upgrade instant by hand (05-hub H5).
-//
-// The old table is dropped in the same transaction, and with
-// secure_delete=ON its pages are overwritten with zeros as they are freed.
-// The WAL is then checkpointed and truncated, so the old page images do
-// not remain in hub.db-wal either.
-//
-// What was dropped is counted, logged, and recorded in hub_meta in the
-// same transaction (the Meta* keys below): the log line is gone once the log
-// rotates, and the operator running the §9 cleanup, or asked afterwards
-// what the upgrade discarded, needs the numbers and the instant. Counts
-// and a time, nothing about any row.
-//
-// The AUTOINCREMENT counter is carried over, so no new envelope receives
-// an id that a daemon may still hold from before the upgrade.
-//
-// Cost: with secure_delete=ON, dropping the old table writes every page it
-// occupied once more, as zeros, through the WAL, and the checkpoint then
-// writes them into hub.db. The WAL therefore grows to about the size of
-// the old table before it is truncated, and the first start of a wire-2
-// hub on a large wire-1 database needs that much free disk and the time
-// to write it twice.
-func (s *Store) migrateRelayV2() error {
+// relayIndexes are created after relayTables.
+var relayIndexes = []string{
+	`CREATE INDEX IF NOT EXISTS idx_relay_to ON relay_message(to_aid, id)`,
+	`CREATE INDEX IF NOT EXISTS idx_relay_created ON relay_message(created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_relay_exp ON relay_message(exp) WHERE exp IS NOT NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_relay_cap ON relay_message(to_aid, cap_id) WHERE cap_id IS NOT NULL`,
+	`CREATE INDEX IF NOT EXISTS idx_relay_redelivery ON relay_redelivery(window_start)`,
+}
+
+// ErrOldRelayTable is Open's refusal of a database whose relay table was
+// written by an earlier release. Wire 3 keeps nothing of it and converts
+// nothing (core CORE-V4).
+var ErrOldRelayTable = errors.New("hub: this data directory was written by an earlier anet-hub release, " +
+	"and this one does not convert it; move the directory aside and start anet-hub again")
+
+// refuseOldRelayTable refuses a relay_message table without the wire-3
+// columns: CREATE TABLE IF NOT EXISTS would keep it, and the hub would then
+// fail on its first send instead of now.
+func (s *Store) refuseOldRelayTable() error {
 	cols, err := tableColumns(s.db, "relay_message")
 	if err != nil {
 		return err
 	}
-	if !cols["from_aid"] && !cols["delivered_at"] {
-		return nil
-	}
-	var lastSeq int64
-	_ = s.db.QueryRow(`SELECT COALESCE(MAX(seq),0) FROM sqlite_sequence WHERE name='relay_message'`).Scan(&lastSeq)
-	var maxID int64
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM relay_message`).Scan(&maxID); err != nil {
-		return fmt.Errorf("hub: migrate relay: %w", err)
-	}
-	if maxID > lastSeq {
-		lastSeq = maxID
-	}
-	// A wire-1 table without delivered_at never existed; the guard is for
-	// a hand-made or half-migrated one, where every row counts as
-	// undelivered.
-	undeliveredQ := `SELECT COUNT(*) FROM relay_message`
-	if cols["delivered_at"] {
-		undeliveredQ += ` WHERE delivered_at IS NULL`
-	}
-	var total, undelivered int64
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM relay_message`).Scan(&total); err != nil {
-		return fmt.Errorf("hub: migrate relay: %w", err)
-	}
-	if err := s.db.QueryRow(undeliveredQ).Scan(&undelivered); err != nil {
-		return fmt.Errorf("hub: migrate relay: %w", err)
-	}
-	now := time.Now().UnixMilli()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, q := range []string{
-		`DROP TABLE relay_message`,
-		relayTableV2,
-		`DELETE FROM sqlite_sequence WHERE name IN ('relay_message','relay_message_v2')`,
-	} {
-		if _, err := tx.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate relay: %w", err)
-		}
-	}
-	if _, err := tx.Exec(`INSERT INTO sqlite_sequence(name, seq) VALUES('relay_message', ?)`, lastSeq); err != nil {
-		return fmt.Errorf("hub: migrate relay: %w", err)
-	}
-	for k, v := range map[string]int64{
-		MetaRelayV2MigratedAt:         now,
-		MetaRelayV2DroppedUndelivered: undelivered,
-		MetaRelayV2DroppedDelivered:   total - undelivered,
-	} {
-		if _, err := tx.Exec(`INSERT OR REPLACE INTO hub_meta(key, value) VALUES(?, ?)`, k, fmt.Sprint(v)); err != nil {
-			return fmt.Errorf("hub: migrate relay: record: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("hub: migrate relay: %w", err)
-	}
-	log.Printf("hub: relay table migrated to wire 2: dropped %d undelivered and %d delivered wire-1 "+
-		"message(s); wire-1 payloads are plaintext and no wire-2 daemon can open them "+
-		"(recorded in hub_meta relay_v2_*)", undelivered, total-undelivered)
-	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return fmt.Errorf("hub: migrate relay: checkpoint: %w", err)
+	if len(cols) > 0 && !cols["rid"] {
+		return ErrOldRelayTable
 	}
 	return nil
 }
-
-// hub_meta keys the relay migration writes, once, in its own transaction.
-// Values are decimal strings. deploy/cleanup-content-v0.2.sh reads them by
-// these names; change both together.
-const (
-	// MetaRelayV2MigratedAt is when the wire-1 relay table was rebuilt,
-	// in unix milliseconds.
-	MetaRelayV2MigratedAt = "relay_v2_migrated_at"
-	// MetaRelayV2DroppedUndelivered is how many undelivered wire-1
-	// messages the migration discarded.
-	MetaRelayV2DroppedUndelivered = "relay_v2_dropped_undelivered"
-	// MetaRelayV2DroppedDelivered is how many already delivered wire-1
-	// rows it deleted.
-	MetaRelayV2DroppedDelivered = "relay_v2_dropped_delivered"
-)
 
 // Meta returns a hub_meta value and whether it is set.
 func (s *Store) Meta(key string) (string, bool, error) {
@@ -395,4 +498,33 @@ func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
 		out[name] = true
 	}
 	return out, rows.Err()
+}
+
+// agentRegistered reports whether aid has a registration here.
+func (s *Store) agentRegistered(aid string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM agent WHERE aid=?`, aid).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// ownerMbox is the mailbox signing key of the key set an agent registered
+// here published (sealed-sender §2.4): found is false when aid is not
+// registered here or has published no key set.
+func (s *Store) ownerMbox(aid string) (mbox seal.Mbox, found bool, err error) {
+	keyset, _, registered, err := s.LocalKeys(aid)
+	if err != nil || !registered || keyset == nil {
+		return seal.Mbox{}, false, err
+	}
+	signed, err := seal.UnmarshalSignedEncKeySet(keyset)
+	if err != nil {
+		return seal.Mbox{}, false, fmt.Errorf("hub: a stored key set does not decode: %w", err)
+	}
+	m, err := mboxOf(signed.Set)
+	if err != nil {
+		return seal.Mbox{}, false, fmt.Errorf("hub: a stored key set does not decode: %w", err)
+	}
+	return *m, true, nil
 }

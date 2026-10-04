@@ -1,0 +1,57 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /relay/session (core §2.12.2, L7; sealed-sender §4.2.3, SSR-H6): an agent registered here opens a first-contact session under its relayauth signature for \"session\", sending {epk}, a 32-byte X25519 key in base64url, and is answered {sid, exp, enc, ct}: the session id, when it ends (an hour on), and the session key sealed to epk. A signer not registered here is not admitted (403 admission_required, with its AID); an unsigned request, a signature for another action or by another key is 401 unauthorized; a body that is not exactly {epk} with 32 bytes is 400 bad_request.",
+  "setup": "relay",
+  "cases": [
+    {
+      "name": "a session",
+      "cite": "SSR-H6",
+      "request": {"method": "POST", "path": "/relay/session", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "session", "as": "alice"},
+        "json": {"epk": "${epk}"}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}}
+    },
+    {
+      "name": "a signer not registered here",
+      "cite": "SSR-H6",
+      "request": {"method": "POST", "path": "/relay/session", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "session", "as": "nobody"},
+        "json": {"epk": "${epk}"}},
+      "response": {"status": 403, "body": {"reason": "admission_required", "aid": "${nobody}",
+        "error": "This hub admits AIDs one by one; ask its operator to run: anet-hub admit <AID>."}}
+    },
+    {
+      "name": "unsigned",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/relay/session", "headers": {"X-ANet-Wire": "3"}, "json": {"epk": "${epk}"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "signed for poll",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/relay/session", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"},
+        "json": {"epk": "${epk}"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "a 31-byte key",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/relay/session", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "session", "as": "alice"},
+        "json": {"epk": "${epk_short}"}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"epk\" must be 32 bytes; send a value of that length."}}
+    },
+    {
+      "name": "an unknown member",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/relay/session", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "session", "as": "alice"},
+        "json": {"epk": "${epk}", "aid": "${alice}"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "an older wire",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/relay/session", "headers": {"X-ANet-Wire": "2"}, "sign": {"action": "session", "as": "alice"},
+        "json": {"epk": "${epk}"}},
+      "response": {"status": 426, "body_has": {"reason": "wire_too_old", "required_wire": 3}}
+    }
+  ]
+}

@@ -217,8 +217,7 @@ func TestAKeysLookupDoesNotNameTheRecipientInTheRequestLine(t *testing.T) {
 		t.Fatalf("keys lookup: %d %s", code, viaPost)
 	}
 	env := testEnvelope(t, bob.AID(), bytes.Repeat([]byte{0xA5}, 3000))
-	if code, b := as(ipAlice, signedRequest(t, srv, alice, actionSend, http.MethodPost, "/relay/send",
-		map[string]any{"to_aid": bob.AID(), "envelope": base64.StdEncoding.EncodeToString(env)})); code != 200 {
+	if code, b := as(ipAlice, sessionSendRequest(t, srv, relaySession(t, srv, alice), env, "")); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
 	}
 	code, pb := as(ipBob, signedRequest(t, srv, bob, relayauth.ActionPoll, http.MethodPost, "/relay/poll", map[string]any{}))

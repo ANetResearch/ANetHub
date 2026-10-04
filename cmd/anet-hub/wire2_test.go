@@ -74,7 +74,7 @@ func TestTheRelayLimitFlagsSetTheirOwnLimits(t *testing.T) {
 	}
 	def := aghub.DefaultLimits()
 	want := aghub.Limits{
-		MaxEnvelope: 101, SendRate: def.SendRate, SendBurst: def.SendBurst, MailboxMessages: 104, MailboxBytes: 105,
+		MaxEnvelope: 101, MailboxMessages: 104, MailboxBytes: 105,
 		UndeliveredTTL: 106 * time.Second, PollBudget: 107, RegisterPerMinute: 108, RegisterBurst: 109,
 		KeysLookupPerMinute: def.KeysLookupPerMinute, KeysLookupBurst: def.KeysLookupBurst,
 	}

@@ -4,13 +4,13 @@ go 1.26.6
 
 require (
 	github.com/ANetResearch/ANetCore v0.15.0
+	github.com/fxamacker/cbor/v2 v2.9.2
 	modernc.org/sqlite v1.56.0
 )
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mr-tron/base58 v1.3.0 // indirect

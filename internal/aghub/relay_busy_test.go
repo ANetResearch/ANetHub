@@ -1,6 +1,7 @@
 package aghub_test
 
 import (
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -26,7 +27,7 @@ func TestRelayEnqueueSurvivesConcurrentWriters(t *testing.T) {
 	}
 	defer s.Close()
 	const to = "bafyreirecipientforbusytest"
-	env := testEnvelope(t, to, nil)
+	var n atomic.Int64
 
 	stop := make(chan struct{})
 	var writers sync.WaitGroup
@@ -53,7 +54,10 @@ func TestRelayEnqueueSurvivesConcurrentWriters(t *testing.T) {
 		go func() {
 			defer senders.Done()
 			for time.Now().Before(deadline) {
-				id, err := s.RelayEnqueue(to, env)
+				// A new envelope each time: the same one would be a
+				// duplicate, or a redelivery past its limit.
+				q, err := s.QueueEnvelope(to, testEnvelope(t, to, []byte(strconv.FormatInt(n.Add(1), 10))))
+				id := q.ID
 				if err != nil {
 					if failed.Add(1) == 1 {
 						first.Store(err.Error())

@@ -429,8 +429,10 @@ func TestFederatedKeyLookupsAreRateLimitedPerClient(t *testing.T) {
 }
 
 // A full mailbox at the recipient's hub reaches the sender as 507, the
-// same answer a full local mailbox gives, not as a generic 502.
+// same answer a full local mailbox gives, not as a generic 502
+// (sealed-sender SSR-H13).
 func TestAFullMailboxAtThePeerHubIs507ForTheSender(t *testing.T) {
+	t.Skip("v030-todo(SS-6): /relay/send forwards a recipient registered at a peer to its home hub (federation v3)")
 	a, b := twoFederatedHubs(t, true)
 	recip, sender := twoAgents(t)
 	register(t, b.srv, recip, "Provider", nil)
@@ -454,17 +456,14 @@ func TestAFullMailboxAtThePeerHubIs507ForTheSender(t *testing.T) {
 // without the key cannot add to the replay state.
 func TestARefusedRequestDoesNotSpendItsSignature(t *testing.T) {
 	srv := newHub(t)
-	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	sender, _ := twoAgents(t)
 	register(t, srv, sender, "Sender", nil)
-	body := rawBody(t, map[string]any{"to_aid": recip.AID(),
-		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("genuine")))})
-	genuine := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-	signV2(t, genuine, sender, actionSend, hubAIDOf(t, srv), body, signingNow())
+	body := rawBody(t, map[string]any{"summary": "genuine", "readme": ""})
+	genuine := newRequest(t, srv, http.MethodPost, "/profile", body)
+	signV2(t, genuine, sender, relayauth.ActionProfile, hubAIDOf(t, srv), body, signingNow())
 
-	altered := rawBody(t, map[string]any{"to_aid": recip.AID(),
-		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("altered")))})
-	forged := newRequest(t, srv, http.MethodPost, "/relay/send", altered)
+	altered := rawBody(t, map[string]any{"summary": "altered", "readme": ""})
+	forged := newRequest(t, srv, http.MethodPost, "/profile", altered)
 	forged.Header = genuine.Header.Clone()
 	if code, b, _ := send(t, forged); code != http.StatusUnauthorized {
 		t.Fatalf("the signature over another body: %d %s, want 401", code, b)

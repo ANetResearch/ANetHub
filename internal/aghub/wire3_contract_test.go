@@ -3,6 +3,7 @@ package aghub
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/regpow"
 	"github.com/ANetResearch/ANetCore/relayauth"
+	"github.com/ANetResearch/ANetCore/seal"
 	"github.com/ANetResearch/ANetCore/wire"
 	"github.com/ANetResearch/ANetCore/wire/scan"
 
@@ -86,9 +88,9 @@ func TestWire3JSONFields(t *testing.T) {
 	req := func(m, p string, typ reflect.Type, todo string) row { return row{m, p, false, "", typ, todo} }
 	resp := func(m, p string, typ reflect.Type, todo string) row { return row{m, p, true, "", typ, todo} }
 	rows := []row{
-		req("POST", "/relay/session", nil, "v030-todo(SS-4)"),
-		resp("POST", "/relay/session", nil, "v030-todo(SS-4)"),
-		resp("POST", "/relay/send", reflect.TypeFor[RelaySendResponse](), "v030-todo(SS-4)"),
+		req("POST", "/relay/session", reflect.TypeFor[SessionRequest](), ""),
+		resp("POST", "/relay/session", reflect.TypeFor[SessionResponse](), ""),
+		resp("POST", "/relay/send", reflect.TypeFor[RelaySendResponse](), ""),
 		req("POST", "/relay/poll", reflect.TypeFor[RelayPollRequest](), ""),
 		resp("POST", "/relay/poll", reflect.TypeFor[RelayPollResponse](), "v030-todo(KEL-5)"),
 		req("POST", "/relay/ack", reflect.TypeFor[RelayAckRequest](), "v030-todo(RC-3)"),
@@ -203,6 +205,68 @@ var wire3Setups = map[string]wire3test.Setup{
 	"register_window": wire3RegisterSetup(AdmissionClosed, "window"),
 	"rc1":             wire3RC1Setup,
 	"revoke":          wire3RevokeSetup,
+	"relay":           wire3RelaySetup,
+}
+
+// wire3RelaySetup is the hub of wire3HubSetup for the /relay/session and
+// /relay/send fixtures (sealed-sender §4.2.1, §4.2.3). alice is registered
+// and has a first-contact session (${sid}); bob is registered with a mailbox
+// key and issued alice a contact credential; nobody is not registered.
+// Envelopes, base64url, with what their sends need:
+//
+//	${env_first}    a first contact from alice to bob, MAC ${mac_first}
+//	${env_unknown}  a first contact to nobody, MAC ${mac_unknown}
+//	${env_cap}      an envelope to bob under the credential, ${access_cap}
+//	${env_forged}   the same credential with a proof by another key,
+//	                ${access_forged}
+//
+// The MACs are over POST /relay/send, no X-ANet-Home, at ${ts}; ${access0}
+// is the kind-0 access.
+func wire3RelaySetup(t *testing.T) *wire3test.Env {
+	t.Helper()
+	env, store, signers := wire3Hub(t)
+	hubAID := env.Vars["hub"]
+	alice, bob, nobody := signers["alice"], wire3Incept(t), wire3Incept(t)
+	signers["bob"], signers["nobody"] = bob, nobody
+	kel, err := identity.MarshalKEL(bob.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgent(bob.AID(), "bob", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	owner := &relayAgent{c: bob, aid: bob.AID()}
+	(&relayHub{t: t, store: store, now: time.Now()}).publishTo(owner, 1, time.Now())
+	ss, rec := openSessionVia(t, env.Handler, hubAID, alice)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open a session: %d %s", rec.Code, rec.Body)
+	}
+	b64 := base64.RawURLEncoding.EncodeToString
+	ts := uint64(time.Now().UnixMilli())
+	first := func(name, to string) {
+		e := envelope(t, to, []byte(name))
+		mac, err := relayauth.SessionMAC(ss.key, ss.sid, ts, http.MethodPost, "/relay/send", "", e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.Vars["env_"+name], env.Vars["mac_"+name] = b64(e), relayauth.EncodeMAC(mac)
+	}
+	first("first", bob.AID())
+	first("unknown", nobody.AID())
+	g := (&relayHub{t: t, now: time.Now()}).issue(owner, seal.CapClassContact, 24*time.Hour)
+	withAccess := func(name string, g grant) {
+		e := withCap(t, envelope(t, bob.AID(), []byte(name)), g)
+		env.Vars["env_"+name], env.Vars["access_"+name] = b64(e), b64(accessRaw(t, e))
+	}
+	withAccess("cap", g)
+	_, g.holder, _ = ed25519.GenerateKey(nil)
+	withAccess("forged", g)
+	env.Vars["bob"], env.Vars["nobody"] = bob.AID(), nobody.AID()
+	env.Vars["sid"], env.Vars["ts"] = relayauth.EncodeSessionID(ss.sid), strconv.FormatUint(ts, 10)
+	env.Vars["access0"] = b64([]byte{0xa1, 0x01, 0x00})
+	env.Vars["epk"] = b64(func() []byte { _, epk, _ := relayauth.NewSessionKey(); return epk }())
+	env.Vars["epk_short"] = b64(make([]byte, 31))
+	return env
 }
 
 // wire3RC1Setup is wire3HubSetup for the RC1 fixtures (hub-payment-privacy

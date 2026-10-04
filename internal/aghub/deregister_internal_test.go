@@ -316,8 +316,9 @@ func TestMain(m *testing.M) {
 
 // TestOutOfProcessDeregDropsSessions (PAY-O2; M-PAY-46): a deregistration
 // committed by another process reaches the hub process's callbacks within
-// two seconds. Until sealed-sender's sessions register their callback, a
-// test callback stands for "drop this AID's sessions".
+// two seconds, and the first-contact sessions of the AID are gone
+// (sealed-sender SSR-H9; the session table registers its callback in
+// NewServer).
 func TestOutOfProcessDeregDropsSessions(t *testing.T) {
 	g := newGateHub(t)
 	c, _ := identitytest.Hub()
@@ -327,16 +328,19 @@ func TestOutOfProcessDeregDropsSessions(t *testing.T) {
 	if code, out := g.register(c, c, nil); code != 200 {
 		t.Fatalf("register: %d %s", code, out["_raw"])
 	}
-	// The session table this stands for: a session of c's is live.
-	var mu sync.Mutex
-	sessions := map[string]bool{c.AID(): true}
+	// A live session of c's.
+	ss, rec := openSessionVia(t, g.h, g.hubAID, c)
+	if rec.Code != 200 {
+		t.Fatalf("open a session: %d %s", rec.Code, rec.Body)
+	}
+	live := func() bool { _, ok := g.srv.relay.sessions.get(ss.sid, g.store.now()); return ok }
+	if !live() {
+		t.Fatal("the session is not live after it opened")
+	}
+	// Callbacks run in the order they were added: when this one runs, the
+	// session table's has run.
 	dropped := make(chan string, 4)
-	g.store.OnDeregistered(func(aid string) {
-		mu.Lock()
-		delete(sessions, aid)
-		mu.Unlock()
-		dropped <- aid
-	})
+	g.store.OnDeregistered(func(aid string) { dropped <- aid })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := g.store.StartDeregWatcher(ctx); err != nil {
@@ -362,10 +366,7 @@ func TestOutOfProcessDeregDropsSessions(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the hub process did not learn of the deregistration within 2 s")
 	}
-	mu.Lock()
-	live := sessions[c.AID()]
-	mu.Unlock()
-	if live {
+	if live() {
 		t.Error("the deregistered AID's session is still live")
 	}
 	// The watcher deletes the row right after the callbacks return, so it

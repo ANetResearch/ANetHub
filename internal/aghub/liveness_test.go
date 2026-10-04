@@ -80,21 +80,22 @@ func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("send refused: %d %s", code, b)
 	}
-	var out struct {
-		Status  string `json:"status"`
-		Quiet   bool   `json:"recipient_quiet"`
-		Warning string `json:"warning"`
-	}
+	var out map[string]any
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
 	// Accepted, deliberately. This hub cannot know whether the agent is
 	// coming back, and refusing would be asserting that it is not.
-	if out.Status != "queued" {
-		t.Errorf("status = %q — a quiet recipient is not a reason to refuse", out.Status)
+	if out["status"] != "queued" {
+		t.Errorf("status = %v — a quiet recipient is not a reason to refuse", out["status"])
 	}
-	if !out.Quiet || out.Warning == "" {
+	// The sender is told by the flag alone: the answer carries no text
+	// about the recipient (sealed-sender §4.2.8; the daemon words it).
+	if out["recipient_quiet"] != true {
 		t.Errorf("the sender was told nothing and will now wait: %s", b)
+	}
+	if _, ok := out["warning"]; ok {
+		t.Errorf("the answer carries a warning: %s", b)
 	}
 
 	// And once it collects again, the warning stops.

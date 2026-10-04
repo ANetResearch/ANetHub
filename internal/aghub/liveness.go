@@ -73,10 +73,11 @@ type Liveness struct {
 	// registered before the column existed, and is why empty must read as
 	// "unknown" rather than "dead".
 	LastSeen string `json:"last_seen,omitempty"`
-	// Quiet is true when nothing has been collected for QuietAfter.
+	// Quiet is true when nothing has been collected for QuietAfter. It is
+	// all a sender is told (/relay/send recipient_quiet): a yes or no, not
+	// for how long, which would say more about the recipient than whether
+	// to expect an answer soon (sealed-sender SSR-H18).
 	Quiet bool `json:"quiet,omitempty"`
-	// QuietFor is how long, human-readable, when Quiet.
-	QuietFor string `json:"quiet_for,omitempty"`
 }
 
 // LivenessOf reports whether an agent is still collecting.
@@ -108,21 +109,8 @@ func livenessFrom(lastSeen string, now time.Time) Liveness {
 	out := Liveness{LastSeen: t.UTC().Format(time.RFC3339)}
 	if d := now.Sub(t); d > QuietAfter {
 		out.Quiet = true
-		out.QuietFor = roundDuration(d)
 	}
 	return out
-}
-
-// roundDuration renders a gap the way a person reads it.
-func roundDuration(d time.Duration) string {
-	switch {
-	case d >= 48*time.Hour:
-		return fmt.Sprintf("%d days", int(d.Hours()/24))
-	case d >= 2*time.Hour:
-		return fmt.Sprintf("%d hours", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%d minutes", int(d.Minutes()))
-	}
 }
 
 // SetLastSeenForTest backdates an agent's last poll.

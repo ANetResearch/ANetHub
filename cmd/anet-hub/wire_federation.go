@@ -34,7 +34,10 @@ func init() {
 		// to peers only (A2A-DESIGN §3.9).
 		fed.SetKeySource(aghub.StoreKeySource{S: d.store})
 		if fed.Enabled() {
-			d.srv0.SetForwarder(fed.TryForward)
+			// v030-todo(SS-6): /relay/send forwards a recipient registered
+			// at a peer to its one home hub (federation v3); the v2 forward
+			// that tried each peer is not wired to the wire-3 send.
+			//
 			// The lookup a sender here needs for a peer's hub-local agent
 			// ([C32]).
 			d.srv0.SetFederatedKeyLookup(fed.LookupKeys)
