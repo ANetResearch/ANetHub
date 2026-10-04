@@ -11,6 +11,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -82,6 +83,19 @@ type stepCase struct {
 	send  func(sc *relayScene) *httptest.ResponseRecorder
 	// debit: a 403 that debits the address bucket by one (SSR-H3b).
 	debit bool
+	// unread: a refusal of steps 0 to 2, answered before the body is read.
+	unread bool
+}
+
+// beforeTheBody marks cases that steps 0 to 2 refuse: they are answered
+// before a byte of the envelope is read (§4.2.1 step 2 "before the body").
+// A check of step 2 that went missing would still be refused at step 5
+// with the same bytes, but only after the hub took in the whole body.
+func beforeTheBody(cases []stepCase) []stepCase {
+	for i := range cases {
+		cases[i].unread = true
+	}
+	return cases
 }
 
 // runSteps runs each case on a new scene: the refusal, the wire-3 contract
@@ -101,6 +115,9 @@ func runSteps(t *testing.T, cases []stepCase) {
 			}
 			for _, p := range wire3test.Contract(rec.Code, rec.Header(), rec.Body.Bytes()) {
 				t.Error(p)
+			}
+			if n := sc.h.read.Load(); c.unread && n != 0 {
+				t.Errorf("refused after reading %d bytes of the body; this step answers before reading it", n)
 			}
 			if c.debit {
 				k := "addr|" + rateKeyOfString(relayClientIP)
@@ -137,7 +154,7 @@ func drain(set *bucketSet, key string, r relayRate) {
 var b64u = base64.RawURLEncoding.EncodeToString
 
 func TestRelaySendOrder_Step0(t *testing.T) {
-	runSteps(t, []stepCase{
+	runSteps(t, beforeTheBody([]stepCase{
 		{name: "no wire header", status: 426, reason: "wire_too_old", send: func(sc *relayScene) *httptest.ResponseRecorder {
 			return sc.send0(func(r *http.Request) { r.Header.Del(wireVersionHeader) })
 		}},
@@ -147,7 +164,7 @@ func TestRelaySendOrder_Step0(t *testing.T) {
 		{name: "wire 4", status: 400, reason: "wire_too_new", send: func(sc *relayScene) *httptest.ResponseRecorder {
 			return sc.send0(func(r *http.Request) { r.Header.Set(wireVersionHeader, "4") })
 		}},
-	})
+	}))
 }
 
 func TestRelaySendOrder_Step1(t *testing.T) {
@@ -162,7 +179,7 @@ func TestRelaySendOrder_Step1(t *testing.T) {
 		return b
 	}
 	sig := bytes.Repeat([]byte{1}, 64)
-	runSteps(t, []stepCase{
+	runSteps(t, beforeTheBody([]stepCase{
 		{name: "a JSON content type", status: 400, reason: "bad_request", send: func(sc *relayScene) *httptest.ResponseRecorder {
 			return sc.send0(func(r *http.Request) { r.Header.Set("Content-Type", "application/json") })
 		}},
@@ -191,7 +208,16 @@ func TestRelaySendOrder_Step1(t *testing.T) {
 			return sc.send0(func(r *http.Request) { r.Header.Add(HeaderAccess, r.Header.Get(HeaderAccess)) })
 		}},
 		{name: "X-ANet-Access over 1 KiB", status: 400, reason: "bad_envelope", send: func(sc *relayScene) *httptest.ResponseRecorder {
-			return sc.send1Edited(func(r *http.Request) { r.Header.Set(HeaderAccess, strings.Repeat("A", MaxAccessHeader+1)) })
+			// A well-formed kind-1 access, only longer than the header may be:
+			// refused for its length, not for its spelling.
+			long := b64u(cbor(map[uint64]any{1: uint64(1), 2: map[uint64]any{1: bytes.Repeat([]byte{2}, 800), 2: sig}, 3: sig}))
+			if len(long) <= MaxAccessHeader {
+				sc.h.t.Fatalf("the access is %d characters, not over %d", len(long), MaxAccessHeader)
+			}
+			if _, err := decodeAccessHeader(mustB64(sc.h.t, long)); err != nil {
+				sc.h.t.Fatalf("the long access does not decode: %v", err)
+			}
+			return sc.send1Edited(func(r *http.Request) { r.Header.Set(HeaderAccess, long) })
 		}},
 		{name: "X-ANet-Access padded", status: 400, reason: "bad_envelope", send: func(sc *relayScene) *httptest.ResponseRecorder {
 			return sc.send0(func(r *http.Request) { r.Header.Set(HeaderAccess, "oQEA=") })
@@ -260,17 +286,17 @@ func TestRelaySendOrder_Step1(t *testing.T) {
 				r.Header.Add(relayauth.HeaderHome, sc.h.hubAID)
 			})
 		}},
-	})
+	}))
 }
 
 func TestRelaySendOrder_Step1a(t *testing.T) {
-	runSteps(t, []stepCase{
+	runSteps(t, beforeTheBody([]stepCase{
 		{name: "a credential from an address whose refusals ran out", status: 429, reason: "rate_limited",
 			setup: func(sc *relayScene) {
 				drain(sc.h.srv.relay.addrFailure, rateKeyOfString(relayClientIP), rateAddrFailure)
 			},
 			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.send1(sc.env(), sc.contact) }},
-	})
+	}))
 }
 
 func TestRelaySendOrder_Step2(t *testing.T) {
@@ -295,7 +321,7 @@ func TestRelaySendOrder_Step2(t *testing.T) {
 		v := uint64(sc.h.clock().Add(d).UnixMilli())
 		return &v
 	}
-	runSteps(t, []stepCase{
+	runSteps(t, beforeTheBody([]stepCase{
 		{name: "an unknown session", status: 401, reason: "session_invalid", send: func(sc *relayScene) *httptest.ResponseRecorder {
 			return sc.h.send0(session{sid: bytes.Repeat([]byte{5}, 16), key: bytes.Repeat([]byte{6}, 32)}, sc.env(), kind0Opts{})
 		}},
@@ -330,6 +356,9 @@ func TestRelaySendOrder_Step2(t *testing.T) {
 		refused("an epoch the owner has left", func(sc *relayScene) { sc.h.publish(sc.recip, 2) }, func(sc *relayScene) grant {
 			return sc.contact
 		}),
+		refused("another epoch, signed by the owner's current key", nil, func(sc *relayScene) grant {
+			return signedBody(sc, func(b map[uint64]any) { b[2] = sc.recip.mbox.Epoch + 1 }, sc.recip.mboxPriv)
+		}),
 		refused("a signature by another key", nil, func(sc *relayScene) grant {
 			_, other, _ := ed25519.GenerateKey(nil)
 			return signedBody(sc, func(map[uint64]any) {}, other)
@@ -352,7 +381,7 @@ func TestRelaySendOrder_Step2(t *testing.T) {
 				drain(sc.h.srv.relay.caps, capKey(&sc.stranger.body), rateStrangerCap)
 			},
 			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.send1(sc.env(), sc.stranger) }},
-	})
+	}))
 }
 
 func TestRelaySendOrder_Step3(t *testing.T) {
@@ -607,6 +636,30 @@ func TestRelaySendOrder_Step10(t *testing.T) {
 	if got := decodeSent(t, sc.send1(sc.env(), sc.contact)); got.Status != RelayQueued {
 		t.Fatalf("a contact's send with the non-contact share full: %+v", got)
 	}
+}
+
+// An outer exp the relay table cannot hold (2^63 ms or later) is refused as
+// a bad envelope, taking and writing nothing, and is not answered as an
+// error of this hub. v030-todo(UX-7): step 4 refuses it first, as bad_exp
+// (CUX-H1).
+func TestAnOuterExpiryBeyondTheTableIsRefused(t *testing.T) {
+	far := func(sc *relayScene) []byte {
+		v := uint64(math.MaxUint64)
+		env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: sc.recip.aid, Suite: seal.SuiteX25519,
+			KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("far"),
+			Access: &seal.Access{Kind: seal.AccessKindSession}, Exp: &v}
+		b, err := env.Marshal()
+		if err != nil {
+			sc.h.t.Fatal(err)
+		}
+		return b
+	}
+	runSteps(t, []stepCase{
+		{name: "a first contact", status: 400, reason: "bad_envelope",
+			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.h.send0(sc.ss, far(sc), kind0Opts{}) }},
+		{name: "under a credential", status: 400, reason: "bad_envelope",
+			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.send1(far(sc), sc.contact) }},
+	})
 }
 
 // Step 11: what a queued send answers, writes and takes.

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -43,6 +44,9 @@ type relayHub struct {
 	hubID  *hubid.Identity
 	mu     sync.Mutex
 	now    time.Time
+	// read is how many bytes of its body the hub read of the last request
+	// serve sent.
+	read atomic.Int64
 }
 
 // relayClientIP is the address relay requests come from unless a test says
@@ -197,12 +201,30 @@ func (h *relayHub) signed(c *identity.Controller, action, method, path string, b
 
 // serve runs req against the hub from ip (through the loopback proxy).
 func (h *relayHub) serve(req *http.Request, ip string) *httptest.ResponseRecorder {
+	h.read.Store(0)
+	if req.Body != nil {
+		req.Body = countingBody{req.Body, &h.read}
+	}
 	req.RemoteAddr = "127.0.0.1:4000"
 	req.Header.Set("X-Real-IP", ip)
 	rec := httptest.NewRecorder()
 	h.h.ServeHTTP(rec, req)
 	return rec
 }
+
+// countingBody counts the bytes the hub reads of a request body.
+type countingBody struct {
+	r io.ReadCloser
+	n *atomic.Int64
+}
+
+func (c countingBody) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c countingBody) Close() error { return c.r.Close() }
 
 // session is an open first-contact session of the test.
 type session struct {

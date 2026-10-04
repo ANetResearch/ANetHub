@@ -1622,6 +1622,10 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 		wire3.Refuse(w, wire3.ReasonMailboxFull)
 	case errors.Is(err, ErrStrangersBusy):
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonStrangersBusy, RetryAfter: StrangersBusyRetry})
+	case errors.Is(err, ErrBadEnvelope):
+		// An envelope the relay table cannot hold as it is (an outer exp
+		// past 2^63 - 1 ms) is the sender's mistake, not this hub's.
+		wire3.Refuse(w, wire3.ReasonBadEnvelope)
 	default:
 		wire3.Internal(w, err)
 	}

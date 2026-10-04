@@ -148,6 +148,11 @@ func TestKind1Step2ConstantVerifyCount(t *testing.T) {
 		if n != 1 {
 			t.Errorf("%s: step 2 made %d Ed25519 verifications, want exactly 1", name, n)
 		}
+		// Refused at step 2 itself, before the body: a later step that
+		// refuses the same credential would read the envelope first.
+		if read := sc.h.read.Load(); read != 0 {
+			t.Errorf("%s: refused after reading %d bytes of the body, want a refusal of step 2", name, read)
+		}
 	}
 }
 
@@ -281,5 +286,43 @@ func TestConcurrentSendsOfOneEnvelopeShareOneRow(t *testing.T) {
 	// One send's token: the duplicates gave theirs back.
 	if got := sc.h.srv.relay.caps.tokens(capKey(&sc.contact.body), rateContactCap); got != rateContactCap.burst-1 {
 		t.Errorf("the credential's bucket holds %v, want %v", got, rateContactCap.burst-1)
+	}
+}
+
+// SI-10, SSR-H2: a copy that passed step 7 while the first was still being
+// queued finds the first one's row in the queueing transaction. It is
+// answered duplicate with that rid, and gives back the token it took at
+// step 8.
+func TestARacedDuplicateGivesItsTokenBack(t *testing.T) {
+	sc := newScene(t)
+	env := withCap(t, sc.env(), sc.contact)
+	key := capKey(&sc.contact.body)
+	inTx, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	enqueueFault = func() error {
+		once.Do(func() { close(inTx); <-release })
+		return nil
+	}
+	defer func() { enqueueFault = nil }()
+	first, second := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- sc.h.send1(env, "") }()
+	<-inTx
+	// The first holds its transaction open; the copy sees no row at step 7,
+	// takes its token at step 8 and waits to queue.
+	go func() { second <- sc.h.send1(env, "") }()
+	for deadline := time.Now().Add(10 * time.Second); sc.h.srv.relay.caps.tokens(key, rateContactCap) > rateContactCap.burst-2; {
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("the copy never took its token")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	a, b := decodeSent(t, <-first), decodeSent(t, <-second)
+	if a.Status != RelayQueued || b.Status != RelayDuplicate || b.RID != a.RID {
+		t.Fatalf("first %+v, copy %+v; want queued, then duplicate with the same rid", a, b)
+	}
+	if got := sc.h.srv.relay.caps.tokens(key, rateContactCap); got != rateContactCap.burst-1 {
+		t.Errorf("the credential's bucket holds %v, want %v: the copy kept its token", got, rateContactCap.burst-1)
 	}
 }
