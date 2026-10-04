@@ -11,6 +11,9 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // ---- relayauth v2 on every signed route ----
@@ -54,6 +57,10 @@ const (
 //
 // "Accepted" means the answer is not the authentication refusal (401).
 // The handlers may still refuse the body (400) or the state (404, 409).
+//
+// A replaced header that contains U+0000 never reaches the signature
+// check: the wire-3 contract refuses it first as bad_request (core
+// CORE-E9), so such a request must be answered 400 bad_request instead.
 func FuzzHubRelayAuthV2(f *testing.F) {
 	h := newFZ(f)
 	a, _ := h.agent(f, "fuzz-auth", []string{"fuzz.auth"}, true)
@@ -138,10 +145,22 @@ func FuzzHubRelayAuthV2(f *testing.F) {
 			req.Header.Add(relayauth.HeaderSig, req.Header.Get(relayauth.HeaderSig))
 		}
 
+		nul := wire3.CheckRequest(req) != nil
 		rec := h.serve(req)
 		code := rec.Code
 		if !allowed(code, 200, 400, 401, 404, 409, 413, 429) {
 			t.Fatalf("%s %s (tamper %08b): unexpected %d %s", rt.method, path, tamper, code, rec.Body.Bytes())
+		}
+		if nul {
+			var refusal struct {
+				Reason string `json:"reason"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &refusal)
+			if !tampered || code != http.StatusBadRequest || refusal.Reason != string(wire3.ReasonBadRequest) {
+				t.Fatalf("%s %s: request with U+0000 in a header (tamper %08b, tampered %v) answered %d, not 400 bad_request: %s",
+					rt.method, path, tamper, tampered, code, rec.Body.Bytes())
+			}
+			return
 		}
 		inWindow := skew > -relayauth.MaxSkewMillis+5_000 && skew < relayauth.MaxSkewMillis-5_000
 		outWindow := skew < -relayauth.MaxSkewMillis-5_000 || skew > relayauth.MaxSkewMillis+5_000
@@ -291,7 +310,7 @@ func pollAll(t *testing.T, h *fz, c *identity.Controller, afterID int64) []polle
 // holding envelopes for the caller and for somebody else. Properties:
 //
 //   - poll answers 200 or 400 (400 exactly when the body does not decode
-//     or after_id is negative);
+//     strictly, core CORE-E7, or after_id or limit is negative);
 //   - a 200 lists only the caller's envelopes, ids strictly ascending and
 //     above after_id, at most limit of them (100 when limit is not
 //     positive);
@@ -329,10 +348,16 @@ func FuzzHubRelayPollAck(f *testing.F) {
 		perr := error(nil)
 		if len(pollBody) > 0 {
 			perr = json.Unmarshal(pollBody, &preq)
+			if perr == nil {
+				// The hub decodes the body strictly (core CORE-E7): a member it
+				// does not take, a member given twice, U+0000 or invalid UTF-8
+				// is refused although encoding/json accepts it.
+				perr = wire3.DecodeStrict(pollBody, &aghub.RelayPollRequest{})
+			}
 		}
 		rec := h.signedDo(me, relayauth.ActionPoll, http.MethodPost, "/relay/poll", "", pollBody)
 		switch {
-		case perr != nil || preq.AfterID < 0:
+		case perr != nil || preq.AfterID < 0 || preq.Limit < 0:
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("poll %q: %d, want 400", pollBody, rec.Code)
 			}
