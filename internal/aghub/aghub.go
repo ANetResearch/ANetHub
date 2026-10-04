@@ -1102,9 +1102,9 @@ type HubStats struct {
 	Reviews        int     `json:"reviews"`    // verified reviews stored here
 	AvgRating      float64 `json:"avg_rating"` // mean rating over all reviews (0 if none)
 	// Modules names the optional hub modules compiled into and wired by
-	// this build (for example "federation", "taskboard"). The web UI hides
-	// the task board when "taskboard" is absent. Empty when the kernel was
-	// started without the module wiring, as in unit tests.
+	// this build (for example "federation"). A client tells a module this
+	// build lacks from one that is present and empty by it. Empty when the
+	// kernel was started without the module wiring, as in unit tests.
 	Modules []string `json:"modules"`
 }
 

@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"path"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -133,8 +132,7 @@ func (s *Server) SetFederatedDirectory(f func(capFilter string) ([]AgentView, er
 
 // SetModules records which optional modules the application wired in, for
 // /stats. The kernel attaches no meaning to the names; a client uses them
-// to decide what to show (the web UI hides the task board unless
-// "taskboard" is listed). Call it before serving.
+// to decide what to show. Call it before serving.
 func (s *Server) SetModules(names []string) {
 	s.modules = append([]string(nil), names...)
 }
@@ -1525,72 +1523,6 @@ const (
 	actionSendRetired = "send" // v030-todo(SS-4): relay v3 checks a session MAC or a capability
 	actionP2PRetired  = "p2p"  // v030-todo(SS-5): the rendezvous routes are removed
 )
-
-// TaskChallenge is the bytes a taskboard caller signs: the wire-1 challenge
-// "anet-relay/" + action + "/" + aid + "/" + decimal(ts), which relayauth no longer provides. The
-// board is its last user; its actions are all "task.*", so the bytes never begin like a relayauth
-// preimage ("anet-relay/v2/").
-// v030-todo(SS-4): the board gets a registered authentication form and this goes.
-func TaskChallenge(action, aid string, ts uint64) []byte {
-	return []byte("anet-relay/" + action + "/" + aid + "/" + strconv.FormatUint(ts, 10))
-}
-
-// VerifyAgentChallenge authenticates a wire-1 signed action challenge
-// (TaskChallenge in a JSON body) from a REGISTERED agent.
-//
-// The hub's own endpoints use relayauth v2 headers since wire 2 (see
-// auth2.go). This remains for the taskboard module, which authenticates
-// its own requests through this seam and is outside the wire-2 change.
-func (st *Store) VerifyAgentChallenge(action, aid string, ts, keyStateSeq uint64, sigB64 string) error {
-	kelBytes, err := st.AgentKEL(aid)
-	if err != nil {
-		return fmt.Errorf("agent not registered")
-	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
-	if err != nil {
-		return fmt.Errorf("kel corrupt")
-	}
-	return verifyChallenge(kel, action, aid, ts, keyStateSeq, sigB64)
-}
-
-// verifyChallenge checks a signed action challenge against a specific KEL, within the replay window. The
-// caller signs TaskChallenge(action, aid, ts) with its current key; this rebuilds the identical
-// bytes and verifies them, binding the signature to (action, aid) so it cannot be reused elsewhere.
-func verifyChallenge(kel []identity.SignedEvent, action, aid string, ts, keyStateSeq uint64, sigB64 string) error {
-	return verifyChallengeAt(kel, action, aid, ts, keyStateSeq, sigB64, uint64(time.Now().UnixMilli()))
-}
-
-// verifyChallengeAt is verifyChallenge at the hub time now (unix ms).
-//
-// A ts above 2^62 is refused before the window is computed, as verifyV2
-// does: int64(now) - int64(ts) overflows for a ts 2^63 away, and
-// negating math.MinInt64 leaves it negative, so a challenge dated half
-// the clock away passed "skew > MaxSkew" (found by
-// FuzzTaskboardChallengeTime, ANet an internal note).
-func verifyChallengeAt(kel []identity.SignedEvent, action, aid string, ts, keyStateSeq uint64, sigB64 string,
-	now uint64) error {
-	if aid == "" || sigB64 == "" {
-		return fmt.Errorf("aid + sig required")
-	}
-	skew := int64(now) - int64(ts)
-	if skew < 0 {
-		skew = -skew
-	}
-	if ts > uint64(1)<<62 || skew > relayauth.MaxSkewMillis {
-		return fmt.Errorf("stale or future-dated challenge")
-	}
-	sig, err := base64.StdEncoding.DecodeString(sigB64)
-	if err != nil {
-		return fmt.Errorf("sig not base64")
-	}
-	pre := TaskChallenge(action, aid, ts)
-	// A bad signature costs one verification, not a replay of the KEL
-	// (kelreplay.go) [redteam:F36].
-	if verr := plausibleSignature(kel, keyStateSeq, pre, sig); verr != nil {
-		return verr
-	}
-	return identity.VerifyObject(kel, aid, keyStateSeq, ts, pre, sig)
-}
 
 func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")

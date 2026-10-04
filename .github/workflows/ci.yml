@@ -74,54 +74,6 @@ jobs:
           test "$lean" -eq 0 || (echo "$pat is still linked into the ${{ matrix.tags }} build" && exit 1)
           /tmp/hub-lean -version >/dev/null
 
-  # Additive tags: the module is NOT in the default build and `-tags <name>`
-  # adds it. taskboard is additive because a board stores caller-supplied
-  # titles and notes and serves them to anyone (A2A-DESIGN §2, §16), and a
-  # hub must not hold task content by default. The direction of the symbol
-  # check is reversed: the default build must contain none of it, the opt-in
-  # build must contain it. The default `go test ./...` cannot see tagged
-  # code at all, so the module's own tests run only here.
-  optin:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - tag: "taskboard"
-            pattern: "internal/taskboard"
-    env:
-      CGO_ENABLED: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: vet and test with the module in
-        run: |
-          go vet -tags "${{ matrix.tag }}" ./...
-          go test -tags "${{ matrix.tag }}" ./...
-      - name: the module is absent by default and present when asked
-        run: |
-          go build -o /tmp/hub-default ./cmd/anet-hub
-          go build -tags "${{ matrix.tag }}" -o /tmp/hub-optin ./cmd/anet-hub
-          pat="${{ matrix.pattern }}"
-          def=$(go tool nm /tmp/hub-default | grep -cE "$pat" || true)
-          opt=$(go tool nm /tmp/hub-optin | grep -cE "$pat" || true)
-          echo "$pat symbols: default=$def opt-in=$opt"
-          test "$def" -eq 0 || (echo "$pat is linked into the DEFAULT build" && exit 1)
-          test "$opt" -gt 0 || (echo "-tags ${{ matrix.tag }} did not link $pat in" && exit 1)
-          /tmp/hub-default -version >/dev/null
-          /tmp/hub-optin -version >/dev/null
-      # internal/aghub/importguard_test.go runs `go list -deps` without
-      # tags, so under `go test -tags ${{ matrix.tag }}` it still checks the
-      # default build. The opt-in binary must not pull the content codecs
-      # (or a subpackage of one, as the test counts them) into the hub
-      # either (A2A-DESIGN §9 静态护栏).
-      - name: the opt-in build links no content codec
-        run: |
-          deps=$(go list -tags "${{ matrix.tag }}" -deps ./cmd/anet-hub ./cmd/anet-hub-admin | grep -E 'ANetCore/(delegation|tsir)(/|$)' || true)
-          test -z "$deps" || (echo "-tags ${{ matrix.tag }} links: $deps" && exit 1)
-
   race:
     runs-on: ubuntu-latest
     steps:
@@ -134,7 +86,6 @@ jobs:
           CGO_ENABLED: "1"   # -race needs cgo; runners ship gcc
         run: |
           go test -race ./...
-          go test -race -tags taskboard ./internal/taskboard/... ./cmd/anet-hub/...
 
   # The web UI is the first thing a person sees when joining, and its
   # markdown renderer feeds dangerouslySetInnerHTML from prose that any

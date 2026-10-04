@@ -53,7 +53,7 @@ func hubRoot(t *testing.T) string {
 // and identity-key signing call in this repository's code matches the registry, or is a v0.2
 // leftover listed in ANetCore wire/transition.json with the work item that removes it.
 func TestWireRegistry(t *testing.T) {
-	ps, err := scan.Check(scan.Config{Dir: hubRoot(t), Repo: "ANetHub", Tags: [][]string{{"taskboard"}}})
+	ps, err := scan.Check(scan.Config{Dir: hubRoot(t), Repo: "ANetHub"})
 	if err != nil {
 		t.Fatal(err)
 	}

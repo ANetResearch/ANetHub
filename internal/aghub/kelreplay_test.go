@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/identity"
@@ -154,22 +153,6 @@ func TestABadSignatureDoesNotReplayTheKELItNames(t *testing.T) {
 		}
 	})
 
-	t.Run("taskboard challenge", func(t *testing.T) {
-		ts := uint64(time.Now().UnixMilli())
-		sig, seq := long.Sign(aghub.TaskChallenge("task.create", long.AID(), ts))
-		before := replays(counter)
-		if err := store.VerifyAgentChallenge("task.create", long.AID(), ts, seq,
-			base64.StdEncoding.EncodeToString(flipped(sig))); err == nil {
-			t.Fatal("a challenge with a bad signature verified")
-		}
-		if n := replays(counter) - before; n != 0 {
-			t.Fatalf("a challenge with a bad signature replayed %d KELs", n)
-		}
-		if err := store.VerifyAgentChallenge("task.create", long.AID(), ts, seq,
-			base64.StdEncoding.EncodeToString(sig)); err != nil {
-			t.Fatalf("a good challenge: %v", err)
-		}
-	})
 }
 
 // A process with a hub store replays each KEL once: Open installs a replay

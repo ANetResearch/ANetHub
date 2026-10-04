@@ -73,11 +73,11 @@ func mountNames() []string {
 	return out
 }
 
-// /stats.modules is the list of modules this build wired, in order. The
-// web UI shows the task board only when the list names it, so a build
-// that wired the board but did not report it would hide a working board,
-// and one that reported a module it lacks would send the page to routes
-// that do not exist. Checked in every tag configuration CI runs.
+// /stats.modules is the list of modules this build wired, in order. A
+// client shows a module's pages only when the list names it, so a build
+// that wired a module but did not report it would hide it, and one that
+// reported a module it lacks would send the client to routes that do not
+// exist. Checked in every tag configuration CI runs.
 func TestStatsNamesTheWiredModules(t *testing.T) {
 	h, wired := wiredHub(t)
 	want := strings.Join(mountNames(), ",")
@@ -86,5 +86,22 @@ func TestStatsNamesTheWiredModules(t *testing.T) {
 	}
 	if got := strings.Join(statsModules(t, h), ","); got != want {
 		t.Errorf("/stats.modules = %q, want the wired modules %q", got, want)
+	}
+}
+
+// The shared task board is gone (it kept task titles and notes in plain
+// text on the hub, where the hub is only a transport): no build wires it,
+// /stats names no such module, and /tasks/ is not routed.
+func TestTheTaskBoardIsGone(t *testing.T) {
+	h, wired := wiredHub(t)
+	for _, m := range wired {
+		if m == "taskboard" {
+			t.Fatal("a build wired the task board")
+		}
+	}
+	for _, path := range []string{"/tasks/board", "/tasks/"} {
+		if code, body := get(t, h, path); code != http.StatusNotFound {
+			t.Errorf("GET %s = %d %.80s, want 404", path, code, body)
+		}
 	}
 }

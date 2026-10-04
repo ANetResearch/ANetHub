@@ -380,7 +380,7 @@ func main() {
 	for _, n := range wired {
 		names += " " + n
 	}
-	log.Printf("anet-hub modules:%s (opt-in modules not in this build:%s)", names, notBuilt(wired))
+	log.Printf("anet-hub modules:%s", names)
 
 	srv := &http.Server{
 		Addr:              *f.addr,
