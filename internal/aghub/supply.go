@@ -373,7 +373,7 @@ func (s *Store) SupplyHead() (id string, seq uint64, ok bool) {
 
 // SupplyEpochs serves the published epochs from seq from, inclusive (an ael
 // chain starts at seq 0, which a verifier needs first), at most limit of
-// them (issuancePage when limit is 0 or more).
+// them (issuancePage when limit is 0 or above issuancePage).
 func (s *Store) SupplyEpochs(from uint64, limit int) ([]SupplyEpochEntry, error) {
 	if limit <= 0 || limit > issuancePage {
 		limit = issuancePage
@@ -417,33 +417,57 @@ func (s *Store) latestEpoch() (e SupplyEpochEntry, ok bool, err error) {
 
 // RunSupplyEpochs publishes due epochs until ctx ends: once at start (a hub
 // that was down over a midnight catches up), then once after each UTC
-// midnight (PAY-S2). It also drops the leaves of epochs past their 14 days.
+// midnight (PAY-S2). A check that failed for a reason that can pass (the
+// database busy or full) is made again at the next tick, a minute later,
+// rather than a day later; a ledger that does not add up is not, since it
+// needs the operator and is logged where it is found. Every tick also drops
+// the leaves of epochs past their 14 days, so no balance snapshot outlives
+// them by more than a tick (PAY-S5).
 func (s *Store) RunSupplyEpochs(ctx context.Context) {
-	check := func() {
-		if e, err := s.PublishDue(); err != nil {
-			if !errors.Is(err, ErrSupplyMismatch) { // logged where it is found
-				log.Printf("hub: supply epoch: %v", err)
-			}
-		} else if e != nil {
+	t := time.NewTicker(supplyCheckEvery)
+	defer t.Stop()
+	s.runSupplyEpochs(ctx, t.C, func() {})
+}
+
+// runSupplyEpochs is RunSupplyEpochs on the ticks of tick; done is called
+// after the start and after each tick has been handled.
+func (s *Store) runSupplyEpochs(ctx context.Context, tick <-chan time.Time, done func()) {
+	// check publishes the epoch that is due and says whether to check
+	// again at the next tick.
+	check := func() (again bool) {
+		e, err := s.PublishDue()
+		switch {
+		case errors.Is(err, ErrSupplyMismatch): // logged where it is found
+		case errors.Is(err, errNoSigningKey):
+			log.Printf("hub: supply epoch: %v", err)
+		case err != nil:
+			log.Printf("hub: supply epoch: %v; checking again in %v", err, supplyCheckEvery)
+			return true
+		case e != nil:
 			log.Printf("hub: published supply epoch %d (days %d..%d)", e.Seq, e.FromDay, e.ToDay)
 		}
+		return false
+	}
+	prune := func() {
 		if err := s.PruneLiabilityProofs(); err != nil {
 			log.Printf("hub: dropping old balance proofs: %v", err)
 		}
 	}
-	check()
 	day := utcDay(s.now())
-	t := time.NewTicker(supplyCheckEvery)
-	defer t.Stop()
+	again := check()
+	prune()
+	done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			if d := utcDay(s.now()); d != day {
+		case <-tick:
+			if d := utcDay(s.now()); d != day || again {
 				day = d
-				check()
+				again = check()
 			}
+			prune()
+			done()
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/ael"
+	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
@@ -182,6 +183,46 @@ func TestAHubRefusesAttestationsAboutOtherChains(t *testing.T) {
 		"attestation": base64.RawURLEncoding.EncodeToString(raw)})
 	if code != http.StatusBadRequest || !strings.Contains(string(b), `"reason":"bad_request"`) {
 		t.Fatalf("an attestation about another chain: %d %s, want 400 bad_request", code, b)
+	}
+}
+
+// An attestation without its signature is refused as the request's fault,
+// 400 bad_request, and nothing is stored: it is not a statement anybody
+// made.
+func TestAHubRefusesAnUnsignedAttestation(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	witness, err := identitytest.Hub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &ael.HeadAttestation{ChainDID: hubAIDOf(t, srv), Seq: 0, HeadID: "bafy-x", ObservedAt: time.Now().UnixMilli()}
+	if err := a.Sign(witness); err != nil {
+		t.Fatal(err)
+	}
+	signed, err := a.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same attestation with its envelope (key 2) taken off.
+	var m map[uint64]any
+	if err := coredet.Unmarshal(signed, &m); err != nil {
+		t.Fatal(err)
+	}
+	delete(m, 2)
+	raw, err := coredet.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, err := ael.UnmarshalHeadAttestation(raw); err != nil || back.Envelope != nil {
+		t.Fatalf("setup: %+v %v", back, err)
+	}
+	code, b := post(t, srv.URL+"/x402/witness", map[string]any{"attestation": base64.RawURLEncoding.EncodeToString(raw)})
+	if code != http.StatusBadRequest || !strings.Contains(string(b), `"reason":"bad_request"`) ||
+		!strings.Contains(string(b), "not signed") {
+		t.Fatalf("an unsigned attestation: %d %s, want 400 bad_request", code, b)
+	}
+	if n := countRows(t, store, `SELECT COUNT(*) FROM head_attestation`); n != 0 {
+		t.Errorf("an unsigned attestation was stored: %d rows", n)
 	}
 }
 

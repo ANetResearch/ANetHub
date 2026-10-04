@@ -641,3 +641,42 @@ func TestADeregisteredBalanceIsStillOnTheBooks(t *testing.T) {
 		t.Errorf("supply %+v", sup)
 	}
 }
+
+// The hub answers a proof only from leaves that rebuild the root it signed:
+// a stored leaf changed after the close (a salt, a balance moved between
+// two leaves so the sum still holds, a leaf gone) is not served as a proof,
+// which would fail at the account and look like the hub shrinking it; the
+// answer is 500 internal, and the operator has the log.
+func TestALeafChangedAfterTheCloseIsNotServed(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		tamper []string
+	}{
+		{"a salt", []string{`UPDATE liab_leaf SET salt = zeroblob(32) WHERE aid = ?1`}},
+		{"a balance moved", []string{
+			`UPDATE liab_leaf SET balance = balance - 1 WHERE aid = ?1`,
+			`UPDATE liab_leaf SET balance = balance + 1 WHERE aid = ?2`}},
+		{"a leaf gone", []string{`DELETE FROM liab_leaf WHERE aid = ?2`}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv, store := newHubWithStore(t)
+			a, b := twoAgents(t)
+			register(t, srv, a, "A", nil)
+			register(t, srv, b, "B", nil)
+			publishEpoch(t, store)
+			for _, q := range c.tamper {
+				if _, err := store.DBForTest().Exec(q, a.AID(), b.AID()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			logs := captureLog(t)
+			code, _, body := liabilityProof(t, srv, a, a, "")
+			if code != http.StatusInternalServerError || !strings.Contains(string(body), `"reason":"internal"`) {
+				t.Errorf("a proof from changed leaves: %d %s, want 500 internal", code, body)
+			}
+			if !strings.Contains(logs.String(), "epoch 0") {
+				t.Errorf("nothing logged for the operator: %q", logs.String())
+			}
+		})
+	}
+}

@@ -18,8 +18,10 @@ import (
 
 // deregAllowed are the tables an AID may still appear in after it is
 // deregistered (hub-payment-privacy PAY-O1): its tombstone; its balance and
-// the ledger, the supply record and the settlements (the debt is still this
-// hub's); the reviews and receipts it is the subject of; the withdrawals on
+// the ledger and the settlements (the debt is still this hub's); its leaf in
+// the balance tree of an epoch already closed, kept the 14 days the epoch's
+// proofs are (the published root covers every leaf, so one cannot go); the
+// reviews and receipts it is the subject of; the withdrawals on
 // the card federation streams; dereg_event for the hub process; and the
 // admission list and the quota the operator raised for it unless the
 // admission was revoked.
@@ -31,7 +33,7 @@ var deregAllowed = map[string]bool{
 	"departed_kel":        true,
 	"credit_balance":      true,
 	"credit_entry":        true,
-	"credit_issuance":     true,
+	"liab_leaf":           true,
 	"credit_settled":      true,
 	"credit_cleared":      true,
 	"credit_redemption":   true,
@@ -131,6 +133,7 @@ func TestDeregRemovesEveryAIDKeyedRow(t *testing.T) {
 			if _, err := store.SetQuota(x.AID(), aghub.QuotaChange{NonContactMsgs: i64(900)}); err != nil {
 				t.Fatal(err)
 			}
+			publishEpoch(t, store) // a leaf in a closed epoch
 
 			if got := tablesNaming(t, store.DBForTest(), x.AID()); len(got) < 13 {
 				t.Fatalf("setup: the agent is in only %v", got)

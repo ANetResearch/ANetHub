@@ -53,6 +53,11 @@
       "response": {"status": 400, "body_has": {"reason": "bad_request"}}
     },
     {
+      "name": "issuance_cursor_given_twice",
+      "request": {"method": "GET", "path": "/x402/issuance?from=0&from=1", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
       "name": "head_is_the_latest_epoch",
       "request": {"method": "GET", "path": "/x402/issuance/head", "headers": {"X-ANet-Wire": "3"}},
       "response": {"status": 200, "body": {"seq": 1, "id": "${e1_id}"}}

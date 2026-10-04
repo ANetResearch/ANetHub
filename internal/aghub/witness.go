@@ -377,9 +377,15 @@ func (s *Server) hWitnessSubmit(w http.ResponseWriter, r *http.Request) {
 			Error: "This attestation is about another chain; send it to the hub it names."})
 		return
 	}
-	if err := s.store.StoreAttestation(a); err != nil {
+	if a.Envelope == nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
 			Error: "The attestation is not signed; send the attestation as your witness signed it."})
+		return
+	}
+	// Signed and about this hub: what is left to fail is this hub's own
+	// database, which is no fault of the request (500 internal, G1).
+	if err := s.store.StoreAttestation(a); err != nil {
+		wire3.Internal(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -392,12 +398,12 @@ func (s *Server) hWitnessSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hWitnesses(w http.ResponseWriter, _ *http.Request) {
 	out, err := s.store.AttestationsAbout(s.hubAID, 0)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
 	health, herr := s.store.WitnessHealthOf(s.hubAID, time.Now())
 	if herr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": herr.Error()})
+		wire3.Internal(w, herr)
 		return
 	}
 	// Where each witness can be reached, so the instruction below is one

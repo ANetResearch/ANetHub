@@ -161,6 +161,9 @@ func TestHubDataOfAnotherReleaseIsRefusedUntouched(t *testing.T) {
 		want    error
 	}{
 		{"0.2 tables, no version", 0, []string{v02AgentTable}, aghub.ErrHubDataV02},
+		// As a 0.2 hub left it: in WAL mode, stopped cleanly. Read without
+		// the immutable flag, SQLite would make its -wal and -shm files.
+		{"0.2 tables in WAL mode", 0, []string{`PRAGMA journal_mode=WAL`, v02AgentTable}, aghub.ErrHubDataV02},
 		{"version 1", 1, []string{v02AgentTable}, aghub.ErrHubDataV02},
 		{"version 2", 2, []string{v02AgentTable}, aghub.ErrHubDataV02},
 		{"version 2, no tables", 2, nil, aghub.ErrHubDataV02},
