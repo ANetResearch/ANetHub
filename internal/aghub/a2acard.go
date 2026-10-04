@@ -47,6 +47,59 @@ const (
 // hub lists only cards that verified (A2A-DESIGN §10.5).
 const CardVerificationOK = "ok"
 
+// CardErrorPriceInPublicCard is the card_error of a public card refused for
+// carrying prices (with card_status invalid).
+const CardErrorPriceInPublicCard = "price_in_public_card"
+
+// ErrPriceInPublicCard refuses an A2A card that carries a price extension.
+// Its text is CardErrorPriceInPublicCard, which /register reports as the
+// card_error.
+var ErrPriceInPublicCard = errors.New(CardErrorPriceInPublicCard)
+
+// The price extensions a public card must not carry.
+//
+// Prices are not public: a provider states them in the extended card it
+// signs and sends end to end to the requester that asks, and nowhere else.
+// A public card is stored and served by hubs and copied by every peer that
+// federates it, so a price in it is a price published to everyone, which
+// is what moving prices into the extended card set out to end. The hub
+// refuses both forms a daemon has written: the v0.2 public price list, and
+// the extended card's own price extension put on the public card.
+const (
+	extPricingV1URI = "https://agentnetwork.org.cn/a2a/ext/anet-pricing/v1"
+	extPriceV1URI   = "https://agentnetwork.org.cn/a2a/ext/anet-price/v1"
+)
+
+// carriesPrices reports whether a card's capabilities.extensions names a
+// price extension. The card has passed a2acard.Verify, which reads it as
+// strict I-JSON; the members are read here by their exact names, as Verify
+// reads them, so a member spelled in another case is not mistaken for one.
+func carriesPrices(card []byte) bool {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(card, &top) != nil {
+		return false
+	}
+	var caps map[string]json.RawMessage
+	if json.Unmarshal(top["capabilities"], &caps) != nil {
+		return false
+	}
+	var exts []json.RawMessage
+	if json.Unmarshal(caps["extensions"], &exts) != nil {
+		return false
+	}
+	for _, raw := range exts {
+		var e map[string]json.RawMessage
+		var uri string
+		if json.Unmarshal(raw, &e) != nil || json.Unmarshal(e["uri"], &uri) != nil {
+			continue
+		}
+		if uri == extPricingV1URI || uri == extPriceV1URI {
+			return true
+		}
+	}
+	return false
+}
+
 // maxA2ACardBytes bounds an A2A card (A2A-DESIGN §10.3); a2acard.Verify
 // refuses a larger one before parsing it.
 const maxA2ACardBytes = a2acard.MaxCardBytes
@@ -59,7 +112,7 @@ const maxA2ACardBytes = a2acard.MaxCardBytes
 // row is not listed, either because the KEL moved past the key that signed
 // it or because it predates admission. search is the lowercased text the
 // registry's q parameter matches. fed_seq orders the rows for the
-// federation stream (§10.6), like agent_card.fed_seq.
+// federation stream (§10.6).
 func (s *Store) migrateA2ACard() error {
 	for _, q := range []string{
 		`ALTER TABLE agent_a2a_card ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`,
@@ -196,7 +249,8 @@ func (e *notTheRegistrant) Error() string {
 
 // verifyA2ACardFor is the admission check of an A2A card that speaks for
 // aid, whose KEL is kel: a2acard.Verify with a resolver that answers only
-// for aid, and the capability index bounds on the card's skill ids. It is
+// for aid, the capability index bounds on the card's skill ids, and no
+// price extension (ErrPriceInPublicCard). It is
 // the check for a card an agent registers here (AdmitA2ACard, the
 // re-verification after a KEL change) and for one a peer hub federates
 // (AdmitFedA2ACard), where aid is the AID the entry's KEL replays to. The
@@ -222,6 +276,11 @@ func verifyA2ACardFor(aid string, raw []byte, kel []identity.SignedEvent, now ti
 	// bounds apply to them as to ids declared at registration.
 	if err := validateCaps(skillIDs(v)); err != nil {
 		return nil, fmt.Errorf("skill ids: %w", err)
+	}
+	// After the signature: a card that does not verify is refused for
+	// that, whatever it says about prices.
+	if carriesPrices(raw) {
+		return nil, ErrPriceInPublicCard
 	}
 	return v, nil
 }

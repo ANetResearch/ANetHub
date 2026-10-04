@@ -595,7 +595,8 @@ func (s *Server) hVision(w http.ResponseWriter, r *http.Request) {
 }
 
 // hStore is the Agent Store composition: agents grouped by product line, with tier + capability
-// rollups. Payments are out of scope here (pricing text is display-only, as in the public hub).
+// rollups. Payments are out of scope here; prices are not public at all (they travel in the
+// provider-signed extended card, end to end), so the hub holds none to show.
 func (s *Server) hStore(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.hub.AllAgents("")
 	if err != nil {
@@ -621,7 +622,7 @@ func (s *Server) hStore(w http.ResponseWriter, r *http.Request) {
 		}
 		lines[line] = append(lines[line], map[string]any{
 			"aid": a.AID, "name": a.Name, "caps": a.Caps, "summary": a.Summary,
-			"pricing": a.Pricing, "avg_rating": a.AvgRating, "review_count": a.ReviewCount,
+			"avg_rating": a.AvgRating, "review_count": a.ReviewCount,
 			"tier": tier, "official_id": officialID,
 		})
 		for _, c := range a.Caps {

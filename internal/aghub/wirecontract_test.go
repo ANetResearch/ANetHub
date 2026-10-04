@@ -384,18 +384,17 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"ids"}},
 		{"RelayAckResponse", aghub.RelayAckResponse{}, []string{"acked"}},
 		{"RegisterRequest", aghub.RegisterRequest{}, []string{
-			"a2a_card", "aid", "caps", "card", "check_only", "enc_keys", "kel", "name", "pow", "prev_seq", "pricing",
+			"a2a_card", "aid", "caps", "check_only", "enc_keys", "kel", "name", "pow", "prev_seq",
 			"readme", "summary"}},
 		{"RegisterResponse", aghub.RegisterResponse{}, []string{
 			"aid", "card_error", "card_status", "keys_error", "keys_status", "probation_until", "status", "trial"}},
 		{"CheckOnlyResponse", aghub.CheckOnlyResponse{}, []string{"status"}},
-		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "pricing", "readme", "summary"}},
+		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "readme", "summary"}},
 		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keyset"}},
 		// POST /agents/keys:lookup, the daemon's recipient lookup [redteam:F3].
 		{"KeysLookupRequest", aghub.KeysLookupRequest{}, []string{"aid"}},
 		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keyset"}},
 		{"KeysPublishResponse", aghub.KeysPublishResponse{}, []string{"aid", "keys_status"}},
-		{"FedCard", aghub.FedCard{}, []string{"card", "fed_seq", "home", "kel", "keys"}},
 		// The A2A registry (A2A-DESIGN §10.5), read by the daemon's
 		// list_agents (ANet internal/hubapi pins the same names).
 		{"A2AAgentEntry", aghub.A2AAgentEntry{}, []string{
@@ -422,6 +421,7 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{aghub.CardStatusInvalid, "invalid"}, {aghub.CardStatusConflict, "conflict"},
 		{aghub.CardStatusWithdrawn, "withdrawn"},
 		{aghub.CardVerificationOK, "ok"},
+		{aghub.CardErrorPriceInPublicCard, "price_in_public_card"},
 		// The /fed/v2/cards entry formats a peer hub dispatches on.
 		{federation.FormatA2ACard, "a2a-card/1"}, {federation.FormatWithdrawal, "withdrawal/1"},
 	} {

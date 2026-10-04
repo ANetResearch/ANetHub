@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/a2acard"
-	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
@@ -155,7 +154,7 @@ func (f *fz) agent(tb testing.TB, name string, caps []string, withKeys bool) (*i
 	return c, kp
 }
 
-// registration is a /register body for c with a signed ADP card.
+// registration is a /register body for c.
 func (f *fz) registration(tb testing.TB, c *identity.Controller, name string, caps []string) map[string]any {
 	tb.Helper()
 	kel, err := identity.MarshalKEL(c.KEL())
@@ -164,8 +163,7 @@ func (f *fz) registration(tb testing.TB, c *identity.Controller, name string, ca
 	}
 	return map[string]any{
 		"aid": c.AID(), "name": name, "caps": caps,
-		"kel":  base64.RawURLEncoding.EncodeToString(kel),
-		"card": fzADPCard(tb, c, name, caps),
+		"kel": base64.RawURLEncoding.EncodeToString(kel),
 	}
 }
 
@@ -176,25 +174,6 @@ func (f *fz) register(c *identity.Controller, raw []byte) *httptest.ResponseReco
 		panic(err)
 	}
 	return f.signedDo(c, relayauth.ActionRegister, http.MethodPost, "/register", "", raw)
-}
-
-// fzADPCard is mintCard for a testing.TB.
-func fzADPCard(tb testing.TB, c *identity.Controller, name string, caps []string) json.RawMessage {
-	tb.Helper()
-	if caps == nil {
-		caps = []string{}
-	}
-	now := time.Now()
-	card := &adp.AgentCard{
-		SubjectDID: c.AID(), CardSchema: adp.CardSchema{Major: 1},
-		Seq: uint64(now.UnixNano()), IssuedAt: now.Unix(),
-		NotBefore:    now.Add(-time.Minute).Unix(),
-		Capabilities: caps, CriticalExtensions: []string{}, Name: name,
-	}
-	// A card the signer cannot encode (fuzzed text that is not UTF-8) is
-	// sent unsigned, which the hub must refuse.
-	_ = card.Sign(c)
-	return fzJSON(tb, card)
 }
 
 // fzJSON marshals v or fails.

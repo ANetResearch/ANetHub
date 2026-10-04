@@ -60,7 +60,7 @@ func TestARegistrationWithAKELPastTheMessagePathCapIsRefused(t *testing.T) {
 	if len(kelB) <= seal.MaxKELBytes {
 		t.Fatalf("test did not build a KEL past the cap: %d bytes", len(kelB))
 	}
-	code, b := registerWithCard(t, srv, attacker, "big", nil, nil)
+	code, b := registerCode(t, srv, attacker, "big", nil)
 	if code != http.StatusBadRequest || !strings.Contains(string(b), `"kel_invalid"`) || !strings.Contains(string(b), "too long") {
 		t.Fatalf("register with a %d-event, %d-byte KEL: %d %s, want 400 kel too long",
 			len(attacker.KEL()), len(kelB), code, b)
@@ -71,7 +71,7 @@ func TestARegistrationWithAKELPastTheMessagePathCapIsRefused(t *testing.T) {
 
 	// Under the cap, a long KEL registers and its JWKS is served.
 	long := bigKELController(t, seal.MaxKELBytes/2)
-	registerLegacy(t, srv, long, "long", nil)
+	register(t, srv, long, "long", nil)
 	if code, b := getJSON(t, srv.URL+"/agents/"+long.AID()+"/jwks.json"); code != http.StatusOK {
 		t.Fatalf("JWKS of a KEL under the cap: %d %s", code, b)
 	}

@@ -249,7 +249,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
 	mux.HandleFunc("POST "+KELLookupPath, s.hAgentKELLookup)
-	mux.HandleFunc("GET /agents/{aid}/card", s.hAgentCard)
 	// The JWKS named by the jku of an agent's A2A card, derived from its
 	// KEL (A2A-DESIGN §10.3, §10.5). See registry.go.
 	mux.HandleFunc("GET /agents/{aid}/jwks.json", s.hJWKS)
@@ -296,9 +295,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}/reputation", s.hReputation)
 	mux.HandleFunc("POST /x402/verify", s.hX402Verify)
 	mux.HandleFunc("POST /x402/settle", s.hX402Settle)
-	// The resource server: pay here, work there. See gateway.go for why
-	// this hands back a voucher instead of proxying the call.
-	mux.HandleFunc("GET /x402/resource/{aid}/{capability}", s.hX402Resource)
+	// The x402 resource gateway is removed; its path answers 410
+	// gateway_removed (see gateway.go).
+	mux.HandleFunc("GET "+gatewayPath, hGatewayRemoved)
 	// The A2A registry: verified A2A cards of agents registered here
 	// (A2A-DESIGN §10.5). See registry.go.
 	mux.HandleFunc("GET /a2a/v1/agents", s.hA2AAgents)
@@ -511,14 +510,7 @@ type RegisterRequest struct {
 	Caps    []string `json:"caps"`
 	Summary string   `json:"summary"`
 	Readme  string   `json:"readme"`
-	// Pricing and Card leave the request with the public prices and the
-	// signed ADP card (hub-payment-privacy §4.2.6); strict decoding then
-	// refuses them. v030-todo(PAY-8)
-	Pricing string `json:"pricing"`
-	KEL     string `json:"kel"` // base64url(identity.MarshalKEL)
-	// Card is the agent's own signed statement of what it offers (an ADP
-	// AgentCard). v030-todo(PAY-8)
-	Card json.RawMessage `json:"card"`
+	KEL     string   `json:"kel"` // base64url(identity.MarshalKEL)
 	// EncKeys is the agent's encryption key set: base64 (std) of the
 	// seal.SignedEncKeySet encoding (§3.1). Optional. A set that does not
 	// verify, or does not advance the stored one, is reported in
@@ -586,12 +578,12 @@ const (
 // inherited it: one unauthenticated POST could hand this hub a
 // multi-megabyte body before anything examined its contents, which is the
 // root of the capability-index amplification the constants in aghub.go
-// bound. A registration carries a KEL, a signed card, profile text, a
-// capability list, a key set and an A2A card (at most maxA2ACardBytes).
-// The largest plausible one is maxCapsPerAgent ids of maxCapIDLen bytes
-// listed twice — once in caps, once inside the signed card — at roughly
-// 130 KiB, so 1 MiB admits it with room for a long readme. An agent whose
-// registration does not fit is refused with 413 rather than truncated.
+// bound. A registration carries a KEL, profile text, a capability list, a
+// key set and an A2A card (at most maxA2ACardBytes). The largest plausible
+// one is maxCapsPerAgent ids of maxCapIDLen bytes listed twice — once in
+// caps, once as the skills of the A2A card — at roughly 130 KiB, so 1 MiB
+// admits it with room for a long readme. An agent whose registration does
+// not fit is refused with 413 rather than truncated.
 const maxRegisterBody = 1 << 20
 
 // registerKELReplays counts the KELs /register decoded and replayed. A test
@@ -789,16 +781,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, CheckOnlyResponse{Status: checkStatus})
 		return
 	}
-	// 9 and 10. The card, if one came, before the row it speaks for — so a
-	// registration whose card is a forgery does not first take effect and
-	// then get rejected. v030-todo(PAY-8)
-	if len(req.Card) > 0 {
-		if err := s.store.AdmitCard(req.AID, req.Card, kel); err != nil {
-			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: sentence(err)})
-			return
-		}
-	}
-	// One transaction: the row, and for a first registration how it came
+	// 10. One transaction: the row, and for a first registration how it came
 	// in and the list's grant. RegisterAgent repeats the KEL extension
 	// check inside it, for a concurrent registration of the same AID that
 	// wrote between the check above and this write.
@@ -822,8 +805,8 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		s.store.gate().committed(hold)
 	}
 	// Optional profile carried on the registration (usually set later via /profile).
-	if req.Summary != "" || req.Readme != "" || req.Pricing != "" {
-		if err := s.store.PutProfile(req.AID, req.Summary, req.Readme, req.Pricing); err != nil {
+	if req.Summary != "" || req.Readme != "" {
+		if err := s.store.PutProfile(req.AID, req.Summary, req.Readme); err != nil {
 			wire3.Internal(w, err)
 			return
 		}
@@ -989,11 +972,15 @@ func sentence(err error) string {
 // authenticated with relayauth v2 headers, action "profile", verified
 // against the agent's REGISTERED KEL. aid is optional; when present it must
 // equal the X-ANet-AID header.
+//
+// There is no pricing member: prices are not public any more (they travel
+// in the extended card the provider signs, end to end), so the body is
+// decoded strictly and a pricing member is 400 bad_request like any member
+// the route does not take.
 type ProfileRequest struct {
 	AID     string `json:"aid,omitempty"`
 	Summary string `json:"summary"`
 	Readme  string `json:"readme"`
-	Pricing string `json:"pricing"`
 }
 
 func (s *Server) hProfile(w http.ResponseWriter, r *http.Request) {
@@ -1002,17 +989,22 @@ func (s *Server) hProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req ProfileRequest
-	if err := json.Unmarshal(a.Body, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+	if err := wire3.DecodeStrict(a.Body, &req); err != nil {
+		wire3.RefuseDecode(w, err)
 		return
 	}
 	if req.AID != "" && req.AID != a.AID {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{
-			"error": "aid does not match " + relayauth.HeaderAID})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
+			Error: "The member \"aid\" is not the AID in " + relayauth.HeaderAID + "; update your own profile, signed as yourself."})
 		return
 	}
-	if err := s.store.PutProfile(a.AID, req.Summary, req.Readme, req.Pricing); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if err := s.store.PutProfile(a.AID, req.Summary, req.Readme); err != nil {
+		if errors.Is(err, ErrNotRegistered) {
+			// Deregistered between the signature check and the write.
+			wire3.Refuse(w, wire3.ReasonUnknownAID)
+			return
+		}
+		wire3.Internal(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aid": a.AID, "status": "profile_updated"})
@@ -1671,7 +1663,7 @@ func (s *Server) hAgentKELLookup(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveAgentKEL(w http.ResponseWriter, aid string) {
 	// The hub's own history is served here too.
 	//
-	// It signs settlements, redemption receipts and vouchers, and every
+	// It signs settlements and redemption receipts, and every
 	// one of those is worthless to a holder who cannot check the
 	// signature. Until this line the hub was the one signer on the
 	// network whose key nobody could look up — it published everyone
@@ -1727,26 +1719,6 @@ func (s *Server) serveAgentKEL(w http.ResponseWriter, aid string) {
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{
 		"error": "hub: " + aid + " is neither registered here, known from a peer, nor a peer hub"})
-}
-
-// hAgentCard serves an agent's own signed statement of what it offers.
-//
-// Published rather than kept internal, for the same reason the key
-// history is: a claim nobody outside can check is a claim this hub is
-// making on the agent's behalf. With the card and the KEL, anyone can
-// confirm the directory entry is the agent's own words.
-func (s *Server) hAgentCard(w http.ResponseWriter, r *http.Request) {
-	raw, err := s.store.AgentCard(r.PathValue("aid"))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if len(raw) == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no card published for this agent"})
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(raw)
 }
 
 // federatedAgents returns peer-learned agents, or nothing when discovery

@@ -103,13 +103,9 @@ func execAID(q string) func(d *deregRun) error {
 // behind. State that lives only in the hub process's memory is dropped by an
 // OnDeregistered callback instead.
 var deregSteps = []deregStep{
-	// The cards are withdrawn on their federation streams before their
-	// rows go, so a peer that synced them learns the agent left; read
-	// against the visibility the agent had (card.go withdrawCard,
-	// a2acard_withdraw.go).
-	{"withdraw the signed card from the federation stream", func(d *deregRun) error {
-		return withdrawCard(d.tx, d.aid, withdrawDeparted, federates(d.visibility))
-	}},
+	// The card is withdrawn on the federation stream before its rows go,
+	// so a peer that synced it learns the agent left; read against the
+	// visibility the agent had (fed_a2acard.go withdrawA2ACard).
 	{"withdraw the A2A card from the federation stream", func(d *deregRun) error {
 		if !federates(d.visibility) {
 			return nil

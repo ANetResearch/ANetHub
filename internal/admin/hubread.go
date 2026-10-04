@@ -67,7 +67,6 @@ type AdminAgentView struct {
 	Caps           []string `json:"caps"`
 	Summary        string   `json:"summary,omitempty"`
 	Readme         string   `json:"readme,omitempty"`
-	Pricing        string   `json:"pricing,omitempty"`
 	Listed         bool     `json:"listed"`
 	AvgRating      float64  `json:"avg_rating"`
 	ReviewCount    int      `json:"review_count"`
@@ -80,7 +79,7 @@ type AdminAgentView struct {
 // registered first. q filters like the public search.
 func (h *HubDB) AllAgents(q string) ([]AdminAgentView, error) {
 	query := `
-	SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at,
+	SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at,
 	       COALESCE((SELECT AVG(rating) FROM review r WHERE r.subject_aid=a.aid), 0),
 	       COALESCE((SELECT COUNT(*) FROM review r WHERE r.subject_aid=a.aid), 0),
 	       COALESCE((SELECT COUNT(*) FROM review r WHERE r.reviewer_aid=a.aid), 0),
@@ -102,13 +101,13 @@ func (h *HubDB) AllAgents(q string) ([]AdminAgentView, error) {
 	for rows.Next() {
 		var v AdminAgentView
 		var capsJSON string
-		if err := rows.Scan(&v.AID, &v.Name, &capsJSON, &v.Summary, &v.Readme, &v.Pricing,
+		if err := rows.Scan(&v.AID, &v.Name, &capsJSON, &v.Summary, &v.Readme,
 			&v.RegisteredAt, &v.AvgRating, &v.ReviewCount, &v.ReviewsWritten,
 			&v.MailboxBacklog); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(capsJSON), &v.Caps)
-		v.Listed = len(v.Caps) > 0 || v.Summary != "" || v.Readme != "" || v.Pricing != ""
+		v.Listed = len(v.Caps) > 0 || v.Summary != "" || v.Readme != ""
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -184,13 +183,13 @@ func (h *HubDB) Totals() (HubTotals, error) {
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&t.Agents); err != nil {
 		return t, err
 	}
-	rows, err := h.db.Query(`SELECT caps, summary, readme, pricing FROM agent`)
+	rows, err := h.db.Query(`SELECT caps, summary, readme FROM agent`)
 	if err != nil {
 		return t, err
 	}
 	for rows.Next() {
-		var capsJSON, sum, rd, pr string
-		if err := rows.Scan(&capsJSON, &sum, &rd, &pr); err != nil {
+		var capsJSON, sum, rd string
+		if err := rows.Scan(&capsJSON, &sum, &rd); err != nil {
 			rows.Close()
 			return t, err
 		}
@@ -198,7 +197,7 @@ func (h *HubDB) Totals() (HubTotals, error) {
 		// JSON "null", which a raw string compare would miscount) or any profile text.
 		var caps []string
 		_ = json.Unmarshal([]byte(capsJSON), &caps)
-		if len(caps) > 0 || sum != "" || rd != "" || pr != "" {
+		if len(caps) > 0 || sum != "" || rd != "" {
 			t.Listed++
 		}
 	}

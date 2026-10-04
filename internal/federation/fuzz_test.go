@@ -305,7 +305,7 @@ func FuzzFedKeysAndStreams(f *testing.F) {
 		case !tampered && inWindow && rec.Code == http.StatusUnauthorized:
 			t.Fatalf("a correctly signed request inside the window was refused: %s", rec.Body.Bytes())
 		}
-		for _, path := range []string{"/fed/v1/cards", "/fed/v1/reviews", "/fed/v2/cards"} {
+		for _, path := range []string{"/fed/v1/reviews", "/fed/v2/cards"} {
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.URL.Path = path
 			req.URL.RawQuery = "cursor=" + cursor
