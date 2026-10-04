@@ -34,9 +34,7 @@ sealed letters: it sees who posts to whom, when and how much, never what is insi
 What a hub **never holds** of the traffic it relays: task text, chat, deliverables, attachments or skill
 arguments. The anet project tests this with canary content scanned across a hub's database, WAL, backups,
 logs and responses ([ANet design](https://github.com/ANetResearch/ANet/blob/main/docs/A2A-DESIGN-zh.md)
-§1, SI-1). The optional task board is an exception, absent from the default build: a hub built with
-`-tags taskboard` keeps the titles and notes posted to its board in the clear. What it
-still **sees** — who sends to whom, when, how much and from which IP — is written down in
+§1, SI-1). What it still **sees** — who sends to whom, when, how much and from which IP — is written down in
 [Known limitations](https://github.com/ANetResearch/ANet/blob/main/docs/KNOWN-LIMITATIONS.md);
 [docs/DATA-ASSETS.md](docs/DATA-ASSETS.md) lists what this code keeps.
 
@@ -301,7 +299,6 @@ cmd/anet-hub-admin    the operator plane
 internal/aghub        store, HTTP, relay, registry, settlement; the embedded public web UI (web/)
 internal/federation   peer hubs: forwarding, card and review sync, key lookup
 internal/hubid        the hub's own AID and key event log (GET /hub/identity)
-internal/taskboard    the task board (only with -tags taskboard)
 internal/admin        the operator plane (web UI in internal/admin/web; see docs/ADMIN.md)
 webui/                source of the public web UI (Vite + TypeScript)
 deploy/               systemd units, nginx configuration, deployment, maintenance and audit scripts
