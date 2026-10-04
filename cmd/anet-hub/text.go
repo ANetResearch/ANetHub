@@ -135,9 +135,17 @@ var hubText = []textRow{
 	{Key: "hub_flag_removed", Class: classC, Exit: 2, NextKind: nextCommand, Next: "anet-hub {subcommand}",
 		Zh: "{flag} 已改为子命令；请运行 anet-hub {subcommand}。",
 		En: "{flag} is now a subcommand; run anet-hub {subcommand}."},
+	{Key: "hub_flag_removed.fixed", Class: classC, Exit: 2, NextKind: nextChangeInput,
+		Zh: "{flag} 已改为固定值；请删去这个参数后重新启动 anet-hub。",
+		En: "{flag} is now a fixed value; remove it and start anet-hub again."},
 	{Key: "hub_flag_removed.none", Class: classC, Exit: 2, NextKind: nextChangeInput,
 		Zh: "{flag} 已删除，没有替代（账目只保留 14 天，不再有需要修复的缺口）；请删去这个参数。",
 		En: "{flag} was removed with no replacement (the ledger keeps 14 days, so there is no gap to repair); remove it from the command."},
+
+	// anet-hub quota (sealed-sender SSR-H22): a value below its default.
+	{Key: "quota_below_default", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "只能调高：{key} 不能低于缺省值 {value}；请改用不小于 {value} 的值。",
+		En: "You can only raise it: {key} cannot be below the default {value}; use a value of at least {value}."},
 
 	// anet-hub redemptions
 	{Key: "redemptions.summary", Class: classI,

@@ -162,6 +162,12 @@ type Store struct {
 	// dereg holds the in-process callbacks run when an AID is
 	// deregistered, and whether this process is the hub (deregister.go).
 	dereg deregHooks
+	// revoked caches what cap_revocation says about the credentials sends
+	// ask about (revoke.go).
+	revoked revokedCache
+	// quotas is the operator's raised per-recipient quotas as the hub
+	// process last read them (quota.go).
+	quotas quotaCache
 }
 
 // Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
@@ -212,6 +218,13 @@ func Open(dir string) (*Store, error) {
 	if err := s.backfillCaps(); err != nil {
 		return nil, err
 	}
+	// A deregistration deletes the AID's revocations (deregSteps) and, when
+	// the operator removed it, its raised quota; what this process holds
+	// of either is read again.
+	s.OnDeregistered(func(string) {
+		s.revoked.forget()
+		s.quotas.invalidate()
+	})
 	return s, nil
 }
 
@@ -447,6 +460,26 @@ func (s *Store) migrate() error {
 		   aid TEXT PRIMARY KEY,
 		   card BLOB NOT NULL,
 		   stored_at TEXT NOT NULL
+		 )`,
+		// The delivery credentials an owner revoked (sealed-sender SSR-H10;
+		// revoke.go): the owner's AID, the credential's 16-byte random id
+		// and when, in unix ms. Kept 31 days, at most 100 000 per owner,
+		// and in the weekly backup (deploy/hub-db-roll.sh).
+		`CREATE TABLE IF NOT EXISTS cap_revocation (
+		   owner TEXT NOT NULL,
+		   cap_id BLOB NOT NULL,
+		   revoked_at INTEGER NOT NULL,
+		   PRIMARY KEY (owner, cap_id)
+		 ) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS idx_cap_revocation_at ON cap_revocation(revoked_at)`,
+		// What the operator raised for one recipient above the defaults
+		// (anet-hub quota; sealed-sender SSR-H5, SSR-H22; quota.go): every
+		// value at or above its default. In the weekly backup.
+		`CREATE TABLE IF NOT EXISTS quota_override (
+		   aid TEXT PRIMARY KEY,
+		   first_contacts_per_min INTEGER NOT NULL,
+		   non_contact_msgs INTEGER NOT NULL,
+		   non_contact_bytes INTEGER NOT NULL
 		 )`,
 	}
 	for _, q := range stmts {

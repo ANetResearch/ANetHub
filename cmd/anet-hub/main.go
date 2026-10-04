@@ -76,18 +76,12 @@ type hubFlags struct {
 	removed *[]removedUse
 	// The §3.7 relay limits (A2A-DESIGN). See aghub.Limits.
 	maxEnvelope       *int64
-	sendRate          *float64
-	sendBurst         *int
 	mailboxMessages   *int
 	mailboxBytes      *int64
 	undeliveredTTL    *time.Duration
 	pollBudget        *int64
 	registerPerMinute *float64
 	registerBurst     *int
-	keysLookupRate    *float64
-	keysLookupBurst   *int
-	// testNoFedKeyLookup is a test switch, not a setting: see defineFlags.
-	testNoFedKeyLookup *bool
 }
 
 func defineFlags(fs *flag.FlagSet) *hubFlags {
@@ -124,8 +118,6 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	f.maxEnvelope = fs.Int64("relay-max-envelope", def.MaxEnvelope,
 		"largest sealed envelope /relay/send accepts, in bytes (413 above it); keep the reverse proxy's "+
 			"client_max_body_size at or above 4/3 of this")
-	f.sendRate = fs.Float64("relay-send-rate", def.SendRate, "per-sender /relay/send token refill, per second (429 when empty)")
-	f.sendBurst = fs.Int("relay-send-burst", def.SendBurst, "per-sender /relay/send token bucket size")
 	f.mailboxMessages = fs.Int("relay-mailbox-messages", def.MailboxMessages,
 		"undelivered envelopes one recipient may have queued (507 above it)")
 	f.mailboxBytes = fs.Int64("relay-mailbox-bytes", def.MailboxBytes,
@@ -137,37 +129,20 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	f.registerPerMinute = fs.Float64("register-rate", def.RegisterPerMinute,
 		"per-client-IP /register token refill, per minute (429 when empty)")
 	f.registerBurst = fs.Int("register-burst", def.RegisterBurst, "per-client-IP /register token bucket size")
-	f.keysLookupRate = fs.Float64("keys-lookup-rate", def.KeysLookupPerMinute,
-		"per-client-IP token refill, per minute, for GET /agents/{aid}/keys lookups forwarded to peer hubs (429 when empty)")
-	f.keysLookupBurst = fs.Int("keys-lookup-burst", def.KeysLookupBurst,
-		"per-client-IP token bucket size for key lookups forwarded to peer hubs")
-	// A test switch for the joint runs, and the only one on this binary.
-	//
-	// ANet scripts/scenario.sh proves that the /fed/v2/keys lookup is what
-	// lets a sender on another hub reach an agent whose card is not
-	// federated (A2A-DESIGN §3.9, §17 C32): with the lookup off, the same
-	// run must fail at that step. The run uses one prebuilt set of binaries
-	// on the test hosts, and a patch applied to a second build would test a
-	// binary the rest of the run never touched. The switch only takes a
-	// path away — GET /agents/{aid}/keys answers 404 where a peer would
-	// have answered — so a hub started with it by mistake fails closed:
-	// such agents are unreachable from here, nothing is exposed. It is
-	// named test-* and logged at start so it is not mistaken for tuning.
-	f.testNoFedKeyLookup = fs.Bool("test-no-fed-key-lookup", false,
-		"TESTING ONLY (ANet scripts/scenario.sh, A2A-DESIGN §17 C32): never ask peer hubs for the keys of "+
-			"agents registered elsewhere (/fed/v2/keys); agents whose cards are not federated become "+
-			"unreachable from this hub. Never set in production")
 	return f
 }
 
-// limits collects the relay limit flags.
+// limits collects the relay limit flags. The per-sender send bucket and the
+// federated key lookup's bucket are fixed values now (sealed-sender SSR-H20,
+// SSR-H21): no flag sets them.
 func (f *hubFlags) limits() aghub.Limits {
+	def := aghub.DefaultLimits()
 	return aghub.Limits{
-		MaxEnvelope: *f.maxEnvelope, SendRate: *f.sendRate, SendBurst: *f.sendBurst,
+		MaxEnvelope: *f.maxEnvelope, SendRate: def.SendRate, SendBurst: def.SendBurst,
 		MailboxMessages: *f.mailboxMessages, MailboxBytes: *f.mailboxBytes,
 		UndeliveredTTL: *f.undeliveredTTL, PollBudget: *f.pollBudget,
 		RegisterPerMinute: *f.registerPerMinute, RegisterBurst: *f.registerBurst,
-		KeysLookupPerMinute: *f.keysLookupRate, KeysLookupBurst: *f.keysLookupBurst,
+		KeysLookupPerMinute: def.KeysLookupPerMinute, KeysLookupBurst: def.KeysLookupBurst,
 	}
 }
 
@@ -175,39 +150,53 @@ func (f *hubFlags) limits() aghub.Limits {
 // value names nothing.
 var modeFlags = []string{"clear", "repair-ledger"}
 
-// removedFlags are the action flags of 0.2 that are subcommands now (core
-// G12, hub-payment-privacy PAY-U3), each with the subcommand to run. A
-// command line with one is refused with hub_flag_removed, exit 2, before
-// anything is opened.
+// removedFlags are the flags of 0.2 that are gone. A command line with one
+// is refused before anything is opened, exit 2:
+//
+//   - the action flags, subcommands now (core G12, hub-payment-privacy
+//     PAY-U3): hub_flag_removed, with the subcommand to run;
+//   - the sealed-sender settings, fixed values now (sealed-sender SSR-H20,
+//     SSR-H21): hub_flag_removed.fixed. A hub does not tune them; an
+//     operator raises one recipient's quota with anet-hub quota.
 var removedFlags = []struct {
 	name, subcommand string
 	boolean          bool
+	// fixed: the setting is a fixed value now (subcommand is empty).
+	fixed bool
 }{
-	{"grant", "grant", false},
-	{"invite-required", "admission", false},
-	{"invite-new", "admit", true},
-	{"label", "admit", false},
-	{"invite-uses", "admit", false},
-	{"invite-days", "admit", false},
-	{"invite-list", "admissions", true},
-	{"invite-revoke", "admissions revoke", false},
+	{name: "grant", subcommand: "grant"},
+	{name: "invite-required", subcommand: "admission"},
+	{name: "invite-new", subcommand: "admit", boolean: true},
+	{name: "label", subcommand: "admit"},
+	{name: "invite-uses", subcommand: "admit"},
+	{name: "invite-days", subcommand: "admit"},
+	{name: "invite-list", subcommand: "admissions", boolean: true},
+	{name: "invite-revoke", subcommand: "admissions revoke"},
+	{name: "relay-send-rate", fixed: true},
+	{name: "relay-send-burst", fixed: true},
+	{name: "keys-lookup-rate", fixed: true},
+	{name: "keys-lookup-burst", fixed: true},
+	{name: "test-no-fed-key-lookup", boolean: true, fixed: true},
 }
 
 // removedUse is one removed flag on the command line.
-type removedUse struct{ flag, subcommand string }
+type removedUse struct {
+	flag, subcommand string
+	fixed            bool
+}
 
 // removedFlagValue records that a removed flag was given; boolean ones take
 // no value, the others take one (so the parser stays in step with the rest
 // of the command line).
 type removedFlagValue struct {
 	name, subcommand string
-	boolean          bool
+	boolean, fixed   bool
 	seen             *[]removedUse
 }
 
 func (v *removedFlagValue) String() string { return "" }
 func (v *removedFlagValue) Set(string) error {
-	*v.seen = append(*v.seen, removedUse{flag: "-" + v.name, subcommand: v.subcommand})
+	*v.seen = append(*v.seen, removedUse{flag: "-" + v.name, subcommand: v.subcommand, fixed: v.fixed})
 	return nil
 }
 func (v *removedFlagValue) IsBoolFlag() bool { return v.boolean }
@@ -216,8 +205,12 @@ func (v *removedFlagValue) IsBoolFlag() bool { return v.boolean }
 func defineRemovedFlags(fs *flag.FlagSet) *[]removedUse {
 	seen := &[]removedUse{}
 	for _, r := range removedFlags {
-		fs.Var(&removedFlagValue{name: r.name, subcommand: r.subcommand, boolean: r.boolean, seen: seen},
-			r.name, "removed: run anet-hub "+r.subcommand)
+		usage := "removed: run anet-hub " + r.subcommand
+		if r.fixed {
+			usage = "removed: a fixed value now"
+		}
+		fs.Var(&removedFlagValue{name: r.name, subcommand: r.subcommand, boolean: r.boolean, fixed: r.fixed, seen: seen},
+			r.name, usage)
 	}
 	return seen
 }
@@ -261,6 +254,9 @@ func refuseEmptyModeFlags(fs *flag.FlagSet) error {
 // running hub (core G12). done is false when the hub is to be served.
 func beforeServing(f *hubFlags, fs *flag.FlagSet, c *console) (code int, done bool) {
 	if r := *f.removed; len(r) > 0 {
+		if r[0].fixed {
+			return c.say("hub_flag_removed.fixed", map[string]string{"flag": r[0].flag}), true
+		}
 		return c.say("hub_flag_removed", map[string]string{"flag": r[0].flag, "subcommand": r[0].subcommand}), true
 	}
 	if *f.showVersion {
@@ -367,13 +363,12 @@ func main() {
 	// Accounts that never collected their mail in 7 days are deregistered,
 	// hourly (PAY-A6).
 	go store.RunAdmissionJanitor(ctx, time.Hour)
+	// Revocations of delivery credentials are kept 31 days (sealed-sender
+	// SSR-H10).
+	go store.RunRevocationJanitor(ctx, time.Hour)
 
 	root := newRoot(hubID, srv0)
-	if *f.testNoFedKeyLookup {
-		log.Printf("anet-hub: TEST MODE (-test-no-fed-key-lookup): federated key lookups (/fed/v2/keys) are off")
-	}
-	deps := &hubDeps{data: *f.data, store: store, hubID: hubID, srv0: srv0, root: root,
-		noFedKeyLookup: *f.testNoFedKeyLookup}
+	deps := &hubDeps{data: *f.data, store: store, hubID: hubID, srv0: srv0, root: root}
 	wired, closers, err := wireMounts(deps)
 	for _, closer := range closers {
 		defer closer()

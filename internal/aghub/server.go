@@ -313,6 +313,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /relay/send", s.hRelaySend)
 	mux.HandleFunc("POST /relay/poll", s.hRelayPoll)
 	mux.HandleFunc("POST /relay/ack", s.hRelayAck)
+	// A mailbox owner revokes delivery credentials it issued (revoke.go).
+	mux.HandleFunc("POST /mailbox/revoke", s.hMailboxRevoke)
 	// There is no guest mode (A2A-DESIGN §9 row 访客模式). The hub used to
 	// relay a browser visitor's messages under a hub-held identity, which
 	// made it a plaintext endpoint of the conversation; /guest/* is not
@@ -555,7 +557,10 @@ type RegisterPoW struct {
 // report the optional fields individually; keys_error and card_error
 // explain a status other than ok, unchanged or absent. probation_until (unix
 // ms) and trial (pending or granted) are there only for an account that
-// came in through a sign-up window or open registration.
+// came in through a sign-up window or open registration. revocations is
+// how many unexpired revocations of the agent's delivery credentials this
+// hub holds (the total of /mailbox/revoke): a daemon that revoked more
+// pushes them again (sealed-sender SSR-D21).
 type RegisterResponse struct {
 	AID            string  `json:"aid"`
 	Status         string  `json:"status"`
@@ -565,6 +570,7 @@ type RegisterResponse struct {
 	CardError      string  `json:"card_error,omitempty"`
 	ProbationUntil *uint64 `json:"probation_until,omitempty"`
 	Trial          string  `json:"trial,omitempty"`
+	Revocations    uint64  `json:"revocations"`
 }
 
 // CheckOnlyResponse is the /register answer to check_only: admitted (the
@@ -853,6 +859,14 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		log.Printf("hub: reading the probation of %s: %v", req.AID, err)
 	} else {
 		out.ProbationUntil, out.Trial = st.ProbationUntil, st.Trial
+	}
+	// The registration is written; a count that cannot be read is
+	// reported as 0, which makes the daemon push its revocations again
+	// (idempotent) rather than fail a registration that took effect.
+	if n, err := s.store.RevocationCount(req.AID); err != nil {
+		log.Printf("hub: counting the revocations of a registering agent: %v", err)
+	} else {
+		out.Revocations = uint64(n)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

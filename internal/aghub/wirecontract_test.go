@@ -387,7 +387,8 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 			"a2a_card", "aid", "caps", "card", "check_only", "enc_keys", "kel", "name", "pow", "prev_seq", "pricing",
 			"readme", "summary"}},
 		{"RegisterResponse", aghub.RegisterResponse{}, []string{
-			"aid", "card_error", "card_status", "keys_error", "keys_status", "probation_until", "status", "trial"}},
+			"aid", "card_error", "card_status", "keys_error", "keys_status", "probation_until", "revocations", "status",
+			"trial"}},
 		{"CheckOnlyResponse", aghub.CheckOnlyResponse{}, []string{"status"}},
 		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "pricing", "readme", "summary"}},
 		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keyset"}},

@@ -128,7 +128,6 @@ func TestHubTextJSON(t *testing.T) {
 // KEL-7). Each goes when its row lands; a row present while still listed
 // here fails.
 var pendingOperatorCodes = map[string]string{
-	"quota_below_default":         "v030-todo(SS-3)",
 	"hub_recovery_setup_required": "v030-todo(KEL-7)",
 	"hub_running":                 "v030-todo(KEL-7)",
 	"hub_identity_v02":            "v030-todo(KEL-7)",
@@ -191,10 +190,11 @@ func sortedSet(m map[string]bool) []string {
 var placeholderRe = regexp.MustCompile(`\{[a-z_]+\}`)
 
 // hubPlaceholders are the placeholders the hub fills (ux UX-G8 and the
-// operator rows' own: {flag}, {subcommand}).
+// operator rows' own: {flag}, {subcommand}, and {key}, the option of anet-hub
+// quota a value belongs to).
 var hubPlaceholders = map[string]bool{
 	"{aid}": true, "{peer}": true, "{n}": true, "{m}": true, "{time}": true, "{path}": true,
-	"{value}": true, "{name}": true, "{flag}": true, "{subcommand}": true,
+	"{value}": true, "{name}": true, "{flag}": true, "{subcommand}": true, "{key}": true,
 }
 
 // placeholderValues are sample values of each placeholder, for the checks
@@ -208,8 +208,9 @@ var placeholderValues = map[string][]string{
 	"{path}":       {"/var/lib/anet-hub"},
 	"{value}":      {"bafyrei"},
 	"{name}":       {"operator grant"},
-	"{flag}":       {"-grant"},
+	"{flag}":       {"-grant", "-relay-send-rate"},
 	"{subcommand}": subcommandValues(),
+	"{key}":        {"--first-contacts-per-min", "--non-contact-mib"},
 }
 
 // subcommandValues are the subcommands a removed flag can name.
@@ -217,6 +218,9 @@ func subcommandValues() []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, r := range removedFlags {
+		if r.fixed {
+			continue
+		}
 		if !seen[r.subcommand] {
 			seen[r.subcommand] = true
 			out = append(out, r.subcommand)

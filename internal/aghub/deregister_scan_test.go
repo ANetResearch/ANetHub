@@ -21,7 +21,8 @@ import (
 // the ledger, the supply record and the settlements (the debt is still this
 // hub's); the reviews and receipts it is the subject of; the withdrawals on
 // the card federation streams; dereg_event for the hub process; and the
-// admission list unless the admission was revoked.
+// admission list and the quota the operator raised for it unless the
+// admission was revoked.
 //
 // review and review_blob also name a reviewer while reviews are v1; v2
 // keeps no reviewer (PAY-6, SI-48), after which an AID is there only as the
@@ -100,7 +101,8 @@ func tablesNaming(t *testing.T, db *sql.DB, aid string) []string {
 // TestDeregRemovesEveryAIDKeyedRow (PAY-O1): an agent with everything a hub
 // keeps for it — capabilities, both cards on federating streams, a key set,
 // a p2p address, mail waiting, credit, reviews as subject and as reviewer,
-// an admission — is deregistered for each reason; afterwards its AID is
+// an admission, revoked delivery credentials, a raised quota — is
+// deregistered for each reason; afterwards its AID is
 // only in the tables of deregAllowed (read row by row), and the raw bytes
 // of hub.db hold it nowhere else (the allowed rows removed from a copy,
 // then VACUUM, then the file scanned).
@@ -126,8 +128,12 @@ func TestDeregRemovesEveryAIDKeyedRow(t *testing.T) {
 			}
 			uploadInterlockedReview(t, srv, x, y, 5, "as subject")
 			uploadInterlockedReview(t, srv, y, x, 4, "as reviewer")
+			revoked(t, srv, x, b64ids(capIDFor(1, 1), capIDFor(1, 2)), 2, 2)
+			if _, err := store.SetQuota(x.AID(), aghub.QuotaChange{NonContactMsgs: i64(900)}); err != nil {
+				t.Fatal(err)
+			}
 
-			if got := tablesNaming(t, store.DBForTest(), x.AID()); len(got) < 12 {
+			if got := tablesNaming(t, store.DBForTest(), x.AID()); len(got) < 14 {
 				t.Fatalf("setup: the agent is in only %v", got)
 			}
 			tx, err := store.DBForTest().Begin()
@@ -151,6 +157,7 @@ func TestDeregRemovesEveryAIDKeyedRow(t *testing.T) {
 			}
 			if why != aghub.DeregRevoked && why != aghub.DeregOperator {
 				allowed["admitted"] = true
+				allowed["quota_override"] = true
 			}
 			for _, tb := range tablesNaming(t, store.DBForTest(), x.AID()) {
 				if !allowed[tb] {
@@ -166,6 +173,13 @@ func TestDeregRemovesEveryAIDKeyedRow(t *testing.T) {
 			}
 			if code, _ := getJSON(t, srv.URL+"/agents/"+x.AID()+"/p2p"); code != http.StatusNotFound {
 				t.Errorf("its p2p address is still served (%d)", code)
+			}
+			if n := revocationCount(t, store, x.AID()); n != 0 {
+				t.Errorf("after %s it still has %d revocations", why, n)
+			}
+			q, err := store.QuotaOf(x.AID())
+			if raised := q != aghub.DefaultQuota(); err != nil || raised != allowed["quota_override"] {
+				t.Errorf("after %s its quota is %+v (%v): the operator's raise should stay only when the operator did not remove it", why, q, err)
 			}
 		})
 	}

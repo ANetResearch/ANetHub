@@ -36,6 +36,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 	"admissions": runAdmissions,
 	"admission":  runAdmission,
 	"grant":      runGrant,
+	"quota":      runQuota, // quota.go
 }
 
 // runSubcommand runs the subcommand name with args; data is the --data the
@@ -43,7 +44,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 func runSubcommand(c *console, name, data string, args []string) int {
 	f, ok := subcommands[name]
 	if !ok {
-		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant …")
+		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota …")
 	}
 	return f(c, data, args)
 }

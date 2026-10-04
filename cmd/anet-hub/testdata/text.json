@@ -169,12 +169,28 @@
       "en": "{flag} is now a subcommand; run anet-hub {subcommand}."
     },
     {
+      "key": "hub_flag_removed.fixed",
+      "class": "C",
+      "exit": 2,
+      "next_kind": "change_input",
+      "zh": "{flag} 已改为固定值；请删去这个参数后重新启动 anet-hub。",
+      "en": "{flag} is now a fixed value; remove it and start anet-hub again."
+    },
+    {
       "key": "hub_flag_removed.none",
       "class": "C",
       "exit": 2,
       "next_kind": "change_input",
       "zh": "{flag} 已删除，没有替代（账目只保留 14 天，不再有需要修复的缺口）；请删去这个参数。",
       "en": "{flag} was removed with no replacement (the ledger keeps 14 days, so there is no gap to repair); remove it from the command."
+    },
+    {
+      "key": "quota_below_default",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "只能调高：{key} 不能低于缺省值 {value}；请改用不小于 {value} 的值。",
+      "en": "You can only raise it: {key} cannot be below the default {value}; use a value of at least {value}."
     },
     {
       "key": "redemptions.summary",
