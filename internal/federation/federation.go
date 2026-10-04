@@ -218,6 +218,8 @@ type Service struct {
 	maxEnvelope int64
 	// replay remembers accepted /fed/v2/keys request signatures.
 	replay *replayGuard
+	// signer signs this hub's requests to its peers (signer.go).
+	signer *Signer
 	// round counts sync passes, so a full re-read can be scheduled
 	// without a second timer. Touched only from the sync loop.
 	round int
@@ -280,11 +282,13 @@ CREATE TABLE IF NOT EXISTS fed_cursor_v2 (peer_aid TEXT PRIMARY KEY, cursor INTE
 		db.Close()
 		return nil, err
 	}
-	return &Service{cfg: cfg, id: id, local: local, db: db,
+	s := &Service{cfg: cfg, id: id, local: local, db: db,
 		// Every request to a peer states the hub wire (core CORE-V1).
 		http:        &http.Client{Timeout: 10 * time.Second, Transport: wire3.Transport(nil)},
 		maxEnvelope: defaultMaxEnvelope, replay: newReplayGuard(),
-		a2aStreamStatus: map[string]int{}, kelFetches: map[string]*peerKELFetch{}}, nil
+		a2aStreamStatus: map[string]int{}, kelFetches: map[string]*peerKELFetch{}}
+	s.signer = NewSigner(id, s.http)
+	return s, nil
 }
 
 // defaultMaxEnvelope matches the kernel's default envelope limit
