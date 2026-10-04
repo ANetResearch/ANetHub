@@ -168,18 +168,7 @@ func (s *Service) LookupKeys(ctx context.Context, aid string,
 // askKeys performs one signed /fed/v2/keys request to one peer.
 func (s *Service) askKeys(ctx context.Context, p *Peer, aid string) (keyset, kel []byte, err error) {
 	target := strings.TrimSuffix(p.Endpoint, "/") + "/fed/v2/keys/" + url.PathEscape(aid)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	ts := uint64(time.Now().UnixMilli())
-	pre := relayauth.PreimageV2(actionFedKeys, s.id.AID, p.AID, ts, http.MethodGet, req.URL.RequestURI(), nil)
-	sig, seq := s.id.Sign(pre)
-	req.Header.Set(relayauth.HeaderAID, s.id.AID)
-	req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
-	req.Header.Set(relayauth.HeaderSeq, strconv.FormatUint(seq, 10))
-	req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
-	resp, err := s.http.Do(req)
+	resp, err := s.signer.Do(ctx, p.AID, actionFedKeys, Request{Method: http.MethodGet, URL: target})
 	if err != nil {
 		return nil, nil, fmt.Errorf("peer %s: %w", p.AID, err)
 	}
