@@ -99,3 +99,23 @@ func (s *Store) SetDirNoticeForTest(f func(aid string) []byte) {
 
 // DirMaxBitsOfForTest is dirMaxBits over the given 64-bit hash prefixes.
 func DirMaxBitsOfForTest(prefixes []uint64) int { return dirMaxBits(prefixes) }
+
+// PublishDueAtForTest is PublishDue with the clock reading at, so a test can
+// close an epoch without moving the clock every other part of the hub reads.
+func (s *Store) PublishDueAtForTest(at time.Time) (*SupplyEpochEntry, error) {
+	return s.publishDueAt(at)
+}
+
+// LiabilityProofAtForTest is LiabilityProof with the clock reading at.
+func (s *Store) LiabilityProofAtForTest(aid string, toDay *uint64, at time.Time) (LiabilityProof, error) {
+	return s.liabilityProofAt(aid, toDay, at)
+}
+
+// PruneLiabilityProofsAtForTest is PruneLiabilityProofs with the clock
+// reading at.
+func (s *Store) PruneLiabilityProofsAtForTest(at time.Time) error {
+	return s.pruneLiabilityProofsAt(at)
+}
+
+// DepthForTest is the tree depth an epoch states.
+func (e SupplyEpochEntry) DepthForTest() int { return e.depth }

@@ -91,8 +91,6 @@ func TestQuotaCommand(t *testing.T) {
 	for _, args := range [][]string{
 		{"quota"},
 		{"quota", aid, aid},
-		{"quota", aid, "--non-contact-msgs", "many"},
-		{"quota", aid, "--non-contact-msgs", "99999999999"},
 		{"quota", aid, "--quota", "5"},
 	} {
 		if r := cli(t, "en", append([]string{"-data", dir}, args...)...); r.code != 2 || !strings.HasPrefix(r.stderr, "usage: anet-hub quota") {
@@ -179,5 +177,41 @@ func TestNoSealedSenderGlobalFlags(t *testing.T) {
 				t.Errorf("-%s looks like a sealed-sender setting; those are fixed values (SSR-H21)", name)
 			}
 		}
+	}
+}
+
+// quota_bad_value (ux §1.4 L): a value that is not a whole number, or is
+// above 2^31 − 1, is a usage error naming the option, exit 2, in the
+// operator's language, and changes nothing; the line says what range the
+// value has to be in. A value below its default is still
+// quota_below_default (exit 1), and an unknown option the usage line.
+func TestQuotaBadValueSentence(t *testing.T) {
+	dir := hubDir(t)
+	_, aid := newAID(t)
+	before := quotaLines("30", "500", "64")
+	expectOut(t, cli(t, "en", "-data", dir, "quota", aid), before)
+	for _, c := range []struct {
+		args []string
+		key  string
+	}{
+		{[]string{"--non-contact-msgs", "many"}, "--non-contact-msgs"},
+		{[]string{"--non-contact-msgs", "99999999999"}, "--non-contact-msgs"},
+		{[]string{"--first-contacts-per-min", "2147483648"}, "--first-contacts-per-min"},
+		{[]string{"--non-contact-mib=1.5"}, "--non-contact-mib"},
+		{[]string{"--non-contact-mib", "9223372036854775808"}, "--non-contact-mib"},
+		{[]string{"--non-contact-msgs", "900", "--non-contact-mib", "0x10"}, "--non-contact-mib"},
+	} {
+		for _, lang := range []string{"en", "zh"} {
+			r := cli(t, lang, append([]string{"-data", dir, "quota", aid}, c.args...)...)
+			expectErr(t, r, 2, sentenceOf(lang, "quota_bad_value", map[string]string{"key": c.key}))
+		}
+	}
+	expectOut(t, cli(t, "en", "-data", dir, "quota", aid), before)
+	// The largest value it takes is a raise like any other.
+	expectOut(t, cli(t, "en", "-data", dir, "quota", aid, "--non-contact-msgs", "2147483647"),
+		quotaLines("30", "2147483647", "64"))
+	if got := render("quota_bad_value", langEN, map[string]string{"key": "--non-contact-msgs"}); got !=
+		"--non-contact-msgs needs a whole number from 1 to 2147483647; use a whole number in that range." {
+		t.Errorf("the English sentence: %q", got)
 	}
 }

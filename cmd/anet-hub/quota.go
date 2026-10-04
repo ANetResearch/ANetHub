@@ -9,7 +9,8 @@ package main
 //   - with options, it raises the values given (only those) and shows the
 //     result the same way. A value below its default changes nothing and is
 //     refused with quota_below_default, exit 1. A value equal to its default
-//     puts the default back.
+//     puts the default back. A value that is not a whole number, or is above
+//     2^31 − 1, is a usage error: quota_bad_value, exit 2.
 //
 // Like admit, it runs beside a running hub; the hub reads the change within
 // a minute (aghub.Store.QuotaFor). Every other number of the sealed-sender
@@ -18,29 +19,74 @@ package main
 import (
 	"errors"
 	"flag"
+	"math"
+	"strconv"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
+// quotaValue is the value of one quota option: a whole number up to
+// 2^31 − 1. Anything else is remembered as bad rather than only failing the
+// parse, so the refusal can name the option (quota_bad_value).
+type quotaValue struct {
+	n   int64
+	bad bool
+}
+
+func (v *quotaValue) String() string { return strconv.FormatInt(v.n, 10) }
+
+// errQuotaValue fails the parse of a bad quota value; runQuota answers it
+// with quota_bad_value.
+var errQuotaValue = errors.New("quota_bad_value")
+
+func (v *quotaValue) Set(s string) error {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n > math.MaxInt32 {
+		v.bad = true
+		return errQuotaValue
+	}
+	v.n = n
+	return nil
+}
+
 func runQuota(c *console, data string, args []string) int {
 	const use = "anet-hub quota <AID> [--first-contacts-per-min N] [--non-contact-msgs N] [--non-contact-mib N]"
 	fs, dataDir := newSubFlags("quota", data)
-	firstContacts := fs.Int64(aghub.QuotaFirstContactsPerMin, 0, "first contacts this AID takes per minute")
-	msgs := fs.Int64(aghub.QuotaNonContactMsgs, 0, "messages from non-contacts its mailbox holds")
-	mib := fs.Int64(aghub.QuotaNonContactMiB, 0, "MiB from non-contacts its mailbox holds")
+	var firstContacts, msgs, mib quotaValue
+	opts := []struct {
+		name string
+		v    *quotaValue
+	}{
+		{aghub.QuotaFirstContactsPerMin, &firstContacts},
+		{aghub.QuotaNonContactMsgs, &msgs},
+		{aghub.QuotaNonContactMiB, &mib},
+	}
+	fs.Var(&firstContacts, aghub.QuotaFirstContactsPerMin, "first contacts this AID takes per minute")
+	fs.Var(&msgs, aghub.QuotaNonContactMsgs, "messages from non-contacts its mailbox holds")
+	fs.Var(&mib, aghub.QuotaNonContactMiB, "MiB from non-contacts its mailbox holds")
 	pos, err := parseArgs(fs, args)
-	if err != nil || len(pos) != 1 {
+	if err != nil {
+		// A value the option cannot take is named; anything else is the
+		// usage line.
+		for _, o := range opts {
+			if o.v.bad {
+				return c.say("quota_bad_value", map[string]string{"key": "--" + o.name})
+			}
+		}
+		return c.usage(use)
+	}
+	if len(pos) != 1 {
 		return c.usage(use)
 	}
 	var ch aghub.QuotaChange
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case aghub.QuotaFirstContactsPerMin:
-			ch.FirstContactsPerMin = firstContacts
+			ch.FirstContactsPerMin = &firstContacts.n
 		case aghub.QuotaNonContactMsgs:
-			ch.NonContactMsgs = msgs
+			ch.NonContactMsgs = &msgs.n
 		case aghub.QuotaNonContactMiB:
-			ch.NonContactMiB = mib
+			ch.NonContactMiB = &mib.n
 		}
 	})
 	aid := pos[0]

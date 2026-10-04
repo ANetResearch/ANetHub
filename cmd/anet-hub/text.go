@@ -142,10 +142,14 @@ var hubText = []textRow{
 		Zh: "{flag} 已删除，没有替代（账目只保留 14 天，不再有需要修复的缺口）；请删去这个参数。",
 		En: "{flag} was removed with no replacement (the ledger keeps 14 days, so there is no gap to repair); remove it from the command."},
 
-	// anet-hub quota (sealed-sender SSR-H22): a value below its default.
+	// anet-hub quota (sealed-sender SSR-H22): a value below its default,
+	// or one that is not a whole number up to 2^31 − 1 (a usage error).
 	{Key: "quota_below_default", Class: classC, Exit: 1, NextKind: nextChangeInput,
 		Zh: "只能调高：{key} 不能低于缺省值 {value}；请改用不小于 {value} 的值。",
 		En: "You can only raise it: {key} cannot be below the default {value}; use a value of at least {value}."},
+	{Key: "quota_bad_value", Class: classC, Exit: 2, NextKind: nextChangeInput,
+		Zh: "{key} 需要一个 1 到 2147483647 之间的整数；请改用这个范围内的整数。",
+		En: "{key} needs a whole number from 1 to 2147483647; use a whole number in that range."},
 
 	// anet-hub redemptions
 	{Key: "redemptions.summary", Class: classI,
@@ -156,6 +160,16 @@ var hubText = []textRow{
 	{Key: "data.missing", Class: classC, Exit: 1, NextKind: nextChangeInput,
 		Zh: "{path} 里没有 hub 数据，什么都没有改；请用 --data 指向 anet-hub 运行时用的目录后重试。",
 		En: "There is no hub data in {path}, so nothing was changed; point --data at the directory anet-hub runs with and try again."},
+
+	// The hub and every subcommand: a data directory this release does not
+	// open (core CORE-V4). Data of 0.2 is moved away; data a newer anet-hub
+	// wrote is valid, so the next step is to upgrade and nothing is deleted.
+	{Key: "hub_identity_v02", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "这是 0.2 的 hub 数据（身份文件或数据库），0.3.0 不迁移旧数据；请把 hub 数据目录移走后重试（会生成新身份）。",
+		En: "This hub data (identity file or database) is from 0.2, and 0.3.0 does not migrate old data; move the hub data directory away and try again to create a new identity."},
+	{Key: "hub_data_too_new", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "这个 hub 数据目录由更新版本的 anet-hub 写入，本版本打不开；请升级 anet-hub 后重试（不要删除这个目录）。",
+		En: "This hub data directory was written by a newer anet-hub, which this version cannot open; upgrade anet-hub and try again (do not delete the directory)."},
 }
 
 // textLang is the language of the sentences.

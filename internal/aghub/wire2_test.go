@@ -548,8 +548,9 @@ func TestAnAckedEnvelopeLeavesNoBytesOnDisk(t *testing.T) {
 }
 
 // A relay table written by an earlier release is not converted (core
-// CORE-V4): the hub refuses to open the data directory and says to start
-// from a new one, and the file is left as it was.
+// CORE-V4): the hub refuses to open the data directory (a database without
+// the 0.3.0 version is anet-hub 0.2's, hub_identity_v02), and the file is
+// left as it was.
 func TestAnEarlierRelayTableIsRefused(t *testing.T) {
 	for name, table := range map[string]string{
 		"wire 1": `CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
@@ -569,14 +570,11 @@ func TestAnEarlierRelayTableIsRefused(t *testing.T) {
 			}
 			old.Close()
 			store, err := aghub.Open(dir)
-			if !errors.Is(err, aghub.ErrOldRelayTable) {
+			if !errors.Is(err, aghub.ErrHubDataV02) {
 				if store != nil {
 					store.Close()
 				}
-				t.Fatalf("opening a %s relay table: %v, want ErrOldRelayTable", name, err)
-			}
-			if !strings.Contains(err.Error(), "move the directory aside") {
-				t.Errorf("the refusal does not say what to do: %v", err)
+				t.Fatalf("opening a %s relay table: %v, want ErrHubDataV02", name, err)
 			}
 			// Nothing was created beside the old table.
 			db := openDB(t, dir)

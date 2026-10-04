@@ -536,19 +536,28 @@ func TestTheDirectoryHealsWhatTheCursorSkipped(t *testing.T) {
 // A chain with exactly one record must be witnessable.
 //
 // WitnessOnce tested head.Seq == 0 for "nothing to pin". An AEL's first
-// record is seq 0, and the opening entry every upgraded hub starts with
-// sits there — so a hub whose chain held only that was never witnessed.
-// Live: host-e was witnessed zero times while witnessing host-f hourly.
+// record is seq 0 — so a hub whose chain held only that was never
+// witnessed. Live: one hub was witnessed zero times while witnessing its
+// peer hourly. The head is the peer's latest supply epoch, {seq, id}; the
+// attestation goes back to the peer base64url (core CORE-E5).
 func TestAOneRecordChainIsStillWitnessed(t *testing.T) {
 	dir := t.TempDir()
 	// A peer serving a head at seq 0.
+	var mu sync.Mutex
+	var submitted []string
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/x402/issuance/head" {
-			w.WriteHeader(http.StatusOK)
-			return
+		switch r.URL.Path {
+		case "/x402/issuance/head":
+			_ = json.NewEncoder(w).Encode(map[string]any{"seq": 0, "id": "bafy-first-epoch"})
+		case "/x402/witness":
+			var body struct {
+				Attestation string `json:"attestation"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			submitted = append(submitted, body.Attestation)
+			mu.Unlock()
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"chain_did": "did:anet:peer", "seq": 0, "head_id": "bafy-opening"})
 	}))
 	defer peer.Close()
 
@@ -562,16 +571,22 @@ func TestAOneRecordChainIsStillWitnessed(t *testing.T) {
 	if n := svc.WitnessOnce(context.Background()); n != 1 {
 		t.Fatalf("pinned %d heads, want 1 — a one-record chain was treated as having none", n)
 	}
-	if len(w.pinned) != 1 || w.pinned[0].seq != 0 || w.pinned[0].headID != "bafy-opening" {
+	if len(w.pinned) != 1 || w.pinned[0].seq != 0 || w.pinned[0].headID != "bafy-first-epoch" ||
+		w.pinned[0].peerAID != "did:anet:peer" {
 		t.Errorf("pinned = %+v", w.pinned)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := base64.RawURLEncoding.EncodeToString([]byte("attestation")); len(submitted) != 1 || submitted[0] != want {
+		t.Errorf("the peer was sent %q, want the attestation base64url %q", submitted, want)
 	}
 }
 
-// A peer that has issued nothing has no head, and must not be pinned.
+// A peer that has published no epoch has no head, and must not be pinned.
 func TestAPeerWithNoChainIsNotWitnessed(t *testing.T) {
 	dir := t.TempDir()
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"chain_did": "did:anet:peer"})
+		_ = json.NewEncoder(w).Encode(map[string]any{})
 	}))
 	defer peer.Close()
 	svc := newDiscoveryService(t, dir, Config{

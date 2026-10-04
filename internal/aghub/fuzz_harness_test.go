@@ -333,8 +333,8 @@ func (f *fz) balance(tb testing.TB, aid string) int64 {
 //   - what is due to and owed by peers is not negative;
 //   - every account's entries add up to its balance (what `anet
 //     reconcile` checks);
-//   - the published supply agrees with itself: outstanding equals what
-//     the agent rows add up to, and the signed issuance chain agrees.
+//   - the supply adds up (P-PAY-3): the agent balances add up to
+//     issued − redeemed, and the hub's own row holds the negative of that.
 func (f *fz) ledgerInvariants(tb testing.TB) {
 	tb.Helper()
 	for _, q := range []string{
@@ -369,16 +369,20 @@ func (f *fz) ledgerInvariants(tb testing.TB) {
 		}
 	}
 	rows.Close()
+	f.supplyInvariant(tb)
+}
+
+// supplyInvariant is P-PAY-3 (hub-payment-privacy §4.2.1 PAY-S8): after
+// every step, Σ agent balances == issued − redeemed == −(the hub's row).
+func (f *fz) supplyInvariant(tb testing.TB) {
+	tb.Helper()
 	sup, err := f.store.Supply(f.hubAID)
 	if err != nil {
 		tb.Fatalf("supply: %v", err)
 	}
-	if sup.Outstanding != sup.Balances {
-		tb.Fatalf("supply: outstanding %d, agent balances %d", sup.Outstanding, sup.Balances)
-	}
-	if !sup.ChainAgrees {
-		tb.Fatalf("supply: the issuance chain says %d outstanding, the ledger %d (%+v)",
-			sup.ChainOutstanding, sup.Outstanding, sup)
+	if !sup.Consistent() {
+		tb.Fatalf("supply: agent balances %d, issued − redeemed %d, the hub's row %d (%+v)",
+			sup.Balances, sup.Outstanding, sup.HubRow, sup)
 	}
 }
 

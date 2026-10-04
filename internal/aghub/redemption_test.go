@@ -265,18 +265,11 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 
 func supplyOf(t *testing.T, srv *httptest.Server) aghub.Supply {
 	t.Helper()
-	resp, err := http.Get(srv.URL + "/x402/supply")
+	sup, err := storeOf(t, srv).Supply(hubAIDOf(t, srv))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	var out struct {
-		Supply aghub.Supply `json:"supply"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
-	return out.Supply
+	return sup
 }
 
 // signedPayment is a PAYMENT-SIGNATURE header value: the payment payload
@@ -623,10 +616,10 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 		t.Errorf("due to %s = %d, want 250", foreignPayee, due[foreignPayee])
 	}
 
-	// The supply fell by what left, and the chain agrees with the
-	// balances. A chain that did not record this would keep claiming the
-	// credit was still outstanding here while it was also outstanding on
-	// the peer.
+	// The supply fell by what left, and the totals agree with the
+	// balances and the hub's row (P-PAY-3). Totals that did not record
+	// this would keep claiming the credit was still outstanding here while
+	// it was also outstanding on the peer.
 	after := supplyOf(t, srv)
 	if after.Outstanding != before.Outstanding-250 {
 		t.Errorf("outstanding = %d, want %d", after.Outstanding, before.Outstanding-250)
@@ -635,20 +628,22 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 		t.Errorf("the ledger no longer balances: outstanding=%d balances=%d",
 			after.Outstanding, after.Balances)
 	}
-	if !after.ChainAgrees {
-		t.Errorf("the signed chain disagrees with the ledger: chain=%d outstanding=%d",
-			after.ChainOutstanding, after.Outstanding)
+	if !after.Consistent() {
+		t.Errorf("the supply totals disagree with the ledger: %+v", after)
+	}
+	if after.Redeemed != before.Redeemed+250 {
+		t.Errorf("redeemed = %d, want %d — paying a peer's agent was not recorded as leaving circulation",
+			after.Redeemed, before.Redeemed+250)
 	}
 }
 
 // The payee's side of the same payment: credit is created here, and the
-// signed chain records it as issuance.
+// supply totals record it as issuance.
 //
 // Clearing raised a local balance with no local account falling, which is
-// issuance by definition, and wrote nothing to the chain. The chain then
-// understated what was outstanding by exactly the cleared amount, so the
-// hub's own audit endpoint reported a discrepancy that was its own
-// omission rather than a ledger problem.
+// issuance by definition. Not recorded as such, the published outstanding
+// would understate what this hub owes by exactly the cleared amount, and
+// the next epoch would refuse to close.
 func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	peer, err := identitytest.Hub()
@@ -678,13 +673,12 @@ func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 	if after.Outstanding != before.Outstanding+250 {
 		t.Errorf("outstanding = %d, want %d", after.Outstanding, before.Outstanding+250)
 	}
-	if !after.ChainAgrees {
-		t.Errorf("the signed chain disagrees after clearing: chain=%d outstanding=%d",
-			after.ChainOutstanding, after.Outstanding)
+	if !after.Consistent() {
+		t.Errorf("the supply totals disagree after clearing: %+v", after)
 	}
-	if after.ChainIssued != before.ChainIssued+250 {
-		t.Errorf("chain issued = %d, want %d — clearing was not recorded as issuance",
-			after.ChainIssued, before.ChainIssued+250)
+	if after.Issued != before.Issued+250 {
+		t.Errorf("issued = %d, want %d — clearing was not recorded as issuance",
+			after.Issued, before.Issued+250)
 	}
 }
 

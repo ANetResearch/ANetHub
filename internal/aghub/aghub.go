@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,18 +151,9 @@ type Store struct {
 	// hubAID is the row credit is issued from and redeemed into, so the
 	// ledger sums to zero and the hub's liability is countable.
 	hubAID string
-	// issuance serialises appends to the supply chain. A gap or a
-	// duplicate sequence number would make the chain unverifiable, and
-	// two concurrent grants are an ordinary thing to have.
-	issuance issuanceChain
-	// issueMu makes ClearFromPeer one step with issuanceRoom, the check
-	// that it fits what the supply can add up to: reading the room and
-	// writing in separate statements let issuances arriving together at the
-	// bound each find room for itself, and the sum passed MaxInt64 anyway
-	// (found by a fuzzing review of the hub). The grants (issueTx) check and
-	// write in one transaction instead. Taken before issuance.mu, never
-	// after it.
-	issueMu sync.Mutex
+	// liabTrees caches the liability trees of the epochs whose proofs
+	// are still served (supply.go).
+	liabTrees liabTreeCache
 	// quota bounds each recipient's undelivered messages (relay.go).
 	quota relayQuota
 	db    *sql.DB
@@ -220,10 +213,17 @@ func (s *Store) runKELHooks(aid string) {
 	}
 }
 
-// Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
+// Open opens the Hub store at dir (SQLite at dir/hub.db), creating it when
+// there is none. A hub.db that this release did not write is refused, not
+// converted (core CORE-V4): one an earlier anet-hub wrote is ErrHubDataV02,
+// one a newer anet-hub wrote is ErrHubDataTooNew, and in both cases the file
+// is left exactly as it was (CheckData).
 func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("hub: dir required")
+	}
+	if err := CheckData(dir); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("hub: mkdir: %w", err)
@@ -245,27 +245,26 @@ func Open(dir string) (*Store, error) {
 	// busy_timeout (waiting could deadlock). The send failed with "database
 	// is locked" (ANet an internal note F2). A lock taken at BEGIN waits
 	// under busy_timeout like any single statement.
-	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+
+	db, err := sql.Open("sqlite", filepath.Join(dir, dataFile)+
 		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)&_pragma=secure_delete(ON)"+
 		"&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("hub: open db: %w", err)
 	}
+	// Every connection SQLite opens parses the whole schema before its first
+	// statement. database/sql keeps 2 idle connections by default, so under
+	// more than two concurrent requests most of them opened a fresh
+	// connection, parsed the schema and closed it again: in a profile of the
+	// hub under load the SQLite parser took about 35% of the CPU. The pool
+	// keeps as many idle connections as the hub serves requests at once in
+	// practice; an idle connection costs its page cache and nothing else.
+	db.SetMaxIdleConns(dbIdleConns)
 	s := &Store{db: db, quota: relayQuota{
 		messages: DefaultLimits().MailboxMessages,
 		bytes:    DefaultLimits().MailboxBytes,
 	}}
-	if err := s.migrate(); err != nil {
+	if err := s.createSchema(); err != nil {
 		db.Close()
-		return nil, err
-	}
-	if err := s.migrateAdmission(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	// An upgraded hub already holds agents whose capabilities were only
-	// ever a JSON blob; index them before serving.
-	if err := s.backfillCaps(); err != nil {
 		return nil, err
 	}
 	// A deregistration deletes the AID's revocations (deregSteps) and, when
@@ -281,8 +280,144 @@ func Open(dir string) (*Store, error) {
 // Close closes the db handle.
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
-	stmts := []string{
+// dataFile is the hub's database in its data directory.
+const dataFile = "hub.db"
+
+// dbIdleConns is how many idle connections the pool keeps (Open).
+const dbIdleConns = 32
+
+// SchemaVersion is the PRAGMA user_version of a 0.3.0 hub.db (core CORE-V4).
+// A new database gets it together with its whole schema, in one transaction
+// (createSchema).
+const SchemaVersion = 3
+
+// ErrHubDataV02 is a hub.db an earlier anet-hub wrote: its user_version is
+// below SchemaVersion, or it has tables and no version at all. 0.3.0 does not
+// convert one (core CORE-V4); anet-hub says hub_identity_v02.
+var ErrHubDataV02 = errors.New("hub: hub.db was written by anet-hub 0.2 or earlier, and 0.3.0 does not migrate it")
+
+// ErrHubDataTooNew is a hub.db a newer anet-hub wrote: its user_version is
+// above SchemaVersion. The data is valid and must not be moved away; the
+// operator upgrades anet-hub (hub_data_too_new).
+var ErrHubDataTooNew = errors.New("hub: hub.db was written by a newer anet-hub than this one")
+
+// CheckData says whether this release can open the hub.db in dir, and writes
+// nothing: nil when there is none yet, when the file holds no schema (a
+// creation that never committed) and for a 0.3.0 database; an error wrapping
+// ErrHubDataV02 or ErrHubDataTooNew otherwise. The file is read with SQLite's
+// immutable flag, which takes no lock and makes no -wal or -shm file, so a
+// directory the hub refuses stays exactly as it was.
+func CheckData(dir string) error {
+	path := filepath.Join(dir, dataFile)
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("hub: %w", err)
+	}
+	db, err := sql.Open("sqlite", readOnlyURI(path))
+	if err != nil {
+		return fmt.Errorf("hub: open %s: %w", path, err)
+	}
+	defer db.Close()
+	version, objects, err := schemaState(db)
+	if err != nil {
+		return fmt.Errorf("hub: read %s: %w", path, err)
+	}
+	return judgeSchema(version, objects)
+}
+
+// readOnlyURI is the SQLite URI that opens the file at path read-only and
+// immutable.
+func readOnlyURI(path string) string {
+	p := filepath.ToSlash(path)
+	if filepath.IsAbs(path) && !strings.HasPrefix(p, "/") {
+		p = "/" + p // a drive letter: file:/C:/…
+	}
+	return "file:" + (&url.URL{Path: p}).EscapedPath() + "?mode=ro&immutable=1"
+}
+
+// schemaState reads a database's user_version and the number of objects in
+// its schema, through q (the database or a transaction).
+func schemaState(q rowQuerier) (version, objects int, err error) {
+	if err = q.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, 0, err
+	}
+	err = q.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&objects)
+	return version, objects, err
+}
+
+// judgeSchema is nil for a 0.3.0 database and for a file with no schema yet;
+// ErrHubDataTooNew for a version above SchemaVersion; ErrHubDataV02 for
+// anything else (an earlier version, or tables without a version).
+func judgeSchema(version, objects int) error {
+	switch {
+	case version == SchemaVersion, version == 0 && objects == 0:
+		return nil
+	case version > SchemaVersion:
+		return fmt.Errorf("%w (user_version %d, this release writes %d)", ErrHubDataTooNew, version, SchemaVersion)
+	}
+	return fmt.Errorf("%w (user_version %d, not %d)", ErrHubDataV02, version, SchemaVersion)
+}
+
+// schema is the 0.3.0 hub.db, one part per file that owns the tables, in the
+// order createSchema runs them. A table or a column a later change needs goes
+// into its CREATE statement here; nothing alters an existing database (core
+// CORE-V4), so there is no ALTER TABLE, no rebuild and no backfill.
+var schema = [][]string{
+	coreSchema(),
+	relayTables,
+	relayIndexes,
+	a2aCardSchema(),
+	fedA2ACardSchema(),
+	a2aFedSeqSchema(),
+	admissionSchema(),
+	supplySchema(),
+}
+
+// createSchema gives a file with no schema the whole of schema and
+// user_version SchemaVersion, in one transaction: a database is complete or
+// empty, so a creation cut short cannot leave a file the next start would
+// take for an earlier release's. A 0.3.0 database is left as it is.
+func (s *Store) createSchema() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("hub: begin: %w", err)
+	}
+	defer tx.Rollback()
+	version, objects, err := schemaState(tx)
+	if err != nil {
+		return fmt.Errorf("hub: read the schema: %w", err)
+	}
+	if version == SchemaVersion {
+		return nil
+	}
+	// CheckData read the file without its write-ahead log; read through it,
+	// the database can still turn out to be another release's (one that
+	// stopped before SQLite moved its log into the file). It is refused all
+	// the same and nothing in it is converted.
+	if err := judgeSchema(version, objects); err != nil {
+		return err
+	}
+	for _, part := range schema {
+		for _, q := range part {
+			if _, err := tx.Exec(q); err != nil {
+				return fmt.Errorf("hub: create the schema: %w", err)
+			}
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion)); err != nil {
+		return fmt.Errorf("hub: create the schema: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("hub: commit the schema: %w", err)
+	}
+	return nil
+}
+
+// coreSchema is the registry, the ledger and the small tables that have no
+// file of their own.
+func coreSchema() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS agent (
 		   aid TEXT PRIMARY KEY,
 		   name TEXT NOT NULL DEFAULT '',
@@ -291,6 +426,15 @@ func (s *Store) migrate() error {
 		   readme TEXT NOT NULL DEFAULT '',
 		   kel BLOB NOT NULL,
 		   registered_at TEXT NOT NULL,
+		   -- Visibility is the agent's answer to "may this hub tell other
+		   -- hubs about me". Three tiers, hub-local by default — the
+		   -- conservative default is deliberate (K208 §5.2): a directory
+		   -- that federated by default would publish, once and for everyone
+		   -- who never thought about it.
+		   visibility TEXT NOT NULL DEFAULT 'hub-local',
+		   -- When this agent last collected its mail; NULL until it first
+		   -- polls (liveness.go).
+		   last_seen_at TEXT,
 		   -- How the account came in (admission.go): list, window or
 		   -- open. A row written without a registration (PutAgent) reads
 		   -- as admitted by the operator.
@@ -305,8 +449,7 @@ func (s *Store) migrate() error {
 		   dir_hash BLOB UNIQUE,
 		   dir_box BLOB
 		 )`,
-		// No interaction content (A2A-DESIGN §9 row 评价). A table from
-		// before that change is rebuilt by migrateContentV2.
+		// No interaction content (A2A-DESIGN §9 row 评价).
 		reviewTableV2,
 		`CREATE INDEX IF NOT EXISTS idx_review_subject ON review(subject_aid)`,
 		// A capability id is precise, structured and machine-resolvable —
@@ -340,15 +483,21 @@ func (s *Store) migrate() error {
 		// One row per settled authorization: the idempotency key and the
 		// replay guard in one. Inserted before the balance moves, so a
 		// concurrent second settle loses on the primary key rather than
-		// on a check it raced.
+		// on a check it raced. receipt is the hub's signed receipt, kept so
+		// a repeat is answered with the same bytes; bound marks the row
+		// that holds its (payer, interaction_id) binding (A2A-DESIGN §8.5).
 		`CREATE TABLE IF NOT EXISTS credit_settled (
 		   auth_id TEXT PRIMARY KEY,
 		   payer TEXT NOT NULL,
 		   pay_to TEXT NOT NULL,
 		   amount INTEGER NOT NULL,
 		   interaction_id TEXT NOT NULL DEFAULT '',
-		   at TEXT NOT NULL
+		   at TEXT NOT NULL,
+		   bound INTEGER NOT NULL DEFAULT 0,
+		   receipt BLOB
 		 )`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_settled_binding
+		   ON credit_settled(payer, interaction_id) WHERE interaction_id != '' AND bound = 1`,
 		// Foreign authorizations already cleared here, so a peer
 		// repeating a receipt cannot credit our user twice.
 		`CREATE TABLE IF NOT EXISTS credit_cleared (
@@ -368,7 +517,7 @@ func (s *Store) migrate() error {
 		// a hub that stored the conclusion and discarded the evidence can
 		// only pass on its own say-so, and federating reputation on say-so
 		// is the thing this design exists to avoid. Only the receipt and
-		// the review: no content (see migrateContentV2).
+		// the review: no content.
 		reviewBlobTableV2,
 		// Reviews learned from a peer hub, kept apart from local ones so
 		// the arithmetic can stay per source.
@@ -384,13 +533,10 @@ func (s *Store) migrate() error {
 			stored_at      TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_fed_review_subject ON fed_review(subject_aid)`,
-		// Every change to the total supply, in order, signed. The record
-		// column holds the ael.EventRecord that actually verifies; the
-		// parsed columns beside it are for querying and are not what a
-		// reader should check.
 		// Attestations: what somebody signed about a chain's head at a
 		// moment. Both directions live here — what others said about
-		// this hub, and what this hub said about its peers.
+		// this hub's supply epoch chain, and what this hub said about its
+		// peers'.
 		`CREATE TABLE IF NOT EXISTS head_attestation (
 			id          TEXT PRIMARY KEY,
 			chain_did   TEXT NOT NULL,
@@ -401,17 +547,6 @@ func (s *Store) migrate() error {
 			blob        BLOB NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_attestation_chain ON head_attestation(chain_did, seq)`,
-		`CREATE TABLE IF NOT EXISTS credit_issuance (
-			seq     INTEGER PRIMARY KEY,
-			id      TEXT NOT NULL UNIQUE,
-			prev_id TEXT NOT NULL,
-			kind    TEXT NOT NULL,
-			aid     TEXT NOT NULL,
-			amount  INTEGER NOT NULL,
-			reason  TEXT NOT NULL DEFAULT '',
-			at      INTEGER NOT NULL,
-			record  BLOB NOT NULL
-		)`,
 		`CREATE TABLE IF NOT EXISTS credit_redemption (
 			auth_id   TEXT PRIMARY KEY,
 			aid       TEXT NOT NULL,
@@ -466,15 +601,6 @@ func (s *Store) migrate() error {
 		   keyset BLOB NOT NULL,
 		   stored_at TEXT NOT NULL
 		 )`,
-		// The A2A AgentCard an agent submitted at registration, stored as
-		// the raw bytes it sent once it passed admission (A2A-DESIGN
-		// §10.3). The admission columns and the skill and tag indexes are
-		// added by migrateA2ACard; see a2acard.go.
-		`CREATE TABLE IF NOT EXISTS agent_a2a_card (
-		   aid TEXT PRIMARY KEY,
-		   card BLOB NOT NULL,
-		   stored_at TEXT NOT NULL
-		 )`,
 		// The delivery credentials an owner revoked (sealed-sender SSR-H10;
 		// revoke.go): the owner's AID, the credential's 16-byte random id
 		// and when, in unix ms. Kept 31 days, at most 100 000 per owner,
@@ -496,53 +622,6 @@ func (s *Store) migrate() error {
 		   non_contact_bytes INTEGER NOT NULL
 		 )`,
 	}
-	// The relay tables of an earlier release are not converted (core
-	// CORE-V4): refused before CREATE TABLE IF NOT EXISTS would keep them.
-	if err := s.refuseOldRelayTable(); err != nil {
-		return err
-	}
-	stmts = append(stmts, relayTables...)
-	for _, q := range stmts {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate: %w", err)
-		}
-	}
-	// Additive upgrade for pre-existing DBs: add the profile columns if they are missing. ADD COLUMN
-	// errors with "duplicate column name" when they already exist (fresh DBs from the CREATE above) —
-	// that is expected and ignored, so migrate stays idempotent.
-	for _, q := range []string{
-		`ALTER TABLE agent ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agent ADD COLUMN readme TEXT NOT NULL DEFAULT ''`,
-		// Visibility is the agent's answer to "may this hub tell other
-		// hubs about me". Three tiers, hub-local by default — the
-		// conservative default is deliberate (K208 §5.2): a directory
-		// that federated by default would publish, once and for everyone
-		// who never thought about it.
-		`ALTER TABLE agent ADD COLUMN visibility TEXT NOT NULL DEFAULT 'hub-local'`,
-		// When this agent last collected its mail. NULL for rows that
-		// predate the column, which must read as "unknown" and never as
-		// "dead" — see liveness.go.
-		`ALTER TABLE agent ADD COLUMN last_seen_at TEXT`,
-	} {
-		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("hub: migrate profile: %w", err)
-		}
-	}
-	if err := s.migrateContentV2(); err != nil {
-		return err
-	}
-	// Stored receipts and the (payer, interaction_id) binding constraint
-	// on credit_settled (facilitator.go).
-	if err := s.migrateSettlement(); err != nil {
-		return err
-	}
-	for _, q := range relayIndexes {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate: %w", err)
-		}
-	}
-	// A2A card admission columns and the skill/tag indexes (a2acard.go).
-	return s.migrateA2ACard()
 }
 
 // PutAgent registers or updates an agent (upsert on AID). The caller has already verified the KEL
@@ -810,48 +889,6 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		out = append(out, av)
 	}
 	return out, rows.Err()
-}
-
-// backfillCaps populates agent_cap for rows registered before the table
-// existed. Without it an upgraded hub answers "nobody serves that" for
-// every agent already registered — a directory that silently forgets its
-// contents on upgrade is worse than one that never had an index.
-func (s *Store) backfillCaps() error {
-	rows, err := s.db.Query(
-		`SELECT aid, caps FROM agent WHERE aid NOT IN (SELECT DISTINCT aid FROM agent_cap)`)
-	if err != nil {
-		return err
-	}
-	type row struct {
-		aid, caps string
-	}
-	var pending []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.aid, &r.caps); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, r := range pending {
-		var caps []string
-		if json.Unmarshal([]byte(r.caps), &caps) != nil {
-			continue
-		}
-		for _, c := range caps {
-			if c = strings.TrimSpace(c); c != "" {
-				if _, err := s.db.Exec(`INSERT OR IGNORE INTO agent_cap(aid,cap) VALUES(?,?)`, r.aid, c); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }
 
 // PutProfile updates an agent's self-authored profile (summary/readme). The agent must already

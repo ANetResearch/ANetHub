@@ -598,41 +598,6 @@ func TestOnlyVerifiedCardsAreListed(t *testing.T) {
 	}
 }
 
-// A card stored before admission existed is verified when the hub opens
-// its database: kept (and indexed) if it verifies, deleted otherwise.
-func TestCardsStoredBeforeAdmissionAreVerifiedOnUpgrade(t *testing.T) {
-	dir := t.TempDir()
-	srv, store, _ := newHubAt(t, dir)
-	good, bad := twoAgents(t)
-	registerA2A(t, srv, good, "Good", nil, nil)
-	registerA2A(t, srv, bad, "Bad", nil, nil)
-	db := openDB(t, dir)
-	goodCard := signA2A(t, good, a2aCardFor(good, 1))
-	badCard := editSigned(t, signA2A(t, bad, a2aCardFor(bad, 1)), func(m map[string]any) { m["name"] = "Forged" })
-	for aid, card := range map[string][]byte{good.AID(): goodCard, bad.AID(): badCard} {
-		// What the pre-admission hub wrote: bytes, no mark.
-		if _, err := db.Exec(`INSERT INTO agent_a2a_card(aid, card, stored_at) VALUES(?,?,?)`,
-			aid, card, time.Now().UTC().Format(time.RFC3339)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	srv.Close()
-	store.Close()
-	srv2, _, _ := newHubAt(t, dir)
-	l := registry(t, srv2, "")
-	if len(l.Agents) != 1 || l.Agents[0].AID != good.AID() || !bytes.Equal(l.Agents[0].Card, goodCard) {
-		t.Errorf("after the upgrade: %+v", l)
-	}
-	var n int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM agent_a2a_card WHERE aid=?`, bad.AID()).Scan(&n)
-	if n != 0 {
-		t.Error("a stored card that does not verify survived the upgrade")
-	}
-	if got := registryAIDs(registry(t, srv2, "?skill=echo")); len(got) != 1 {
-		t.Errorf("the readmitted card is not indexed: %v", got)
-	}
-}
-
 // The registry's cursor is opaque base64url; decoding it is the hub's
 // business, but a caller passing it back must get the next page.
 func TestTheRegistryCursorRoundTrips(t *testing.T) {

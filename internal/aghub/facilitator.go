@@ -61,12 +61,12 @@ type Balance struct {
 //
 // The matching debit goes on the hub's own row. Credit does not appear
 // from nowhere: it is issued, and the issuer carries the liability. That
-// is what makes Supply computable instead of asserted — the rows across
-// the whole ledger sum to zero, so "what this hub owes its users" is
-// arithmetic anyone can repeat rather than a number the hub reports.
+// is what makes the supply countable instead of asserted — the rows across
+// the whole ledger sum to zero, so "what this hub owes its users" is the
+// negative of the hub's row, and the sum of a supply epoch's tree.
 //
-// One transaction: the hub row's entry, the issuance record, the balance
-// and the account's entry are written together or not at all.
+// One transaction: the hub row and its entry, the supply totals, the
+// balance and the account's entry are written together or not at all.
 func (s *Store) Credit(aid string, amount int64, reason string) error {
 	if amount == 0 {
 		return nil
@@ -84,20 +84,28 @@ func (s *Store) Credit(aid string, amount int64, reason string) error {
 
 // creditTx is Credit inside tx. It does not check that the issuance fits
 // the supply's bound; issueTx does.
+//
+// Credit to an agent is a supply event (hub-payment-privacy PAY-S1): the
+// hub's own row falls by it, with its ledger entry, and the issued total
+// grows, in this transaction. A store with no hub identity (some tests)
+// moves the balance alone.
 func (s *Store) creditTx(tx *sql.Tx, aid string, amount int64, reason string) error {
 	if amount == 0 {
 		return nil
 	}
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	if s.hubAID != "" && aid != s.hubAID {
+		if amount < 0 {
+			return fmt.Errorf("an issuance must be positive, got %d", amount)
+		}
+		if err := addToRow(tx, "credit_balance", "aid", "credits", s.hubAID, -amount); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
 			s.hubAID, -amount, reasonIssued+":"+reason, at); err != nil {
 			return err
 		}
-		// On the signed chain with the balance. A grant recorded only in
-		// the balance table is a grant nothing outside this hub attests
-		// to, which is the gap this chain exists to close.
-		if err := s.appendIssuanceTx(tx, EvCreditIssued, aid, amount, reason); err != nil {
+		if err := s.supplyEventTx(tx, supplyIssued, amount); err != nil {
 			return err
 		}
 	}
@@ -119,7 +127,7 @@ func (s *Store) issueTx(tx *sql.Tx, aid string, amount int64, reason string) err
 		return fmt.Errorf("an issuance must be positive, got %d", amount)
 	}
 	if s.hubAID != "" && aid != s.hubAID {
-		if err := issuanceRoom(tx, s.hubAID, amount); err != nil {
+		if err := issuanceRoom(tx, amount); err != nil {
 			return err
 		}
 	}
@@ -274,7 +282,7 @@ func CheckRequirements(p *payment.PaymentPayload, auth *payment.Authorization,
 // ledger can hold (amountInt64).
 //
 // Every door onto a settlement comes through here: /x402/verify and
-// /x402/settle (own ledger and forwarded), /x402/redeem and the gateway.
+// /x402/settle (own ledger and forwarded) and /x402/redeem.
 // An amount above math.MaxInt64 is refused before its signature is even
 // looked at, so no path below can book it as the negative number a bare
 // int64(…) would make of it.
@@ -419,7 +427,7 @@ func (s *Store) ClearablePeers() []string {
 }
 
 // SettleWithRequirements moves the credit, once, if the payment meets the
-// requirements. /x402/settle and the gateway call it.
+// requirements. /x402/settle calls it.
 //
 // On this hub's own ledger the order is: decode and verify the payer's
 // signature; compare with the requirements; answer an authorization
@@ -486,14 +494,13 @@ func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
 // payeeIsThisHub refuses requirements that name this hub as the payee.
 //
 // A payment to the hub is a redemption, and /x402/redeem is the one path
-// that books it as one: it records the redemption with its reference and
-// puts the retirement on the issuance chain. Settled through /x402/settle
-// the same authorization moved the credit to the hub's row with neither,
-// so the published supply fell while the signed chain did not and
-// chain_agrees stayed false from then on (found by FuzzHubX402Facilitator,
-// ANet an internal note). On a peer's ledger the same payment comes back as
-// a peer receipt naming this hub, which ClearFromPeer refuses for the
-// same reason, so it is not forwarded either.
+// that books it as one: it records the redemption with its reference.
+// Settled through /x402/settle the same authorization moved the credit to
+// the hub's row without that record, and before supply epochs it also left
+// the published supply disagreeing with the signed issuance record (found
+// by FuzzHubX402Facilitator, ANet an internal note). On a peer's ledger the
+// same payment comes back as a peer receipt naming this hub, which
+// ClearFromPeer refuses for the same reason, so it is not forwarded either.
 func payeeIsThisHub(hubAID string, req *payment.PaymentRequirements) *Refusal {
 	if hubAID != "" && req.PayTo == hubAID {
 		return refuse(payment.ReasonPayeeMismatch,
@@ -615,7 +622,19 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 		if err := addToRow(tx, "credit_balance", "aid", "credits", auth.PayTo, amt); err != nil {
 			return fail(moved(err))
 		}
-	} else {
+	}
+	// Credit that comes home to the hub's own row leaves circulation: a
+	// redemption (a payment to the hub), or a payment to an agent on a
+	// peer (below). That is a supply event, recorded in this transaction
+	// with the movement itself (hub-payment-privacy PAY-S1). It used to be
+	// appended to the public issuance chain after the commit, naming the
+	// payer, the amount and the payee; an epoch states only the total.
+	if auth.PayTo == hubAID || !local {
+		if err := s.supplyEventTx(tx, supplyRedeemed, amt); err != nil {
+			return fail(moved(err))
+		}
+	}
+	if !local {
 		if err := addToRow(tx, "hub_due", "payee_aid", "amount", auth.PayTo, amt); err != nil {
 			return fail(moved(err))
 		}
@@ -670,21 +689,6 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id string
 	}
 	if err := tx.Commit(); err != nil {
 		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
-	}
-	// Credit that left this ledger goes on the signed chain, for the same
-	// reason a redemption does: the chain must account for every supply
-	// change or chain_outstanding stops equalling outstanding. Paying a
-	// foreign payee destroys credit here exactly as a redemption does.
-	//
-	// After the commit, and logged rather than failed, matching the
-	// redemption path: the credit is already gone, and reporting a failure
-	// would have the payer believe it still held the balance.
-	if !local {
-		if err := s.appendIssuance(EvCreditRetired, auth.Payer, amt,
-			"cross-hub settlement "+id+" to "+auth.PayTo); err != nil {
-			log.Printf("hub: cross-hub settlement %s not recorded on the issuance chain: %v",
-				id, err)
-		}
 	}
 	out := payment.SettlementResponse{Success: true, Payer: auth.Payer,
 		Transaction: id, Network: network, Amount: payment.Amount(auth.Amount)}
@@ -810,50 +814,6 @@ func (s *Store) signReceipt(authID, payer, payTo string, amount uint64, network 
 		return nil, err
 	}
 	return rec.Marshal()
-}
-
-// migrateSettlement adds what settlement needs beyond the original
-// credit_settled table: the stored receipt, and the binding constraint
-// UNIQUE(payer, interaction_id) for non-empty interaction ids
-// (A2A-DESIGN §8.5).
-//
-// The constraint is a partial unique index over rows marked bound = 1,
-// and every new settlement is inserted bound. A hub upgraded with rows
-// already in the table may hold two settlements for one (payer,
-// interaction_id): before this constraint nothing stopped a second one.
-// An index over all rows would then fail to build and the hub would not
-// start. So on the upgrade the earliest settlement of each binding is
-// marked bound, which makes it the holder a later authorization collides
-// with, and the later duplicates stay in the table as the record of what
-// happened. The column, the marking and the index are one transaction,
-// so an interrupted upgrade is repeated whole at the next start.
-func (s *Store) migrateSettlement() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("hub: migrate settlement: %w", err)
-	}
-	defer tx.Rollback()
-	_, err = tx.Exec(`ALTER TABLE credit_settled ADD COLUMN bound INTEGER NOT NULL DEFAULT 0`)
-	switch {
-	case err == nil:
-		if _, err := tx.Exec(`UPDATE credit_settled SET bound = 1
-			WHERE interaction_id != '' AND rowid IN (
-			  SELECT MIN(rowid) FROM credit_settled WHERE interaction_id != ''
-			  GROUP BY payer, interaction_id)`); err != nil {
-			return fmt.Errorf("hub: migrate settlement: %w", err)
-		}
-	case !strings.Contains(err.Error(), "duplicate column name"):
-		return fmt.Errorf("hub: migrate settlement: %w", err)
-	}
-	if _, err := tx.Exec(`ALTER TABLE credit_settled ADD COLUMN receipt BLOB`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column name") {
-		return fmt.Errorf("hub: migrate settlement: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_settled_binding
-		ON credit_settled(payer, interaction_id) WHERE interaction_id != '' AND bound = 1`); err != nil {
-		return fmt.Errorf("hub: migrate settlement: %w", err)
-	}
-	return tx.Commit()
 }
 
 // VerifyWithRequirements answers "would this settle?" without moving
@@ -1070,10 +1030,10 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	}
 	// Not to this hub itself. The credit would land on the hub's own row
 	// and leave it again below, the peer would be recorded as owing it,
-	// and the issuance appended after the commit would be held by no
-	// account, so chain_agrees went false (found by FuzzHubClearFromPeer,
-	// ANet an internal note). A payment to a hub is a redemption on that
-	// hub's own ledger; SettleWithRequirements does not forward one.
+	// and the issuance would be held by no account, so the supply stopped
+	// adding up (found by FuzzHubClearFromPeer, ANet an internal note). A
+	// payment to a hub is a redemption on that hub's own ledger;
+	// SettleWithRequirements does not forward one.
 	if s.hubAID != "" && rec.PayTo == s.hubAID {
 		return refuse(payment.ReasonPayeeMismatch,
 			"%s's receipt pays this hub (%s); a peer's settlement credits an agent here, never the hub's own row",
@@ -1082,10 +1042,9 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("settlement receipt from %s: %w", peerAID, err)
 	}
-	// With the grants: issuanceRoom below and the credit are one step
-	// against them too (issueMu).
-	s.issueMu.Lock()
-	defer s.issueMu.Unlock()
+	// One transaction, which holds the database's write lock from its
+	// start: issuanceRoom below and the credit are one step against every
+	// other issuance, as in issueTx.
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1111,7 +1070,7 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	}
 	// The credit is new supply here, so it must fit what the supply can
 	// add up to, not only the payee's row.
-	if err := issuanceRoom(tx, s.hubAID, amt); err != nil {
+	if err := issuanceRoom(tx, amt); err != nil {
 		return err
 	}
 	// addToRow, as in settleAuth: a sum the column cannot hold is refused
@@ -1146,27 +1105,14 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	if err := addToRow(tx, "hub_owed", "peer_aid", "amount", peerAID, amt); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	// Credit created here goes on the signed chain.
-	//
 	// This is issuance: the payee's balance rose on this ledger and no
 	// account here fell, because the payer's account is on the peer. It is
-	// backed by a claim on that peer rather than by nothing, and the
-	// reason names the receipt so an auditor can follow it to the peer's
-	// own chain — but it is still new supply here, and a supply change
-	// missing from the chain breaks chain_outstanding == outstanding.
-	//
-	// After the commit and logged rather than failed, matching the
-	// redemption path: the credit is already there, and refusing now would
-	// tell the payee it had not been paid when it had.
-	if err := s.appendIssuance(EvCreditIssued, rec.PayTo, amt,
-		"cleared from "+peerAID+" "+rec.AuthID); err != nil {
-		log.Printf("hub: clearing %s from %s not recorded on the issuance chain: %v",
-			rec.AuthID, peerAID, err)
+	// backed by a claim on that peer rather than by nothing, but it is new
+	// supply here, recorded with the credit (hub-payment-privacy PAY-S1).
+	if err := s.supplyEventTx(tx, supplyIssued, amt); err != nil {
+		return err
 	}
-	return nil
+	return tx.Commit()
 }
 
 // Due is what this hub owes, by payee: credit that left this ledger to
@@ -1320,9 +1266,8 @@ func (s *Server) hX402Settle(w http.ResponseWriter, r *http.Request) {
 // request, or one signed by anyone else, gets 401 and no data. The
 // balance, the ledger and the redemption list were public, and between
 // them showed anyone which accounts paid which, how much and when
-// (A2A-DESIGN §3.7). The public issuance chain still shows amounts, times
-// and AIDs of cross-hub payments and redemptions; that is recorded in
-// A2A-DESIGN §21 item 9 and left unchanged in this round.
+// (A2A-DESIGN §3.7). What is public about the ledger is one total per
+// supply epoch (supply.go), which names no account and no payment.
 func (s *Server) hBalance(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.authSelf(w, r, relayauth.ActionBalance, signedBodyLimit)
 	if !ok {

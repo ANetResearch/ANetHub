@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/ael"
-	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
@@ -27,7 +26,7 @@ import (
 // chain. A witness signs what it saw, and the pair — the hub's record and
 // the witness's attestation, naming the same position with different
 // contents — demonstrates the rewrite without either party agreeing.
-func TestAWitnessAttestationDetectsARewrittenIssuanceChain(t *testing.T) {
+func TestAWitnessAttestationDetectsARewrittenSupplyChain(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	agent, err := identitytest.Hub()
 	if err != nil {
@@ -37,10 +36,11 @@ func TestAWitnessAttestationDetectsARewrittenIssuanceChain(t *testing.T) {
 	if err := store.GrantCredit(agent.AID(), 500, "operator"); err != nil {
 		t.Fatal(err)
 	}
+	publishEpoch(t, store)
 	hubAID := hubAIDOf(t, srv)
 
 	// A witness looks and signs.
-	head, seq, ok := store.IssuanceHead()
+	head, seq, ok := store.SupplyHead()
 	if !ok {
 		t.Fatal("no head to witness")
 	}
@@ -59,7 +59,7 @@ func TestAWitnessAttestationDetectsARewrittenIssuanceChain(t *testing.T) {
 	}
 
 	// The chain as it stands agrees with what the witness saw.
-	entries, err := store.IssuanceSince(0, 0)
+	entries, err := store.SupplyEpochs(0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestAWitnessAttestationDetectsARewrittenIssuanceChain(t *testing.T) {
 	}
 
 	// Now the record at that position is different. This is what a hub
-	// rewriting its issuance history would produce.
+	// rewriting its supply history would produce.
 	for _, r := range recs {
 		if r.Seq == seq {
 			r.ID = "bafy-rewritten"
@@ -98,7 +98,8 @@ func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	register(t, srv, agent, "Agent", nil) // produces a head to attest to
+	register(t, srv, agent, "Agent", nil) // a supply event, so an epoch closes
+	publishEpoch(t, storeOf(t, srv))      // produces a head to attest to
 	hubAID := hubAIDOf(t, srv)
 
 	// A witness fetches the head the way any witness would.
@@ -107,15 +108,14 @@ func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	var h struct {
-		ChainDID string `json:"chain_did"`
-		Seq      uint64 `json:"seq"`
-		HeadID   string `json:"head_id"`
+		Seq uint64 `json:"seq"`
+		ID  string `json:"id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if h.ChainDID != hubAID || h.HeadID == "" {
+	if h.ID == "" {
 		t.Fatalf("head = %+v", h)
 	}
 
@@ -123,14 +123,14 @@ func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &ael.HeadAttestation{ChainDID: h.ChainDID, Seq: h.Seq, HeadID: h.HeadID,
+	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: h.Seq, HeadID: h.ID,
 		ObservedAt: time.Now().UnixMilli()}
 	if err := a.Sign(witness); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := a.Marshal()
 	if code, b := post(t, srv.URL+"/x402/witness", map[string]any{
-		"attestation": base64.StdEncoding.EncodeToString(raw)}); code != 200 {
+		"attestation": base64.RawURLEncoding.EncodeToString(raw)}); code != 200 {
 		t.Fatalf("submit: %d %s", code, b)
 	}
 
@@ -150,7 +150,7 @@ func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 	if len(out.Attestations) != 1 {
 		t.Fatalf("served %d attestations", len(out.Attestations))
 	}
-	got, err := base64.StdEncoding.DecodeString(out.Attestations[0].Attestation)
+	got, err := base64.RawURLEncoding.Strict().DecodeString(out.Attestations[0].Attestation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,9 +179,9 @@ func TestAHubRefusesAttestationsAboutOtherChains(t *testing.T) {
 	}
 	raw, _ := a.Marshal()
 	code, b := post(t, srv.URL+"/x402/witness", map[string]any{
-		"attestation": base64.StdEncoding.EncodeToString(raw)})
-	if code == 200 {
-		t.Fatalf("accepted an attestation about another chain: %s", b)
+		"attestation": base64.RawURLEncoding.EncodeToString(raw)})
+	if code != http.StatusBadRequest || !strings.Contains(string(b), `"reason":"bad_request"`) {
+		t.Fatalf("an attestation about another chain: %d %s, want 400 bad_request", code, b)
 	}
 }
 
@@ -194,7 +194,8 @@ func TestAHubCannotWitnessItself(t *testing.T) {
 		t.Fatal(err)
 	}
 	register(t, srv, agent, "Agent", nil)
-	head, seq, ok := store.IssuanceHead()
+	publishEpoch(t, store)
+	head, seq, ok := store.SupplyHead()
 	if !ok {
 		t.Fatal("no head")
 	}
@@ -203,19 +204,19 @@ func TestAHubCannotWitnessItself(t *testing.T) {
 	}
 }
 
-func recordsOf(t *testing.T, entries []aghub.IssuanceEntry) []*ael.EventRecord {
+func recordsOf(t *testing.T, entries []aghub.SupplyEpochEntry) []*ael.EventRecord {
 	t.Helper()
 	var out []*ael.EventRecord
 	for _, e := range entries {
-		raw, err := base64.StdEncoding.DecodeString(e.Record)
+		raw, err := base64.RawURLEncoding.Strict().DecodeString(e.Record)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var rec ael.EventRecord
-		if err := coredet.Unmarshal(raw, &rec); err != nil {
+		rec, err := ael.UnmarshalEventRecord(raw)
+		if err != nil {
 			t.Fatal(err)
 		}
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
 	return out
 }
@@ -233,7 +234,8 @@ func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	register(t, srv, agent, "Agent", nil) // one issuance record, seq 0
+	register(t, srv, agent, "Agent", nil)
+	publishEpoch(t, store) // one epoch, seq 0
 	hubAID := hubAIDOf(t, srv)
 	now := time.Now()
 
@@ -250,7 +252,7 @@ func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 	}
 
 	// Two witnesses look at seq 0.
-	head, seq, ok := store.IssuanceHead()
+	head, seq, ok := store.SupplyHead()
 	if !ok {
 		t.Fatal("no head")
 	}
@@ -288,12 +290,8 @@ func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 
 	// The chain moves on. Those records are the ones the hub could still
 	// rewrite without contradicting anybody.
-	if err := store.GrantCredit(agent.AID(), 100, "later"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.GrantCredit(agent.AID(), 100, "later still"); err != nil {
-		t.Fatal(err)
-	}
+	publishEpoch(t, store)
+	publishEpoch(t, store)
 	h, _ = store.WitnessHealthOf(hubAID, now)
 	if h.UnwitnessedRecords != 2 {
 		t.Errorf("unwitnessed = %d, want 2 — the chain ran past the last pin",
@@ -348,8 +346,9 @@ func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	register(t, srv, agent, "Agent", nil)
+	publishEpoch(t, store)
 	hubAID := hubAIDOf(t, srv)
-	head, seq, ok := store.IssuanceHead()
+	head, seq, ok := store.SupplyHead()
 	if !ok {
 		t.Fatal("no head")
 	}
@@ -421,7 +420,7 @@ func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 // step that could not be taken, so the evidence the whole issuance
 // argument rests on could not be checked by anybody.
 func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
-	srv, store := newHubWithStore(t)
+	srv, _ := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
 	witness, err := identitytest.Hub()
 	if err != nil {
@@ -467,14 +466,7 @@ func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, seq, ok := store.IssuanceHead()
-	if !ok {
-		if err := store.GrantCredit("did:anet:x", 10, "seed"); err != nil {
-			t.Fatal(err)
-		}
-		head, seq, _ = store.IssuanceHead()
-	}
-	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: seq, HeadID: head,
+	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: 0, HeadID: "bafy-any-head",
 		ObservedAt: time.Now().UnixMilli()}
 	if err := a.Sign(witness); err != nil {
 		t.Fatal(err)
@@ -503,13 +495,11 @@ func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 	register(t, srv, agent, "Agent", nil)
 	// Run the chain past seq 0, so head_seq being reported at all is
 	// distinguishable from the field being left at its zero value.
-	for i := 0; i < 2; i++ {
-		if err := store.GrantCredit(agent.AID(), 10, "before anybody looked"); err != nil {
-			t.Fatal(err)
-		}
+	for i := 0; i < 3; i++ {
+		publishEpoch(t, store)
 	}
 	hubAID := hubAIDOf(t, srv)
-	head, seq, ok := store.IssuanceHead()
+	head, seq, ok := store.SupplyHead()
 	if !ok {
 		t.Fatal("no head")
 	}
@@ -579,10 +569,8 @@ func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 
 	// And the chain catching back up clears it, so the flag reports the
 	// current state rather than latching on the first bad reading.
-	for i := 0; i < 6; i++ {
-		if err := store.GrantCredit(agent.AID(), 10, "chain moves on"); err != nil {
-			t.Fatal(err)
-		}
+	for i := 0; i < 5; i++ {
+		publishEpoch(t, store)
 	}
 	h, err = store.WitnessHealthOf(hubAID, time.Now())
 	if err != nil {
@@ -603,11 +591,10 @@ func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 	}
 	register(t, srv, agent, "Agent", nil)
 	// Above seq 0, so the published head_seq cannot pass by being zero.
-	if err := store.GrantCredit(agent.AID(), 10, "before anybody looked"); err != nil {
-		t.Fatal(err)
-	}
+	publishEpoch(t, store)
+	publishEpoch(t, store)
 	hubAID := hubAIDOf(t, srv)
-	_, seq, ok := store.IssuanceHead()
+	_, seq, ok := store.SupplyHead()
 	if !ok || seq == 0 {
 		t.Fatalf("head = %d (ok %v); this test needs a head above seq 0", seq, ok)
 	}
@@ -642,7 +629,7 @@ func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 	}
 	raw, _ := a.Marshal()
 	if code, b := post(t, srv.URL+"/x402/witness", map[string]any{
-		"attestation": base64.StdEncoding.EncodeToString(raw)}); code != 200 {
+		"attestation": base64.RawURLEncoding.EncodeToString(raw)}); code != 200 {
 		t.Fatalf("submit: %d %s", code, b)
 	}
 	h := fetch()
@@ -664,8 +651,9 @@ func TestARolledBackChainIsLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 	register(t, srv, agent, "Agent", nil)
+	publishEpoch(t, store)
 	hubAID := hubAIDOf(t, srv)
-	_, seq, ok := store.IssuanceHead()
+	_, seq, ok := store.SupplyHead()
 	if !ok {
 		t.Fatal("no head")
 	}
@@ -720,8 +708,8 @@ func TestARolledBackChainIsLogged(t *testing.T) {
 func TestAHubServingNoChainWhileWitnessesHoldOneIsRolledBack(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	if _, _, ok := store.IssuanceHead(); ok {
-		t.Fatal("this test needs a hub that has issued nothing")
+	if _, _, ok := store.SupplyHead(); ok {
+		t.Fatal("this test needs a hub that has published nothing")
 	}
 
 	// Nothing issued and nobody watching is not a rollback: it is a hub

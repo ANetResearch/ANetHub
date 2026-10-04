@@ -21,7 +21,7 @@ var publicRoutes = []publicRoute{
 	{http.MethodPost, "/reviews"},
 	{http.MethodGet, "/agents/{aid}"},
 	{http.MethodGet, "/agents/{aid}/kel"},
-	{http.MethodGet, "/agents/{aid}/card"},
+	{http.MethodGet, "/agents/{aid}/liability-proof"},
 	{http.MethodGet, "/agents/{aid}/reputation"},
 	{http.MethodPost, "/directory:bucket"},
 	{http.MethodGet, "/a2a/v1/agents"},

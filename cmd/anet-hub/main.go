@@ -286,16 +286,17 @@ func versionLine() string {
 func main() {
 	f := defineFlags(flag.CommandLine)
 	flag.Parse()
-	if code, done := beforeServing(f, flag.CommandLine, newConsole(os.Stdout, os.Stderr)); done {
+	c := newConsole(os.Stdout, os.Stderr)
+	if code, done := beforeServing(f, flag.CommandLine, c); done {
 		os.Exit(code)
 	}
 	if err := refuseEmptyModeFlags(flag.CommandLine); err != nil {
 		log.Fatalf("anet-hub: %v", err)
 	}
 
-	store, err := aghub.Open(*f.data)
-	if err != nil {
-		log.Fatalf("anet-hub: open store: %v", err)
+	store, code := openStore(c, *f.data)
+	if store == nil {
+		os.Exit(code)
 	}
 	defer store.Close()
 
@@ -339,23 +340,12 @@ func main() {
 	// into every relayauth v2 signature, so a signature made for this hub
 	// is refused by any other.
 	srv0.SetHubAID(hubID.AID)
-	// The identity settlements are signed with, so a payer holds a receipt
-	// it can show without asking this hub to agree.
+	// The identity settlements and supply epochs are signed with, so a
+	// payer holds a receipt it can show without asking this hub to agree.
 	store.SetHubKey(hubID.Ctrl)
-	// A hub upgraded into having an issuance chain has credit
-	// outstanding from before the chain existed. Record that once, as
-	// what it is, rather than leaving the chain permanently disagreeing
-	// with the balances or backfilling a reconstruction and signing it as
-	// though it were contemporaneous.
-	if sup, err := store.Supply(hubID.AID); err == nil && sup.Outstanding > 0 {
-		if err := store.OpenBalance(sup.Outstanding); err != nil {
-			log.Printf("anet-hub: opening balance: %v", err)
-		} else if sup.ChainIssued == 0 && sup.ChainOpening == 0 {
-			log.Printf("anet-hub: issuance chain opened at %d outstanding "+
-				"(issued before this chain existed; not attested outside this hub)",
-				sup.Outstanding)
-		}
-	}
+	// A supply epoch is published when one is due: now, for a hub that was
+	// down over a midnight, and after every UTC midnight (PAY-S2).
+	go store.RunSupplyEpochs(ctx)
 	// Envelopes nobody collects are deleted after the undelivered TTL.
 	go srv0.RunRelayJanitor(ctx, 10*time.Minute)
 	// This process is the hub: it drops what it holds in memory for an AID
@@ -405,6 +395,31 @@ func main() {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+}
+
+// openStore opens the hub's database in dir for serving. A database this
+// release does not open (core CORE-V4) is refused with its sentence, exit 1:
+// one of 0.2 or earlier (hub_identity_v02), or one a newer anet-hub wrote
+// (hub_data_too_new; it is valid data, so the next step is to upgrade, not
+// to move it away).
+func openStore(c *console, dir string) (*aghub.Store, int) {
+	store, err := aghub.Open(dir)
+	if err != nil {
+		return nil, c.refuseData(err)
+	}
+	return store, 0
+}
+
+// refuseData answers an aghub.Open error: the sentence of a database this
+// release does not open, or the error itself (exit 1).
+func (c *console) refuseData(err error) int {
+	switch {
+	case errors.Is(err, aghub.ErrHubDataV02):
+		return c.say("hub_identity_v02", nil)
+	case errors.Is(err, aghub.ErrHubDataTooNew):
+		return c.say("hub_data_too_new", nil)
+	}
+	return c.fail(err)
 }
 
 // clearOwed signs this hub's statement that it has discharged what it

@@ -46,9 +46,9 @@ import (
 // Why a card stopped being published, beyond the two reasons of fedstream.go.
 const withdrawDelisted = "card-no-longer-verifies"
 
-// migrateFedA2ACard creates the tables of the A2A card stream.
-func (s *Store) migrateFedA2ACard() error {
-	for _, q := range []string{
+// fedA2ACardSchema is the tables of the A2A card stream.
+func fedA2ACardSchema() []string {
+	return []string{
 		// Cards this hub stopped publishing, one row per agent, on the
 		// agent_a2a_card fed_seq sequence.
 		`CREATE TABLE IF NOT EXISTS a2a_card_withdrawal (
@@ -91,12 +91,7 @@ func (s *Store) migrateFedA2ACard() error {
 		   PRIMARY KEY (aid, tag)
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_fed_a2a_tag ON fed_a2a_tag(tag)`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate federated a2a card: %w", err)
-		}
 	}
-	return nil
 }
 
 // ---- publishing ----

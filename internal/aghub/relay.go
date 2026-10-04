@@ -448,26 +448,6 @@ var relayIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_relay_redelivery ON relay_redelivery(window_start)`,
 }
 
-// ErrOldRelayTable is Open's refusal of a database whose relay table was
-// written by an earlier release. Wire 3 keeps nothing of it and converts
-// nothing (core CORE-V4).
-var ErrOldRelayTable = errors.New("hub: this data directory was written by an earlier anet-hub release, " +
-	"and this one does not convert it; move the directory aside and start anet-hub again")
-
-// refuseOldRelayTable refuses a relay_message table without the wire-3
-// columns: CREATE TABLE IF NOT EXISTS would keep it, and the hub would then
-// fail on its first send instead of now.
-func (s *Store) refuseOldRelayTable() error {
-	cols, err := tableColumns(s.db, "relay_message")
-	if err != nil {
-		return err
-	}
-	if len(cols) > 0 && !cols["rid"] {
-		return ErrOldRelayTable
-	}
-	return nil
-}
-
 // Meta returns a hub_meta value and whether it is set.
 func (s *Store) Meta(key string) (string, bool, error) {
 	var v string
