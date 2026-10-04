@@ -30,7 +30,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
 	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 	_ "modernc.org/sqlite"                                         // pure-Go driver (K207 A3: no cgo in distributed runtime)
@@ -38,15 +37,14 @@ import (
 
 // AgentView is an agent's public registry entry plus its aggregate rating. Agents are addressed purely
 // by AID (v0.1 has no P2P endpoint) — all traffic flows through the Hub relay. The profile fields
-// (summary/readme/pricing) are AGENT-authored self-description (set via `anet profile set`); pricing is
-// display-only text in v0.1 (no settlement).
+// (summary/readme) are AGENT-authored self-description (set via `anet profile set`). There is no price:
+// prices are not public, they travel in the extended card the provider signs, end to end.
 type AgentView struct {
 	AID          string   `json:"aid"`
 	Name         string   `json:"name"`
 	Caps         []string `json:"caps"`
 	Summary      string   `json:"summary,omitempty"` // one-line self-description
 	Readme       string   `json:"readme,omitempty"`  // longer markdown self-description
-	Pricing      string   `json:"pricing,omitempty"` // free-form pricing text (display-only in v0.1)
 	Listed       bool     `json:"listed"`            // true if it advertises a service (caps or profile) — only listed agents appear in the starfield/find
 	AvgRating    float64  `json:"avg_rating"`
 	ReviewCount  int      `json:"review_count"`
@@ -239,7 +237,6 @@ func (s *Store) migrate() error {
 		   caps TEXT NOT NULL DEFAULT '[]',
 		   summary TEXT NOT NULL DEFAULT '',
 		   readme TEXT NOT NULL DEFAULT '',
-		   pricing TEXT NOT NULL DEFAULT '',
 		   kel BLOB NOT NULL,
 		   registered_at TEXT NOT NULL,
 		   -- How the account came in (admission.go): list, window or
@@ -268,25 +265,6 @@ func (s *Store) migrate() error {
 		   PRIMARY KEY (aid, cap)
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_cap ON agent_cap(cap)`,
-		// The agent's own signed statement of what it offers. Stored
-		// verbatim, because the signature covers these exact bytes and a
-		// re-encoding would break it for everyone downstream.
-		`CREATE TABLE IF NOT EXISTS agent_card (
-		   aid TEXT PRIMARY KEY,
-		   seq INTEGER NOT NULL,
-		   card BLOB NOT NULL,
-		   stored_at TEXT NOT NULL,
-		   -- fed_seq orders cards for federation sync: a peer asks for
-		   -- everything after the cursor it holds. It advances on every
-		   -- store, including an update, or a peer that already synced an
-		   -- agent would never see that agent change.
-		   fed_seq INTEGER NOT NULL DEFAULT 0
-		 )`,
-		`CREATE INDEX IF NOT EXISTS idx_card_fedseq ON agent_card(fed_seq)`,
-		// Cards learned from a peer hub, kept apart from cards published
-		// here. Which hub an agent actually lives on decides where its
-		// work is delivered, and a directory that forgot the difference
-		// would answer with agents it cannot reach.
 		// The credit ledger. Balances live here, which is exactly what
 		// makes this hub their custodian — see facilitator.go.
 		`CREATE TABLE IF NOT EXISTS credit_balance (
@@ -421,16 +399,6 @@ func (s *Store) migrate() error {
 		   payee_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
-		`CREATE TABLE IF NOT EXISTS fed_card (
-		   aid TEXT PRIMARY KEY,
-		   seq INTEGER NOT NULL,
-		   card BLOB NOT NULL,
-		   kel BLOB NOT NULL,
-		   home TEXT NOT NULL,
-		   peer_aid TEXT NOT NULL,
-		   stored_at TEXT NOT NULL,
-		   keys BLOB
-		 )`,
 		// The wire-2 relay table; an existing wire-1 table is rebuilt by
 		// migrateRelayV2 below. See relay.go.
 		relayTableV2,
@@ -493,7 +461,6 @@ func (s *Store) migrate() error {
 	for _, q := range []string{
 		`ALTER TABLE agent ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE agent ADD COLUMN readme TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agent ADD COLUMN pricing TEXT NOT NULL DEFAULT ''`,
 		// Visibility is the agent's answer to "may this hub tell other
 		// hubs about me". Three tiers, hub-local by default — the
 		// conservative default is deliberate (K208 §5.2): a directory
@@ -504,9 +471,6 @@ func (s *Store) migrate() error {
 		// predate the column, which must read as "unknown" and never as
 		// "dead" — see liveness.go.
 		`ALTER TABLE agent ADD COLUMN last_seen_at TEXT`,
-		`ALTER TABLE agent_card ADD COLUMN fed_seq INTEGER NOT NULL DEFAULT 0`,
-		// The encryption key set a peer's card sync carried (§3.9).
-		`ALTER TABLE fed_card ADD COLUMN keys BLOB`,
 	} {
 		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return fmt.Errorf("hub: migrate profile: %w", err)
@@ -521,10 +485,6 @@ func (s *Store) migrate() error {
 	// Stored receipts and the (payer, interaction_id) binding constraint
 	// on credit_settled (facilitator.go).
 	if err := s.migrateSettlement(); err != nil {
-		return err
-	}
-	// The voucher issued for each gateway settlement (gateway.go).
-	if err := s.migrateGateway(); err != nil {
 		return err
 	}
 	for _, q := range relayIndexesV2 {
@@ -744,7 +704,7 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 			// is a structured identifier that a provider dispatches on, not
 			// prose — "Text.Digest" and "text.digest" name two different
 			// capabilities, and only one of them will be answered — so both
-			// forms compare bytes. This also matches cardServes(), which is
+			// forms compare bytes. This also matches capsServe(), which is
 			// how the same question is answered for a peer-learned agent.
 			//
 			// substr has no pattern language of its own, so the escaping
@@ -765,7 +725,7 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at, a.last_seen_at,
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		 FROM agent a
 		 JOIN agent_cap c ON c.aid = a.aid
@@ -833,19 +793,19 @@ func (s *Store) backfillCaps() error {
 	return nil
 }
 
-// PutProfile updates an agent's self-authored profile (summary/readme/pricing). The agent must already
-// be registered (its identity is proven at registration + on this call's signed challenge). Profile is
-// kept separate from PutAgent so a plain re-registration never wipes it.
-func (s *Store) PutProfile(aid, summary, readme, pricing string) error {
+// PutProfile updates an agent's self-authored profile (summary/readme). The agent must already
+// be registered (its identity is proven at registration + on this call's signed challenge); for an AID
+// with no registration it returns ErrNotRegistered. Profile is kept separate from PutAgent so a plain
+// re-registration never wipes it.
+func (s *Store) PutProfile(aid, summary, readme string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`UPDATE agent SET summary=?, readme=?, pricing=? WHERE aid=?`,
-		summary, readme, pricing, aid)
+	res, err := s.db.Exec(`UPDATE agent SET summary=?, readme=? WHERE aid=?`, summary, readme, aid)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("hub: agent %s not registered", aid)
+		return ErrNotRegistered
 	}
 	return nil
 }
@@ -879,20 +839,11 @@ func (s *Store) AnyKEL(aid string) ([]byte, error) {
 	if kel, err := s.AgentKEL(aid); err == nil {
 		return kel, nil
 	}
-	// From a peer's ADP card stream (fed_card) or its A2A card stream
-	// (fed_a2a_card, fed_a2acard.go; a withdrawn row still holds the KEL,
-	// which is proof, not routing). Each table only ever extends its own
-	// copy, but the two streams arrive independently, so when both hold
-	// one the longer is served: a KEL that extends another is longer, and
-	// serving the other would go back to a key state the agent rotated
-	// away from, against which its current A2A card no longer verifies.
+	// From a peer's A2A card stream (fed_a2a_card, fed_a2acard.go; a
+	// withdrawn row still holds the KEL, which is proof, not routing). The
+	// row only ever extends its own copy (§3.8).
 	var kel []byte
-	err := s.db.QueryRow(
-		`SELECT kel FROM (
-		   SELECT kel FROM fed_card WHERE aid=?
-		   UNION ALL
-		   SELECT kel FROM fed_a2a_card WHERE aid=?
-		 ) ORDER BY length(kel) DESC LIMIT 1`, aid, aid).Scan(&kel)
+	err := s.db.QueryRow(`SELECT kel FROM fed_a2a_card WHERE aid=?`, aid).Scan(&kel)
 	if err == nil {
 		return kel, nil
 	}
@@ -964,7 +915,7 @@ func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
 // profile contain it (case-insensitive) — the `find` backend. Pure requesters (registered but with no
 // caps/profile) are intentionally omitted so they do not clutter the starfield.
 func (s *Store) ListAgents(query string) ([]AgentView, error) {
-	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at, a.last_seen_at,
+	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at,
 	             COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 	      FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid`
 	var args []any
@@ -1075,7 +1026,7 @@ func (s *Store) departedView(aid string) (*AgentView, error) {
 // GetAgent returns one agent's entry + aggregate and its reviews (newest first).
 func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 	row := s.db.QueryRow(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at, a.last_seen_at,
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		 FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		 WHERE a.aid=? GROUP BY a.aid`, aid)
@@ -1216,7 +1167,7 @@ func scanAgent(sc scanner) (AgentView, error) {
 	var av AgentView
 	var capsJSON string
 	var lastSeen sql.NullString
-	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme, &av.Pricing,
+	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme,
 		&av.RegisteredAt, &lastSeen, &av.AvgRating, &av.ReviewCount); err != nil {
 		return av, err
 	}
@@ -1228,7 +1179,7 @@ func scanAgent(sc scanner) (AgentView, error) {
 	_ = json.Unmarshal([]byte(capsJSON), &av.Caps)
 	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
 	// profile text. A pure requester has none of these and stays out of the public listing.
-	av.Listed = len(av.Caps) > 0 || av.Summary != "" || av.Readme != "" || av.Pricing != ""
+	av.Listed = len(av.Caps) > 0 || av.Summary != "" || av.Readme != ""
 	av.Registered = true // it came out of the agent table
 	return av, nil
 }
@@ -1254,7 +1205,7 @@ func aidFromKEL(kel []identity.SignedEvent) (string, error) {
 // would throw away information the hub still holds.
 func (s *Store) GraphNodeFor(aid string) AgentView {
 	row := s.db.QueryRow(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing,
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme,
 		        a.registered_at, a.last_seen_at,
 		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
 		   FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
@@ -1265,17 +1216,8 @@ func (s *Store) GraphNodeFor(aid string) AgentView {
 	// Not in the registry at all: it left, or it never banked here and is
 	// only known through a review that crossed from a peer. It is named
 	// from its A2A card while a peer publishes one (fed_a2acard.go), as
-	// /agents names it, else from its ADP card.
+	// /agents names it.
 	var fedName string
 	_ = s.db.QueryRow(`SELECT name FROM fed_a2a_card WHERE aid=? AND verified_at IS NOT NULL`, aid).Scan(&fedName)
-	var raw []byte
-	if fedName == "" {
-		if err := s.db.QueryRow(`SELECT card FROM fed_card WHERE aid=?`, aid).Scan(&raw); err == nil {
-			var card adp.AgentCard
-			if json.Unmarshal(raw, &card) == nil {
-				fedName = card.Name
-			}
-		}
-	}
 	return AgentView{AID: aid, Name: fedName, Caps: []string{}, Registered: false}
 }

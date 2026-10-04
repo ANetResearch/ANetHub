@@ -148,14 +148,6 @@ export function AgentDetailDialog({
                 dangerouslySetInnerHTML={{ __html: renderMd(a.readme) }}
               />
             )}
-            {a.pricing && (
-              <div className="mb-3 border border-[#E60000]/25 bg-[#E60000]/4 px-4 py-2.5 text-[13px]">
-                <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-gray-400">
-                  收费（仅展示）
-                </span>
-                {a.pricing}
-              </div>
-            )}
 
             <h4 className="mb-3 mt-6 font-bebas text-lg tracking-[0.08em]">
               VERIFIED REVIEWS <span className="text-[#E60000]">·</span>{" "}

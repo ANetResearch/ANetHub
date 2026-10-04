@@ -278,6 +278,39 @@ func supplyOf(t *testing.T, srv *httptest.Server) aghub.Supply {
 	return out.Supply
 }
 
+// signedPayment is a PAYMENT-SIGNATURE header value: the payment payload
+// for opt, with an authorization the payer signed for its terms, base64.
+func signedPayment(t *testing.T, payer *identity.Controller, opt payment.PaymentOption,
+	interactionID string) string {
+	t.Helper()
+	amount, err := payment.ParseAmount(opt.Amount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	a := &payment.Authorization{
+		PayTo: opt.PayTo, Amount: amount, Network: opt.Network, Nonce: interactionID,
+		IssuedAt: now.UnixMilli(), NotAfter: now.Add(5 * time.Minute).UnixMilli(),
+		InteractionID: interactionID,
+	}
+	if err := a.Sign(payer); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := a.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp := payment.PaymentPayload{
+		X402Version: payment.Version, Accepted: opt,
+		Payload: map[string]any{"authorization": base64.StdEncoding.EncodeToString(raw)},
+	}
+	b, err := json.Marshal(pp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
 // mustPayload builds the JSON PaymentPayload an agent signs.
 func mustPayload(t *testing.T, c *identity.Controller, opt payment.PaymentOption, nonce string) []byte {
 	t.Helper()

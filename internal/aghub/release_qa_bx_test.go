@@ -153,46 +153,26 @@ func TestAnUnknownAIDStillGets404(t *testing.T) {
 	}
 }
 
-// The register path bounds the capability list, but a card carries its
-// own list and reaches the same /agents responses by a different route.
-// Bounding one entrance only moves which request opens the amplification.
+// The register path bounds the capability list, but an A2A card carries
+// its own list: its skill ids become the agent's capability ids and reach
+// the same /agents responses by a different route. Bounding one entrance
+// only moves which request opens the amplification.
 func TestCardAdmissionBoundsTheCapabilityList(t *testing.T) {
-	st, err := aghub.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-
+	srv, store := newHubWithStore(t)
 	c, _ := identity.Incept()
-	kelBytes, err := identity.MarshalKEL(c.KEL())
-	if err != nil {
-		t.Fatal(err)
+	long := signA2A(t, c, a2aCardFor(c, 1, withSkills([]string{strings.Repeat("x", 257), "Long", "test"})))
+	out := registerA2A(t, srv, c, "Carder", []string{"work.do"}, long)
+	if out.CardStatus != aghub.CardStatusInvalid || !strings.Contains(out.CardError, "capability id") {
+		t.Fatalf("a card with a 257-byte skill id: %+v", out)
 	}
-	if err := st.PutAgent(c.AID(), "Carder", []string{"work.do"}, kelBytes); err != nil {
-		t.Fatal(err)
+	if got, err := store.FindByCapability(strings.Repeat("x", 257)); err != nil || len(got) != 0 {
+		t.Fatalf("the refused skill id reached the index: %v %v", got, err)
 	}
-
-	huge := make([]string, 300000)
-	for i := range huge {
-		huge[i] = "cap.flood"
-	}
-	card, _ := json.Marshal(map[string]any{
-		"subject_did": c.AID(), "name": "Carder", "capabilities": huge,
-	})
-	err = st.AdmitCard(c.AID(), card, c.KEL())
-	if err == nil {
-		t.Fatal("a card declaring 300000 capabilities was admitted")
-	}
-	if !strings.Contains(err.Error(), "capabilities") {
-		t.Errorf("refusal does not say what was wrong: %v", err)
-	}
-
-	long, _ := json.Marshal(map[string]any{
-		"subject_did": c.AID(), "name": "Carder",
-		"capabilities": []string{strings.Repeat("x", 100000)},
-	})
-	if err := st.AdmitCard(c.AID(), long, c.KEL()); err == nil {
-		t.Fatal("a card with a 100000-byte capability id was admitted")
+	// The peer side applies the same bound: a peer's limits are not ours.
+	peer := openPeerStore(t)
+	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, c, long)); err == nil ||
+		!strings.Contains(err.Error(), "capability id") {
+		t.Fatalf("a peer's card with a 257-byte skill id: %v", err)
 	}
 }
 
@@ -215,10 +195,7 @@ func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 	home := newFedHub(t)
 	remote, _ := identity.Incept()
 	federate(t, home, remote, "Remote Provider", []string{"work.remote"})
-	cards, _, err := home.store.CardsSince(0, 100, testHome)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cards, _ := a2aStream(t, home.store, 0)
 	if len(cards) != 1 {
 		t.Fatalf("setup: %d cards on the stream, want 1", len(cards))
 	}
@@ -252,7 +229,7 @@ func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 		c, _ := identity.Incept()
 		register(t, srv, c, spec.name, spec.caps)
 	}
-	if err := store.AdmitFedCard(homePeerAID, cards[0]); err != nil {
+	if err := store.AdmitFedA2ACard(homePeerAID, cards[0]); err != nil {
 		t.Fatal(err)
 	}
 

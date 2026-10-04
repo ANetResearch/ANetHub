@@ -3,15 +3,15 @@ package aghub_test
 import (
 	"encoding/base64"
 	"encoding/json"
-	"github.com/ANetResearch/ANetHub/internal/voucherv1" // v030-todo(PAY-8): the voucher goes with the gateway
 	"math"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
 
@@ -383,136 +383,83 @@ func FuzzHubX402Redeem(f *testing.F) {
 	})
 }
 
-// FuzzHubX402Gateway buys a priced capability through
-// GET /x402/resource/{aid}/{capability} with a PAYMENT-SIGNATURE header
-// that is either raw fuzz or a signed payment on fuzzed terms.
-// Properties: the answer is 200, 400, 402, 404 or 409; a voucher is
-// issued only for a settlement to the seller of at least the price, and
-// it verifies against the hub's key and names the seller, the capability
-// and the amount paid; any other answer moves nothing; the ledger
-// invariants hold.
-func FuzzHubX402Gateway(f *testing.F) {
+// FuzzHubGatewayTombstone sends GET /x402/resource/... (the removed
+// gateway) for a registered agent or a fuzzed one, a fuzzed capability and
+// a PAYMENT-SIGNATURE header that is either raw fuzz or a signed payment
+// on fuzzed terms. Properties: the answer is always 410 gateway_removed;
+// nothing moves; the ledger invariants hold.
+func FuzzHubGatewayTombstone(f *testing.F) {
 	w := newX402World(f)
 	h := w.h
 	seller, err := identity.Incept()
 	if err != nil {
 		f.Fatal(err)
 	}
-	card := fzSellableCard(f, seller, "Seller", []string{"work.do", "work.free"},
-		map[string]any{"work.do": 120, "work.str": "7", "work.big": "9223372036854775807",
-			"work.neg": -1, "work.frac": 1.5}, "https://seller.example/x402/redeem")
-	body := h.registration(f, seller, "Seller", []string{"work.do", "work.free"})
-	body["card"] = card
-	if rec := h.register(seller, fzJSON(f, body)); rec.Code != http.StatusOK {
+	if rec := h.register(seller, fzJSON(f, h.registration(f, seller, "Seller", []string{"work.do"}))); rec.Code != http.StatusOK {
 		f.Fatalf("register seller: %d %s", rec.Code, rec.Body.Bytes())
 	}
 	w.payee = seller
-	caps := []string{"work.do", "work.str", "work.big", "work.neg", "work.frac", "work.free", "nothing"}
-	f.Add(uint8(0), uint64(120), "", uint8(0), "", uint8(0), "", uint8(0), "ix", false, "")
-	f.Add(uint8(0), uint64(119), "", uint8(0), "", uint8(0), "", uint8(0), "ix", false, "")
-	f.Add(uint8(1), uint64(7), "", uint8(0), "", uint8(0), "", uint8(0), "", true, "")
-	f.Add(uint8(2), uint64(math.MaxInt64), "", uint8(0), "", uint8(0), "", uint8(0), "", false, "")
-	f.Add(uint8(0), uint64(120), "", uint8(1), "", uint8(0), "", uint8(4), "", false, "")
-	f.Add(uint8(0), uint64(0), "", uint8(0), "", uint8(0), "", uint8(0), "", false, "not base64 {")
-	f.Add(uint8(5), uint64(1), "", uint8(0), "", uint8(0), "", uint8(0), "", false, `{"accepted":{"payTo":"x","amount":"1"}}`)
+	f.Add(true, "work.do", uint64(120), "", uint8(0), "", uint8(0), "", uint8(0), "ix", "")
+	f.Add(false, "work.do", uint64(7), "did:anet:nobody", uint8(1), "", uint8(0), "", uint8(0), "", "")
+	f.Add(true, "a/b/../c", uint64(0), "", uint8(0), "", uint8(0), "", uint8(0), "", "not base64 {")
+	f.Add(true, "%2e%2e", uint64(1), "", uint8(0), "", uint8(0), "", uint8(0), "", `{"accepted":{"payTo":"x","amount":"1"}}`)
 
-	f.Fuzz(func(t *testing.T, capSel uint8, amount uint64, rawAID string, payToSel uint8, rawNet string,
-		netSel uint8, accAmount string, flags uint8, ix string, repeat bool, rawHeader string) {
-		rawAID, rawNet, accAmount, ix, rawHeader = clip(rawAID, 128), clip(rawNet, 128), clip(accAmount, 64), clip(ix, 128), clip(rawHeader, 16<<10)
+	f.Fuzz(func(t *testing.T, ours bool, capID string, amount uint64, rawAID string, payToSel uint8, rawNet string,
+		netSel uint8, accAmount string, flags uint8, ix string, rawHeader string) {
+		capID, rawAID, rawNet, accAmount, ix, rawHeader = clip(capID, 256), clip(rawAID, 128), clip(rawNet, 128),
+			clip(accAmount, 64), clip(ix, 128), clip(rawHeader, 16<<10)
 		w.topUp(t)
 		defer h.ledgerInvariants(t)
-		capID := caps[int(capSel)%len(caps)]
-		x := w.terms(amount, "", accAmount, payToSel, rawAID, netSel, rawNet, flags&(1|4|8|32), ix, -1000, 5*60_000)
+		aid := rawAID
+		if ours || aid == "" {
+			aid = seller.AID()
+		}
 		header := rawHeader
 		if header == "" {
+			x := w.terms(amount, "", accAmount, payToSel, rawAID, netSel, rawNet, flags&(1|4|8|32), ix, -1000, 5*60_000)
 			p, _ := x.payload(t, w.payer)
 			header = base64.StdEncoding.EncodeToString(fzJSON(t, p))
 		}
-		send := func() *httpResult {
-			req := h.request(http.MethodGet, "/x402/resource/"+seller.AID()+"/"+capID, "", nil)
+		path := "/x402/resource/" + url.PathEscape(aid) + "/" + url.PathEscape(capID)
+		get := func(p string) *httptest.ResponseRecorder {
+			req := h.request(http.MethodGet, p, "", nil)
 			req.Header.Set(payment.HeaderPaymentSignature, header)
-			rec := h.serve(req)
-			return &httpResult{rec.Code, rec.Body.Bytes()}
+			return h.serve(req)
 		}
 		before := w.snap(t)
-		res := send()
-		if !allowed(res.code, 200, 400, 402, 404, 409) {
-			t.Fatalf("gateway: unexpected %d %s", res.code, res.body)
-		}
-		after := w.snap(t)
-		if res.code != http.StatusOK {
-			// A settlement may have happened on a 409 (a repeat for another
-			// capability); anything else moved nothing.
-			if after != before && res.code != http.StatusConflict {
-				t.Fatalf("gateway %d moved balances: %+v -> %+v", res.code, before, after)
+		rec := get(path)
+		if loc := rec.Header().Get("Location"); allowed(rec.Code, http.StatusMovedPermanently,
+			http.StatusTemporaryRedirect, http.StatusPermanentRedirect) {
+			// A path with a "." or ".." segment is not canonical, and the
+			// router redirects it to its cleaned form; nothing else
+			// happens. The cleaned path, while still the gateway's, is the
+			// tombstone too.
+			if !hasDotSegment(path) {
+				t.Fatalf("GET %s: %d to %q, want 410 gateway_removed", path, rec.Code, loc)
 			}
-			return
-		}
-		var out struct {
-			Voucher     string `json:"voucher"`
-			Capability  string `json:"capability"`
-			Provider    string `json:"provider"`
-			Transaction string `json:"transaction"`
-		}
-		if err := json.Unmarshal(res.body, &out); err != nil {
-			t.Fatal(err)
-		}
-		raw, err := base64.StdEncoding.DecodeString(out.Voucher)
-		if err != nil {
-			t.Fatalf("voucher not base64: %v", err)
-		}
-		v, err := voucherv1.UnmarshalVoucher(raw)
-		if err != nil {
-			t.Fatalf("voucher undecodable: %v", err)
-		}
-		if err := v.Verify(h.hub.KEL(), h.hubAID, seller.AID(), capID, payment.CreditNetwork(h.hubAID),
-			time.Now().UnixMilli()); err != nil {
-			t.Fatalf("voucher does not verify against the hub: %v", err)
-		}
-		price := map[string]uint64{"work.do": 120, "work.str": 7, "work.big": math.MaxInt64}[capID]
-		if price == 0 || v.PayTo != seller.AID() || v.Capability != capID || v.Amount < price ||
-			out.Provider != seller.AID() || out.Capability != capID {
-			t.Fatalf("voucher %+v for %s at price %d", v, capID, price)
-		}
-		paid := after.payer - before.payer
-		if paid != 0 && (-paid != int64(v.Amount) || after.payee-before.payee != int64(v.Amount)) {
-			t.Fatalf("voucher for %d, balances %+v -> %+v", v.Amount, before, after)
-		}
-		if repeat {
-			again := send()
-			if again.code != http.StatusOK && again.code != http.StatusConflict {
-				t.Fatalf("a repeated purchase answered %d %s", again.code, again.body)
+			if !strings.HasPrefix(loc, "/x402/resource/") {
+				return
 			}
-			if s := w.snap(t); s != after {
-				t.Fatalf("a repeated purchase moved balances: %+v -> %+v", after, s)
-			}
+			path, rec = loc, get(loc)
+		}
+		var out struct{ Reason string }
+		if rec.Code != http.StatusGone || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Reason != "gateway_removed" {
+			t.Fatalf("GET %s: %d %s, want 410 gateway_removed", path, rec.Code, rec.Body.Bytes())
+		}
+		if after := w.snap(t); after != before {
+			t.Fatalf("the tombstone moved balances: %+v -> %+v", before, after)
 		}
 	})
 }
 
-// fzSellableCard is sellableCard for a testing.TB.
-func fzSellableCard(tb testing.TB, c *identity.Controller, name string, caps []string,
-	prices map[string]any, redeemAt string) json.RawMessage {
-	tb.Helper()
-	now := time.Now()
-	card := &adp.AgentCard{
-		SubjectDID: c.AID(), CardSchema: adp.CardSchema{Major: 1},
-		Seq: uint64(now.UnixNano()), IssuedAt: now.Unix(),
-		NotBefore:    now.Add(-time.Minute).Unix(),
-		Capabilities: caps, CriticalExtensions: []string{}, Name: name,
-		Extensions: map[string]any{aghub.ExtPricing: prices},
-		Endpoints:  []adp.EndpointDesc{{Protocol: aghub.EndpointRedeem, URI: redeemAt, Methods: []string{"POST"}}},
+// hasDotSegment reports whether a URL path has a "." or ".." segment.
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
 	}
-	if err := card.Sign(c); err != nil {
-		tb.Fatal(err)
-	}
-	return fzJSON(tb, card)
-}
-
-// httpResult is a status and a body.
-type httpResult struct {
-	code int
-	body []byte
+	return false
 }
 
 // FuzzHubClearFromPeer applies a peer hub's signed receipts: the credit a

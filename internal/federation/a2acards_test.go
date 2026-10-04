@@ -11,8 +11,8 @@ import (
 	"testing"
 )
 
-// The A2A card stream (A2A-DESIGN §10.6): /fed/v2/cards alongside
-// /fed/v1/cards, format dispatch, and peers that serve only v1.
+// The A2A card stream (A2A-DESIGN §10.6): /fed/v2/cards, format dispatch,
+// and peers that do not serve it.
 
 // discoveryPair starts hub A serving source over HTTP and returns the
 // service of hub B, which pulls from A into sink.
@@ -89,7 +89,8 @@ func TestTheA2ACardStreamDispatchesByFormat(t *testing.T) {
 	}
 }
 
-// A card refused for now holds the v2 cursor just before it, as on v1.
+// A card refused for now holds the cursor just before it, so the entry is
+// asked for again once the refusal stops applying.
 func TestTheA2ACardStreamStallsOnARefusalForNow(t *testing.T) {
 	source := &fakeDirectory{a2a: []FedA2ACardView{
 		{Format: FormatA2ACard, Card: json.RawMessage(`{}`), KEL: []byte("k"), FedSeq: 4},
@@ -113,57 +114,35 @@ func TestTheA2ACardStreamStallsOnARefusalForNow(t *testing.T) {
 	}
 }
 
-// A peer that serves only /fed/v1/cards (not yet upgraded) still federates
-// its ADP cards; its 404 on /fed/v2/cards is neither a refusal nor a
-// cursor move. v1 and v2 are pulled side by side from an upgraded peer.
-func TestV1AndV2CardStreamsAreServedAndPulledTogether(t *testing.T) {
-	agentCard := []byte(`{"subject_did":"did:anet:x"}`)
-	source := &fakeDirectory{
-		cards: []FedCardView{{Card: agentCard, KEL: []byte("k"), FedSeq: 1}},
-		a2a:   []FedA2ACardView{{Format: FormatA2ACard, Card: json.RawMessage(`{}`), KEL: []byte("k"), FedSeq: 1}},
-	}
-	sink := &fakeDirectory{}
-	_, b := discoveryPair(t, source, sink)
-	if admitted, refused := b.SyncOnce(context.Background()); admitted != 2 || refused != 0 {
-		t.Fatalf("upgraded peer: admitted %d refused %d, want 2 and 0", admitted, refused)
-	}
-	if len(sink.got) != 1 || len(sink.gotA2A) != 1 {
-		t.Fatalf("v1 %d, v2 %d entries, want one each", len(sink.got), len(sink.gotA2A))
-	}
-
-	// A peer whose build has no /fed/v2/cards.
-	v1only := newDiscoveryService(t, filepath.Join(t.TempDir(), "old"), Config{
+// A peer whose build has no /fed/v2/cards answers 404: that is neither a
+// refusal nor a cursor move, and is asked again on the next round.
+func TestAPeerWithoutTheCardStreamIsNotARefusal(t *testing.T) {
+	source := &fakeDirectory{a2a: []FedA2ACardView{{Format: FormatA2ACard, Card: json.RawMessage(`{}`), KEL: []byte("k"), FedSeq: 1}}}
+	old := newDiscoveryService(t, filepath.Join(t.TempDir(), "old"), Config{
 		Discovery: "allowlist", Home: "https://old.example",
 		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
 	}, source)
-	full := v1only.Handler()
-	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	full := old.Handler()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/fed/v2/") {
 			http.NotFound(w, r)
 			return
 		}
 		full.ServeHTTP(w, r)
 	}))
-	defer old.Close()
-	sink2 := &fakeDirectory{}
+	defer srv.Close()
+	sink := &fakeDirectory{}
 	c := newDiscoveryService(t, filepath.Join(t.TempDir(), "c"), Config{
 		Discovery: "allowlist", Home: "https://hub-c.example",
-		Peers: []Peer{{AID: "did:anet:old", Endpoint: old.URL}},
-	}, sink2)
+		Peers: []Peer{{AID: "did:anet:old", Endpoint: srv.URL}},
+	}, sink)
 	for i := 0; i < 2; i++ {
-		admitted, refused := c.SyncOnce(context.Background())
-		if refused != 0 {
-			t.Fatalf("round %d: a peer without /fed/v2/cards counted as refusing: %d", i, refused)
-		}
-		if i == 0 && admitted != 1 {
-			t.Fatalf("the v1 card of a v1-only peer: admitted %d", admitted)
+		if admitted, refused := c.SyncOnce(context.Background()); admitted != 0 || refused != 0 {
+			t.Fatalf("round %d: a peer without /fed/v2/cards: admitted %d refused %d", i, admitted, refused)
 		}
 	}
-	if len(sink2.got) != 1 || len(sink2.gotA2A) != 0 {
-		t.Fatalf("v1-only peer: v1 %d, v2 %d entries", len(sink2.got), len(sink2.gotA2A))
-	}
-	if cur := c.peerA2ACursor("did:anet:old"); cur != 0 {
-		t.Fatalf("the v2 cursor moved for a peer without the stream: %d", cur)
+	if cur := c.peerA2ACursor("did:anet:old"); cur != 0 || len(sink.gotA2A) != 0 {
+		t.Fatalf("the cursor moved (%d) or entries arrived (%d) from a peer without the stream", cur, len(sink.gotA2A))
 	}
 }
 
