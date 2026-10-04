@@ -608,12 +608,17 @@ func TestOriginVerifiesKind1BeforeForward(t *testing.T) {
 	stolen := b.issue(owner, seal.CapClassContact, time.Hour)
 	_, stolen.holder, _ = ed25519.GenerateKey(nil)
 	moved := b.issue(owner, seal.CapClassContact, time.Hour)
-	for _, env := range [][]byte{
+	for i, env := range [][]byte{
 		withCap(t, envelope(t, owner.aid, []byte("f")), forged), // a forged signature
 		withCap(t, envelope(t, owner.aid, []byte("h")), stolen), // a proof by another holder key
 		withCap(t, envelope(t, other.aid, []byte("r")), moved),  // for another recipient
 	} {
 		expectRefusal(t, a.send1Hint(env, b.hubAID, ""), 403, "access_invalid")
+		// A forged signature is refused at step 2, before the body is
+		// read, as for an owner registered here.
+		if read := a.read.Load(); i == 0 && read != 0 {
+			t.Errorf("a forged signature was refused after reading %d bytes of the body", read)
+		}
 	}
 	if b.forwards() != 0 {
 		t.Fatalf("%d forged credentials reached the home", b.forwards())

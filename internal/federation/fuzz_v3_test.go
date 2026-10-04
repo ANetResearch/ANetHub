@@ -168,16 +168,27 @@ func FuzzFedCardsPage(f *testing.F) {
 		if admitted+refused > len(wire.Cards) || admitted != len(sink.gotA2A) {
 			t.Fatalf("admitted %d refused %d of %d entries; the kernel got %d", admitted, refused, len(wire.Cards), len(sink.gotA2A))
 		}
-		byseq := map[int64]FedA2ACardEntry{}
+		// What the kernel must get: the entries of a known format, in page
+		// order, but those whose kel does not decode.
+		var want []FedA2ACardEntry
 		for _, e := range wire.Cards {
-			byseq[e.FedSeq] = e
-		}
-		for _, got := range sink.gotA2A {
-			if got.Format != FormatA2ACard && got.Format != FormatWithdrawal {
-				t.Fatalf("an entry in format %q was handed over", got.Format)
+			if e.Format != FormatA2ACard && e.Format != FormatWithdrawal {
+				continue
 			}
-			e := byseq[got.FedSeq]
-			if kel, err := wire3.DecodeB64URL("kel", e.KEL); e.KEL != "" && (err != nil || !bytes.Equal(kel, got.KEL)) || e.KEL == "" && len(got.KEL) != 0 {
+			if _, err := wire3.DecodeB64URL("kel", e.KEL); e.KEL != "" && err != nil {
+				continue
+			}
+			want = append(want, e)
+		}
+		if len(want) != len(sink.gotA2A) {
+			t.Fatalf("the kernel got %d entries, want %d", len(sink.gotA2A), len(want))
+		}
+		for i, got := range sink.gotA2A {
+			e := want[i]
+			if got.Format != e.Format || got.FedSeq != e.FedSeq {
+				t.Fatalf("entry %d handed over as %q %d, the page has %q %d", i, got.Format, got.FedSeq, e.Format, e.FedSeq)
+			}
+			if kel, _ := wire3.DecodeB64URL("kel", e.KEL); e.KEL != "" && !bytes.Equal(kel, got.KEL) || e.KEL == "" && len(got.KEL) != 0 {
 				t.Fatalf("the KEL handed over is not the entry's: %q -> %x", e.KEL, got.KEL)
 			}
 			if got.Keys != nil {
