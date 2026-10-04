@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
@@ -420,10 +421,27 @@ func FuzzHubGatewayTombstone(f *testing.F) {
 			header = base64.StdEncoding.EncodeToString(fzJSON(t, p))
 		}
 		path := "/x402/resource/" + url.PathEscape(aid) + "/" + url.PathEscape(capID)
-		req := h.request(http.MethodGet, path, "", nil)
-		req.Header.Set(payment.HeaderPaymentSignature, header)
+		get := func(p string) *httptest.ResponseRecorder {
+			req := h.request(http.MethodGet, p, "", nil)
+			req.Header.Set(payment.HeaderPaymentSignature, header)
+			return h.serve(req)
+		}
 		before := w.snap(t)
-		rec := h.serve(req)
+		rec := get(path)
+		if loc := rec.Header().Get("Location"); allowed(rec.Code, http.StatusMovedPermanently,
+			http.StatusTemporaryRedirect, http.StatusPermanentRedirect) {
+			// A path with a "." or ".." segment is not canonical, and the
+			// router redirects it to its cleaned form; nothing else
+			// happens. The cleaned path, while still the gateway's, is the
+			// tombstone too.
+			if !hasDotSegment(path) {
+				t.Fatalf("GET %s: %d to %q, want 410 gateway_removed", path, rec.Code, loc)
+			}
+			if !strings.HasPrefix(loc, "/x402/resource/") {
+				return
+			}
+			path, rec = loc, get(loc)
+		}
 		var out struct{ Reason string }
 		if rec.Code != http.StatusGone || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Reason != "gateway_removed" {
 			t.Fatalf("GET %s: %d %s, want 410 gateway_removed", path, rec.Code, rec.Body.Bytes())
@@ -432,6 +450,16 @@ func FuzzHubGatewayTombstone(f *testing.F) {
 			t.Fatalf("the tombstone moved balances: %+v -> %+v", before, after)
 		}
 	})
+}
+
+// hasDotSegment reports whether a URL path has a "." or ".." segment.
+func hasDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // FuzzHubClearFromPeer applies a peer hub's signed receipts: the credit a
