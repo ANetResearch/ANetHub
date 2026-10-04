@@ -2,6 +2,7 @@ package wire3
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -189,6 +190,54 @@ func FuzzContract(f *testing.F) {
 		}
 		if rec.Code != Status(b.Reason) {
 			t.Fatalf("%s sent with %d", b.Reason, rec.Code)
+		}
+	})
+}
+
+// FuzzDecodeB64URL: DecodeB64URL never panics; it accepts a string exactly
+// when the string is the one spelling of some bytes (only the 64 characters
+// of base64url, and re-encoding what it decodes to gives the string back),
+// and then it returns those bytes; a refusal is a *DecodeError of
+// KindB64URL. DecodeB64URLSize accepts exactly the accepted strings of n
+// bytes.
+func FuzzDecodeB64URL(f *testing.F) {
+	for _, s := range []string{"", "AA", "AB", "AAA", "AAB", "AAAA", "A", "AA==", "+/", "-_", "AA\nAA",
+		"AA\rAA", " AA", "AAECAwQFBgcICQoLDA0ODw", "_x", "\x00", "é"} {
+		f.Add(s, uint8(16))
+	}
+	f.Fuzz(func(t *testing.T, s string, n uint8) {
+		got, err := DecodeB64URL("m", s)
+		// The oracle: alphabet first (the standard decoder skips "\r" and
+		// "\n"), then the lenient decoder, then the round trip.
+		canonical := true
+		for i := 0; i < len(s); i++ {
+			if !b64urlChar(s[i]) {
+				canonical = false
+			}
+		}
+		var ref []byte
+		if canonical {
+			var rerr error
+			ref, rerr = base64.RawURLEncoding.DecodeString(s)
+			canonical = rerr == nil && base64.RawURLEncoding.EncodeToString(ref) == s
+		}
+		if canonical != (err == nil) {
+			t.Fatalf("%q: accepted %v, but it is the one spelling of some bytes: %v", s, err == nil, canonical)
+		}
+		if err != nil {
+			var de *DecodeError
+			if !errors.As(err, &de) || de.Kind != KindB64URL || de.Member != "m" {
+				t.Fatalf("%q: error %#v", s, err)
+			}
+		} else if !bytes.Equal(got, ref) || EncodeB64URL(got) != s {
+			t.Fatalf("%q decoded to %x, want %x", s, got, ref)
+		}
+		sized, serr := DecodeB64URLSize("m", s, int(n))
+		if (serr == nil) != (err == nil && len(got) == int(n)) {
+			t.Fatalf("%q, %d bytes: sized accepted %v", s, n, serr == nil)
+		}
+		if serr == nil && !bytes.Equal(sized, got) {
+			t.Fatalf("%q: sized %x, plain %x", s, sized, got)
 		}
 	})
 }

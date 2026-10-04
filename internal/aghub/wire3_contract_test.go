@@ -1,6 +1,7 @@
 package aghub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -94,8 +95,8 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("POST", "/relay/ack", reflect.TypeFor[RelayAckResponse](), "v030-todo(RC-3)"),
 		req("POST", "/relay/status", nil, "v030-todo(RC-3)"),
 		resp("POST", "/relay/status", nil, "v030-todo(RC-3)"),
-		req("POST", "/mailbox/revoke", nil, "v030-todo(SS-3)"),
-		resp("POST", "/mailbox/revoke", nil, "v030-todo(SS-3)"),
+		req("POST", "/mailbox/revoke", reflect.TypeFor[MailboxRevokeRequest](), ""),
+		resp("POST", "/mailbox/revoke", reflect.TypeFor[MailboxRevokeResponse](), ""),
 		req("POST", "/directory:bucket", nil, "v030-todo(SS-5)"),
 		resp("POST", "/directory:bucket", nil, "v030-todo(SS-5)"),
 		req("POST", "/register", reflect.TypeFor[RegisterRequest](), ""),
@@ -201,6 +202,7 @@ var wire3Setups = map[string]wire3test.Setup{
 	"register_quota":  wire3RegisterSetup(AdmissionOpen, "quota"),
 	"register_window": wire3RegisterSetup(AdmissionClosed, "window"),
 	"rc1":             wire3RC1Setup,
+	"revoke":          wire3RevokeSetup,
 }
 
 // wire3RC1Setup is wire3HubSetup for the RC1 fixtures (hub-payment-privacy
@@ -410,6 +412,14 @@ func wire3RegisterSetup(mode, variant string) wire3test.Setup {
 // registered; ${hub} and ${alice} are their AIDs, and a case can sign as alice.
 func wire3HubSetup(t *testing.T) *wire3test.Env {
 	t.Helper()
+	env, _, _ := wire3Hub(t)
+	return env
+}
+
+// wire3Hub is wire3HubSetup with its store and the identities its cases can sign as, for the
+// setups that build on it: an identity added to signers can sign too.
+func wire3Hub(t *testing.T) (*wire3test.Env, *Store, map[string]*identity.Controller) {
+	t.Helper()
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +464,57 @@ func wire3HubSetup(t *testing.T) *wire3test.Env {
 			req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
 			return nil
 		},
+	}, store, signers
+}
+
+// wire3RevokeSetup is the hub of wire3HubSetup for the /mailbox/revoke fixtures (sealed-sender
+// SSR-H10, SSR-H11): alice is registered with no revocation; full is registered with
+// MaxRevocationsPerOwner unexpired revocations (ids 0xf0, 0…, the index in the last 8 bytes);
+// stranger is not registered. ${id1}, ${id2} and ${id3} are fresh 16-byte ids, ${id_padded} id1
+// padded, ${id_std} a 16-byte id in the standard alphabet, ${id_short} a 15-byte one, and
+// ${full_id0} the first id full revoked.
+func wire3RevokeSetup(t *testing.T) *wire3test.Env {
+	t.Helper()
+	env, store, signers := wire3Hub(t)
+	full, stranger := wire3Incept(t), wire3Incept(t)
+	signers["full"], signers["stranger"] = full, stranger
+	kel, err := identity.MarshalKEL(full.KEL())
+	if err != nil {
+		t.Fatal(err)
 	}
+	if err := store.PutAgent(full.AID(), "full", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`WITH RECURSIVE k(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM k WHERE i+1 < ?)
+	    INSERT INTO cap_revocation(owner, cap_id, revoked_at)
+	    SELECT ?, unhex('F000000000000000' || printf('%016X', i)), ? FROM k`,
+		MaxRevocationsPerOwner, full.AID(), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	id := func(tag byte, n int) []byte {
+		b := make([]byte, 16)
+		b[0] = tag
+		b[15] = byte(n)
+		return b
+	}
+	b64 := base64.RawURLEncoding.EncodeToString
+	env.Vars["full"], env.Vars["stranger"] = full.AID(), stranger.AID()
+	env.Vars["id1"], env.Vars["id2"], env.Vars["id3"] = b64(id(1, 1)), b64(id(1, 2)), b64(id(1, 3))
+	env.Vars["id_padded"] = base64.URLEncoding.EncodeToString(id(1, 1))
+	env.Vars["id_std"] = base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{0xfb}, 16))
+	env.Vars["id_short"] = b64(make([]byte, 15))
+	env.Vars["full_id0"] = b64(id(0xf0, 0))
+	return env
+}
+
+// wire3Incept is one more identity for a fixture to sign as, incepted like alice.
+func wire3Incept(t *testing.T) *identity.Controller {
+	t.Helper()
+	c, err := identitytest.Hub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 // wire3LastSigned is the X-ANet-TS of the last request a fixture signed. RC1 takes each of a

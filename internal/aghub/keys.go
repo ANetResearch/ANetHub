@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
@@ -35,6 +36,21 @@ import (
 // same statement and is accepted without change (200), which lets a
 // restarted daemon re-register without an error. Anything else — a lower
 // seq, or the stored seq with different content — is refused with 409.
+//
+// Mailbox key rule (sealed-sender SSR-W9): a set carries its owner's
+// mailbox signing key and its epoch, and the hub admits a delivery
+// credential only if the current mailbox key signed it under the current
+// epoch (SSR-W11). The epoch is how holders and other hubs tell that the
+// key changed, so it only rises, and only with a new key: a new key under
+// the same epoch looks unchanged to them, and a lower epoch could bring
+// back an old key and every credential it signed, which the owner had
+// invalidated by changing keys. A set whose mailbox key changes
+// without its epoch rising, whose epoch changes without its key changing,
+// whose epoch goes down, or whose epoch is 2^53 or more is refused as
+// invalid (keys_status invalid), and the stored set stays. There is no
+// exception for a daemon that lost its key file and made a new key under
+// the old epoch: it is refused like anyone else, and publishes a valid set
+// once it raises the epoch.
 
 // ErrKeysConflict is the publisher high-water refusal (409).
 var ErrKeysConflict = errors.New("hub: key set does not advance the stored one")
@@ -158,6 +174,15 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrKeysInvalid, err)
 	}
+	var prev *seal.Mbox
+	if seen != nil {
+		if prev, err = mboxOf(seen.Set); err != nil {
+			return "", fmt.Errorf("hub: stored key set for %s undecodable: %w", aid, err)
+		}
+	}
+	if err := checkMboxEpoch(prev, set.Mbox); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrKeysInvalid, err)
+	}
 	// agent_keys.seq is an SQLite INTEGER, and database/sql refuses a
 	// uint64 with the high bit set: such a set verified and then failed to
 	// store, and POST /agents/{aid}/keys answered 500 (found by FuzzHubKeys,
@@ -197,6 +222,46 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 		}
 	}
 	return KeysStatusOK, nil
+}
+
+// MaxMboxEpoch bounds a mailbox key's epoch: every epoch is below it
+// (sealed-sender SSR-W9, SSR-W10). 2^53 is the largest integer every JSON
+// reader holds exactly; an honest hub never stores more, so a daemon that
+// adds one to what a hub reports cannot wrap around to 0.
+const MaxMboxEpoch = 1 << 53
+
+// mboxOf reads the mailbox key of stored set bytes. They were verified
+// before they were stored, so they decode.
+func mboxOf(set []byte) (*seal.Mbox, error) {
+	var es seal.EncKeySet
+	if err := coredet.UnmarshalStrict(set, &es); err != nil {
+		return nil, err
+	}
+	return &es.Mbox, nil
+}
+
+// checkMboxEpoch is the mailbox key rule (SSR-W9) for next against the stored
+// prev (nil when there is none).
+func checkMboxEpoch(prev *seal.Mbox, next seal.Mbox) error {
+	if next.Epoch >= MaxMboxEpoch {
+		return fmt.Errorf("the mailbox key's epoch %d is not below 2^53; no mailbox key has one that large", next.Epoch)
+	}
+	if prev == nil {
+		return nil
+	}
+	samePub := bytes.Equal(prev.Pub, next.Pub)
+	switch {
+	case next.Epoch < prev.Epoch:
+		return fmt.Errorf("the mailbox key's epoch went down from %d to %d; publish epoch %d or a new key under a higher epoch",
+			prev.Epoch, next.Epoch, prev.Epoch)
+	case !samePub && next.Epoch == prev.Epoch:
+		return fmt.Errorf("the mailbox key changed but its epoch stayed %d; a new mailbox key needs epoch %d or more",
+			prev.Epoch, prev.Epoch+1)
+	case samePub && next.Epoch != prev.Epoch:
+		return fmt.Errorf("the mailbox key is unchanged but its epoch moved from %d to %d; keep epoch %d with this key",
+			prev.Epoch, next.Epoch, prev.Epoch)
+	}
+	return nil
 }
 
 // LocalKeys returns the key set and KEL of an agent registered here.

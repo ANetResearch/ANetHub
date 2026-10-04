@@ -36,11 +36,8 @@ func init() {
 		if fed.Enabled() {
 			d.srv0.SetForwarder(fed.TryForward)
 			// The lookup a sender here needs for a peer's hub-local agent
-			// ([C32]). Left out only under the test switch; answering
-			// peers' /fed/v2/keys (SetKeySource above) is not affected.
-			if !d.noFedKeyLookup {
-				d.srv0.SetFederatedKeyLookup(fed.LookupKeys)
-			}
+			// ([C32]).
+			d.srv0.SetFederatedKeyLookup(fed.LookupKeys)
 			log.Printf("anet-hub federation: delivery=%s peers=%d", cfg.Delivery, len(cfg.Peers))
 		}
 

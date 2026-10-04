@@ -593,6 +593,67 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 	}
 }
 
+// hub-db-roll.sh's weekly backup keeps what a restored hub must still know
+// and leaves out what only matters while the hub runs (sealed-sender SSR-H1):
+// it holds the revoked delivery credentials (cap_revocation) and the quotas
+// the operator raised (quota_override), and no row of relay_message or
+// relay_redelivery; the log says what it kept.
+func TestTheWeeklyBackupKeepsRevocationsAndQuotas(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "bafyowner-" + canary(t, "OWNER")
+	capID := bytes.Repeat([]byte{0xc5}, 16)
+	if _, _, err := store.RevokeCaps(owner, [][]byte{capID, bytes.Repeat([]byte{0xc6}, 16)}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := int64(900)
+	if _, err := store.SetQuota(owner, aghub.QuotaChange{NonContactMsgs: &msgs}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	payload := canary(t, "ENVELOPE")
+	digest := canary(t, "DIGEST")
+	execAll(t, filepath.Join(dir, "hub.db"), []string{
+		`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES('bafyagent', 1, 1, ?)`,
+		// relay_redelivery comes with relay v3; the script excludes it
+		// whether or not this version of the hub has it yet.
+		`CREATE TABLE IF NOT EXISTS relay_redelivery(env_digest BLOB PRIMARY KEY, count INTEGER NOT NULL, window_start INTEGER NOT NULL)`,
+		`INSERT INTO relay_redelivery(env_digest, count, window_start) VALUES(?, 2, 1)`,
+	}, []any{[]byte(payload)}, nil, []any{[]byte(digest)})
+
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	backup := filepath.Join(dir, "hub-backup-"+time.Now().Format("20060102")+".db")
+	for q, want := range map[string]int{
+		`SELECT COUNT(*) FROM cap_revocation`:                                                    2,
+		`SELECT COUNT(*) FROM cap_revocation WHERE cap_id = x'c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5'`: 1,
+		`SELECT COUNT(*) FROM quota_override WHERE non_contact_msgs = 900`:                       1,
+		`SELECT COUNT(*) FROM relay_message`:                                                     0,
+		`SELECT COUNT(*) FROM relay_redelivery`:                                                  0,
+	} {
+		if n := queryInt(t, backup, q); n != want {
+			t.Errorf("the backup: %s = %d, want %d", q, n, want)
+		}
+	}
+	for _, c := range []string{payload, digest} {
+		if hits := filesHolding(t, c, backup); len(hits) != 0 {
+			t.Errorf("the backup file holds an excluded row's bytes (%s)", c[:8])
+		}
+	}
+	logb, _ := os.ReadFile(filepath.Join(dir, "roll.log"))
+	for _, want := range []string{"rows of relay_message relay_redelivery excluded", "kept 2 revocations, 1 raised quotas"} {
+		if !bytes.Contains(logb, []byte(want)) {
+			t.Errorf("roll.log lacks %q:\n%s", want, logb)
+		}
+	}
+}
+
 func containsPath(list []string, p string) bool {
 	for _, s := range list {
 		if s == p {

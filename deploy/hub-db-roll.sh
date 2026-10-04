@@ -10,14 +10,23 @@
 #     this script records is the current backlog, for the log.
 #   - PRAGMA wal_checkpoint(TRUNCATE) on every run, so page images of
 #     deleted rows do not stay in hub.db-wal.
-#   - On Sundays: a rotating backup (keep newest 2) WITHOUT relay_message
-#     rows, and VACUUM of the main db if the freelist exceeds 20% of pages.
+#   - On Sundays: a rotating backup (keep newest 2) WITHOUT the rows of the
+#     tables in EXCLUDED_TABLES, and VACUUM of the main db if the freelist
+#     exceeds 20% of pages.
 #
-# Backups exclude relay content (A2A-DESIGN §9 row "relay 存储", [C38]).
+# Backups exclude relay content (A2A-DESIGN §9 row "relay 存储", [C38]) and
+# what only matters while the hub runs: EXCLUDED_TABLES below. relay_message
+# holds the envelopes; relay_redelivery counts how often an envelope was
+# queued in the last 24 hours, by its digest (sealed-sender SSR-H1). A hub
+# restored from a backup has an empty mailbox; senders learn it and send
+# again (/relay/status answers unknown).
+# Backups keep everything else, in particular cap_revocation (the delivery
+# credentials owners revoked, so a restored hub still refuses them) and
+# quota_override (the quotas the operator raised with anet-hub quota).
 # Method: VACUUM INTO a temporary copy in the data directory, delete every
-# relay_message row in that copy with secure_delete=ON (the copy's pages
-# holding them are overwritten), then VACUUM INTO the final backup from the
-# copy, which writes only live pages, and remove the copy. The temporary
+# row of the excluded tables in that copy with secure_delete=ON (the copy's
+# pages holding them are overwritten), then VACUUM INTO the final backup from
+# the copy, which writes only live pages, and remove the copy. The temporary
 # copy exists only for the duration of the backup, in the same directory
 # and under the same account as hub.db, which already holds those rows; one
 # left by a run killed outright is removed at the start of the next run.
@@ -45,6 +54,10 @@ LOG="$DATA_DIR/roll.log"
 
 command -v sqlite3 >/dev/null || { echo "hub-db-roll: sqlite3 is required" >&2; exit 1; }
 [ -f "$DB" ] || { echo "hub-db-roll: $DB not found (set HUB_DATA_DIR)" >&2; exit 1; }
+
+# The tables whose rows no backup holds. A table that this hub's version
+# does not have yet is skipped.
+EXCLUDED_TABLES="relay_message relay_redelivery"
 
 SQL() { sqlite3 "$DB" ".timeout 5000" "$@"; }
 log() { echo "[$(date -Is)] $*" >>"$LOG"; }
@@ -78,18 +91,29 @@ if [ "$(date +%u)" = "7" ] || [ "${FORCE_WEEKLY:-0}" = 1 ]; then
         # statement under set -e, so that it does not outlive this run.
         trap 'rm -f -- "$tmp" "$tmp-journal" "$tmp-wal" "$tmp-shm"' EXIT
         SQL "VACUUM INTO $(sqlstr "$tmp");"
-        sqlite3 "$tmp" ".timeout 5000" \
-            "PRAGMA secure_delete=ON;" \
-            "DELETE FROM relay_message;" >/dev/null
+        excluded=()
+        for table in $EXCLUDED_TABLES; do
+            have=$(sqlite3 "$tmp" ".timeout 5000" \
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$table';")
+            [ "$have" = "1" ] && excluded+=("$table")
+        done
+        for table in ${excluded[@]+"${excluded[@]}"}; do
+            sqlite3 "$tmp" ".timeout 5000" \
+                "PRAGMA secure_delete=ON;" \
+                "DELETE FROM $table;" >/dev/null
+        done
         sqlite3 "$tmp" ".timeout 5000" "VACUUM INTO $(sqlstr "$backup");"
         rm -f -- "$tmp" "$tmp-journal" "$tmp-wal" "$tmp-shm"
-        left=$(sqlite3 "$backup" "SELECT COUNT(*) FROM relay_message;")
-        if [ "$left" != "0" ]; then
-            log "ERROR: backup $backup holds $left relay rows; removing it"
-            rm -f -- "$backup"
-            exit 1
-        fi
-        log "weekly backup: $backup ($(stat -c %s "$backup" | awk '{printf "%dMB", $1/1024/1024}'), relay rows excluded)"
+        for table in ${excluded[@]+"${excluded[@]}"}; do
+            left=$(sqlite3 "$backup" "SELECT COUNT(*) FROM $table;")
+            if [ "$left" != "0" ]; then
+                log "ERROR: backup $backup holds $left rows of $table; removing it"
+                rm -f -- "$backup"
+                exit 1
+            fi
+        done
+        kept=$(sqlite3 "$backup" "SELECT (SELECT COUNT(*) FROM cap_revocation) || ' revocations, ' || (SELECT COUNT(*) FROM quota_override) || ' raised quotas';" 2>/dev/null || echo "no revocation or quota tables")
+        log "weekly backup: $backup ($(stat -c %s "$backup" | awk '{printf "%dMB", $1/1024/1024}'), rows of ${excluded[*]} excluded; kept $kept)"
     fi
     # Keep the newest 2 backups. Not `ls | tail | while`: with pipefail an
     # ls that matches nothing fails the pipeline, and set -e then ended the

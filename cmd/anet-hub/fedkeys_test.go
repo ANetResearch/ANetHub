@@ -5,7 +5,6 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/json"
-	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,9 +32,8 @@ type fedHub struct {
 
 // newFedHubs starts two hubs that name each other as peers (delivery on,
 // discovery off, so no background sync runs), wired from their
-// federation.json files as the binary does. The flags are parsed by
-// defineFlags, so what reaches wireMounts is what the binary would see.
-func newFedHubs(t *testing.T, argsA []string) (a, b *fedHub) {
+// federation.json files as the binary does (wireMounts).
+func newFedHubs(t *testing.T) (a, b *fedHub) {
 	t.Helper()
 	mk := func() (*fedHub, *http.ServeMux) {
 		dir := t.TempDir()
@@ -67,18 +65,12 @@ func newFedHubs(t *testing.T, argsA []string) (a, b *fedHub) {
 	}
 	write(a, b)
 	write(b, a)
-	wire := func(h *fedHub, root *http.ServeMux, args []string) {
-		fs := flag.NewFlagSet("anet-hub", flag.ContinueOnError)
-		f := defineFlags(fs)
-		if err := fs.Parse(args); err != nil {
-			t.Fatal(err)
-		}
+	wire := func(h *fedHub, root *http.ServeMux) {
 		srv0 := aghub.NewServer(h.store)
 		srv0.SetHubAID(h.id.AID)
 		root.Handle("/hub/identity", h.id.Handler())
 		root.Handle("/", srv0.Handler())
-		_, closers, err := wireMounts(&hubDeps{data: h.dir, store: h.store, hubID: h.id, srv0: srv0, root: root,
-			noFedKeyLookup: *f.testNoFedKeyLookup})
+		_, closers, err := wireMounts(&hubDeps{data: h.dir, store: h.store, hubID: h.id, srv0: srv0, root: root})
 		t.Cleanup(func() {
 			for i := len(closers) - 1; i >= 0; i-- {
 				_ = closers[i]()
@@ -89,8 +81,8 @@ func newFedHubs(t *testing.T, argsA []string) (a, b *fedHub) {
 			t.Fatal(err)
 		}
 	}
-	wire(a, rootA, argsA)
-	wire(b, rootB, nil)
+	wire(a, rootA)
+	wire(b, rootB)
 	return a, b
 }
 
@@ -130,19 +122,13 @@ func registerWithKeys(t *testing.T, h *fedHub) string {
 	return c.AID()
 }
 
-// -test-no-fed-key-lookup is the switch ANet scripts/scenario.sh uses for
-// its C32 mutation (A2A-DESIGN §17): with it, a hub stops asking its peers
-// for the keys of agents registered there, and nothing else changes. The
-// scenario's claim — the lookup is what makes a peer's hub-local agent
-// reachable — holds only if the switch removes exactly that path: here the
-// same request is 200 without it and 404 with it, while the switched hub
-// still answers its peer's lookups for its own agents.
-func TestTheTestSwitchTurnsOffOnlyTheFederatedKeyLookup(t *testing.T) {
-	fs := flag.NewFlagSet("anet-hub", flag.ContinueOnError)
-	if f := defineFlags(fs); *f.testNoFedKeyLookup {
-		t.Fatal("-test-no-fed-key-lookup is on by default")
-	}
-
+// The hub as main wires it asks its peers for the keys of an agent
+// registered at a peer whose card is not federated (A2A-DESIGN §3.9, [C32]),
+// and still answers for its own agents. The test switch that took this
+// lookup away (-test-no-fed-key-lookup) is gone with the other fixed values
+// of sealed-sender SSR-H20; the lookup itself goes when the directory
+// buckets replace it.
+func TestTheHubWiresTheFederatedKeyLookup(t *testing.T) {
 	keysAt := func(h *fedHub, aid string) int {
 		t.Helper()
 		resp, err := http.Get(h.url + "/agents/" + aid + "/keys")
@@ -152,29 +138,14 @@ func TestTheTestSwitchTurnsOffOnlyTheFederatedKeyLookup(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-
-	t.Run("without the switch", func(t *testing.T) {
-		a, b := newFedHubs(t, nil)
-		if code := keysAt(a, registerWithKeys(t, b)); code != http.StatusOK {
-			t.Fatalf("keys of the peer's hub-local agent: %d, want 200", code)
-		}
-	})
-
-	t.Run("with the switch", func(t *testing.T) {
-		a, b := newFedHubs(t, []string{"-test-no-fed-key-lookup"})
-		if code := keysAt(a, registerWithKeys(t, b)); code != http.StatusNotFound {
-			t.Fatalf("keys of the peer's hub-local agent with the lookup off: %d, want 404", code)
-		}
-		// Only the lookup went: the switched hub's own agents are still
-		// served to its peer, and to anyone asking it directly.
-		own := registerWithKeys(t, a)
-		if code := keysAt(b, own); code != http.StatusOK {
-			t.Fatalf("the switched hub's own agent, asked at its peer: %d, want 200", code)
-		}
-		if code := keysAt(a, own); code != http.StatusOK {
-			t.Fatalf("the switched hub's own agent, asked there: %d, want 200", code)
-		}
-	})
+	a, b := newFedHubs(t)
+	if code := keysAt(a, registerWithKeys(t, b)); code != http.StatusOK {
+		t.Fatalf("keys of the peer's hub-local agent: %d, want 200", code)
+	}
+	own := registerWithKeys(t, a)
+	if code := keysAt(b, own); code != http.StatusOK {
+		t.Fatalf("the hub's own agent, asked at its peer: %d, want 200", code)
+	}
 }
 
 // mboxPub is a fresh Ed25519 public key for a test key set's mailbox signing

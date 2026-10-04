@@ -1,0 +1,117 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /mailbox/revoke (core §2.12.2; sealed-sender SSR-H10, SSR-H11, CORE-E5, CORE-E7): an owner revokes 1 to 1000 capability ids, each 16 bytes in base64url without padding, under its own relayauth signature for \"revoke\". revoked counts the ids not revoked before (an id given twice, in one request or two, counts once) and total the owner's unexpired revocations. A padded, standard-alphabet or wrong-length id, an empty list, a missing or unknown member is 400 bad_request and writes nothing; an unsigned request, a signature for another action or from an agent not registered here is 401 unauthorized; a batch that would take the owner past 100 000 unexpired revocations is 429 revocation_list_full, with nothing written, while ids it already revoked are still answered.",
+  "setup": "revoke",
+  "cases": [
+    {
+      "name": "two ids",
+      "cite": "SSR-H10",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id1}", "${id2}"]}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body": {"revoked": 2, "total": 2}}
+    },
+    {
+      "name": "again, with one id twice and one new",
+      "cite": "SSR-H10",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id1}", "${id3}", "${id3}"]}},
+      "response": {"status": 200, "body": {"revoked": 1, "total": 3}}
+    },
+    {
+      "name": "a padded id",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id_padded}"]}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"cap_ids[0]\" is not base64url (the URL-safe alphabet, no padding, no white space); encode it that way and send again."}}
+    },
+    {
+      "name": "an id in the standard alphabet after a good one",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id2}", "${id_std}"]}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a 15-byte id",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id_short}"]}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"cap_ids[0]\" must be 16 bytes; send a value of that length."}}
+    },
+    {
+      "name": "no ids",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": []}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"cap_ids\" holds 1 to 1000 capability ids; send them in batches of that size."}}
+    },
+    {
+      "name": "no member",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "an unknown member",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id1}"], "owner": "${full}"}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The request body has the member \"owner\", which this route does not take; remove it and send again."}}
+    },
+    {
+      "name": "the refused requests wrote nothing",
+      "cite": "SSR-H10",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id1}"]}},
+      "response": {"status": 200, "body": {"revoked": 0, "total": 3}}
+    },
+    {
+      "name": "unsigned",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"},
+        "json": {"cap_ids": ["${id1}"]}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "signed for another action",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"},
+        "json": {"cap_ids": ["${id1}"]}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "signed by an agent not registered here",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "stranger"},
+        "json": {"cap_ids": ["${id1}"]}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "a full list refuses a new id",
+      "cite": "SSR-H11",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "full"},
+        "json": {"cap_ids": ["${full_id0}", "${id1}"]}},
+      "response": {"status": 429, "headers": {"Retry-After": "*"}, "body": {"reason": "revocation_list_full",
+        "error": "This mailbox's revocation list is full; start a new mailbox key epoch, which empties it, instead of revoking more."}}
+    },
+    {
+      "name": "a full list still answers ids it holds",
+      "cite": "SSR-H11",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "revoke", "as": "full"},
+        "json": {"cap_ids": ["${full_id0}"]}},
+      "response": {"status": 200, "body": {"revoked": 0, "total": 100000}}
+    },
+    {
+      "name": "an older wire is refused",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/mailbox/revoke", "headers": {"X-ANet-Wire": "2"}, "sign": {"action": "revoke", "as": "alice"},
+        "json": {"cap_ids": ["${id1}"]}},
+      "response": {"status": 426, "body_has": {"reason": "wire_too_old"}}
+    }
+  ]
+}

@@ -118,6 +118,10 @@ var deregSteps = []deregStep{
 	{"A2A card skill index", execAID(`DELETE FROM agent_skill WHERE aid = ?`)},
 	{"A2A card tag index", execAID(`DELETE FROM agent_tag WHERE aid = ?`)},
 	{"mailbox", execAID(`DELETE FROM relay_message WHERE to_aid = ?`)},
+	// The credentials it revoked: it is no longer a recipient here. If it
+	// registers again, its daemon pushes them again when the registration
+	// answer counts none (sealed-sender SSR-D21).
+	{"revoked delivery credentials", execAID(`DELETE FROM cap_revocation WHERE owner = ?`)},
 	{"p2p address", execAID(`DELETE FROM p2p_addr WHERE aid = ?`)},
 	// The registry row last: the steps above may read it.
 	{"registry row", execAID(`DELETE FROM agent WHERE aid = ?`)},
@@ -133,7 +137,10 @@ var deregSteps = []deregStep{
 //     tombstone is always the longest key history this hub accepted for the
 //     AID; otherwise ErrTombstoneShrinks, logged, and the caller rolls back;
 //  3. deregSteps;
-//  4. for revoked and operator, the admission list row goes too;
+//  4. for revoked and operator, the admission list row goes too, and so
+//     does what the operator raised its quota to (anet-hub quota): both
+//     are the operator's decisions about the AID, and both stay when the
+//     agent leaves on its own or is swept;
 //  5. dereg_event(aid) for the hub process (PAY-O2);
 //  6. the balance and the ledger, the reviews it is the subject of and the
 //     receipts stay.
@@ -167,6 +174,9 @@ func DeregisterTx(tx *sql.Tx, aid, why string) (DeregResult, error) {
 	}
 	if why == DeregRevoked || why == DeregOperator {
 		if _, err := tx.Exec(`DELETE FROM admitted WHERE aid=?`, aid); err != nil {
+			return DeregResult{}, err
+		}
+		if _, err := tx.Exec(`DELETE FROM quota_override WHERE aid=?`, aid); err != nil {
 			return DeregResult{}, err
 		}
 	}
