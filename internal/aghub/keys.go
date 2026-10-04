@@ -187,12 +187,8 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 		return "", err
 	}
 	// A federating agent's card entry carries its key set (§3.9), and the
-	// sync stream is ordered by fed_seq, so the card row is moved to the
+	// A2A card stream is ordered by fed_seq, so the card is moved to the
 	// head of the stream for peers to pick up the new set.
-	if err := s.bumpFederatedCard(aid); err != nil {
-		return "", err
-	}
-	// The A2A card stream carries the key set too (/fed/v2/cards).
 	if fed, err := agentFederates(s.db, aid); err != nil {
 		return "", err
 	} else if fed {
@@ -201,28 +197,6 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 		}
 	}
 	return KeysStatusOK, nil
-}
-
-// bumpFederatedCard moves a published card to the head of the federation
-// stream without changing it. A card that is withdrawn, or an agent that
-// does not federate, is left alone.
-func (s *Store) bumpFederatedCard(aid string) error {
-	var stored []byte
-	err := s.db.QueryRow(`SELECT card FROM agent_card WHERE aid=?`, aid).Scan(&stored)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if _, withdrawn := parseWithdrawal(stored); withdrawn {
-		return nil
-	}
-	fed, err := s.federatesCard(aid)
-	if err != nil || !fed {
-		return err
-	}
-	return bumpCard(s.db, aid, stored)
 }
 
 // LocalKeys returns the key set and KEL of an agent registered here.
@@ -239,14 +213,6 @@ func (s *Store) LocalKeys(aid string) (keyset, kel []byte, registered bool, err 
 		return nil, nil, false, err
 	}
 	return keyset, kel, true, nil
-}
-
-// FedCardKeys returns the key set and KEL a peer's card sync delivered for
-// aid, or sql.ErrNoRows when there is none.
-func (s *Store) FedCardKeys(aid string) (keyset, kel []byte, err error) {
-	err = s.db.QueryRow(`SELECT keys, kel FROM fed_card WHERE aid=? AND keys IS NOT NULL AND length(keys) > 0`,
-		aid).Scan(&keyset, &kel)
-	return keyset, kel, err
 }
 
 // verifyKeysFor checks a key set and KEL for aid as a sender would. The
@@ -278,12 +244,11 @@ func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 // (hKeysLookup) is the same with the AID in the body.
 //
 // Sources, in order: an agent registered here; a key set that arrived with
-// a peer's card sync (the A2A card stream, then the ADP card stream); a
-// /fed/v2/keys lookup at the peer hubs. The last one
-// covers agents whose card is not federated (the default hub-local
-// visibility), which a cross-hub sender can otherwise never encrypt to
-// ([C32]). Its answer is relayed to this caller and not stored: it does
-// not enter fed_card, /agents or any index.
+// a peer's A2A card stream; a /fed/v2/keys lookup at the peer hubs. The
+// last one covers agents whose card is not federated (the default
+// hub-local visibility), which a cross-hub sender can otherwise never
+// encrypt to ([C32]). Its answer is relayed to this caller and not stored:
+// it does not enter fed_a2a_card, /agents or any index.
 func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
 	s.serveKeys(w, r, r.PathValue("aid"))
 }
@@ -343,10 +308,6 @@ func (s *Server) serveKeys(w http.ResponseWriter, r *http.Request, aid string) {
 		return
 	}
 	if ks, kl, err := s.store.FedA2ACardKeys(aid); err == nil && verifyKeysFor(aid, ks, kl) == nil {
-		writeKeys(w, aid, ks, kl)
-		return
-	}
-	if ks, kl, err := s.store.FedCardKeys(aid); err == nil && verifyKeysFor(aid, ks, kl) == nil {
 		writeKeys(w, aid, ks, kl)
 		return
 	}

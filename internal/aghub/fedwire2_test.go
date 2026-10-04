@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -152,7 +151,7 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 	if listedContains(t, a.srv, recip.AID()) {
 		t.Error("the looked-up agent is listed at A")
 	}
-	if _, _, err := a.store.FedCardKeys(recip.AID()); !errors.Is(err, sql.ErrNoRows) {
+	if _, _, err := a.store.FedA2ACardKeys(recip.AID()); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("the lookup was stored at A: %v", err)
 	}
 
@@ -221,142 +220,5 @@ func TestAPeersKeySetForAnotherAIDIsNotRelayed(t *testing.T) {
 	})
 	if code, body := getJSON(t, srv.URL+"/agents/"+asked.AID()+"/keys"); code == http.StatusOK {
 		t.Fatalf("another AID's key set was relayed: %s", body)
-	}
-}
-
-// ---- keys and KELs in the card sync stream ----
-
-// A federating agent's key set travels with its card, a new key set moves
-// the card to the head of the stream, and the pulling hub stores the set
-// only when it verifies for the card's subject.
-func TestKeysTravelWithTheCardAndAreVerifiedOnArrival(t *testing.T) {
-	hub := newFedHub(t)
-	agent, stranger := twoAgents(t)
-	federate(t, hub, agent, "Keyed", []string{"work.do"})
-	k1, _ := mintKeySet(t, agent, 1)
-	if code, body := publishKeys(t, hub.srv, agent, k1); code != 200 {
-		t.Fatalf("publish: %d %s", code, body)
-	}
-	cards, cursor, err := hub.store.CardsSince(0, 100, testHome)
-	if err != nil || len(cards) != 1 {
-		t.Fatalf("stream: %v %v", cards, err)
-	}
-	if cards[0].Keys != base64.StdEncoding.EncodeToString(k1) {
-		t.Fatal("the card entry does not carry the key set")
-	}
-	peer := openPeerStore(t)
-	if err := peer.AdmitFedCard(homePeerAID, cards[0]); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, err := peer.FedCardKeys(agent.AID()); err != nil || !bytes.Equal(ks, k1) {
-		t.Fatalf("the peer did not store the verified key set: %v", err)
-	}
-
-	// A new set moves the card past the cursor a peer holds.
-	k2, _ := mintKeySet(t, agent, 2)
-	if code, body := publishKeys(t, hub.srv, agent, k2); code != 200 {
-		t.Fatalf("publish 2: %d %s", code, body)
-	}
-	after, _, err := hub.store.CardsSince(cursor, 100, testHome)
-	if err != nil || len(after) != 1 || after[0].Keys != base64.StdEncoding.EncodeToString(k2) {
-		t.Fatalf("a new key set did not reach the stream: %+v %v", after, err)
-	}
-	if err := peer.AdmitFedCard(homePeerAID, after[0]); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-		t.Fatal("the peer kept the older set")
-	}
-
-	// A stale set, and another AID's set, are ignored; the card itself is
-	// still admitted.
-	stale := after[0]
-	stale.Keys = base64.StdEncoding.EncodeToString(k1)
-	if err := peer.AdmitFedCard(homePeerAID, stale); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-		t.Fatal("a lower seq replaced the stored set")
-	}
-	foreign, _ := mintKeySet(t, stranger, 99)
-	swapped := after[0]
-	swapped.Keys = base64.StdEncoding.EncodeToString(foreign)
-	if err := peer.AdmitFedCard(homePeerAID, swapped); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-		t.Fatal("another AID's key set was stored under this card")
-	}
-	// Only the peer that taught the card may update it: a valid, newer
-	// set on the same card from a different peer is not stored.
-	k3, _ := mintKeySet(t, agent, 3)
-	fromOther := after[0]
-	fromOther.Keys = base64.StdEncoding.EncodeToString(k3)
-	if err := peer.AdmitFedCard("did:anet:other-hub", fromOther); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-		t.Fatal("a peer that did not teach the card replaced its key set")
-	}
-	// The federation seam carries the set both ways.
-	views, _, err := aghub.FedDirectory{S: hub.store}.CardsSince(cursor, 100, testHome)
-	if err != nil || len(views) != 1 || !bytes.Equal(views[0].Keys, k2) {
-		t.Fatalf("FedDirectory.CardsSince dropped the key set: %+v %v", views, err)
-	}
-	other := openPeerStore(t)
-	if err := (aghub.FedDirectory{S: other}).AdmitFedCard(homePeerAID, views[0].Card, views[0].KEL, views[0].Keys, testHome); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, _ := other.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-		t.Fatal("FedDirectory.AdmitFedCard dropped the key set")
-	}
-}
-
-// A card entry whose KEL is shorter than, or forked from, the KEL already
-// held for the agent is refused (§3.8).
-func TestAFederatedCardCannotRollBackOrForkTheKEL(t *testing.T) {
-	hub := newFedHub(t)
-	agent, err := identitytest.Hub()
-	if err != nil {
-		t.Fatal(err)
-	}
-	blob, _ := agent.Export()
-	before, _ := identity.Restore(blob)
-	forked, _ := identity.Restore(blob)
-	federate(t, hub, agent, "Agent", []string{"work.do"})
-	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())); err != nil {
-		t.Fatal(err)
-	}
-	register(t, hub.srv, agent, "Agent", []string{"work.do"})
-	cards, _, err := hub.store.CardsSince(0, 100, testHome)
-	if err != nil || len(cards) != 1 {
-		t.Fatalf("stream: %v %v", cards, err)
-	}
-	peer := openPeerStore(t)
-	if err := peer.AdmitFedCard(homePeerAID, cards[0]); err != nil {
-		t.Fatalf("the rotated card: %v", err)
-	}
-	entryFor := func(c *identity.Controller) aghub.FedCard {
-		kel, _ := identity.MarshalKEL(c.KEL())
-		return aghub.FedCard{Card: mintCard(t, c, "Agent", []string{"work.do"}),
-			KEL: base64.StdEncoding.EncodeToString(kel), Home: testHome}
-	}
-	err = peer.AdmitFedCard(homePeerAID, entryFor(before))
-	if err == nil || !errors.Is(err, identity.ErrKELRollback) {
-		t.Fatalf("a newer card over the pre-rotation KEL: %v, want a rollback refusal", err)
-	}
-	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+7); err != nil {
-		t.Fatal(err)
-	}
-	err = peer.AdmitFedCard(homePeerAID, entryFor(forked))
-	if err == nil || !errors.Is(err, identity.ErrKELFork) {
-		t.Fatalf("a card over a forked KEL: %v, want a fork refusal", err)
-	}
-	// The agent itself, rotating further, still goes through.
-	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())+11); err != nil {
-		t.Fatal(err)
-	}
-	if err := peer.AdmitFedCard(homePeerAID, entryFor(agent)); err != nil {
-		t.Fatalf("an extending KEL was refused: %v", err)
 	}
 }

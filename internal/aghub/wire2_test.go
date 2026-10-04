@@ -670,14 +670,14 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
-	if code, b := registerWithCard(t, srv, c, "Agent", nil, nil); code != 200 {
+	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
 		t.Fatalf("a longer KEL was refused: %d %s", code, b)
 	}
-	if code, b := registerWithCard(t, srv, c, "Agent", nil, nil); code != 200 {
+	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
 		t.Fatalf("the same KEL again was refused: %d %s", code, b)
 	}
 	// Rollback: the pre-rotation KEL, signed by the pre-rotation key.
-	code, b := registerWithCard(t, srv, before, "Agent", nil, nil)
+	code, b := registerCode(t, srv, before, "Agent", nil)
 	if code != http.StatusConflict || !strings.Contains(string(b), "rollback") {
 		t.Errorf("a rolled-back KEL: %d %s, want 409 naming the rollback", code, b)
 	}
@@ -685,7 +685,7 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+1); err != nil {
 		t.Fatal(err)
 	}
-	code, b = registerWithCard(t, srv, forked, "Agent", nil, nil)
+	code, b = registerCode(t, srv, forked, "Agent", nil)
 	if code != http.StatusConflict || !strings.Contains(string(b), "fork") {
 		t.Errorf("a forked KEL: %d %s, want 409 naming the fork", code, b)
 	}
@@ -696,7 +696,7 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 		if code, b := leave(t, srv, c); code != 200 {
 			t.Fatalf("leave: %d %s", code, b)
 		}
-		if code, b := registerWithCard(t, srv, before, "Agent", nil, nil); code != http.StatusConflict {
+		if code, b := registerCode(t, srv, before, "Agent", nil); code != http.StatusConflict {
 			t.Errorf("re-registering after leaving with a rolled-back KEL: %d %s, want 409", code, b)
 		}
 	}()

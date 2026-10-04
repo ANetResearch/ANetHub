@@ -6,18 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/ANetResearch/ANetCore/adp"
-	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
@@ -360,60 +355,6 @@ func TestPayloadCIDMismatch(t *testing.T) {
 	}
 }
 
-// Two hubs, one agent, and a directory that crosses between them.
-//
-// The property being tested is not "the card arrived" but that it arrived
-// as the agent's own signed statement. A peer hub can decline to tell us
-// about an agent — hiding is allowed and unavoidable — and this is what
-// stops it inventing one.
-func TestDirectoryFederation(t *testing.T) {
-	dir := t.TempDir()
-
-	agent, err := identitytest.Hub()
-	if err != nil {
-		t.Fatal(err)
-	}
-	kel, err := identity.MarshalKEL(agent.KEL())
-	if err != nil {
-		t.Fatal(err)
-	}
-	card := signedCardFor(t, agent, "RemoteNode", []string{"cas.put"})
-
-	// Hub A publishes one opted-in card.
-	source := &fakeDirectory{cards: []FedCardView{{
-		Card: card, KEL: kel, Home: "https://hub-a.example", FedSeq: 7,
-	}}}
-	svcA := newDiscoveryService(t, filepath.Join(dir, "a"), Config{
-		Discovery: "allowlist", Home: "https://hub-a.example",
-		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
-	}, source)
-	srvA := httptest.NewServer(svcA.Handler())
-	defer srvA.Close()
-
-	// Hub B pulls from A.
-	sink := &fakeDirectory{}
-	svcB := newDiscoveryService(t, filepath.Join(dir, "b"), Config{
-		Discovery: "allowlist", Home: "https://hub-b.example",
-		Peers: []Peer{{AID: "did:anet:a", Endpoint: srvA.URL}},
-	}, sink)
-	admitted, refused := svcB.SyncOnce(context.Background())
-	if admitted != 1 || refused != 0 {
-		t.Fatalf("sync admitted=%d refused=%d, want 1/0", admitted, refused)
-	}
-	if len(sink.got) != 1 {
-		t.Fatalf("hub B stored %d cards", len(sink.got))
-	}
-	if sink.got[0].home != "https://hub-a.example" {
-		t.Errorf("routing hint lost: %q — B would not know where to deliver", sink.got[0].home)
-	}
-
-	// The cursor advances, so a second sync is not a second copy.
-	admitted2, _ := svcB.SyncOnce(context.Background())
-	if admitted2 != 0 {
-		t.Errorf("re-syncing re-admitted %d cards; the cursor did not advance", admitted2)
-	}
-}
-
 // Discovery is off by default and switches independently of delivery. A
 // hub may carry a peer's traffic without publishing its directory.
 func TestDiscoveryIsOffUnlessAskedFor(t *testing.T) {
@@ -426,7 +367,7 @@ func TestDiscoveryIsOffUnlessAskedFor(t *testing.T) {
 	}
 	srv := httptest.NewServer(svc.Handler())
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/fed/v1/cards")
+	resp, err := http.Get(srv.URL + "/fed/v2/cards")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,25 +377,41 @@ func TestDiscoveryIsOffUnlessAskedFor(t *testing.T) {
 	}
 }
 
+// The ADP card stream is gone with the signed ADP card it carried: a hub
+// with discovery on serves its directory on /fed/v2/cards only.
+func TestTheADPCardStreamIsGone(t *testing.T) {
+	svc := newDiscoveryService(t, t.TempDir(), Config{
+		Discovery: "allowlist", Home: "https://hub-a.example",
+		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
+	}, &fakeDirectory{})
+	srv := httptest.NewServer(svc.Handler())
+	defer srv.Close()
+	for path, want := range map[string]int{"/fed/v1/cards": http.StatusNotFound, "/fed/v2/cards": http.StatusOK} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("GET %s: %d, want %d", path, resp.StatusCode, want)
+		}
+	}
+}
+
 // fakeDirectory stands in for the hub kernel.
 type fakeDirectory struct {
-	cards []FedCardView
-	got   []storedCard
-	// refuseForNow names subjects this directory will not take TODAY —
-	// the shape of "that agent is registered here", which stops applying
-	// the moment the agent moves.
-	refuseForNow map[string]bool
-	// rejectForever names subjects that are wrong for good — malformed,
-	// forged, mismatched. The stream should move past these.
-	rejectForever map[string]bool
-	reviews       []json.RawMessage
-	gotRevs       []storedReview
+	reviews []json.RawMessage
+	gotRevs []storedReview
 	// a2a is the A2A card stream this directory serves; gotA2A what it
-	// admitted from one, and a2aRefuseForNow the FedSeqs it refuses for
-	// now.
-	a2a             []FedA2ACardView
-	gotA2A          []FedA2ACardView
-	a2aRefuseForNow map[int64]bool
+	// admitted from one. a2aRefuseForNow names the FedSeqs it will not
+	// take TODAY — the shape of "that agent is registered here", which
+	// stops applying the moment the agent moves; a2aRejectForever those
+	// that are wrong for good (malformed, forged, mismatched), which the
+	// stream should move past.
+	a2a              []FedA2ACardView
+	gotA2A           []FedA2ACardView
+	a2aRefuseForNow  map[int64]bool
+	a2aRejectForever map[int64]bool
 }
 
 func (f *fakeDirectory) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACardView, int64, error) {
@@ -474,6 +431,9 @@ func (f *fakeDirectory) AdmitFedA2ACard(peerAID string, e FedA2ACardView) error 
 	if f.a2aRefuseForNow[e.FedSeq] {
 		return fmt.Errorf("%w: registered here", ErrRefusedForNow)
 	}
+	if f.a2aRejectForever[e.FedSeq] {
+		return fmt.Errorf("card is malformed")
+	}
 	f.gotA2A = append(f.gotA2A, e)
 	return nil
 }
@@ -481,24 +441,6 @@ func (f *fakeDirectory) AdmitFedA2ACard(peerAID string, e FedA2ACardView) error 
 type storedReview struct {
 	peer string
 	raw  json.RawMessage
-}
-
-type storedCard struct {
-	peer, home string
-	card, keys []byte
-}
-
-func (f *fakeDirectory) CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error) {
-	out := []FedCardView{}
-	next := cursor
-	for _, c := range f.cards {
-		if c.FedSeq > cursor {
-			c.Home = home
-			out = append(out, c)
-			next = c.FedSeq
-		}
-	}
-	return out, next, nil
 }
 
 func (f *fakeDirectory) ReviewsSince(cursor int64, limit int) ([]json.RawMessage, int64, error) {
@@ -515,21 +457,6 @@ func (f *fakeDirectory) ReviewsSince(cursor int64, limit int) ([]json.RawMessage
 
 func (f *fakeDirectory) AdmitFedReview(peerAID string, raw json.RawMessage) error {
 	f.gotRevs = append(f.gotRevs, storedReview{peer: peerAID, raw: raw})
-	return nil
-}
-
-func (f *fakeDirectory) AdmitFedCard(peerAID string, card, kel, keys []byte, home string) error {
-	var c struct {
-		SubjectDID string `json:"subject_did"`
-	}
-	_ = json.Unmarshal(card, &c)
-	if f.refuseForNow[c.SubjectDID] {
-		return fmt.Errorf("%w: %s is registered here", ErrRefusedForNow, c.SubjectDID)
-	}
-	if f.rejectForever[c.SubjectDID] {
-		return fmt.Errorf("card is malformed")
-	}
-	f.got = append(f.got, storedCard{peer: peerAID, home: home, card: card, keys: keys})
 	return nil
 }
 
@@ -551,93 +478,21 @@ func newDiscoveryService(t *testing.T, dir string, cfg Config, d Directory) *Ser
 	return svc
 }
 
-func signedCardFor(t *testing.T, c *identity.Controller, name string, caps []string) []byte {
-	t.Helper()
-	now := time.Now()
-	card := &adp.AgentCard{
-		SubjectDID: c.AID(), CardSchema: adp.CardSchema{Major: 1},
-		Seq: uint64(now.UnixNano()), IssuedAt: now.Unix(),
-		NotBefore:    now.Add(-time.Minute).Unix(),
-		Capabilities: caps, CriticalExtensions: []string{}, Name: name,
-	}
-	if err := card.Sign(c); err != nil {
-		t.Fatal(err)
-	}
-	b, err := json.Marshal(card)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-
-// A card refused for a reason that later stops applying must not be lost.
-//
-// The cursor is how the stream avoids re-reading, and it was also how an
-// agent disappeared for good: a peer's card was refused because that
-// agent was registered here, the cursor advanced past it, the agent later
-// moved away, and this hub never asked for that card again. It stayed
-// missing from the directory long after the reason had gone — found in
-// production, where the agent was simply absent from the directory and
-// nothing anywhere said why.
-func TestATransientRefusalDoesNotAdvancePastTheCard(t *testing.T) {
-	dir := t.TempDir()
-	source := &fakeDirectory{cards: []FedCardView{
-		{Card: []byte(`{"subject_did":"did:anet:a"}`), KEL: []byte("k"), FedSeq: 1},
-		{Card: []byte(`{"subject_did":"did:anet:b"}`), KEL: []byte("k"), FedSeq: 2},
-	}}
-	svcA := newDiscoveryService(t, filepath.Join(dir, "a"), Config{
-		Discovery: "allowlist", Home: "https://hub-a.example",
-		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
-	}, source)
-	srvA := httptest.NewServer(svcA.Handler())
-	defer srvA.Close()
-
-	sink := &fakeDirectory{refuseForNow: map[string]bool{"did:anet:a": true}}
-	svcB := newDiscoveryService(t, filepath.Join(dir, "b"), Config{
-		Discovery: "allowlist", Home: "https://hub-b.example",
-		Peers: []Peer{{AID: "did:anet:a", Endpoint: srvA.URL}},
-	}, sink)
-
-	// The first card is refused for now, so the stream holds there rather
-	// than skipping to the second and forgetting the first exists.
-	svcB.SyncOnce(context.Background())
-	if len(sink.got) != 0 {
-		t.Fatalf("admitted %d cards past a transient refusal", len(sink.got))
-	}
-
-	// The reason goes away. The next round must pick it up.
-	sink.refuseForNow = nil
-	svcB.SyncOnce(context.Background())
-	if len(sink.got) != 2 {
-		t.Errorf("after the refusal lifted, admitted %d cards, want 2 — "+
-			"the cursor had moved past the first one", len(sink.got))
-	}
-}
-
 // A permanent refusal must NOT hold the stream, or one bad card from one
 // peer wedges that peer's directory for ever.
 func TestAPermanentRefusalStillAdvances(t *testing.T) {
-	dir := t.TempDir()
-	source := &fakeDirectory{cards: []FedCardView{
-		{Card: []byte(`{"subject_did":"did:anet:bad"}`), KEL: []byte("k"), FedSeq: 1},
-		{Card: []byte(`{"subject_did":"did:anet:good"}`), KEL: []byte("k"), FedSeq: 2},
+	source := &fakeDirectory{a2a: []FedA2ACardView{
+		{Format: FormatA2ACard, Card: json.RawMessage(`{"name":"bad"}`), KEL: []byte("k"), FedSeq: 1},
+		{Format: FormatA2ACard, Card: json.RawMessage(`{"name":"good"}`), KEL: []byte("k"), FedSeq: 2},
 	}}
-	svcA := newDiscoveryService(t, filepath.Join(dir, "a"), Config{
-		Discovery: "allowlist", Home: "https://hub-a.example",
-		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
-	}, source)
-	srvA := httptest.NewServer(svcA.Handler())
-	defer srvA.Close()
-
-	sink := &fakeDirectory{rejectForever: map[string]bool{"did:anet:bad": true}}
-	svcB := newDiscoveryService(t, filepath.Join(dir, "b"), Config{
-		Discovery: "allowlist", Home: "https://hub-b.example",
-		Peers: []Peer{{AID: "did:anet:a", Endpoint: srvA.URL}},
-	}, sink)
-	svcB.SyncOnce(context.Background())
-	if len(sink.got) != 1 {
-		t.Errorf("a permanently bad card stopped the stream: admitted %d, want 1",
-			len(sink.got))
+	sink := &fakeDirectory{a2aRejectForever: map[int64]bool{1: true}}
+	_, svcB := discoveryPair(t, source, sink)
+	if admitted, refused := svcB.SyncOnce(context.Background()); admitted != 1 || refused != 1 {
+		t.Errorf("a permanently bad card stopped the stream: admitted %d refused %d, want 1 and 1",
+			admitted, refused)
+	}
+	if c := svcB.peerA2ACursor("did:anet:a"); c != 2 {
+		t.Errorf("cursor %d, want 2: past the card refused for good", c)
 	}
 }
 
@@ -649,40 +504,32 @@ func TestAPermanentRefusalStillAdvances(t *testing.T) {
 // past it for ever. So a peer's directory is re-read from the start every
 // so often, which heals that and every cause not yet thought of.
 func TestTheDirectoryHealsWhatTheCursorSkipped(t *testing.T) {
-	dir := t.TempDir()
-	source := &fakeDirectory{cards: []FedCardView{
-		{Card: []byte(`{"subject_did":"did:anet:a"}`), KEL: []byte("k"), FedSeq: 1},
+	source := &fakeDirectory{a2a: []FedA2ACardView{
+		{Format: FormatA2ACard, Card: json.RawMessage(`{"name":"a"}`), KEL: []byte("k"), FedSeq: 1},
 	}}
-	svcA := newDiscoveryService(t, filepath.Join(dir, "a"), Config{
-		Discovery: "allowlist", Home: "https://hub-a.example",
-		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
-	}, source)
-	srvA := httptest.NewServer(svcA.Handler())
-	defer srvA.Close()
-
 	sink := &fakeDirectory{}
-	svcB := newDiscoveryService(t, filepath.Join(dir, "b"), Config{
-		Discovery: "allowlist", Home: "https://hub-b.example",
-		Peers: []Peer{{AID: "did:anet:a", Endpoint: srvA.URL}},
-	}, sink)
+	_, svcB := discoveryPair(t, source, sink)
 
 	svcB.SyncOnce(context.Background())
-	if len(sink.got) != 1 {
-		t.Fatalf("setup: admitted %d", len(sink.got))
+	if len(sink.gotA2A) != 1 {
+		t.Fatalf("setup: admitted %d", len(sink.gotA2A))
 	}
 	// The entry is lost — a bad restore, an admission bug, anything. The
 	// cursor is past it, so ordinary rounds will never ask again.
-	sink.got = nil
+	sink.gotA2A = nil
 	for i := 0; i < fullResyncEvery-2; i++ {
 		svcB.SyncOnce(context.Background())
 	}
-	if len(sink.got) != 0 {
+	if len(sink.gotA2A) != 0 {
 		t.Fatalf("re-read too eagerly: a full pass every round would make the cursor pointless")
 	}
 	// The scheduled full pass brings it back.
 	svcB.SyncOnce(context.Background())
-	if len(sink.got) != 1 {
-		t.Errorf("the directory did not heal: admitted %d after a full resync round", len(sink.got))
+	if len(sink.gotA2A) != 1 {
+		t.Errorf("the directory did not heal: admitted %d after a full resync round", len(sink.gotA2A))
+	}
+	if c := svcB.peerA2ACursor("did:anet:a"); c != 1 {
+		t.Errorf("cursor %d after the full pass, want 1", c)
 	}
 }
 

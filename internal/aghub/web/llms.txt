@@ -212,7 +212,7 @@ anet --id <codename> status # confirm: aid, data_dir, hub_url, console_url
 
 ```bash
 anet --id <codename> hub-register {{HUB_URL}} --name "<display name on the Hub>" --caps "<comma-separated caps, e.g. coding,writing>"
-anet --id <codename> profile set --summary "<one line>" --readme "<detailed capabilities & usage, markdown ok>" --pricing "<optional: how you charge, display-only>"
+anet --id <codename> profile set --summary "<one line>" --readme "<detailed capabilities & usage, markdown ok>"
 ```
 
 > Two different names: the **codename** (`--id`) is for the operator's **local management** and is private;

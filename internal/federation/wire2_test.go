@@ -8,7 +8,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,8 +15,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/coredet"
-	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
@@ -275,31 +272,21 @@ func TestAKeyLookupMustBeSignedByAPeer(t *testing.T) {
 	}
 }
 
-// ---- keys in the card sync stream ----
+// ---- keys in the card stream ----
 
-// A card entry carries the agent's key set to the pulling hub.
+// A card entry carries the agent's key set to the pulling hub; an entry
+// without one carries no keys member.
 func TestTheCardStreamCarriesKeys(t *testing.T) {
-	dir := t.TempDir()
-	agent, err := identitytest.Hub()
-	if err != nil {
-		t.Fatal(err)
-	}
-	kel, _ := identity.MarshalKEL(agent.KEL())
-	source := &fakeDirectory{cards: []FedCardView{{
-		Card: signedCardFor(t, agent, "Keyed", []string{"x.y"}), KEL: kel,
-		Keys: []byte("signed-key-set"), FedSeq: 3,
-	}, {
-		Card: signedCardFor(t, agent, "Keyless", []string{"x.y"}), KEL: kel, FedSeq: 4,
-	}}}
-	svcA := newDiscoveryService(t, filepath.Join(dir, "a"), Config{
-		Discovery: "allowlist", Home: "https://hub-a.example",
-		Peers: []Peer{{AID: "did:anet:b", Endpoint: "http://unused"}},
-	}, source)
-	srvA := httptest.NewServer(svcA.Handler())
-	defer srvA.Close()
+	source := &fakeDirectory{a2a: []FedA2ACardView{
+		{Format: FormatA2ACard, Card: json.RawMessage(`{"name":"Keyed"}`), KEL: []byte("kel"),
+			Keys: []byte("signed-key-set"), FedSeq: 3},
+		{Format: FormatA2ACard, Card: json.RawMessage(`{"name":"Keyless"}`), KEL: []byte("kel"), FedSeq: 4},
+	}}
+	sink := &fakeDirectory{}
+	srvA, svcB := discoveryPair(t, source, sink)
 
 	// The wire field.
-	resp, err := http.Get(srvA.URL + "/fed/v1/cards")
+	resp, err := http.Get(srvA.URL + "/fed/v2/cards")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,15 +302,10 @@ func TestTheCardStreamCarriesKeys(t *testing.T) {
 		t.Errorf("an entry without keys carries a keys field: %v", page.Cards[1])
 	}
 
-	sink := &fakeDirectory{}
-	svcB := newDiscoveryService(t, filepath.Join(dir, "b"), Config{
-		Discovery: "allowlist", Home: "https://hub-b.example",
-		Peers: []Peer{{AID: "did:anet:a", Endpoint: srvA.URL}},
-	}, sink)
 	if admitted, _ := svcB.SyncOnce(context.Background()); admitted != 2 {
 		t.Fatalf("admitted %d", admitted)
 	}
-	if string(sink.got[0].keys) != "signed-key-set" || sink.got[1].keys != nil {
-		t.Fatalf("keys handed to the kernel: %q, %q", sink.got[0].keys, sink.got[1].keys)
+	if string(sink.gotA2A[0].Keys) != "signed-key-set" || sink.gotA2A[1].Keys != nil {
+		t.Fatalf("keys handed to the kernel: %q, %q", sink.gotA2A[0].Keys, sink.gotA2A[1].Keys)
 	}
 }
