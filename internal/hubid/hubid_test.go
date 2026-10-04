@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 )
@@ -30,7 +31,7 @@ func TestSignVerifiableAgainstServedKEL(t *testing.T) {
 		t.Fatal(err)
 	}
 	pre := []byte("fed-envelope-preimage")
-	sig, seq := id.Sign(pre)
+	sig, seq := id.Ctrl.Sign(pre)
 
 	srv := httptest.NewServer(id.Handler())
 	defer srv.Close()
@@ -94,5 +95,19 @@ func TestServedIdentityIsCurrent(t *testing.T) {
 	}
 	if rec.Header().Get("X-ANet-Wire") != "3" {
 		t.Fatalf("X-ANet-Wire %q", rec.Header().Get("X-ANet-Wire"))
+	}
+}
+
+// A hub's first start incepts a hub identity (toad 0, KEL C-5, H-30): no witness, ever, and the
+// time of inception in its icp.
+func TestHubIdentityIsAHubIdentity(t *testing.T) {
+	before := uint64(time.Now().UnixMilli())
+	id, err := LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	icp := id.Ctrl.KEL()[0].Event
+	if id.Ctrl.Toad() != identity.ToadHub || len(icp.Witnesses) != 0 || icp.Timestamp < before {
+		t.Fatalf("toad %d, icp %+v", id.Ctrl.Toad(), icp)
 	}
 }

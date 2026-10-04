@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 )
 
 // plausibleSignature promises that a signature it refuses is refused by
@@ -14,21 +15,21 @@ import (
 // (KEL C-10 step 3), so a signature declared at the dip's seq is
 // REVOKED_KEY here as well, never INVALID_SIGNATURE.
 func TestPlausibleSignatureRefusesAsVerifyObjectDoes(t *testing.T) {
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
 	pre := []byte("an object")
 	s0, _ := c.Sign(pre)
-	if err := c.Rotate(2000); err != nil {
+	if err := identitytest.Rotate(c, 2000); err != nil {
 		t.Fatal(err)
 	}
 	s1, _ := c.Sign(pre)
-	if err := c.Rotate(3000); err != nil {
+	if err := identitytest.Rotate(c, 3000); err != nil {
 		t.Fatal(err)
 	}
 	s2, _ := c.Sign(pre)
-	if err := c.Deactivate(4000); err != nil {
+	if err := identitytest.Deactivate(c, 4000); err != nil {
 		t.Fatal(err)
 	}
 	kel := c.KEL()

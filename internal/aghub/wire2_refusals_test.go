@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -170,7 +171,7 @@ func storedKeys(t *testing.T, srvURL, aid string) []byte {
 // is verified against the key in force (§3.1 step 2).
 func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,7 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	}
 
 	// Rotate, register the longer KEL, and re-sign the identical set.
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
@@ -307,7 +308,7 @@ func TestLeavingRemovesTheA2ACard(t *testing.T) {
 // wrote cannot then replace the KEL with a fork or a shorter copy.
 func TestRegisterAgentChecksTheKELInTheWriteTransaction(t *testing.T) {
 	store := openPeerStore(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,13 +325,13 @@ func TestRegisterAgentChecksTheKELInTheWriteTransaction(t *testing.T) {
 	if err := write(initial); err != nil {
 		t.Fatalf("first registration: %v", err)
 	}
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if err := write(c.KEL()); err != nil {
 		t.Fatalf("an extending KEL: %v", err)
 	}
-	if err := forked.Rotate(uint64(time.Now().UnixMilli()) + 3); err != nil {
+	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+3); err != nil {
 		t.Fatal(err)
 	}
 	if err := write(forked.KEL()); !errors.Is(err, aghub.ErrKELNotExtended) || !errors.Is(err, identity.ErrKELFork) {
@@ -359,7 +360,7 @@ func TestRegistrationIsRateLimitedPerIPv6Prefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := func(ip string) int {
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))
@@ -405,7 +406,7 @@ func TestFederatedKeyLookupsAreRateLimitedPerClient(t *testing.T) {
 		code, _, hdr := send(t, req)
 		return code, hdr
 	}
-	unknown := func() string { c, _ := identity.Incept(); return c.AID() }
+	unknown := func() string { c, _ := identitytest.Hub(); return c.AID() }
 	if code, _ := get(unknown(), "203.0.113.5"); code != http.StatusNotFound {
 		t.Fatalf("first federated lookup: %d, want 404 from the peers", code)
 	}

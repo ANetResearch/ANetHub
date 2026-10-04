@@ -698,7 +698,7 @@ func (s *Service) TryForward(destAID string, envelope []byte) (bool, string, err
 	if err != nil {
 		return false, "", err
 	}
-	sig, seq := s.id.Sign(pre)
+	sig, seq := s.id.Ctrl.Sign(pre)
 	env.Sig, env.KeyStateSeq = base64.StdEncoding.EncodeToString(sig), seq
 
 	body, _ := json.Marshal(env)

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 )
 
 func TestANewHubIsClosed(t *testing.T) {
@@ -22,7 +22,7 @@ func TestANewHubIsClosed(t *testing.T) {
 	if err := g.store.db.QueryRow(`SELECT COUNT(*) FROM hub_meta WHERE key=?`, metaAdmissionMode).Scan(&n); err != nil || n != 0 {
 		t.Errorf("a new hub wrote its mode (%d rows, %v)", n, err)
 	}
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	for _, extra := range []map[string]any{nil, {"check_only": true}, g.pow(c.AID(), "good")} {
 		code, out := g.register(c, c, extra)
 		if code != http.StatusForbidden || out["reason"] != "admission_required" || out["aid"] != c.AID() {
@@ -46,7 +46,7 @@ func TestRegistrationPaysNothing(t *testing.T) {
 	for _, route := range []string{"listed", "window_open", "open"} {
 		t.Run(route, func(t *testing.T) {
 			g := newGateHub(t)
-			c, _ := identity.Incept()
+			c, _ := identitytest.Hub()
 			g.gateState(route, c)
 			code, out := g.register(c, c, g.pow(c.AID(), "good"))
 			if code != http.StatusOK {

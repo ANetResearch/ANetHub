@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
@@ -30,7 +31,7 @@ func leave(t *testing.T, srv *httptest.Server, c *identity.Controller) (int, []b
 // crossing, and never arrived.
 func TestAnAgentCanLeaveAHub(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

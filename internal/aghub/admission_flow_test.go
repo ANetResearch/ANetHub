@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
@@ -62,7 +63,7 @@ func (g *gateHub) registerOpen() *identity.Controller {
 	if err := g.store.SetAdmissionMode(AdmissionOpen); err != nil {
 		g.t.Fatal(err)
 	}
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	if code, out := g.register(c, c, g.pow(c.AID(), "good")); code != http.StatusOK {
 		g.t.Fatalf("open registration: %d %s", code, out["_raw"])
 	}
@@ -73,7 +74,7 @@ func (g *gateHub) registerOpen() *identity.Controller {
 // when it registers again, not again when it is admitted again.
 func TestTheListGrantIsPaidOnceAtFirstRegistration(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	res, err := g.store.Admit(c.AID(), 30, "bench", true)
 	if err != nil || res.Registered || res.Paid != 0 || res.Grant != 30 {
 		t.Fatalf("admit with a grant before registering: %+v %v", res, err)
@@ -174,7 +175,7 @@ func TestTheTrialCreditAfterProbation(t *testing.T) {
 		t.Errorf("re-registration after the trial credit: %d %s", code, reg["_raw"])
 	}
 	// An account the operator admitted shows neither field.
-	d, _ := identity.Incept()
+	d, _ := identitytest.Hub()
 	if _, err := g.store.Admit(d.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestTheTrialCreditAfterProbation(t *testing.T) {
 // credit is pending, as the gate would have.
 func (g *gateHub) pendingTrial() *identity.Controller {
 	g.t.Helper()
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	kel, _ := identity.MarshalKEL(c.KEL())
 	if err := g.store.PutAgent(c.AID(), "t", nil, kel); err != nil {
 		g.t.Fatal(err)
@@ -282,14 +283,14 @@ func TestTheTrialBudget(t *testing.T) {
 // back (PAY-A6; M-PAY-25).
 func TestTheInactiveSweep(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	for i := 0; i < 2; i++ {
-		if err := c.Rotate(kelTime()); err != nil {
+		if err := identitytest.Rotate(c, kelTime()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	snap, _ := c.Export()
-	if err := c.Rotate(kelTime()); err != nil {
+	if err := identitytest.Rotate(c, kelTime()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
@@ -318,7 +319,7 @@ func TestTheInactiveSweep(t *testing.T) {
 	}
 	kept := map[string]*identity.Controller{}
 	for name, f := range keep {
-		k, _ := identity.Incept()
+		k, _ := identitytest.Hub()
 		kel, _ := identity.MarshalKEL(k.KEL())
 		if err := g.store.PutAgent(k.AID(), name, nil, kel); err != nil {
 			t.Fatal(err)
@@ -360,7 +361,7 @@ func TestTheInactiveSweep(t *testing.T) {
 // ErrNotListed (PAY-A7).
 func TestRevokingAnAdmission(t *testing.T) {
 	g := newGateHub(t)
-	listed, _ := identity.Incept()
+	listed, _ := identitytest.Hub()
 	if _, err := g.store.Admit(listed.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
@@ -413,10 +414,10 @@ func TestAdmitFileIsAllOrNothing(t *testing.T) {
 	g := newGateHub(t)
 	var aids []string
 	for i := 0; i < 3; i++ {
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		aids = append(aids, c.AID())
 	}
-	reg, _ := identity.Incept()
+	reg, _ := identitytest.Hub()
 	regKEL, _ := identity.MarshalKEL(reg.KEL())
 	if err := g.store.PutAgent(reg.AID(), "r", nil, regKEL); err != nil {
 		t.Fatal(err)
@@ -471,7 +472,7 @@ func TestTheSignUpWindow(t *testing.T) {
 	if !errors.As(err, &open) || open.Window.ID != w.ID || !errors.Is(err, ErrWindowExists) {
 		t.Fatalf("a second window: %v", err)
 	}
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	if code, out := g.register(c, c, g.pow(c.AID(), "good")); code != http.StatusOK || out["trial"] != trialPending {
 		t.Fatalf("registration through the window: %d %s", code, out["_raw"])
 	}
@@ -482,7 +483,7 @@ func TestTheSignUpWindow(t *testing.T) {
 	if _, ok, _ := g.store.CloseWindow(); ok {
 		t.Error("a second close found a window open")
 	}
-	d, _ := identity.Incept()
+	d, _ := identitytest.Hub()
 	if code, out := g.register(d, d, g.pow(d.AID(), "good")); code != http.StatusForbidden || out["reason"] != "admission_required" {
 		t.Errorf("after the window closed: %d %s", code, out["_raw"])
 	}
@@ -507,7 +508,7 @@ func TestTheSignUpWindow(t *testing.T) {
 
 // ValidAID takes complete AIDs only.
 func TestValidAID(t *testing.T) {
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	if !ValidAID(c.AID()) {
 		t.Fatalf("%s is not valid", c.AID())
 	}

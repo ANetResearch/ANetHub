@@ -9,6 +9,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 )
 
 // [redteam:F36] GET /agents/{aid}/jwks.json needs no authentication and
@@ -31,7 +32,7 @@ func TestTheJWKSIsDerivedOncePerStoredKEL(t *testing.T) {
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +66,7 @@ func TestTheJWKSIsDerivedOncePerStoredKEL(t *testing.T) {
 	}
 	// The KEL grows (a rot adds a key state): the next request derives the
 	// new JWKS, once.
-	if err := c.Rotate(2); err != nil {
+	if err := identitytest.Rotate(c, 2); err != nil {
 		t.Fatal(err)
 	}
 	put()
@@ -89,7 +90,7 @@ func TestTheJWKSCacheIsBounded(t *testing.T) {
 	})
 	kels := make([][]byte, 4)
 	for i := range kels {
-		ctrl, err := identity.Incept()
+		ctrl, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}

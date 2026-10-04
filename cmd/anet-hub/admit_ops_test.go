@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
@@ -77,7 +78,7 @@ func sentenceOf(lang, key string, args map[string]string) string {
 
 func newAID(t *testing.T) (*identity.Controller, string) {
 	t.Helper()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

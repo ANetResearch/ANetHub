@@ -100,7 +100,7 @@ func (s *Signer) send(ctx context.Context, peerAID, action string, r Request) (*
 		req.Header.Set("Content-Type", r.ContentType)
 	}
 	ts := uint64(s.clock.Next(peerAID, s.now().UnixMilli()))
-	sig, seq := s.id.Sign(relayauth.PreimageV2(action, s.id.AID, peerAID, ts, req.Method, req.URL.RequestURI(), r.Body))
+	sig, seq := s.id.Ctrl.Sign(relayauth.PreimageV2(action, s.id.AID, peerAID, ts, req.Method, req.URL.RequestURI(), r.Body))
 	req.Header.Set(relayauth.HeaderAID, s.id.AID)
 	req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
 	req.Header.Set(relayauth.HeaderSeq, strconv.FormatUint(seq, 10))

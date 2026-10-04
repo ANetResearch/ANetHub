@@ -166,7 +166,7 @@ func FuzzFedForward(f *testing.F) {
 			if err != nil {
 				t.Skip()
 			}
-			sig, seq := signer.Sign(pre)
+			sig, seq := signer.Ctrl.Sign(pre)
 			env.Sig, env.KeyStateSeq = base64.StdEncoding.EncodeToString(sig), seq
 		} else {
 			env.Sig = base64.StdEncoding.EncodeToString(raw)
@@ -269,7 +269,7 @@ func FuzzFedKeysAndStreams(f *testing.F) {
 		if tamper&16 != 0 {
 			target += "&x"
 		}
-		sig, seq := signer.Sign(relayauth.PreimageV2(actionFedKeys, ff.a.AID, ff.bid.AID, ts, http.MethodGet, target, nil))
+		sig, seq := signer.Ctrl.Sign(relayauth.PreimageV2(actionFedKeys, ff.a.AID, ff.bid.AID, ts, http.MethodGet, target, nil))
 		req.Header.Set(relayauth.HeaderAID, ff.a.AID)
 		req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
 		req.Header.Set(relayauth.HeaderSeq, strconv.FormatUint(seq, 10))

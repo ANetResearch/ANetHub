@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
@@ -67,8 +67,8 @@ func TestAnAgentThatNeverPolledIsJudgedByItsRegistrationDate(t *testing.T) {
 // outside can still check it.
 func TestReviewsStayReadableAfterTheAgentLeaves(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := identitytest.Hub()
+	req, _ := identitytest.Hub()
 	register(t, srv, prov, "Provider", []string{"bakery"})
 	register(t, srv, req, "Requester", nil)
 	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_leave", 5, "")); code != 200 {
@@ -137,13 +137,13 @@ func TestReviewsStayReadableAfterTheAgentLeaves(t *testing.T) {
 // every unknown string would make the departed view meaningless.
 func TestAnUnknownAIDStillGets404(t *testing.T) {
 	srv := newHub(t)
-	stranger, _ := identity.Incept()
+	stranger, _ := identitytest.Hub()
 	if code, _ := getJSON(t, srv.URL+"/agents/"+stranger.AID()); code != 404 {
 		t.Fatalf("unknown AID: got %d, want 404", code)
 	}
 	// And an agent that leaves without ever being reviewed has no
 	// evidence to preserve, so it is unknown too.
-	quitter, _ := identity.Incept()
+	quitter, _ := identitytest.Hub()
 	register(t, srv, quitter, "Quitter", nil)
 	if code, _ := leave(t, srv, quitter); code != 200 {
 		t.Fatal("setup: deregister failed")
@@ -159,7 +159,7 @@ func TestAnUnknownAIDStillGets404(t *testing.T) {
 // only moves which request opens the amplification.
 func TestCardAdmissionBoundsTheCapabilityList(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	long := signA2A(t, c, a2aCardFor(c, 1, withSkills([]string{strings.Repeat("x", 257), "Long", "test"})))
 	out := registerA2A(t, srv, c, "Carder", []string{"work.do"}, long)
 	if out.CardStatus != aghub.CardStatusInvalid || !strings.Contains(out.CardError, "capability id") {
@@ -193,7 +193,7 @@ func TestCardAdmissionBoundsTheCapabilityList(t *testing.T) {
 func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 	// A hub that will learn one agent from a peer.
 	home := newFedHub(t)
-	remote, _ := identity.Incept()
+	remote, _ := identitytest.Hub()
 	federate(t, home, remote, "Remote Provider", []string{"work.remote"})
 	cards, _ := a2aStream(t, home.store, 0)
 	if len(cards) != 1 {
@@ -226,7 +226,7 @@ func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 		name string
 		caps []string
 	}{{"Local A", []string{"work.a"}}, {"Local B", []string{"work.b"}}, {"Watcher", nil}} {
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		register(t, srv, c, spec.name, spec.caps)
 	}
 	if err := store.AdmitFedA2ACard(homePeerAID, cards[0]); err != nil {
@@ -299,7 +299,7 @@ func TestStatsAndTheDirectoryAgreeOnHowManyAgentsThereAre(t *testing.T) {
 // hLedger already carried this shape; the withdrawals list did not.
 func TestTheRedemptionListSaysWhenItIsOnlyAPage(t *testing.T) {
 	srv := newHub(t)
-	agent, _ := identity.Incept()
+	agent, _ := identitytest.Hub()
 	register(t, srv, agent, "Withdrawer", nil)
 	fundAgent(t, srv, agent.AID(), 400)
 	hubAID := hubAIDOf(t, srv)
