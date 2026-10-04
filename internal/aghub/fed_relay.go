@@ -151,7 +151,7 @@ func (s *Server) forwardAnswer(w http.ResponseWriter, resp *http.Response, f fwd
 		wire3.Refuse(w, wire3.ReasonRecipientUnknown)
 	case reason == wire3.ReasonAccessInvalid && resp.StatusCode == http.StatusForbidden && f.capBody != nil:
 		s.fedState.putNegative(negKey{f.home, f.capBody.Owner, string(f.capBody.CapID)}, f.capBody.CapExp)
-		s.fedState.markStale(f.capBody.Owner)
+		s.fedState.markStale(f.capBody.Owner, s.store.now())
 		s.refuseAccess(w, f.addr)
 	case passedThrough[reason] && reason != wire3.ReasonAccessInvalid && resp.StatusCode == wire3.Status(reason):
 		wire3.Write(w, wire3.Refusal{Reason: reason, RetryAfter: wait})
@@ -175,7 +175,8 @@ func retryAfterOf(resp *http.Response) time.Duration {
 // registered here (§4.2.6, SSR-H14): the owner's home and mailbox key are
 // resolved (resolveOwner), the credential is not one its home refused
 // (SSR-H14a), and it was signed under the owner's current epoch, by that
-// key, and has not expired. The revocations of a remote owner are its
+// key, and has not expired. A signature that does not verify under the key
+// held has the owner's resolution made again at its next use (§2.12). The revocations of a remote owner are its
 // home's to check. Every refusal is the one answer of SSR-H3 and costs one
 // verification (SSR-H3a), as for an owner registered here.
 func (s *Server) capPrecheckRemote(w http.ResponseWriter, r *http.Request, a *seal.Access, body *seal.CapBody, addr, hint string, now time.Time) (seal.Mbox, string, bool) {
@@ -199,6 +200,7 @@ func (s *Server) capPrecheckRemote(w http.ResponseWriter, r *http.Request, a *se
 		return refuse(true)
 	}
 	if !verifyEd25519(mbox.Pub, c.Body, c.Sig) {
+		s.fedState.markStale(body.Owner, now)
 		return refuse(false)
 	}
 	if !capExpOK(body.CapExp, nowMS) {

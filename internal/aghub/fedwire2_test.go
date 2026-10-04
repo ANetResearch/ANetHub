@@ -1,15 +1,18 @@
 package aghub_test
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/dirbox"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -98,11 +101,13 @@ func federatedHubs(t *testing.T, discovery bool) (a, b *fedHubNode) {
 }
 
 // A sender on hub A writes to an agent registered on hub B with the default
-// hub-local visibility: it seals to the key set B publishes for its agent
-// (which a daemon reads from a directory bucket). Hub A serves nothing of
-// the agent: not its keys (it answers only for its own agents,
-// sealed-sender §2.7), not a listing, and it stores nothing about it
-// ([C32]). The send at A that reaches B is TestASendAtAHubReachesAPeersAgent.
+// hub-local visibility. It finds the agent's key set where a daemon does,
+// in A's answer for the agent's directory bucket, which merges B's
+// (sealed-sender SSR-W19), and the entry, opened with the AID, names B as
+// the agent's home. Hub A serves nothing of the agent by its AID: not its
+// keys (it answers only for its own agents, sealed-sender §2.7), not a
+// listing, and it stores nothing about it ([C32]). The send at A that
+// reaches B is TestASendAtAHubReachesAPeersAgent.
 func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 	a, b := twoFederatedHubs(t)
 	recip, sender := twoAgents(t)
@@ -112,17 +117,36 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 	if code, body := publishKeys(t, b.srv, recip, recipKeys); code != 200 {
 		t.Fatalf("publish at B: %d %s", code, body)
 	}
-
 	if code, body := getJSON(t, a.srv.URL+"/agents/"+recip.AID()+"/keys"); code != http.StatusNotFound {
 		t.Fatalf("keys of a peer's agent, asked at A: %d %s, want 404", code, body)
 	}
-	code, body := getJSON(t, b.srv.URL+"/agents/"+recip.AID()+"/keys")
-	if code != 200 {
-		t.Fatalf("keys at the agent's own hub: %d %s", code, body)
-	}
-	var view aghub.KeysView
-	if err := json.Unmarshal(body, &view); err != nil {
+
+	// The bucket, asked at A without naming the agent.
+	h, err := dirbox.Hash(recip.AID())
+	if err != nil {
 		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, a.srv.URL+"/directory:bucket", strings.NewReader(`{"prefix":"","bits":0}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ANet-Wire", wireHeader)
+	code, raw, _ := send(t, req)
+	var out aghub.DirBucketResponse
+	if code != http.StatusOK || json.Unmarshal(raw, &out) != nil || out.Partial {
+		t.Fatalf("the bucket at A: %d %s", code, raw)
+	}
+	var entry *dirbox.DirEntry
+	for _, e := range out.Entries {
+		eh, _ := base64.RawURLEncoding.DecodeString(e.H)
+		box, _ := base64.RawURLEncoding.DecodeString(e.Box)
+		if de, err := dirbox.Open(recip.AID(), eh, box); err == nil && bytes.Equal(eh, h) {
+			entry = de
+		}
+	}
+	if entry == nil {
+		t.Fatalf("A's bucket has no entry that opens for the agent registered at B: %s", raw)
+	}
+	if entry.Home != b.id.AID {
+		t.Fatalf("the entry names home %s, want B %s", entry.Home, b.id.AID)
 	}
 	// Nothing about the agent became part of A's directory.
 	if listedContains(t, a.srv, recip.AID()) {
@@ -132,13 +156,21 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 		t.Errorf("something about the peer's agent was stored at A: %v", err)
 	}
 
-	// What B publishes verifies as the recipient's.
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
-	kelRaw, _ := base64.StdEncoding.DecodeString(view.KEL)
-	events, _ := identity.UnmarshalKEL(kelRaw)
-	signed, _ := seal.UnmarshalSignedEncKeySet(raw)
+	// What the entry carries verifies as the recipient's, and is what it
+	// published.
+	events, err := identity.UnmarshalKEL(entry.KEL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := seal.UnmarshalSignedEncKeySet(entry.Keys)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := seal.VerifyEncKeySet(signed, recip.AID(), events, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Equal(entry.Keys, recipKeys) {
+		t.Error("the entry's key set is not the one the agent published")
 	}
 	_ = kp
 }

@@ -246,14 +246,19 @@ func (f *fedState) forgetHome(aid string) {
 	f.homes.remove(aid)
 }
 
-// markStale has aid's resolution made again at its next use (SSR-H14a 2).
-func (f *fedState) markStale(aid string) {
+// markStale has aid's resolution made again at its next use (SSR-H14a 2,
+// §2.12): after its home refused a credential, or a credential did not
+// verify under the mailbox key held. When nothing is kept for aid (its key
+// came from its federated card), a mark alone is kept.
+func (f *fedState) markStale(aid string, now time.Time) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if h, ok := f.homes.get(aid); ok {
-		h.stale = true
-		f.homes.put(aid, h)
+	h, ok := f.homes.get(aid)
+	if !ok || now.Sub(h.at) >= HomeCacheTTL || now.Before(h.at) {
+		h = homeInfo{at: now}
 	}
+	h.stale = true
+	f.homes.put(aid, h)
 }
 
 // mayRefresh reports whether aid's resolution may be made again on demand
@@ -668,7 +673,8 @@ func (s *Server) resolveRecipient(ctx context.Context, aid, hint string) (string
 // or the federated card's key set. They are made again, asking the peers
 // rather than their cached answers, when there is no mailbox key, when the
 // credential names a newer epoch than the one held, or when the owner's home
-// refused a credential since; at most once a minute for one owner
+// refused a credential or a credential did not verify under the key held
+// since (markStale); at most once a minute for one owner
 // (HomeRefreshEvery). When only the hint named a home, only that peer is
 // asked. ok is false without a home or a mailbox key.
 func (s *Server) resolveOwner(ctx context.Context, owner, hint string, capEpoch uint64) (string, seal.Mbox, bool) {
@@ -681,10 +687,10 @@ func (s *Server) resolveOwner(ctx context.Context, owner, hint string, capEpoch 
 	var held homeInfo
 	cached, haveCache := s.fedState.home(owner, now)
 	switch {
-	case haveCache:
+	case haveCache && usableMbox(cached.mbox):
 		held = cached
 	case carded && usableMbox(cardMbox):
-		held = homeInfo{home: cardAt, mbox: cardMbox}
+		held = homeInfo{home: cardAt, mbox: cardMbox, stale: haveCache && cached.stale}
 	}
 	behind := !usableMbox(held.mbox) || capEpoch > held.mbox.Epoch || held.stale
 	if behind && (!haveCache && !carded || s.fedState.mayRefresh(owner, now)) {

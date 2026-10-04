@@ -1112,3 +1112,69 @@ func TestPeerRC1KeepsFourThousandTimes(t *testing.T) {
 		t.Fatalf("a time taken before: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// TestOwnerResolutionIsMadeAgainAfterABadSignature (§2.12): a credential
+// that does not verify under the mailbox key held for its remote owner is
+// refused, and has the owner's resolution made again at its next use (at
+// most once a minute), so a key held in error does not outlive the minute.
+func TestOwnerResolutionIsMadeAgainAfterABadSignature(t *testing.T) {
+	net := newFedNet(t, 2)
+	a, b := net.nodes[0], net.nodes[1]
+	owner := b.agent()
+	send := func(ct string) *httptest.ResponseRecorder {
+		env, _ := capEnv(t, b, owner, seal.CapClassContact, time.Hour, ct)
+		return a.send1Hint(env, "", "")
+	}
+	if rec := send("resolved"); rec.Code != 200 {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+	// The key held goes wrong (same epoch, another key).
+	wrong, _, _ := ed25519.GenerateKey(nil)
+	held, ok := a.srv.fedState.home(owner.aid, a.clock())
+	if !ok {
+		t.Fatal("nothing held for the owner")
+	}
+	held.mbox = seal.Mbox{Epoch: held.mbox.Epoch, Pub: wrong}
+	a.srv.fedState.putHome(owner.aid, held)
+	a.advance(HomeRefreshEvery)
+	expectRefusal(t, send("under the wrong key"), 403, "access_invalid")
+	if rec := send("made again"); rec.Code != 200 {
+		t.Fatalf("after the refusal: %d %s, want the owner's key resolved again", rec.Code, rec.Body)
+	}
+}
+
+// TestAMovedOwnerIsFoundAgainAfterARefusal (SSR-H14a 2): when the home
+// held for a remote owner refuses a credential, the owner's resolution is
+// made again at its next use: an owner that moved to another hub is found
+// there, and the sends that follow reach it.
+func TestAMovedOwnerIsFoundAgainAfterARefusal(t *testing.T) {
+	net := newFedNet(t, 3)
+	a, b, c := net.nodes[0], net.nodes[1], net.nodes[2]
+	owner := b.agent()
+	send := func(ct string) *httptest.ResponseRecorder {
+		env, _ := capEnv(t, b, owner, seal.CapClassContact, time.Hour, ct)
+		return a.send1Hint(env, "", "")
+	}
+	if rec := send("at B"); rec.Code != 200 || b.forwards() != 1 {
+		t.Fatalf("at B: %d %s", rec.Code, rec.Body)
+	}
+	// The owner moves to C with the same mailbox key.
+	kel, _ := b.store.AgentKEL(owner.aid)
+	if err := c.store.PutAgent(owner.aid, "moved", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	keyset, _, _, _ := b.store.LocalKeys(owner.aid)
+	if _, err := c.store.PublishKeys(owner.aid, keyset, owner.c.KEL(), c.clock()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.store.db.Exec(`DELETE FROM agent WHERE aid=?`, owner.aid); err != nil {
+		t.Fatal(err)
+	}
+	expectRefusal(t, send("to B, which no longer has it"), 403, "access_invalid")
+	if b.forwards() != 2 {
+		t.Fatalf("forwards at B: %d", b.forwards())
+	}
+	if rec := send("found at C"); rec.Code != 200 || c.forwards() != 1 || b.forwards() != 2 {
+		t.Fatalf("after the refusal: %d %s; forwards at B %d, at C %d", rec.Code, rec.Body, b.forwards(), c.forwards())
+	}
+}
