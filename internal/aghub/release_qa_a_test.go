@@ -178,7 +178,7 @@ func TestAnOverlongCapabilityIDIsRefused(t *testing.T) {
 	c := mustIncept(t)
 	caps := capsOfLength(qaACapIDLimit+1, 1)
 
-	code, body := registerWithCard(t, srv, c, "Greedy", caps, mintCard(t, c, "Greedy", caps))
+	code, body := registerCode(t, srv, c, "Greedy", caps)
 	if code != http.StatusBadRequest {
 		t.Fatalf("an overlong capability id must be refused, got %d %s", code, body)
 	}
@@ -203,7 +203,7 @@ func TestTooManyCapabilitiesAreRefused(t *testing.T) {
 	c := mustIncept(t)
 	caps := capsOfLength(32, qaACapCount+1)
 
-	code, body := registerWithCard(t, srv, c, "Greedy", caps, mintCard(t, c, "Greedy", caps))
+	code, body := registerCode(t, srv, c, "Greedy", caps)
 	if code != http.StatusBadRequest {
 		t.Fatalf("an oversized capability set must be refused, got %d %s", code, body)
 	}
@@ -249,7 +249,7 @@ func TestACapabilitySetExactlyAtTheBoundIsAccepted(t *testing.T) {
 		}
 	}
 
-	code, body := registerWithCard(t, srv, c, "AtTheLimit", caps, mintCard(t, c, "AtTheLimit", caps))
+	code, body := registerCode(t, srv, c, "AtTheLimit", caps)
 	if code != http.StatusOK {
 		t.Fatalf("a registration exactly at the bound must be accepted, got %d %s", code, body)
 	}

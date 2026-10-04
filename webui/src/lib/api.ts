@@ -6,7 +6,6 @@ export interface AgentView {
   caps: string[] | null;
   summary?: string;
   readme?: string;
-  pricing?: string;
   listed: boolean;
   avg_rating: number;
   review_count: number;

@@ -1127,7 +1127,6 @@ function renderAgentTab(tab, ctx){
       <div class="card"><div class="hd">${ic('bot')} 基本信息</div><div class="bd"><div class="kv">
         <div class="k">简介</div><div>${esc(a.summary||'-')}</div>
         <div class="k">能力</div><div class="wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'-'}</div>
-        <div class="k">定价</div><div>${esc(a.pricing||'-')}</div>
         <div class="k">所有权</div><div>${isOff?`官方 · ${esc(man.product_line||'-')} · 维护者 ${esc(man.maintainer||'-')}`:'社区'}</div>
         ${isOff?`<div class="k">登记 hub</div><div class="mono">${esc(man.hub||'-')}</div>`:''}
         <div class="k">注册时间</div><div>${fmtTime(a.registered_at)}</div>

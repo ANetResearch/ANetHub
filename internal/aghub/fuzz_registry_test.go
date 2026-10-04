@@ -1,6 +1,7 @@
 package aghub_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -265,12 +266,12 @@ func (w *registryWorld) walk(t *testing.T, q url.Values, n int) []string {
 // ---- federation admission: what a peer's sync stream may put in ----
 
 // FuzzHubFedAdmission hands the kernel's federation seam entries a peer
-// could send: an A2A card stream entry, an ADP card stream entry and a
-// review, each valid, mutated or raw. Properties: no panic; whatever is
-// listed from a peer (fed_a2a_card rows with verified_at, the federated
-// registry, fed_card rows) verifies against the KEL stored with it and
-// speaks for the AID it is stored under; a card for an agent registered
-// here is never admitted.
+// could send: an A2A card stream entry (among them a card with prices)
+// and a review, each valid, mutated or raw. Properties: no panic;
+// whatever is listed from a peer (fed_a2a_card rows with verified_at, the
+// federated registry) verifies against the KEL stored with it, speaks for
+// the AID it is stored under and carries no price extension; a card for
+// an agent registered here is never admitted.
 func FuzzHubFedAdmission(f *testing.F) {
 	h := newFZ(f)
 	local, _ := h.agent(f, "fuzz-local", nil, true)
@@ -291,7 +292,8 @@ func FuzzHubFedAdmission(f *testing.F) {
 	f.Add(uint8(3), uint8(0), uint64(4), []byte(nil), []byte(nil), "")
 	f.Add(uint8(4), uint8(0), uint64(5), withdrawal, []byte(nil), "")
 	f.Add(uint8(0), uint8(1), uint64(6), []byte(nil), []byte(nil), "")
-	f.Add(uint8(0), uint8(2), uint64(7), []byte(`{"subject_did":"x"}`), localKEL, "")
+	f.Add(uint8(0), uint8(2), uint64(7), []byte(nil), []byte(nil), "")
+	f.Add(uint8(1), uint8(2), uint64(7), []byte(nil), []byte(nil), "")
 	f.Add(uint8(0), uint8(3), uint64(8), []byte(`{"receipt":"AAAA","review":"AAAA"}`), []byte(nil), "")
 
 	f.Fuzz(func(t *testing.T, mode, stream uint8, seq uint64, raw, kelRaw []byte, home string) {
@@ -324,16 +326,14 @@ func FuzzHubFedAdmission(f *testing.F) {
 			}
 			_ = h.store.AdmitFedA2ACard(peer, e)
 		case 2:
-			fc := aghub.FedCard{Card: raw, KEL: base64.StdEncoding.EncodeToString(kelRaw), Home: home}
-			switch mode % 3 {
-			case 0:
-				fc.Card = fzADPCard(t, remote, "remote", []string{"r.x"})
-				fc.KEL = base64.StdEncoding.EncodeToString(remoteKEL)
-			case 1:
-				fc.Card = fzADPCard(t, local, "local", nil)
-				fc.KEL = base64.StdEncoding.EncodeToString(localKEL)
+			// A public card with prices, which no hub lists.
+			uri := priceV1URI
+			if mode%2 == 1 {
+				uri = pricingV1URI
 			}
-			_ = h.store.AdmitFedCard(peer, fc)
+			e := aghub.FedA2ACard{Format: federation.FormatA2ACard, KEL: remoteKEL, Home: home,
+				Card: fzA2ACardOrRaw(t, remote, seq, withExtension(priceExtension(uri)))}
+			_ = h.store.AdmitFedA2ACard(peer, e)
 		case 3:
 			var fr aghub.FedReview
 			if json.Unmarshal(raw, &fr) == nil {
@@ -382,33 +382,12 @@ func fedInvariants(t *testing.T, h *fz, localAID string) {
 		if err := verifiesFor(r.card, r.aid, kel); err != nil {
 			t.Fatalf("listed federated card for %s does not verify: %v", r.aid, err)
 		}
-	}
-	rows, err = h.db.Query(`SELECT aid, kel FROM fed_card`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var aid string
-		var kelBytes []byte
-		if err := rows.Scan(&aid, &kelBytes); err != nil {
-			rows.Close()
-			t.Fatal(err)
-		}
-		if aid == localAID {
-			rows.Close()
-			t.Fatalf("a peer's ADP card for %s, an agent registered here, is stored", aid)
-		}
-		kel, err := identity.UnmarshalKEL(kelBytes)
-		if err != nil {
-			rows.Close()
-			t.Fatalf("fed_card %s: %v", aid, err)
-		}
-		if states, err := identity.Replay(kel); err != nil || states[len(states)-1].AID != aid {
-			rows.Close()
-			t.Fatalf("fed_card %s stored with a KEL that is not its own: %v", aid, err)
+		for _, uri := range []string{priceV1URI, pricingV1URI} {
+			if bytes.Contains(r.card, []byte(uri)) {
+				t.Fatalf("listed federated card for %s carries %s", r.aid, uri)
+			}
 		}
 	}
-	rows.Close()
 	list, _, err := h.store.A2ARegistry(aghub.RegistryQuery{Federated: true, Limit: 200})
 	if err != nil {
 		t.Fatal(err)

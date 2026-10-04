@@ -94,7 +94,6 @@ func (h *HubDB) RestoreDeletedAgent(rowJSON string) error {
 		Caps         string `json:"caps"`
 		Summary      string `json:"summary"`
 		Readme       string `json:"readme"`
-		Pricing      string `json:"pricing"`
 		KELB64       string `json:"kel_b64"`
 		RegisteredAt string `json:"registered_at"`
 	}
@@ -110,26 +109,26 @@ func (h *HubDB) RestoreDeletedAgent(rowJSON string) error {
 		return fmt.Errorf("restore: key history is not base64: %w", err)
 	}
 	_, err = h.db.Exec(
-		`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,pricing,kel,registered_at)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		row.AID, row.Name, row.Caps, row.Summary, row.Readme, row.Pricing,
+		`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,kel,registered_at)
+		 VALUES(?,?,?,?,?,?,?)`,
+		row.AID, row.Name, row.Caps, row.Summary, row.Readme,
 		kel, row.RegisteredAt)
 	return err
 }
 
 // FullAgentRow reads every column of one agent (incl. the kel blob) as a JSON string for archiving.
 func (h *HubDB) FullAgentRow(aid string) (string, error) {
-	var name, caps, summary, readme, pricing, registeredAt string
+	var name, caps, summary, readme, registeredAt string
 	var kel []byte
 	err := h.db.QueryRow(
-		`SELECT name,caps,summary,readme,pricing,kel,registered_at FROM agent WHERE aid=?`, aid).
-		Scan(&name, &caps, &summary, &readme, &pricing, &kel, &registeredAt)
+		`SELECT name,caps,summary,readme,kel,registered_at FROM agent WHERE aid=?`, aid).
+		Scan(&name, &caps, &summary, &readme, &kel, &registeredAt)
 	if err != nil {
 		return "", err
 	}
 	row := map[string]any{
 		"aid": aid, "name": name, "caps": caps, "summary": summary, "readme": readme,
-		"pricing": pricing, "kel_b64": encB64(kel), "registered_at": registeredAt,
+		"kel_b64": encB64(kel), "registered_at": registeredAt,
 	}
 	b, _ := json.Marshal(row)
 	return string(b), nil
@@ -156,8 +155,8 @@ func RestoreAgentsFromBackup(hubDataDir, backupPath string) (before, after int, 
 		return before, before, fmt.Errorf("attach backup: %w", err)
 	}
 	defer hub.db.Exec(`DETACH DATABASE bak`)
-	if _, err = hub.db.Exec(`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,pricing,kel,registered_at)
-	   SELECT aid,name,caps,summary,readme,pricing,kel,registered_at FROM bak.agent`); err != nil {
+	if _, err = hub.db.Exec(`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,kel,registered_at)
+	   SELECT aid,name,caps,summary,readme,kel,registered_at FROM bak.agent`); err != nil {
 		return before, before, fmt.Errorf("restore insert: %w", err)
 	}
 	if err = hub.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&after); err != nil {

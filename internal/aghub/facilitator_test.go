@@ -3,7 +3,6 @@ package aghub_test
 import (
 	"encoding/base64"
 	"encoding/json"
-	"github.com/ANetResearch/ANetHub/internal/voucherv1" // v030-todo(PAY-8): the voucher goes with the gateway
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -613,92 +612,6 @@ func TestLedgerReadsAreForTheAccountHolderOnly(t *testing.T) {
 	}
 }
 
-// mismatchedPayment is a PAYMENT-SIGNATURE whose accepted option states
-// one set of terms while the signed authorization carries another.
-func mismatchedPayment(t *testing.T, payer *identity.Controller, stated payment.PaymentOption,
-	payTo string, amount uint64, ix string) string {
-	t.Helper()
-	now := time.Now()
-	a := authFor(t, payer, payTo, amount, stated.Network, ix, ix, now.UnixMilli(), now.Add(5*time.Minute).UnixMilli())
-	raw, err := a.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := json.Marshal(payment.PaymentPayload{X402Version: payment.Version, Accepted: stated,
-		Payload: map[string]any{"authorization": base64.StdEncoding.EncodeToString(raw)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return base64.StdEncoding.EncodeToString(b)
-}
-
-// The gateway settles the signed authorization, so it compares that with
-// the quote: a buyer who states the price to the seller while signing a
-// smaller amount, or a payment to somebody else, gets no voucher and
-// moves nothing (R06 D2).
-func TestTheGatewayComparesTheSignedTermsWithTheQuote(t *testing.T) {
-	srv, store := newHubWithStore(t)
-	seller, buyer := twoAgents(t)
-	accomplice, _ := identity.Incept()
-	if code, b := registerWithCard(t, srv, seller, "Worker", []string{"work.do"},
-		sellableCard(t, seller, "Worker", []string{"work.do"},
-			map[string]any{"work.do": 120}, "https://worker.example/x402/redeem")); code != 200 {
-		t.Fatalf("register: %d %s", code, b)
-	}
-	register(t, srv, buyer, "Buyer", nil)
-	register(t, srv, accomplice, "Accomplice", nil)
-	fundAgent(t, srv, buyer.AID(), 500)
-	stated := payment.PaymentOption{
-		Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAIDOf(t, srv)),
-		Amount: "120", Asset: payment.AssetCredit, PayTo: seller.AID(),
-	}
-	url := srv.URL + "/x402/resource/" + seller.AID() + "/work.do"
-	for _, c := range []struct {
-		name   string
-		payTo  string
-		amount uint64
-		reason string
-	}{
-		{"signed to somebody else", accomplice.AID(), 120, payment.ReasonPayeeMismatch},
-		{"signed for less", seller.AID(), 1, payment.ReasonInvalidAmount},
-	} {
-		before := balances(t, srv, buyer.AID(), seller.AID(), accomplice.AID())
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
-		req.Header.Set(payment.HeaderPaymentSignature,
-			mismatchedPayment(t, buyer, stated, c.payTo, c.amount, "gw-"+c.name))
-		code, body, _ := send(t, req)
-		var out map[string]any
-		_ = json.Unmarshal(body, &out)
-		if code != http.StatusPaymentRequired || out["voucher"] != nil || out["error"] != c.reason {
-			t.Errorf("%s: %d %s, want 402 %s and no voucher", c.name, code, body, c.reason)
-		}
-		if after := balances(t, srv, buyer.AID(), seller.AID(), accomplice.AID()); !sameBalances(before, after) {
-			t.Errorf("%s: credit moved: %v -> %v", c.name, before, after)
-		}
-	}
-
-	// A payment on a peer's ledger is refused, not forwarded: the voucher
-	// is this hub's statement that it holds the payment.
-	forwarded := 0
-	store.SetPeerSettler(func(network string, p *payment.PaymentPayload, req *payment.PaymentRequirements,
-		auth *payment.Authorization) (payment.SettlementResponse, bool) {
-		forwarded++
-		return payment.SettlementResponse{Success: true, Network: network, Amount: "120"}, true
-	})
-	onPeer := stated
-	onPeer.Network = payment.CreditNetwork("did:anet:peer-hub")
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	req.Header.Set(payment.HeaderPaymentSignature, signedPayment(t, buyer, onPeer, "gw-peer"))
-	code, body, _ := send(t, req)
-	var out map[string]any
-	_ = json.Unmarshal(body, &out)
-	if code != http.StatusPaymentRequired || out["voucher"] != nil || out["error"] != payment.ReasonNetworkMismatch ||
-		forwarded != 0 {
-		t.Errorf("paying on a peer's ledger: %d %s (forwarded %d), want 402 %s and nothing forwarded",
-			code, body, forwarded, payment.ReasonNetworkMismatch)
-	}
-}
-
 // A redemption is a payment to this hub. An authorization paying anybody
 // else is refused and moves nothing.
 func TestARedemptionMustPayTheHub(t *testing.T) {
@@ -721,51 +634,6 @@ func TestARedemptionMustPayTheHub(t *testing.T) {
 	}
 	if after := balances(t, srv, agent.AID(), other.AID()); !sameBalances(before, after) {
 		t.Errorf("a refused redemption moved credit: %v -> %v", before, after)
-	}
-}
-
-// The voucher states the amount that settled. A buyer who paid more than
-// the price holds a voucher for what it paid.
-func TestAGatewayVoucherStatesTheSettledAmount(t *testing.T) {
-	srv := newHub(t)
-	seller, buyer := twoAgents(t)
-	if code, b := registerWithCard(t, srv, seller, "Worker", []string{"work.do"},
-		sellableCard(t, seller, "Worker", []string{"work.do"},
-			map[string]any{"work.do": 120}, "https://worker.example/x402/redeem")); code != 200 {
-		t.Fatalf("register: %d %s", code, b)
-	}
-	register(t, srv, buyer, "Buyer", nil)
-	fundAgent(t, srv, buyer.AID(), 500)
-	opt := payment.PaymentOption{
-		Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAIDOf(t, srv)),
-		Amount: "150", Asset: payment.AssetCredit, PayTo: seller.AID(),
-	}
-	sellerBefore := balanceOf(t, srv, seller.AID())
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/x402/resource/"+seller.AID()+"/work.do", nil)
-	req.Header.Set(payment.HeaderPaymentSignature, signedPayment(t, buyer, opt, "gw-over"))
-	code, body, _ := send(t, req)
-	if code != http.StatusOK {
-		t.Fatalf("paying 150 for a price of 120: %d %s", code, body)
-	}
-	var out struct {
-		Voucher string `json:"voucher"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(out.Voucher)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v, err := voucherv1.UnmarshalVoucher(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v.Amount != 150 {
-		t.Errorf("voucher amount %d, want the settled 150", v.Amount)
-	}
-	if got := balanceOf(t, srv, seller.AID()); got != sellerBefore+150 {
-		t.Errorf("seller balance %d, want %d", got, sellerBefore+150)
 	}
 }
 
@@ -894,80 +762,6 @@ func TestARepeatWithABrokenSignatureIsNotAnsweredWithTheReceipt(t *testing.T) {
 	}
 	if after := balances(t, srv, payer.AID(), payee.AID()); !sameBalances(before, after) {
 		t.Errorf("credit moved: %v -> %v", before, after)
-	}
-}
-
-// gatewayBuy sends one PAYMENT-SIGNATURE to the gateway and returns the
-// status and the voucher, if any.
-func gatewayBuy(t *testing.T, srv *httptest.Server, seller, capID, header string) (int, string) {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/x402/resource/"+seller+"/"+capID, nil)
-	req.Header.Set(payment.HeaderPaymentSignature, header)
-	code, body, _ := send(t, req)
-	var out struct {
-		Voucher string `json:"voucher"`
-	}
-	_ = json.Unmarshal(body, &out)
-	return code, out.Voucher
-}
-
-// One payment buys one voucher. The facilitator answers a settled
-// authorization with its original success at any time, so a buyer can
-// send the same PAYMENT-SIGNATURE again; it gets the voucher it was
-// issued, byte for byte, and never a second one. A second voucher would
-// have a new nonce and so a new id, and the provider's one-use check would
-// accept it: the work done again for no payment.
-func TestOnePaymentBuysOneVoucher(t *testing.T) {
-	srv := newHub(t)
-	seller, buyer := twoAgents(t)
-	caps := []string{"work.do", "work.other"}
-	if code, b := registerWithCard(t, srv, seller, "Worker", caps,
-		sellableCard(t, seller, "Worker", caps,
-			map[string]any{"work.do": 120, "work.other": 100}, "https://worker.example/x402/redeem")); code != 200 {
-		t.Fatalf("register: %d %s", code, b)
-	}
-	register(t, srv, buyer, "Buyer", nil)
-	fundAgent(t, srv, buyer.AID(), 500)
-	own := payment.CreditNetwork(hubAIDOf(t, srv))
-	opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: own,
-		Amount: "120", Asset: payment.AssetCredit, PayTo: seller.AID()}
-	header := signedPayment(t, buyer, opt, "gw-once")
-
-	code, first := gatewayBuy(t, srv, seller.AID(), "work.do", header)
-	if code != http.StatusOK || first == "" {
-		t.Fatalf("the purchase: %d", code)
-	}
-	paid := balances(t, srv, buyer.AID(), seller.AID())
-
-	// The same header again: the same voucher.
-	code, again := gatewayBuy(t, srv, seller.AID(), "work.do", header)
-	if code != http.StatusOK || again != first {
-		t.Errorf("the repeated purchase: %d, voucher identical to the first: %v", code, again == first)
-	}
-	// The same header for another capability of the same provider: no
-	// voucher at all.
-	if code, v := gatewayBuy(t, srv, seller.AID(), "work.other", header); code != http.StatusConflict || v != "" {
-		t.Errorf("the same payment for another capability: %d voucher=%v, want 409 and none", code, v != "")
-	}
-	if after := balances(t, srv, buyer.AID(), seller.AID()); !sameBalances(paid, after) {
-		t.Errorf("a repeat moved credit: %v -> %v", paid, after)
-	}
-
-	// A payment the seller already settled on the relay path buys no
-	// voucher here: the work it paid for is being done on that path.
-	a := authFor(t, buyer, seller.AID(), 120, own, "", "relay-paid", time.Now().UnixMilli()-1000,
-		time.Now().UnixMilli()+60_000)
-	p := creditPayload(t, a, seller.AID(), own)
-	if _, s := settleCall(t, srv, p, requirementsFor(seller.AID(), 120, own)); !s.Success {
-		t.Fatalf("relay settlement: %+v", s)
-	}
-	raw, err := json.Marshal(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if code, v := gatewayBuy(t, srv, seller.AID(), "work.do", base64.StdEncoding.EncodeToString(raw)); code != http.StatusConflict || v != "" {
-		t.Errorf("a payment settled on the relay path, offered to the gateway: %d voucher=%v, want 409 and none",
-			code, v != "")
 	}
 }
 

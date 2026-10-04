@@ -206,7 +206,7 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
-	if code, b := registerWithCard(t, srv, c, "Agent", nil, nil); code != 200 {
+	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
 		t.Fatalf("register after rotation: %d %s", code, b)
 	}
 	after := signSet(t, c, set)
@@ -227,46 +227,6 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	}
 	if got := storedKeys(t, srv.URL, c.AID()); !bytes.Equal(got, after) {
 		t.Fatal("the pre-rotation signature replaced the current one")
-	}
-}
-
-// The consumer rule on a peer's card stream (§3.1): a set with the stored
-// seq and different content is a fork and is ignored, and the stored set
-// sent again under a broken signature does not replace the stored one.
-// Both come from the peer that taught the card, so neither is refused for
-// coming from the wrong peer.
-func TestAPeerCannotForkOrCorruptAStoredKeySet(t *testing.T) {
-	hub := newFedHub(t)
-	agent, _ := twoAgents(t)
-	federate(t, hub, agent, "Keyed", []string{"work.do"})
-	k2, _ := mintKeySet(t, agent, 2)
-	if code, body := publishKeys(t, hub.srv, agent, k2); code != 200 {
-		t.Fatalf("publish: %d %s", code, body)
-	}
-	cards, _, err := hub.store.CardsSince(0, 100, testHome)
-	if err != nil || len(cards) != 1 {
-		t.Fatalf("stream: %v %v", cards, err)
-	}
-	peer := openPeerStore(t)
-	if err := peer.AdmitFedCard(homePeerAID, cards[0]); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-		t.Fatal("setup: the peer did not store the set")
-	}
-	fork, _ := mintKeySet(t, agent, 2) // same seq, other keys, validly signed
-	for name, keys := range map[string][]byte{
-		"a fork (same seq, other content)":        fork,
-		"the stored set under a broken signature": tamperSig(t, k2),
-	} {
-		entry := cards[0]
-		entry.Keys = base64.StdEncoding.EncodeToString(keys)
-		if err := peer.AdmitFedCard(homePeerAID, entry); err != nil {
-			t.Fatalf("%s: the card itself was refused: %v", name, err)
-		}
-		if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-			t.Errorf("%s replaced the stored set", name)
-		}
 	}
 }
 

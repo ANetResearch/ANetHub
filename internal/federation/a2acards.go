@@ -16,21 +16,19 @@ import (
 
 // The A2A card stream: GET /fed/v2/cards (A2A-DESIGN §10.6).
 //
-// /fed/v1/cards carries ADP cards; this stream carries the agents' signed
-// A2A AgentCards that passed admission on their home hub (§10.3), each
-// with the KEL it verifies against and the agent's encryption key set
-// (§3.9). It is a separate stream with its own cursor rather than a new
-// entry shape on v1, because a v1 peer admits every entry as an ADP card
-// and would refuse (and skip past) entries it cannot read. v1 is served
-// and pulled alongside until every peer has moved to v2.
+// The stream carries the agents' signed A2A AgentCards that passed
+// admission on their home hub (§10.3), each with the KEL it verifies
+// against and the agent's encryption key set (§3.9), and a withdrawal for
+// every card the home hub stopped publishing. It is the only card stream:
+// the ADP card stream (/fed/v1/cards) went with the signed ADP card.
 //
 // Each entry names its format, and the pulling hub dispatches admission on
 // it. The format is the publishing hub's statement about the entry, not
 // part of anything an agent signed, so an agent cannot make its card read
-// as a withdrawal (the problem parseWithdrawal has to solve on v1). An
-// entry in a format this build does not know is skipped and the cursor
-// moves past it: a peer that starts publishing a new format must not
-// stall the stream of a hub that has not been upgraded to read it.
+// as a withdrawal. An entry in a format this build does not know is
+// skipped and the cursor moves past it: a peer that starts publishing a new
+// format must not stall the stream of a hub that has not been upgraded to
+// read it.
 
 // Formats of a /fed/v2/cards entry.
 const (
@@ -86,8 +84,10 @@ const (
 
 // hA2ACards serves GET /fed/v2/cards?cursor=<c>.
 //
-// Unauthenticated for the reason /fed/v1/cards is: every card is an
-// agent's own signed statement, published by an agent that opted in.
+// Unauthenticated on purpose. Every card is an agent's own signed
+// statement, published by an agent that opted in: there is nothing here a
+// caller could learn that the agent did not choose to say, and requiring a
+// signature to read public statements would only stop the honest.
 func (s *Service) hA2ACards(w http.ResponseWriter, r *http.Request) {
 	if !s.DiscoveryEnabled() || s.dir == nil {
 		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "discovery federation disabled")
@@ -129,13 +129,12 @@ func (s *Service) hA2ACards(w http.ResponseWriter, r *http.Request) {
 	_ = enc.Encode(page)
 }
 
-// syncA2ACards pulls each peer's A2A card stream forward by one page, with
-// the same per-peer, stall-on-refused-for-now rules as the v1 stream in
-// SyncOnce. full re-reads from the beginning.
+// syncA2ACards pulls each peer's A2A card stream forward by one page, by
+// the per-peer, stall-on-refused-for-now rules of SyncOnce. full re-reads
+// from the beginning.
 //
 // A peer that answers 404 has not been upgraded to serve the stream. That
-// is not a refusal and nothing is counted; its v1 stream still carries its
-// ADP cards.
+// is not a refusal and nothing is counted.
 func (s *Service) syncA2ACards(ctx context.Context, full bool) (admitted, refused int) {
 	for i := range s.cfg.Peers {
 		p := &s.cfg.Peers[i]
@@ -175,10 +174,11 @@ func (s *Service) syncA2ACards(ctx context.Context, full bool) (admitted, refuse
 			}
 			view := FedA2ACardView{Format: e.Format, Card: e.Card, Home: e.Home, FedSeq: e.FedSeq}
 			if !hubHomeURL(view.Home) {
-				// As on v1, the peer's own endpoint is the honest
-				// fallback for a home it does not name; also for one
-				// that is not a hub URL, since the home is served as
-				// homeHub wherever the card has no relay interface.
+				// A peer that names no home still tells us who exists;
+				// its own endpoint is the honest fallback for where they
+				// are reachable. Also for a home that is not a hub URL,
+				// since the home is served as homeHub wherever the card
+				// has no relay interface.
 				view.Home = p.Endpoint
 			}
 			if e.KEL != "" {
@@ -190,8 +190,8 @@ func (s *Service) syncA2ACards(ctx context.Context, full bool) (admitted, refuse
 				}
 				view.KEL = kel
 			}
-			// The key set is advisory, as on v1: one that does not decode
-			// is passed as absent and the card is still admitted.
+			// The key set is advisory: one that does not decode is passed
+			// as absent and the card is still admitted.
 			if e.Keys != "" {
 				if k, kerr := base64.StdEncoding.DecodeString(e.Keys); kerr == nil {
 					view.Keys = k
@@ -249,7 +249,7 @@ func (s *Service) noteA2AStream(peerAID string, status int, detail string) {
 	case http.StatusOK:
 		log.Printf("hub: federation peer %s serves /fed/v2/cards", peerAID)
 	case http.StatusNotFound:
-		log.Printf("hub: federation peer %s serves no /fed/v2/cards yet; its ADP cards still arrive on v1", peerAID)
+		log.Printf("hub: federation peer %s serves no /fed/v2/cards; its directory does not reach this hub", peerAID)
 	default:
 		log.Printf("hub: federation A2A card sync %s: HTTP %d: %s", peerAID, status, detail)
 	}

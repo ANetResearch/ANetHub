@@ -97,9 +97,7 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("POST", "/mailbox/revoke", nil, "v030-todo(SS-3)"),
 		req("POST", "/directory:bucket", nil, "v030-todo(SS-5)"),
 		resp("POST", "/directory:bucket", nil, "v030-todo(SS-5)"),
-		// pricing and card leave the request with PAY-8; FS-3 still owes
-		// enc_keys in base64url and prev_seq's rules.
-		req("POST", "/register", reflect.TypeFor[RegisterRequest](), "v030-todo(PAY-8)"),
+		req("POST", "/register", reflect.TypeFor[RegisterRequest](), ""),
 		{"POST", "/register", true, "registration", reflect.TypeFor[RegisterResponse](), "v030-todo(KEL-5)"},
 		{"POST", "/register", true, "check_only", reflect.TypeFor[CheckOnlyResponse](), ""},
 		req("POST", "/agents/{aid}/keys", reflect.TypeFor[KeysPublishRequest](), "v030-todo(FS-3)"),

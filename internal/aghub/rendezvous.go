@@ -65,10 +65,7 @@ func (s *Store) SetP2PAddr(aid, addr string) error {
 // be vouching for something it was merely told.
 func (s *Store) HomeHubOf(aid string) string {
 	var home string
-	if err := s.db.QueryRow(`SELECT home FROM fed_a2a_card WHERE aid=? AND verified_at IS NOT NULL`, aid).Scan(&home); err == nil {
-		return home
-	}
-	if err := s.db.QueryRow(`SELECT home FROM fed_card WHERE aid=?`, aid).Scan(&home); err != nil {
+	if err := s.db.QueryRow(`SELECT home FROM fed_a2a_card WHERE aid=? AND verified_at IS NOT NULL`, aid).Scan(&home); err != nil {
 		return ""
 	}
 	return home

@@ -82,15 +82,18 @@ func indexInvariants(t *testing.T, h *fz, aid string) {
 }
 
 // FuzzHubRegister fuzzes a registration: profile text, capability list,
-// ADP card, A2A card, encryption key set and KEL, each either valid,
-// another agent's, mutated, or raw fuzz bytes. The request is always
-// signed by the registrant. Properties:
+// A2A card, encryption key set and KEL, each either valid, another
+// agent's, mutated, or raw fuzz bytes, and sometimes one of the removed
+// members pricing and card. The request is always signed by the
+// registrant. Properties:
 //
 //   - the answer is 200, 400, 401, 403, 409 or 413, never a 5xx;
+//   - a body with pricing or card is 400 (or 413);
 //   - 200 only for a KEL that replays to the AID claimed, and the hub
 //     then holds exactly that KEL;
-//   - an A2A card is listed only if it verifies against that KEL, and the
-//     skill and tag indexes hold nothing for an agent without one;
+//   - an A2A card is listed only if it verifies against that KEL and
+//     carries no price extension, and the skill and tag indexes hold
+//     nothing for an agent without one;
 //   - a key set is stored only if it verifies for the agent;
 //   - a refused first registration leaves no agent, card or balance
 //     behind, and a registration pays no credit;
@@ -178,26 +181,22 @@ func FuzzHubRegister(f *testing.F) {
 		}
 		body := map[string]any{
 			"aid": c.AID(), "name": name, "caps": caps,
-			"summary": summary, "readme": readme, "pricing": pricing,
+			"summary": summary, "readme": readme,
 			"kel": base64.RawURLEncoding.EncodeToString(kel),
 		}
-		switch cardMode % 5 {
+		// The members that carried the public prices and the ADP card are
+		// gone: a body with either is refused like any member /register
+		// does not take.
+		removed := false
+		switch cardMode % 4 {
 		case 1:
-			body["card"] = fzADPCard(t, c, name, caps)
+			body["pricing"], removed = pricing, true
 		case 2:
 			if json.Valid(cardRaw) {
-				body["card"] = json.RawMessage(cardRaw)
+				body["card"], removed = json.RawMessage(cardRaw), true
 			}
 		case 3:
-			body["card"] = fzADPCard(t, stranger, name, caps)
-		case 4:
-			card := []byte(fzADPCard(t, c, name, caps))
-			if len(cardRaw) > 0 {
-				card[int(cardRaw[0])%len(card)] ^= 1
-			}
-			if json.Valid(card) {
-				body["card"] = json.RawMessage(card)
-			}
+			body["card"], removed = map[string]any{"subject_did": c.AID(), "name": name, "capabilities": caps}, true
 		}
 		skills := func(card map[string]any) {
 			if capsRaw == "" {
@@ -213,7 +212,7 @@ func FuzzHubRegister(f *testing.F) {
 			}
 			card["skills"] = out
 		}
-		switch a2aMode % 7 {
+		switch a2aMode % 8 {
 		case 1:
 			body["a2a_card"] = fzA2ACardOrRaw(t, c, seq, skills)
 		case 2:
@@ -234,6 +233,9 @@ func FuzzHubRegister(f *testing.F) {
 			body["a2a_card"] = fzA2ACard(t, stranger, seq)
 		case 6:
 			body["a2a_card"] = json.RawMessage(golden)
+		case 7:
+			// A public card with prices is never listed.
+			body["a2a_card"] = fzA2ACardOrRaw(t, c, seq, skills, withExtension(priceExtension(priceV1URI)))
 		}
 		switch keysMode % 7 {
 		case 1:
@@ -269,6 +271,9 @@ func FuzzHubRegister(f *testing.F) {
 		rec := h.register(c, raw)
 		if !allowed(rec.Code, 200, 400, 401, 403, 409, 413) {
 			t.Fatalf("register: unexpected %d %s", rec.Code, rec.Body.Bytes())
+		}
+		if removed && who%4 != 3 && rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("a body with pricing or card was answered %d %s", rec.Code, rec.Body.Bytes())
 		}
 		defer indexInvariants(t, h, c.AID())
 		defer h.ledgerInvariants(t)
@@ -330,6 +335,9 @@ func FuzzHubRegister(f *testing.F) {
 			if _, err := seal.VerifyEncKeySet(signed, c.AID(), ev, uint64(time.Now().UnixMilli())); err != nil {
 				t.Fatalf("keys_status %s for a key set that does not verify: %v", out.KeysStatus, err)
 			}
+		}
+		if a2aMode%8 == 7 && (out.CardStatus == aghub.CardStatusOK || out.CardStatus == aghub.CardStatusUnchanged) {
+			t.Fatalf("a public card with prices was admitted: %+v", out)
 		}
 		if fresh && out.CardStatus != aghub.CardStatusOK && out.CardStatus != aghub.CardStatusUnchanged {
 			if card, _ := h.store.VerifiedA2ACard(c.AID(), false); card != nil {

@@ -1,0 +1,32 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "The hub's x402 resource gateway is removed (HPP §2.8, §4.2.6; core §2.12.2): GET /x402/resource/* answers 410 gateway_removed, with or without the wire header (a read-only GET) and whatever agent, capability or payment header it names; the sentence names the replacement, anet's local A2A interface.",
+  "setup": "hub",
+  "cases": [
+    {
+      "name": "the gateway path of an agent registered here",
+      "cite": "HPP §4.2.6 item 1",
+      "request": {"method": "GET", "path": "/x402/resource/${alice}/work.do", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 410, "headers": {"X-ANet-Wire": "3", "PAYMENT-REQUIRED": null},
+        "body": {"reason": "gateway_removed", "error": "The hub gateway was removed in 0.3.0; install anet and call through its local A2A interface, where anet signs the payment for you: send payment-submitted without x402.payment.payload."}}
+    },
+    {
+      "name": "a plain HTTP x402 client sends no wire header",
+      "cite": "HPP §4.2.6 item 1, CORE-V1",
+      "request": {"method": "GET", "path": "/x402/resource/${alice}/work.do"},
+      "response": {"status": 410, "headers": {"X-ANet-Wire": "3"}, "body_has": {"reason": "gateway_removed"}}
+    },
+    {
+      "name": "a payment is not looked at",
+      "cite": "HPP §4.2.6 item 1",
+      "request": {"method": "GET", "path": "/x402/resource/${alice}/work.do", "headers": {"X-ANet-Wire": "3", "PAYMENT-SIGNATURE": "eyJ4NDAyVmVyc2lvbiI6Mn0="}},
+      "response": {"status": 410, "headers": {"PAYMENT-RESPONSE": null}, "body_has": {"reason": "gateway_removed"}}
+    },
+    {
+      "name": "an agent this hub does not host",
+      "cite": "HPP §4.2.6 item 1",
+      "request": {"method": "GET", "path": "/x402/resource/did:anet:nobody/work.do", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 410, "body_has": {"reason": "gateway_removed"}}
+    }
+  ]
+}

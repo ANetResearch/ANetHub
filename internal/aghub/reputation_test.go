@@ -203,7 +203,7 @@ func TestReputationIsPublishedBySource(t *testing.T) {
 // The custodian's own signature has to be checkable, by the same route
 // as everyone else's.
 //
-// Everything this hub signs — settlements, redemption receipts, vouchers
+// Everything this hub signs — settlements, redemption receipts
 // — is worthless to a holder who cannot look up the key. For a while the
 // hub published every agent's key history and not its own, which made
 // "you can verify what the custodian did" true of the objects and false
@@ -263,15 +263,9 @@ func TestAnInteractionThatCrossedAHubCanStillBeReviewed(t *testing.T) {
 	register(t, hub1, requester, "Requester", nil)
 
 	// The provider's card reaches hub1 the way federation delivers it.
-	kel, err := identity.MarshalKEL(provider.KEL())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store1.AdmitFedCard("did:anet:hub2", aghub.FedCard{
-		Card: mintCard(t, provider, "Provider", []string{"work.do"}),
-		KEL:  base64.StdEncoding.EncodeToString(kel),
-		Home: "https://hub2.example",
-	}); err != nil {
+	entry := a2aEntry(t, provider, signA2A(t, provider, a2aCardFor(provider, 1)))
+	entry.Home = "https://hub2.example"
+	if err := store1.AdmitFedA2ACard("did:anet:hub2", entry); err != nil {
 		t.Fatal(err)
 	}
 

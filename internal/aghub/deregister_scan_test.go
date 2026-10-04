@@ -37,7 +37,6 @@ var deregAllowed = map[string]bool{
 	"review":              true,
 	"review_blob":         true,
 	"fed_review":          true,
-	"agent_card":          true, // the departed agent's withdrawal on the ADP card stream (no card)
 	"a2a_card_withdrawal": true,
 	"dereg_event":         true,
 }

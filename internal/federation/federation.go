@@ -269,7 +269,6 @@ CREATE TABLE IF NOT EXISTS fed_dedupe (payload_cid TEXT PRIMARY KEY, ts INTEGER 
 -- the DELETE reads a week of payload CIDs per message (ANet an internal note).
 CREATE INDEX IF NOT EXISTS idx_fed_dedupe_ts ON fed_dedupe(ts);
 CREATE TABLE IF NOT EXISTS fed_peer_kel (aid TEXT PRIMARY KEY, kel BLOB NOT NULL, fetched_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS fed_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_review_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_cursor_v2 (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 `); err != nil {
@@ -520,16 +519,17 @@ func dropUnprovenPeerKELs(db *sql.DB) error {
 
 // ---- inbound ----
 
-// Handler serves the federation routes: /fed/v1/forward, /fed/v1/cards,
-// /fed/v1/reviews, /fed/v2/keys/{aid} and /fed/v2/cards.
+// Handler serves the federation routes: /fed/v1/forward, /fed/v1/reviews,
+// /fed/v2/keys/{aid} and /fed/v2/cards.
+//
+// The ADP card stream, /fed/v1/cards, is gone with the signed ADP card it
+// carried: an agent's directory entry is its signed A2A card, and the A2A
+// card stream carries it (A2A-DESIGN §10.6).
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fed/v1/forward", s.hForward)
-	mux.HandleFunc("GET /fed/v1/cards", s.hCards)
 	mux.HandleFunc("GET /fed/v1/reviews", s.hFedReviewStream)
 	mux.HandleFunc("GET /fed/v2/keys/{aid}", s.hKeys)
-	// The A2A card stream (A2A-DESIGN §10.6). /fed/v1/cards stays until
-	// every peer reads v2.
 	mux.HandleFunc("GET /fed/v2/cards", s.hA2ACards)
 	return mux
 }
@@ -743,13 +743,6 @@ func nowMillisForTest() uint64               { return uint64(time.Now().UnixMill
 // independently, and a hub running only one should not have to implement
 // the other's seam.
 type Directory interface {
-	// CardsSince serves this hub's own opted-in cards after a cursor.
-	CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error)
-	// AdmitFedCard verifies and stores a card learned from a peer, with
-	// the encryption key set the entry carried (nil when none). An
-	// error wrapping ErrRefusedForNow means the refusal may stop
-	// applying, and the cursor must not advance past that card.
-	AdmitFedCard(peerAID string, card, kel, keys []byte, home string) error
 	// ReviewsSince serves this hub's own opted-in reviews after a cursor,
 	// as opaque JSON. Opaque because federation moves the bytes and the
 	// kernel decides what they mean — a module that understood the shape
@@ -765,7 +758,8 @@ type Directory interface {
 	// AdmitFedA2ACard admits one A2A card stream entry learned from a
 	// peer, dispatching on its Format (FormatA2ACard or FormatWithdrawal;
 	// the sync loop skips any other). An error wrapping ErrRefusedForNow
-	// holds the cursor, as for AdmitFedCard.
+	// means the refusal may stop applying, and the cursor must not advance
+	// past that entry.
 	AdmitFedA2ACard(peerAID string, entry FedA2ACardView) error
 }
 
@@ -779,24 +773,6 @@ type Directory interface {
 // card the moment the fact changes.
 var ErrRefusedForNow = errors.New("federation: refused for now")
 
-// FedCardView is one entry of the sync stream, as the kernel hands it over.
-// Keys is the agent's seal.SignedEncKeySet encoding, or nil.
-type FedCardView struct {
-	Card   []byte
-	KEL    []byte
-	Keys   []byte
-	Home   string
-	FedSeq int64
-}
-
-type fedCardWire struct {
-	Card   json.RawMessage `json:"card"`
-	KEL    string          `json:"kel"`
-	Keys   string          `json:"keys,omitempty"` // base64 of the seal.SignedEncKeySet encoding
-	Home   string          `json:"home"`
-	FedSeq int64           `json:"fed_seq"`
-}
-
 // fullResyncEvery is how many sync rounds pass between full re-reads of
 // a peer's directory. At the steady two-minute cadence this is about
 // every half hour, so a directory that lost an entry heals well inside
@@ -808,44 +784,11 @@ func (s *Service) DiscoveryEnabled() bool {
 	return s.cfg.Discovery != "" && s.cfg.Discovery != "off" && len(s.cfg.Peers) > 0
 }
 
-// hCards serves GET /fed/v1/cards?cursor=<c>.
-//
-// Unauthenticated on purpose. Everything it serves is an agent's own
-// signed card, published by an agent that asked to be federated — there
-// is nothing here a caller could learn that the agent did not choose to
-// say, and requiring a signature to read public statements would only
-// stop the honest.
-func (s *Service) hCards(w http.ResponseWriter, r *http.Request) {
-	if !s.DiscoveryEnabled() || s.dir == nil {
-		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "discovery federation disabled")
-		return
-	}
-	cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
-	cards, next, err := s.dir.CardsSince(cursor, 200, s.cfg.Home)
-	if err != nil {
-		fedErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
-	}
-	out := make([]fedCardWire, 0, len(cards))
-	for _, c := range cards {
-		cw := fedCardWire{
-			Card: json.RawMessage(c.Card), KEL: base64.StdEncoding.EncodeToString(c.KEL),
-			Home: c.Home, FedSeq: c.FedSeq,
-		}
-		if len(c.Keys) > 0 {
-			cw.Keys = base64.StdEncoding.EncodeToString(c.Keys)
-		}
-		out = append(out, cw)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"cursor": next, "cards": out})
-}
-
 // hFedReviewStream serves GET /fed/v1/reviews?cursor=<c>.
 //
-// Unauthenticated for the same reason as the card stream: every review
-// here is a signature the reviewer already published, over an interaction
-// the provider already receipted. There is nothing to withhold from a
+// Unauthenticated for the same reason as the card stream (hA2ACards): every
+// review here is a signature the reviewer already published, over an
+// interaction the provider already receipted. There is nothing to withhold from a
 // reader that the parties did not choose to say.
 func (s *Service) hFedReviewStream(w http.ResponseWriter, r *http.Request) {
 	if !s.DiscoveryEnabled() || s.dir == nil {
@@ -924,13 +867,16 @@ func (s *Service) setPeerReviewCursor(aid string, c int64) {
 		 ON CONFLICT(peer_aid) DO UPDATE SET cursor=excluded.cursor`, aid, c)
 }
 
-// SyncOnce pulls each peer's directory forward by one page.
+// SyncOnce pulls each peer's directory forward by one page: its A2A card
+// stream (a2acards.go) and its reputation stream.
 //
 // Per peer, because a peer that is down or lying must not stop the
 // others: its cursor simply does not advance, and the next attempt asks
-// for the same page. A card that fails admission is dropped and the
-// cursor still advances past it — refusing to move would let one bad card
-// from one peer wedge that peer's stream forever.
+// for the same page. An entry that fails admission for good is dropped and
+// the cursor still advances past it — refusing to move would let one bad
+// card from one peer wedge that peer's stream forever; one refused for now
+// (ErrRefusedForNow) holds the cursor, so it is read again once the
+// refusal stops applying.
 func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 	if !s.DiscoveryEnabled() || s.dir == nil {
 		return 0, 0
@@ -951,114 +897,16 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 	// heals within the hour rather than at the next restart.
 	s.round++
 	full := s.round%fullResyncEvery == 0
-
-	for i := range s.cfg.Peers {
-		p := &s.cfg.Peers[i]
-		cursor := s.peerCursor(p.AID)
-		if full {
-			log.Printf("hub: federation full resync from %s", p.AID)
-			cursor = 0
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/fed/v1/cards?cursor=%d", strings.TrimSuffix(p.Endpoint, "/"), cursor), nil)
-		if err != nil {
-			continue
-		}
-		resp, err := s.http.Do(req)
-		if err != nil {
-			log.Printf("hub: federation sync %s: %v", p.AID, err)
-			continue
-		}
-		var out struct {
-			Cursor int64         `json:"cursor"`
-			Cards  []fedCardWire `json:"cards"`
-		}
-		derr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out)
-		resp.Body.Close()
-		if derr != nil {
-			log.Printf("hub: federation sync %s: %v", p.AID, derr)
-			continue
-		}
-		var stall int64
-		for _, c := range out.Cards {
-			kel, kerr := base64.StdEncoding.DecodeString(c.KEL)
-			if kerr != nil {
-				refused++
-				continue
-			}
-			home := c.Home
-			if home == "" {
-				// A peer that names no home still tells us who exists;
-				// its own endpoint is the honest fallback for where they
-				// are reachable.
-				home = p.Endpoint
-			}
-			// The key set is advisory: one that does not decode is passed
-			// as absent and the card is still admitted.
-			var keys []byte
-			if c.Keys != "" {
-				if k, kerr := base64.StdEncoding.DecodeString(c.Keys); kerr == nil {
-					keys = k
-				}
-			}
-			if err := s.dir.AdmitFedCard(p.AID, c.Card, kel, keys, home); err != nil {
-				log.Printf("hub: federation card from %s refused: %v", p.AID, err)
-				refused++
-				// A refusal that may stop applying must not be skipped
-				// past. Advancing over it loses the card for ever the
-				// moment the reason goes away — which is what happened
-				// in production: a peer's card was refused because that
-				// agent was registered here, the agent later moved, and
-				// the directory never learned it existed.
-				//
-				// Holding the cursor here means a peer that keeps
-				// sending such a card stalls its own stream. That is
-				// visible in the log every round, which is the right
-				// place for it: silently dropping an agent from the
-				// directory is the failure nobody notices.
-				if errors.Is(err, ErrRefusedForNow) {
-					stall = c.FedSeq
-					break
-				}
-				continue
-			}
-			admitted++
-		}
-		switch {
-		case stall > 0 && stall > cursor:
-			s.setPeerCursor(p.AID, stall-1)
-		case out.Cursor > cursor:
-			s.setPeerCursor(p.AID, out.Cursor)
-		}
-		if full && out.Cursor > 0 && stall == 0 {
-			// A full pass that admitted everything leaves the cursor
-			// where the peer says the end is, so the next ordinary round
-			// picks up from there rather than replaying the directory.
-			s.setPeerCursor(p.AID, out.Cursor)
-		}
+	if full {
+		log.Printf("hub: federation full resync from every peer")
 	}
-	// The A2A card stream rides the same tick and the same full-resync
-	// schedule, with its own cursor (a2acards.go).
-	aa, ar := s.syncA2ACards(ctx, full)
-	admitted, refused = admitted+aa, refused+ar
+	admitted, refused = s.syncA2ACards(ctx, full)
 	// Reputation rides the same tick. Cards say who exists; reviews say
 	// how they have done. Pulling one without the other gives a directory
 	// full of strangers with no standing, which is a directory nobody can
 	// choose from.
 	ra, rr := s.syncReviews(ctx)
 	return admitted + ra, refused + rr
-}
-
-func (s *Service) peerCursor(aid string) int64 {
-	var c int64
-	_ = s.db.QueryRow(`SELECT cursor FROM fed_cursor WHERE peer_aid=?`, aid).Scan(&c)
-	return c
-}
-
-func (s *Service) setPeerCursor(aid string, c int64) {
-	_, _ = s.db.Exec(
-		`INSERT INTO fed_cursor(peer_aid, cursor) VALUES(?,?)
-		 ON CONFLICT(peer_aid) DO UPDATE SET cursor=excluded.cursor`, aid, c)
 }
 
 // ---- cross-hub settlement (the clearing half of discovery federation) ----
