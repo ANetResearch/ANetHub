@@ -420,8 +420,8 @@ func a2aMark(tx *sql.Tx, aid string) (*a2acard.Mark, []byte, error) {
 		return nil, nil, err
 	}
 	if len(hash) != 32 {
-		// A row with no mark is not a card this hub admitted (migration
-		// readmits or deletes such rows); the next card replaces it.
+		// A row with no mark is not a card this hub admitted (every
+		// admitted card is stored with its mark); the next card replaces it.
 		return nil, raw, nil
 	}
 	m := &a2acard.Mark{Seq: seq}
