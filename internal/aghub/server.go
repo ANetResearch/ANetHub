@@ -1402,13 +1402,17 @@ const HeaderAccess = "X-ANet-Access"
 //	   headers, kind 0 with all of them; X-ANet-Home, if any, an AID
 //	1a kind 1: the client address's bucket of refused credentials
 //	2  before the body is read: kind 0, the session and X-ANet-TS, then its
-//	   send bucket; kind 1, the credential (capPrecheck), then its bucket
+//	   send bucket; kind 1, the credential (capPrecheck; for an owner
+//	   registered at a peer, against its home's directory entry or its
+//	   federated card, capPrecheckRemote), then its bucket
 //	3  the body, at most MaxEnvelope
 //	4  the envelope: seal.ParseOuter, outer key 7 the same bytes as the
 //	   header, the recipient AID; env_digest
 //	5  kind 0: the session MAC over the request; kind 1: seal.VerifyAccess,
 //	   with the holder's proof over env_digest and owner == to
-//	6  the recipient is registered here
+//	6  the recipient is registered here; else, once its home peer hub is
+//	   resolved, the send goes to that one hub (forwardSend, SSR-H13) and
+//	   steps 7 to 11 are the home's
 //	7  the same envelope already waiting: duplicate, no token taken
 //	7a non-contact mail no larger than the recipient's non-contact share
 //	8  the buckets, all of them or none
