@@ -3,13 +3,12 @@ module github.com/ANetResearch/ANetHub
 go 1.26.6
 
 require (
-	github.com/ANetResearch/ANetCore v0.15.0
+	github.com/ANetResearch/ANetCore v0.16.0-rc.1
 	github.com/fxamacker/cbor/v2 v2.9.2
 	modernc.org/sqlite v1.56.0
 )
 
 require (
-	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
@@ -34,5 +33,6 @@ require (
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.41.0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
