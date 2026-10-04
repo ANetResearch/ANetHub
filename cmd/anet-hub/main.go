@@ -275,9 +275,8 @@ func beforeServing(f *hubFlags, fs *flag.FlagSet, c *console) (code int, done bo
 
 // versionLine is what -version prints: the release, and the wire contract
 // it speaks with the anet release that contract needs. The wire is what an
-// operator upgrading from wire 1 has to know about the binary in hand
-// before starting it (the first start migrates the database; internal notes
-// 0027 in the ANet repository).
+// operator has to know about the binary in hand before starting it: a data
+// directory another release wrote is refused, not converted (core CORE-V4).
 func versionLine() string {
 	return fmt.Sprintf("anet-hub %s (wire %d, nodes need anet >= %s; commit %s, built %s)",
 		version.V, aghub.WireVersion, aghub.RequiredAnet, version.Commit, version.BuiltAt)
