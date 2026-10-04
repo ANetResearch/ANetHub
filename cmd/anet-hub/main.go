@@ -32,21 +32,27 @@ import (
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
-// storeDelivery adapts the hub kernel store to federation.LocalDelivery.
-// The kernel's relay errors are mapped onto federation's, so that the
-// forward handler can answer 507 and 400 without importing the kernel.
+// storeDelivery adapts the hub kernel store to federation.LocalDelivery,
+// the receiving half of the federation v2 forward. The kernel's relay errors
+// are mapped onto federation's, so that the forward handler can answer 507
+// and 400 without importing the kernel.
+//
+// v030-todo(SS-6): /fed/v3/forward checks the delivery credential itself and
+// queues through the kernel's /relay/send steps; this adapter goes with v2.
 type storeDelivery struct{ s *aghub.Store }
 
 func (d storeDelivery) HasAgent(aid string) bool { _, err := d.s.AgentKEL(aid); return err == nil }
 func (d storeDelivery) Enqueue(to string, envelope []byte) (int64, error) {
-	id, err := d.s.RelayEnqueue(to, envelope)
+	q, err := d.s.QueueEnvelope(to, envelope)
+	var limited *aghub.RedeliveryLimitedError
 	switch {
-	case errors.Is(err, aghub.ErrMailboxFull):
+	case errors.Is(err, aghub.ErrMailboxFull), errors.Is(err, aghub.ErrStrangersBusy), errors.As(err, &limited):
+		// Federation v2 has one "cannot take it now" answer.
 		return 0, fmt.Errorf("%w: %v", federation.ErrMailboxFull, err)
 	case errors.Is(err, aghub.ErrBadEnvelope):
 		return 0, fmt.Errorf("%w: %v", federation.ErrBadEnvelope, err)
 	}
-	return id, err
+	return q.ID, err
 }
 
 // hubFlags is every flag this binary takes.
@@ -117,7 +123,7 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	def := aghub.DefaultLimits()
 	f.maxEnvelope = fs.Int64("relay-max-envelope", def.MaxEnvelope,
 		"largest sealed envelope /relay/send accepts, in bytes (413 above it); keep the reverse proxy's "+
-			"client_max_body_size at or above 4/3 of this")
+			"client_max_body_size at or above this")
 	f.mailboxMessages = fs.Int("relay-mailbox-messages", def.MailboxMessages,
 		"undelivered envelopes one recipient may have queued (507 above it)")
 	f.mailboxBytes = fs.Int64("relay-mailbox-bytes", def.MailboxBytes,
@@ -132,12 +138,12 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	return f
 }
 
-// limits collects the relay limit flags. The per-sender send bucket is a
-// fixed value now (sealed-sender SSR-H20, SSR-H21): no flag sets it.
+// limits collects the relay limit flags. The relay's send buckets
+// (aghub/limits.go) are fixed values (sealed-sender SSR-H20, SSR-H21): no
+// flag sets them.
 func (f *hubFlags) limits() aghub.Limits {
-	def := aghub.DefaultLimits()
 	return aghub.Limits{
-		MaxEnvelope: *f.maxEnvelope, SendRate: def.SendRate, SendBurst: def.SendBurst,
+		MaxEnvelope:     *f.maxEnvelope,
 		MailboxMessages: *f.mailboxMessages, MailboxBytes: *f.mailboxBytes,
 		UndeliveredTTL: *f.undeliveredTTL, PollBudget: *f.pollBudget,
 		RegisterPerMinute: *f.registerPerMinute, RegisterBurst: *f.registerBurst,
@@ -378,7 +384,7 @@ func main() {
 	for _, n := range wired {
 		names += " " + n
 	}
-	log.Printf("anet-hub modules:%s (opt-in modules not in this build:%s)", names, notBuilt(wired))
+	log.Printf("anet-hub modules:%s", names)
 
 	srv := &http.Server{
 		Addr:              *f.addr,

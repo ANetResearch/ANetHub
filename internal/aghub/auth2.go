@@ -532,10 +532,12 @@ func readAllLimited(w http.ResponseWriter, r *http.Request, limit int64) ([]byte
 	return io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 }
 
-// authed is an authenticated request: the signer and the raw body.
+// authed is an authenticated request: the signer, the raw body, and the
+// stored key history the signature was verified against.
 type authed struct {
 	AID  string
 	Body []byte
+	KEL  []byte
 }
 
 // authRegistered authenticates a request from an agent registered here,
@@ -579,7 +581,7 @@ func (s *Server) authRegistered(w http.ResponseWriter, r *http.Request, action s
 	if _, err := s.store.maybeGrantTrial(a.AID, clientAddr(r)); err != nil {
 		log.Printf("hub: trial credit of %s: %v", a.AID, err)
 	}
-	return authed{AID: a.AID, Body: body}, true
+	return authed{AID: a.AID, Body: body, KEL: kelBytes}, true
 }
 
 // authSelf is authRegistered for an endpoint that acts on the AID in its

@@ -323,10 +323,46 @@ func TestRC1OneSignerFillingItsStateStopsNobody(t *testing.T) {
 		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("ct"),
 		Access: &seal.Access{Kind: seal.AccessKindSession}}
 	envB, _ := env.Marshal()
-	got := h.do(victim, actionSendRetired, http.MethodPost, "/relay/send",
-		map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(envB)}, nowMS(), false)
+	// The victim's signed request is the opening of its session; the send
+	// is MACed under it.
+	esk, epk, err := relayauth.NewSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := h.do(victim, relayauth.ActionSession, http.MethodPost, "/relay/session",
+		map[string]any{"epk": base64.RawURLEncoding.EncodeToString(epk)}, nowMS(), false)
 	if got.code != http.StatusOK {
-		t.Fatalf("victim send while the attackers fill their state: %d %s", got.code, got.body)
+		t.Fatalf("victim session while the attackers fill their state: %d %s", got.code, got.body)
+	}
+	var opened SessionResponse
+	if err := json.Unmarshal(got.body, &opened); err != nil {
+		t.Fatal(err)
+	}
+	sid, enc, ct := mustB64(t, opened.SID), mustB64(t, opened.Enc), mustB64(t, opened.CT)
+	key, err := relayauth.OpenSessionKey(esk, h.id.AID, sid, enc, ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/relay/send", bytes.NewReader(envB))
+	req.Header.Set("Content-Type", EnvelopeContentType)
+	req.Header.Set(wireVersionHeader, strconv.Itoa(wireVersion))
+	req.Header.Set(HeaderAccess, base64.RawURLEncoding.EncodeToString([]byte{0xa1, 0x01, 0x00}))
+	ts := uint64(time.Now().UnixMilli())
+	mac, err := relayauth.SessionMAC(key, sid, ts, http.MethodPost, "/relay/send", "", envB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(relayauth.HeaderSession, relayauth.EncodeSessionID(sid))
+	req.Header.Set(relayauth.HeaderMAC, relayauth.EncodeMAC(mac))
+	req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("victim send while the attackers fill their state: %d %s", resp.StatusCode, body)
 	}
 	if got := h.poll(recip, nowMS()); got.code != http.StatusOK || !bytes.Contains(got.body, []byte(`"id":`)) {
 		t.Fatalf("recipient poll while the attackers fill their state: %d %s", got.code, got.body)

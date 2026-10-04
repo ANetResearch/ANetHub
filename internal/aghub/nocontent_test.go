@@ -304,8 +304,8 @@ func TestStatsCountPublishedReceiptsAndNameModules(t *testing.T) {
 		t.Errorf("after two published receipts: tasks_completed=%d reviews=%d, want 2/2",
 			st.TasksCompleted, st.Reviews)
 	}
-	s.SetModules([]string{"federation", "taskboard"})
-	if st := stats(); strings.Join(st.Modules, ",") != "federation,taskboard" {
+	s.SetModules([]string{"federation", "example"})
+	if st := stats(); strings.Join(st.Modules, ",") != "federation,example" {
 		t.Errorf("modules = %v", st.Modules)
 	}
 }

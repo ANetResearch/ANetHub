@@ -437,26 +437,17 @@ func assertUnchanged(t *testing.T, what string, before, after map[string]string)
 	}
 }
 
-// On a hub.db the wire-2 hub has migrated, the script reports the record
+// On a hub.db a 0.2 hub migrated to wire 2, the script reports the record
 // the migration left in hub_meta, and --relay-before cannot be used to
-// delete wire-2 envelopes (05-hub H5).
+// delete wire-2 envelopes (05-hub H5). The database is the one that
+// migration left (this release neither migrates nor opens it).
 func TestTheCleanupScriptReportsWhatTheMigrationDropped(t *testing.T) {
 	needSQLite3(t)
 	dir := t.TempDir()
-	execAll(t, filepath.Join(dir, "hub.db"), []string{
-		`CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
-		   from_aid TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, interaction_id TEXT NOT NULL DEFAULT '',
-		   payload BLOB NOT NULL, created_at TEXT NOT NULL, delivered_at TEXT)`,
-		`INSERT INTO relay_message(to_aid,kind,payload,created_at,delivered_at)
-		   VALUES('a','delegate',x'01','2026-09-01T10:00:00Z','2026-09-01T10:01:00Z'),
-		         ('a','message',x'02','2026-09-20T10:00:00Z',NULL),
-		         ('b','message',x'03','2026-09-21T10:00:00Z',NULL)`,
-	})
-	store, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Close()
+	execAll(t, filepath.Join(dir, "hub.db"), append(wire2RelayTables(),
+		`INSERT INTO hub_meta(key, value) VALUES('relay_v2_migrated_at', '1790000000000'),
+		   ('relay_v2_dropped_undelivered', '2'), ('relay_v2_dropped_delivered', '1')`,
+	))
 	out, code := runScript(t, nil, "cleanup-content-v0.2.sh", "--hub-data", dir, "--admin-data", t.TempDir(),
 		"--ssh-dir", t.TempDir(), "--systemd-dir", t.TempDir(),
 		"--relay-before", "9999999999999")
@@ -479,15 +470,10 @@ func TestTheCleanupScriptReportsWhatTheMigrationDropped(t *testing.T) {
 func TestTheCleanupScriptDeletesCopiedRowsOnlyBeforeTheGivenInstant(t *testing.T) {
 	needSQLite3(t)
 	dir := t.TempDir()
-	store, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Close()
 	copied, sealed := canary(t, "WIRE1"), canary(t, "SEALED")
-	execAll(t, filepath.Join(dir, "hub.db"), []string{
+	execAll(t, filepath.Join(dir, "hub.db"), append(wire2RelayTables(),
 		`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES('bafya', 1, 1000, ?), ('bafya', 1, 3000, ?)`,
-	}, []any{[]byte(copied), []byte(sealed)})
+	), nil, nil, []any{[]byte(copied), []byte(sealed)})
 	args := []string{"--hub-data", dir, "--admin-data", t.TempDir(), "--ssh-dir", t.TempDir(),
 		"--systemd-dir", t.TempDir(), "--apply", "--yes"}
 	hubdb := filepath.Join(dir, "hub.db")
@@ -539,7 +525,8 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 	if _, err := hub.Exec(`INSERT INTO agent(aid, kel, registered_at) VALUES('bafyagent', x'00', '2026-09-01')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hub.Exec(`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES('bafyagent', ?, 1, ?)`,
+	if _, err := hub.Exec(`INSERT INTO relay_message(rid, to_aid, env_digest, class, size, created_at, payload)
+	                       VALUES(x'01', 'bafyagent', x'02', 2, ?, 1, ?)`,
 		len(payload), []byte(payload)); err != nil {
 		t.Fatal(err)
 	}
@@ -618,12 +605,10 @@ func TestTheWeeklyBackupKeepsRevocationsAndQuotas(t *testing.T) {
 	payload := canary(t, "ENVELOPE")
 	digest := canary(t, "DIGEST")
 	execAll(t, filepath.Join(dir, "hub.db"), []string{
-		`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES('bafyagent', 1, 1, ?)`,
-		// relay_redelivery comes with relay v3; the script excludes it
-		// whether or not this version of the hub has it yet.
-		`CREATE TABLE IF NOT EXISTS relay_redelivery(env_digest BLOB PRIMARY KEY, count INTEGER NOT NULL, window_start INTEGER NOT NULL)`,
+		`INSERT INTO relay_message(rid, to_aid, env_digest, class, size, created_at, payload)
+		   VALUES(x'01', 'bafyagent', x'02', 2, 1, 1, ?)`,
 		`INSERT INTO relay_redelivery(env_digest, count, window_start) VALUES(?, 2, 1)`,
-	}, []any{[]byte(payload)}, nil, []any{[]byte(digest)})
+	}, []any{[]byte(payload)}, []any{[]byte(digest)})
 
 	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
 	if code != 0 {
@@ -651,6 +636,16 @@ func TestTheWeeklyBackupKeepsRevocationsAndQuotas(t *testing.T) {
 		if !bytes.Contains(logb, []byte(want)) {
 			t.Errorf("roll.log lacks %q:\n%s", want, logb)
 		}
+	}
+}
+
+// wire2RelayTables are the relay table and hub_meta of a 0.2 hub.db, for the
+// tests of the 0.2 content cleanup.
+func wire2RelayTables() []string {
+	return []string{
+		`CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
+		   size INTEGER NOT NULL, created_at INTEGER NOT NULL, payload BLOB NOT NULL)`,
+		`CREATE TABLE hub_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	}
 }
 

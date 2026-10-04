@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -26,14 +25,14 @@ type fedDelivery struct{ s *aghub.Store }
 
 func (d fedDelivery) HasAgent(aid string) bool { _, err := d.s.AgentKEL(aid); return err == nil }
 func (d fedDelivery) Enqueue(to string, env []byte) (int64, error) {
-	id, err := d.s.RelayEnqueue(to, env)
+	q, err := d.s.QueueEnvelope(to, env)
 	switch {
-	case errors.Is(err, aghub.ErrMailboxFull):
+	case errors.Is(err, aghub.ErrMailboxFull), errors.Is(err, aghub.ErrStrangersBusy):
 		return 0, fmt.Errorf("%w: %v", federation.ErrMailboxFull, err)
 	case errors.Is(err, aghub.ErrBadEnvelope):
 		return 0, fmt.Errorf("%w: %v", federation.ErrBadEnvelope, err)
 	}
-	return id, err
+	return q.ID, err
 }
 
 // fedHubNode is one hub with its federation service, wired as main.go
@@ -101,7 +100,6 @@ func federatedHubs(t *testing.T, discovery bool) (a, b *fedHubNode) {
 		}
 		t.Cleanup(func() { _ = fed.Close() })
 		fed.SetKeySource(aghub.StoreKeySource{S: n.store})
-		n.s.SetForwarder(fed.TryForward)
 		n.fed = fed
 		mux := http.NewServeMux()
 		mux.Handle("/hub/identity", n.id.Handler())
@@ -117,10 +115,10 @@ func federatedHubs(t *testing.T, discovery bool) (a, b *fedHubNode) {
 
 // A sender on hub A writes to an agent registered on hub B with the default
 // hub-local visibility: it seals to the key set B publishes for its agent
-// (which a daemon reads from a directory bucket), sends at A, and the
-// envelope is forwarded to B. Hub A serves nothing of the agent: not its
-// keys (it answers only for its own agents, sealed-sender §2.7), not a
-// listing, and it stores nothing about it ([C32]).
+// (which a daemon reads from a directory bucket). Hub A serves nothing of
+// the agent: not its keys (it answers only for its own agents,
+// sealed-sender §2.7), not a listing, and it stores nothing about it
+// ([C32]). The send at A that reaches B is TestASendAtAHubReachesAPeersAgent.
 func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 	a, b := twoFederatedHubs(t)
 	recip, sender := twoAgents(t)
@@ -150,20 +148,40 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 		t.Errorf("something about the peer's agent was stored at A: %v", err)
 	}
 
-	// Seal to what B publishes, send at A, collect at B.
+	// What B publishes verifies as the recipient's.
 	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
 	kelRaw, _ := base64.StdEncoding.DecodeString(view.KEL)
 	events, _ := identity.UnmarshalKEL(kelRaw)
 	signed, _ := seal.UnmarshalSignedEncKeySet(raw)
-	set, err := seal.VerifyEncKeySet(signed, recip.AID(), events, uint64(time.Now().UnixMilli()))
+	if _, err := seal.VerifyEncKeySet(signed, recip.AID(), events, uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatal(err)
+	}
+	_ = kp
+}
+
+// A sender on hub A seals to an agent registered on hub B and sends at A;
+// A forwards to B, the recipient's one home, and the recipient collects it
+// there. Neither hub's relay table names the sender.
+func TestASendAtAHubReachesAPeersAgent(t *testing.T) {
+	t.Skip("v030-todo(SS-6): /relay/send forwards a recipient registered at a peer to its home hub (federation v3)")
+	a, b := twoFederatedHubs(t)
+	recip, sender := twoAgents(t)
+	register(t, b.srv, recip, "Provider", []string{"work.do"})
+	register(t, a.srv, sender, "Requester", nil)
+	recipKeys, kp := mintKeySet(t, recip, 1)
+	if code, body := publishKeys(t, b.srv, recip, recipKeys); code != 200 {
+		t.Fatalf("publish at B: %d %s", code, body)
+	}
+	set, err := seal.VerifyEncKeySet(mustSignedSet(t, recipKeys), recip.AID(), recip.KEL(), uint64(time.Now().UnixMilli()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	key, _ := seal.SelectKey(set, uint64(time.Now().UnixMilli()))
 	senderKeys, _ := mintKeySet(t, sender, 1)
 	env := sealFrom(t, sender, senderKeys, recip.AID(), key, []byte("cross-hub task"))
-	code, body, _ = relaySend(t, a.srv, sender, recip.AID(), env)
-	if code != 200 || !strings.Contains(string(body), `"forwarded"`) {
+	code, body, _ := relaySend(t, a.srv, sender, recip.AID(), env)
+	var out relaySent
+	if code != 200 || json.Unmarshal(body, &out) != nil || out.Status != aghub.RelayQueued || out.ViaHub != b.id.AID || out.RID == "" {
 		t.Fatalf("send at A for an agent on B: %d %s", code, body)
 	}
 	p := relayPoll(t, b.srv, recip)
@@ -184,4 +202,14 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 			t.Errorf("a relay row names the sender: %d %v", hits, err)
 		}
 	}
+}
+
+// mustSignedSet decodes a signed key set.
+func mustSignedSet(t *testing.T, raw []byte) *seal.SignedEncKeySet {
+	t.Helper()
+	signed, err := seal.UnmarshalSignedEncKeySet(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed
 }

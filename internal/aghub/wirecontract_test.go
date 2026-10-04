@@ -376,8 +376,9 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		value any
 		want  []string
 	}{
-		{"RelaySendRequest", aghub.RelaySendRequest{}, []string{"envelope", "to_aid"}},
-		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"id", "recipient_quiet", "status", "via_hub", "warning"}},
+		{"SessionRequest", aghub.SessionRequest{}, []string{"epk"}},
+		{"SessionResponse", aghub.SessionResponse{}, []string{"ct", "enc", "exp", "sid"}},
+		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"recipient_quiet", "rid", "status", "via_hub"}},
 		{"RelayPollRequest", aghub.RelayPollRequest{}, []string{"after_id", "limit"}},
 		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"messages"}},
 		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"envelope", "id"}},
@@ -453,7 +454,12 @@ func TestTheWireVersionsAndHeadersArePinned(t *testing.T) {
 		{relayauth.ActionPoll, "poll"}, {relayauth.ActionAck, "ack"},
 		{relayauth.ActionRegister, "register"}, {relayauth.ActionProfile, "profile"},
 		{relayauth.ActionVisibility, "visibility"}, {relayauth.ActionDeregister, "deregister"},
-		{relayauth.ActionKeys, "keys"},
+		{relayauth.ActionKeys, "keys"}, {relayauth.ActionSession, "session"},
+		// The headers of a send (core §2.12.1).
+		{aghub.HeaderAccess, "X-ANet-Access"}, {relayauth.HeaderSession, "X-ANet-Session"},
+		{relayauth.HeaderMAC, "X-ANet-MAC"}, {relayauth.HeaderHome, "X-ANet-Home"},
+		{aghub.EnvelopeContentType, "application/vnd.anet.envelope+cbor"},
+		{aghub.RelayQueued, "queued"}, {aghub.RelayDuplicate, "duplicate"},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%q, want %q", pair[0], pair[1])
@@ -468,7 +474,7 @@ func TestTheWire2RoutesAreServed(t *testing.T) {
 	srv := newHub(t)
 	c, _ := twoAgents(t)
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodPost, "/relay/send"}, {http.MethodPost, "/relay/poll"}, {http.MethodPost, "/relay/ack"},
+		{http.MethodPost, "/relay/session"}, {http.MethodPost, "/relay/poll"}, {http.MethodPost, "/relay/ack"},
 		{http.MethodPost, "/register"}, {http.MethodPost, "/profile"},
 		{http.MethodPost, "/agents/" + c.AID() + "/keys"},
 	} {

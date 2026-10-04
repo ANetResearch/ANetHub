@@ -81,7 +81,10 @@ type Liveness struct {
 	// column existed, and is why empty must read as "unknown" rather than
 	// "dead".
 	LastSeen string `json:"last_seen,omitempty"`
-	// Quiet is true when nothing has been collected for QuietAfter.
+	// Quiet is true when nothing has been collected for QuietAfter. It is
+	// all a sender is told (/relay/send recipient_quiet): a yes or no, not
+	// for how long, which would say more about the recipient than whether
+	// to expect an answer soon (sealed-sender SSR-H18).
 	Quiet bool `json:"quiet,omitempty"`
 }
 

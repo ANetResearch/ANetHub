@@ -39,9 +39,10 @@
 //	}
 //
 // ${name} in the path, a header value or a body (sent or expected) is
-// replaced by the setup's variable of that name (an AID, say). The JSON of
-// "json" is sent byte for byte as it appears in the file, so a duplicate
-// member or an escaped U+0000 reaches the hub as written.
+// replaced by the setup's variable of that name (an AID, say); a "b64url"
+// body may be such a variable as a whole (bytes the setup made, an envelope
+// say). The JSON of "json" is sent byte for byte as it appears in the file,
+// so a duplicate member or an escaped U+0000 reaches the hub as written.
 //
 // Every response of every case is also checked against the contract
 // itself: it carries X-ANet-Wire: 3, and an error (status 400 or more) is
@@ -279,7 +280,7 @@ func runCase(t *testing.T, env *Env, c Case) {
 		n++
 	}
 	if rq.B64URL != "" {
-		b, err := base64.RawURLEncoding.DecodeString(rq.B64URL)
+		b, err := base64.RawURLEncoding.DecodeString(sub(rq.B64URL))
 		if err != nil {
 			t.Fatalf("b64url: %v", err)
 		}

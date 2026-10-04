@@ -1,13 +1,18 @@
 package aghub
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
+	"math"
+	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -15,14 +20,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
+
 	"github.com/ANetResearch/ANetCore/a2acard"
+	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/regpow"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 
-	"github.com/ANetResearch/ANetHub/internal/seamerr"
 	"github.com/ANetResearch/ANetHub/internal/version"
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
@@ -33,22 +40,18 @@ type Server struct {
 	// modules names the optional modules the application wired in; /stats
 	// reports it. Set before serving (SetModules).
 	modules []string
-	// forwardUnknown, when set (by the application wiring, K207: kernel
-	// never imports modules), offers an envelope for a locally-unknown
-	// recipient to federation peers. Returns (accepted, peerHubAID, error).
-	// Only the recipient and the envelope cross: the sender is not
-	// forwarded (§3.9).
-	forwardUnknown func(toAID string, envelope []byte) (bool, string, error)
-	// limits are the §3.7 bounds; sendLimiter and registerLimiter are the
-	// token buckets they configure; replay is the relayauth v2 replay
-	// protection (RC1, auth2.go).
+	// limits are the §3.7 bounds; registerLimiter is the token bucket
+	// they configure; replay is the relayauth v2 replay protection (RC1,
+	// auth2.go).
 	limits          Limits
-	sendLimiter     *rateLimiter
 	registerLimiter *rateLimiter
 	replay          *rc1State
 	// dirLimiter bounds /directory:bucket per client address
 	// (directory.go; a constant, not one of the limits).
 	dirLimiter *rateLimiter
+	// relay is what /relay/session and /relay/send keep in memory: the
+	// sessions and the send buckets (session.go, hRelaySend).
+	relay *relayState
 	// jwks caches the JWKS derived from each stored KEL (registry.go).
 	jwks *jwksCache
 	// federated, when set, answers discovery with agents learned from
@@ -115,11 +118,6 @@ func (s *Server) peerKEL(aid string) ([]identity.SignedEvent, error) {
 // SetHubAID names the ledger this facilitator settles on.
 func (s *Server) SetHubAID(aid string) { s.hubAID = aid }
 
-// SetForwarder installs the federation egress hook.
-func (s *Server) SetForwarder(f func(toAID string, envelope []byte) (bool, string, error)) {
-	s.forwardUnknown = f
-}
-
 // SetFederatedDirectory lets discovery answer with agents learned from
 // peer hubs as well as those registered here.
 //
@@ -132,20 +130,26 @@ func (s *Server) SetFederatedDirectory(f func(capFilter string) ([]AgentView, er
 
 // SetModules records which optional modules the application wired in, for
 // /stats. The kernel attaches no meaning to the names; a client uses them
-// to decide what to show (the web UI hides the task board unless
-// "taskboard" is listed). Call it before serving.
+// to decide what to show. Call it before serving.
 func (s *Server) SetModules(names []string) {
 	s.modules = append([]string(nil), names...)
 }
 
 // NewServer wraps a store, with DefaultLimits.
+//
+// The server's first-contact sessions end with the deregistration of their
+// AID and with every new event of its key history (sealed-sender SSR-H9);
+// it registers that with the store here.
 func NewServer(store *Store) *Server {
 	s := &Server{store: store, replay: newRC1(time.Now().UnixMilli(), rc1Shards, rc1MemHigh, rc1MemLow),
 		jwks:       newJWKSCache(jwksCacheBytes, a2acard.JWKS),
-		dirLimiter: newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst)}
+		dirLimiter: newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst),
+		relay:      newRelayState(store.now)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
+	store.OnDeregistered(s.dropSessions)
+	store.OnKELExtended(s.dropSessions)
 	return s
 }
 
@@ -156,7 +160,6 @@ func (s *Server) SetLimits(l Limits) error {
 		return err
 	}
 	s.limits = l
-	s.sendLimiter = newRateLimiter(l.SendRate, l.SendBurst)
 	s.registerLimiter = newRateLimiter(l.RegisterPerMinute/60, l.RegisterBurst)
 	s.store.SetRelayQuota(l.MailboxMessages, l.MailboxBytes)
 	return nil
@@ -302,10 +305,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /a2a/v1/agents/{aid}/card", s.hA2ACard)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
-	// Relay (wire 2): sealed envelopes only. send is authenticated so the
-	// hub can rate-limit per sender without storing who sent what; poll
-	// and ack are authenticated so only the mailbox owner can read and
-	// clear it. See relay.go.
+	// Relay (wire 3): sealed envelopes only. A send is not signed: a
+	// first contact carries the MAC of a session its sender opened with
+	// its signature (session.go), every later message a delivery
+	// credential its recipient issued, which names no sender. poll and
+	// ack are signed so only the mailbox owner can read and clear it. See
+	// relay.go.
+	mux.HandleFunc("POST /relay/session", s.hRelaySession)
 	mux.HandleFunc("POST /relay/send", s.hRelaySend)
 	mux.HandleFunc("POST /relay/poll", s.hRelayPoll)
 	mux.HandleFunc("POST /relay/ack", s.hRelayAck)
@@ -681,8 +687,8 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	var powSeed, powNonce []byte
 	if req.PoW != nil {
 		var e1, e2 error
-		powSeed, e1 = decodeB64URL(req.PoW.Seed)
-		powNonce, e2 = decodeB64URL(req.PoW.Nonce)
+		powSeed, e1 = wire3.DecodeB64URL("pow.seed", req.PoW.Seed)
+		powNonce, e2 = wire3.DecodeB64URL("pow.nonce", req.PoW.Nonce)
 		if e1 != nil || e2 != nil || len(powSeed) != 32 || len(powNonce) < 1 || len(powNonce) > regpow.MaxNonce {
 			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
 				Error: "The member \"pow\" must hold a 32-byte seed and a nonce of 1 to 32 bytes, both base64url; fix it and send again."})
@@ -716,7 +722,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	// 5. The KEL and the signature.
 	registerKELReplays.Add(1)
-	kelBytes, err := decodeB64URL(req.KEL)
+	kelBytes, err := wire3.DecodeB64URL("kel", req.KEL)
 	if err != nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
 			Error: "The member \"kel\" is not base64url; encode the key history without padding and send again."})
@@ -955,19 +961,6 @@ func refuseKELExtension(w http.ResponseWriter, err error) {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
 			Error: "The key history does not replay; send the agent's own key history."})
 	}
-}
-
-// decodeB64URL decodes base64url without padding (core CORE-E5): a value
-// with "=", "+", "/" or white space is refused, so each value has one
-// spelling.
-func decodeB64URL(s string) ([]byte, error) {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return nil, fmt.Errorf("not base64url: byte %d", i)
-		}
-	}
-	return base64.RawURLEncoding.Strict().DecodeString(s)
 }
 
 // sentence turns an internal error into the one English sentence of an
@@ -1308,27 +1301,29 @@ func agentMentions(a AgentView, lowerQuery string) bool {
 	return false
 }
 
-// --- relay handlers (wire 2) ---
+// --- relay handlers (wire 3) ---
 
-// RelaySendRequest posts one sealed envelope into a recipient's mailbox.
-// The sender is the X-ANet-AID of the request (relayauth v2, action
-// "send") and is not part of the body: the hub uses it for rate limiting
-// and does not store it (§2 X1).
-type RelaySendRequest struct {
-	ToAID    string `json:"to_aid"`
-	Envelope string `json:"envelope"` // base64 (std) of the seal.SealedEnvelope encoding
-}
-
-// RelaySendResponse is the /relay/send answer for an envelope queued
-// here. An envelope handed to a peer hub is answered with status
-// "forwarded" and via_hub instead of an id.
+// RelaySendResponse is the /relay/send answer (core §2.12.2): queued (a new
+// row) or duplicate (the same envelope is already waiting), the rid the
+// sender asks about later, and whether the recipient has stopped collecting
+// its mail (liveness.go). via_hub names the hub that queued the envelope
+// when it is not this one (federation).
 type RelaySendResponse struct {
-	ID             int64  `json:"id,omitempty"`
 	Status         string `json:"status"`
+	RID            string `json:"rid"`
 	ViaHub         string `json:"via_hub,omitempty"`
-	RecipientQuiet bool   `json:"recipient_quiet,omitempty"`
-	Warning        string `json:"warning,omitempty"`
+	RecipientQuiet bool   `json:"recipient_quiet"`
 }
+
+// The /relay/send statuses.
+const (
+	RelayQueued    = "queued"
+	RelayDuplicate = "duplicate"
+)
+
+// EnvelopeContentType is the Content-Type of a /relay/send body: the
+// envelope itself (core §2.12.1).
+const EnvelopeContentType = "application/vnd.anet.envelope+cbor"
 
 // RelayPollRequest is the /relay/poll body (relayauth v2, action "poll").
 //
@@ -1361,106 +1356,507 @@ type RelayAckResponse struct {
 	Acked int `json:"acked"`
 }
 
-// hRelaySend accepts a sealed envelope from an authenticated sender.
+// relayState is what /relay/session and /relay/send keep in this process's
+// memory only (sealed-sender §3.1): the sessions and the buckets of §2.12.
+type relayState struct {
+	sessions *sessionTable
+	// sessionSend is each session holder's send bucket, by AID.
+	sessionSend *bucketSet
+	// caps is each delivery credential's bucket, by owner and cap_id.
+	caps *bucketSet
+	// firstContact is each recipient's first-contact bucket, by AID.
+	firstContact *bucketSet
+	// addrFailure is each client address's bucket of refused kind-1 sends
+	// (clientIP: IPv4 address, IPv6 /64).
+	addrFailure *bucketSet
+}
+
+func newRelayState(now func() time.Time) *relayState {
+	return &relayState{sessions: newSessionTable(), sessionSend: newBucketSet(now), caps: newBucketSet(now),
+		firstContact: newBucketSet(now), addrFailure: newBucketSet(now)}
+}
+
+// HeaderAccess carries the delivery credential of a send, base64url of the
+// CoreDet encoding of seal.Access, byte for byte outer key 7 of the envelope
+// (core §2.12.1).
+const HeaderAccess = "X-ANet-Access"
+
+// hRelaySend is POST /relay/send, in the one order of sealed-sender §4.2.1
+// (SSR-H2). Each step refuses with its own code; no step before the one that
+// refuses takes a token or writes a row. The one exception is the address
+// bucket of step 1a, which a refused credential debits after its 403 has been
+// answered (SSR-H3b), and never a send that went through.
 //
-// Order: a non-consuming check of the sender's bucket, authentication
-// (the signer must be registered here), the per-sender bucket, decoding,
-// the envelope size, the structural check, then routing and the
-// recipient's quota. The size cap on the raw body is
-// applied while it is read, before the signature is checked, because the
-// signature covers the body. Nothing about the sender is written: the
-// row holds the recipient, the size, the time and the envelope.
+//	0  X-ANet-Wire (wire3.Contract, before this handler)
+//	1  the headers: Content-Type; no identity headers; X-ANet-Access, at most
+//	   1 KiB, base64url, an access of kind 0 or 1; kind 1 without session
+//	   headers, kind 0 with all of them; X-ANet-Home, if any, an AID
+//	1a kind 1: the client address's bucket of refused credentials
+//	2  before the body is read: kind 0, the session and X-ANet-TS, then its
+//	   send bucket; kind 1, the credential (capPrecheck), then its bucket
+//	3  the body, at most MaxEnvelope
+//	4  the envelope: seal.ParseOuter, outer key 7 the same bytes as the
+//	   header, the recipient AID; env_digest
+//	5  kind 0: the session MAC over the request; kind 1: seal.VerifyAccess,
+//	   with the holder's proof over env_digest and owner == to
+//	6  the recipient is registered here
+//	7  the same envelope already waiting: duplicate, no token taken
+//	7a non-contact mail no larger than the recipient's non-contact share
+//	8  the buckets, all of them or none
+//	9, 10 Store.RelayEnqueue: the redelivery count and the mailbox, in the
+//	   transaction that writes the row
+//	11 queued, with the rid
+//
+// A kind-1 refusal at step 2 or 5 is the same status and the same bytes,
+// whatever the cause (SSR-H3): an unknown owner, a bad signature, an old
+// epoch, an expiry, a revocation, a proof for another envelope. The hub
+// learns from a kind-1 send who it is for and under which credential; it
+// never learns from it who sent it, and nothing of the request but the row
+// is written.
 func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
-	// A sender whose bucket is already empty is refused before its body
-	// (up to the envelope limit) is read. The check takes no token, so
-	// naming another agent in the header cannot drain that agent's bucket.
-	if hdr, ok := singleHeader(r, relayauth.HeaderAID); ok {
-		if empty, wait := s.sendLimiter.empty(hdr); empty {
-			w.Header().Set("Retry-After", retryAfter(wait))
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{
-				"error": "send rate exceeded for this sender; retry later"})
+	now := s.store.now()
+	// 1. The headers.
+	if !envelopeContentType(r) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "A send carries the envelope itself as " + EnvelopeContentType + "; send it with that Content-Type."})
+		return
+	}
+	for _, h := range []string{relayauth.HeaderAID, relayauth.HeaderSeq, relayauth.HeaderSig} {
+		if len(r.Header.Values(h)) > 0 {
+			wire3.Refuse(w, wire3.ReasonIdentityHeadersNotAllowed)
 			return
 		}
 	}
-	a, ok := s.authRegistered(w, r, actionSendRetired, s.limits.sendBodyLimit())
+	accessRaw, access, why := accessHeader(r)
+	if why != "" {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadEnvelope, Error: why})
+		return
+	}
+	var sid, mac []byte
+	var ts uint64
+	switch access.Kind {
+	case seal.AccessKindCap:
+		if len(r.Header.Values(relayauth.HeaderSession)) > 0 || len(r.Header.Values(relayauth.HeaderMAC)) > 0 {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+				Error: "A send under a delivery credential carries no session; send it without " +
+					relayauth.HeaderSession + " and " + relayauth.HeaderMAC + "."})
+			return
+		}
+	default: // seal.AccessKindSession: accessHeader admits no other kind
+		var ok bool
+		if sid, mac, ts, ok = sessionHeaders(r); !ok {
+			wire3.Refuse(w, wire3.ReasonSessionInvalid)
+			return
+		}
+	}
+	home, ok := homeHeader(r)
 	if !ok {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: relayauth.HeaderHome + " names a hub by its AID, once; fix it or send without it."})
 		return
 	}
-	if ok, wait := s.sendLimiter.allow(a.AID); !ok {
-		w.Header().Set("Retry-After", retryAfter(wait))
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{
-			"error": "send rate exceeded for this sender; retry later"})
-		return
+	addr := clientIP(r)
+	if access.Kind == seal.AccessKindCap {
+		// 1a. Only the address: nothing that depends on the recipient has
+		// been looked at, so the answer cannot say anything about it.
+		if empty, wait := s.relay.addrFailure.peek(addr, rateAddrFailure); empty {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait,
+				Error: "Too many refused delivery credentials came from this address; send again after the seconds in Retry-After."})
+			return
+		}
 	}
-	var req RelaySendRequest
-	if err := json.Unmarshal(a.Body, &req); err != nil || req.ToAID == "" || req.Envelope == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to_aid + envelope required"})
-		return
+	// 2. The credential, before the body is read.
+	var sess *hubSession
+	var capBody *seal.CapBody
+	var mbox seal.Mbox
+	if access.Kind == seal.AccessKindSession {
+		var ok bool
+		if sess, ok = s.relay.sessions.get(sid, now); !ok || !withinSkew(ts, now, SessionSkew) {
+			wire3.Refuse(w, wire3.ReasonSessionInvalid)
+			return
+		}
+		if empty, wait := s.relay.sessionSend.peek(sess.aid, s.sessionRate(sess.aid)); empty {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait})
+			return
+		}
+	} else {
+		var ok bool
+		if capBody, mbox, ok = s.capPrecheck(w, access, addr, now); !ok {
+			return
+		}
+		if empty, wait := s.relay.caps.peek(capKey(capBody), capRate(capBody)); empty {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait})
+			return
+		}
 	}
-	// The raw body was capped at sendBodyLimit while it was read, which
-	// bounds the decoded size to MaxEnvelope plus less than 48 KiB; the
-	// exact limit is checked on the decoded bytes.
-	envelope, err := base64.StdEncoding.DecodeString(req.Envelope)
+	// 3. The body: the envelope itself.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.limits.MaxEnvelope))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "envelope not base64"})
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonTooLarge,
+				Error: fmt.Sprintf("An envelope is at most %d bytes here; send a smaller one.", s.limits.MaxEnvelope)})
+			return
+		}
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: "The request body could not be read; send it again."})
 		return
 	}
-	if int64(len(envelope)) > s.limits.MaxEnvelope {
-		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-			"error": fmt.Sprintf("envelope exceeds %d bytes", s.limits.MaxEnvelope)})
+	// 4. The envelope.
+	outer, err := seal.ParseOuter(body)
+	if err != nil {
+		wire3.Refuse(w, wire3.ReasonBadEnvelope)
 		return
 	}
-	if err := CheckEnvelope(req.ToAID, envelope); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if !sameOuterAccess(body, accessRaw) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadEnvelope,
+			Error: "Outer key 7 of the envelope is not the access in " + HeaderAccess + "; send the same bytes in both."})
 		return
 	}
-	// The recipient must be a registered agent, so the relay only holds
-	// mail for real mailboxes. A recipient unknown HERE may still live on
-	// a federated peer (K208 delivery federation).
-	if _, err := s.store.AgentKEL(req.ToAID); err != nil {
-		if s.forwardUnknown != nil {
-			ok, peer, ferr := s.forwardUnknown(req.ToAID, envelope)
-			switch {
-			case ok:
-				writeJSON(w, http.StatusOK, RelaySendResponse{Status: "forwarded", ViaHub: peer})
-				return
-			case errors.Is(ferr, seamerr.ErrMailboxFull):
-				writeJSON(w, http.StatusInsufficientStorage, map[string]string{
-					"error": "recipient mailbox full at its hub: " + ferr.Error()})
-				return
-			case ferr != nil:
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "federation forward failed: " + ferr.Error()})
+	if err := wire3.CheckText("to", outer.To); err != nil {
+		wire3.RefuseDecode(w, err)
+		return
+	}
+	// v030-todo(UX-7): outer key 8 (CUX-H1, core G23): 400 expired and
+	// bad_exp, here, before any token is taken.
+	digest, err := seal.EnvDigest(body)
+	if err != nil {
+		wire3.Refuse(w, wire3.ReasonBadEnvelope)
+		return
+	}
+	// 5. The credential, completed.
+	if sess != nil {
+		if err := relayauth.VerifySessionMAC(sess.key, sid, ts, r.Method, r.URL.RequestURI(), home, body, mac); err != nil {
+			if errors.Is(err, relayauth.ErrNUL) {
+				wire3.Refuse(w, wire3.ReasonBadRequest)
 				return
 			}
+			wire3.Refuse(w, wire3.ReasonSessionInvalid)
+			return
 		}
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "recipient not registered"})
+	} else if err := seal.VerifyAccess(access, digest, mbox, outer.To, uint64(now.UnixMilli())); err != nil {
+		s.refuseAccess(w, addr)
 		return
 	}
-	// Queued either way — but if the recipient has not collected its mail
-	// in a long time, the sender is told before it starts waiting. This
-	// hub cannot know whether the agent is coming back, and refusing the
-	// send would be asserting that it is not.
-	live, _ := s.store.LivenessOf(req.ToAID)
-	id, err := s.store.RelayEnqueue(req.ToAID, envelope)
+	// 6. The route. A credential admits only to its owner, and step 2
+	// found the owner registered here. A first contact must name an agent
+	// registered here.
+	//
+	// v030-todo(SS-6): a recipient registered at a peer hub (§4.2.6):
+	// resolve its home and forward to that one hub.
+	if sess != nil {
+		registered, err := s.store.agentRegistered(outer.To)
+		if err != nil {
+			wire3.Internal(w, err)
+			return
+		}
+		if !registered {
+			wire3.Refuse(w, wire3.ReasonRecipientUnknown)
+			return
+		}
+	}
+	// 7. The same envelope already waiting: the sender is told its rid, and
+	// nothing is taken from any bucket (SSR-W15).
+	if rid, ok, err := s.store.RelayQueued(outer.To, digest); err != nil {
+		wire3.Internal(w, err)
+		return
+	} else if ok {
+		s.answerRelay(w, RelayDuplicate, rid, outer.To)
+		return
+	}
+	// 7a. Mail from a non-contact is no larger than the share it goes into.
+	class, capID := seal.CapClassStranger, []byte(nil)
+	if capBody != nil {
+		class, capID = capBody.Class, capBody.CapID
+	}
+	q := s.store.QuotaFor(outer.To)
+	if class == seal.CapClassStranger && int64(len(body)) > q.NonContactBytes {
+		wire3.Refuse(w, wire3.ReasonTooLargeForStranger)
+		return
+	}
+	// 8. The buckets: each looked at first, then all taken or none.
+	var takes []bucketTake
+	var refusals []wire3.Reason
+	if sess != nil {
+		takes = []bucketTake{
+			{s.relay.sessionSend, sess.aid, s.sessionRate(sess.aid)},
+			{s.relay.firstContact, outer.To, firstContactRate(q)},
+		}
+		refusals = []wire3.Reason{wire3.ReasonRateLimited, wire3.ReasonStrangersBusy}
+	} else {
+		takes = []bucketTake{{s.relay.caps, capKey(capBody), capRate(capBody)}}
+		refusals = []wire3.Reason{wire3.ReasonRateLimited}
+	}
+	failed, wait := -1, time.Duration(0)
+	for i, t := range takes {
+		if empty, w := t.set.peek(t.key, t.rate); empty {
+			failed, wait = i, w
+			break
+		}
+	}
+	if failed < 0 {
+		failed, wait = takeAll(takes)
+	}
+	if failed >= 0 {
+		// A send that raced its own duplicate in is a duplicate, not a
+		// refusal.
+		if rid, ok, err := s.store.RelayQueued(outer.To, digest); err == nil && ok {
+			s.answerRelay(w, RelayDuplicate, rid, outer.To)
+			return
+		}
+		wire3.Write(w, wire3.Refusal{Reason: refusals[failed], RetryAfter: wait})
+		return
+	}
+	// 9, 10. The redelivery count and the mailbox, in the transaction
+	// that writes the row. A refusal gives the tokens back.
+	queued, err := s.store.RelayEnqueue(RelayItem{To: outer.To, Envelope: body, Digest: digest,
+		Class: class, CapID: capID, Exp: outer.Exp})
+	if err != nil || queued.Duplicate {
+		refundAll(takes)
+	}
+	var limited *RedeliveryLimitedError
 	switch {
+	case err == nil && queued.Duplicate:
+		s.answerRelay(w, RelayDuplicate, queued.RID, outer.To)
+	case err == nil:
+		// 11.
+		s.answerRelay(w, RelayQueued, queued.RID, outer.To)
+	case errors.As(err, &limited):
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRedeliveryLimited, RetryAfter: limited.Wait})
 	case errors.Is(err, ErrMailboxFull):
-		writeJSON(w, http.StatusInsufficientStorage, map[string]string{"error": err.Error()})
-		return
+		wire3.Refuse(w, wire3.ReasonMailboxFull)
+	case errors.Is(err, ErrStrangersBusy):
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonStrangersBusy, RetryAfter: StrangersBusyRetry})
 	case errors.Is(err, ErrBadEnvelope):
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	case err != nil:
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		// An envelope the relay table cannot hold as it is (an outer exp
+		// past 2^63 - 1 ms) is the sender's mistake, not this hub's.
+		wire3.Refuse(w, wire3.ReasonBadEnvelope)
+	default:
+		wire3.Internal(w, err)
 	}
-	out := RelaySendResponse{ID: id, Status: "queued"}
-	if live.Quiet {
-		out.RecipientQuiet = true
-		out.Warning = fmt.Sprintf(
-			"queued, but %s has not collected its mail for over an hour — it may not be running",
-			req.ToAID)
+}
+
+// answerRelay is the 200 of a send: queued or duplicate, the rid, and
+// whether the recipient has stopped collecting its mail. recipient_quiet is
+// only ever said here, to a send that went through (§4.2.1).
+func (s *Server) answerRelay(w http.ResponseWriter, status string, rid []byte, to string) {
+	live, _ := s.store.LivenessOf(to)
+	writeJSON(w, http.StatusOK, RelaySendResponse{Status: status, RID: wire3.EncodeB64URL(rid), RecipientQuiet: live.Quiet})
+}
+
+// refuseAccess answers a refused delivery credential: 403 access_invalid in
+// the one body of SSR-H3, then debits the address bucket of step 1a
+// (SSR-H3b).
+func (s *Server) refuseAccess(w http.ResponseWriter, addr string) {
+	wire3.Refuse(w, wire3.ReasonAccessInvalid)
+	s.relay.addrFailure.take(addr, rateAddrFailure)
+}
+
+// capPrecheck is step 2 of a kind-1 send, before the body is read: the
+// capability's body decodes strictly (with a class that has a bucket) and
+// has the capability type tag; its owner is registered here and has a
+// mailbox key; it was signed under the owner's current epoch, by that key;
+// cap_exp is in the window of core §2.1; the owner has not revoked it. A
+// refusal is answered by refuseAccess.
+//
+// Every refusal costs one Ed25519 verification (SSR-H3a): one that comes
+// before Cap.sig is checked verifies under equalVerifyKey and throws the
+// result away, so that how long the answer takes does not say which check
+// refused. Looking the owner up in this hub's database is the same work
+// whether or not it is registered.
+//
+// v030-todo(SS-6): an owner registered at a peer hub (§4.2.6): its mailbox
+// key from the federation's cards or directory, and the negative cache of
+// SSR-H14a instead of the revocation table.
+func (s *Server) capPrecheck(w http.ResponseWriter, a *seal.Access, addr string, now time.Time) (*seal.CapBody, seal.Mbox, bool) {
+	refuse := func(equal bool) (*seal.CapBody, seal.Mbox, bool) {
+		if equal {
+			_ = verifyEd25519(equalVerifyKey, a.Cap.Body, a.Cap.Sig)
+		}
+		s.refuseAccess(w, addr)
+		return nil, seal.Mbox{}, false
 	}
-	writeJSON(w, http.StatusOK, out)
+	body, err := seal.UnmarshalCapBody(a.Cap.Body)
+	if err != nil || body.Class != seal.CapClassContact && body.Class != seal.CapClassStranger || body.Type != seal.CapType {
+		return refuse(true)
+	}
+	mbox, found, err := s.store.ownerMbox(body.Owner)
+	if err != nil {
+		wire3.Internal(w, err)
+		return nil, seal.Mbox{}, false
+	}
+	if !found || mbox.Epoch == 0 || body.Epoch != mbox.Epoch || len(mbox.Pub) != ed25519.PublicKeySize {
+		return refuse(true)
+	}
+	if !verifyEd25519(mbox.Pub, a.Cap.Body, a.Cap.Sig) {
+		return refuse(false)
+	}
+	if !capExpOK(body.CapExp, uint64(now.UnixMilli())) {
+		return refuse(false)
+	}
+	revoked, err := s.store.CapRevoked(body.Owner, body.CapID)
+	if err != nil {
+		wire3.Internal(w, err)
+		return nil, seal.Mbox{}, false
+	}
+	if revoked {
+		return refuse(false)
+	}
+	return body, mbox, true
+}
+
+// capExpOK is the window of core §2.1 seal.VerifyAccess checks cap_exp in:
+// now - CapExpGraceMS <= cap_exp <= now + CapExpMaxAheadMS.
+func capExpOK(capExp, now uint64) bool {
+	lo := uint64(0)
+	if now > seal.CapExpGraceMS {
+		lo = now - seal.CapExpGraceMS
+	}
+	hi := now + seal.CapExpMaxAheadMS
+	if hi < now {
+		hi = math.MaxUint64
+	}
+	return lo <= capExp && capExp <= hi
+}
+
+// capKey is a delivery credential's bucket key: its owner and its id. The id
+// is the issuer's choice, so it is keyed under its owner: no issuer can
+// share, or drain, another's bucket.
+func capKey(c *seal.CapBody) string { return c.Owner + "\x00" + string(c.CapID) }
+
+// capRate is a delivery credential's bucket rate, by its class.
+func capRate(c *seal.CapBody) relayRate {
+	if c.Class == seal.CapClassContact {
+		return rateContactCap
+	}
+	return rateStrangerCap
+}
+
+// sessionRate is the send bucket rate of a session holder: smaller during
+// the probation of an account that came in through open registration or a
+// sign-up window (SSR-H8).
+func (s *Server) sessionRate(aid string) relayRate {
+	if _, on := s.store.ProbationUntil(aid); on {
+		return rateSessionSendProbation
+	}
+	return rateSessionSend
+}
+
+// envelopeContentType reports whether the request's Content-Type is exactly
+// EnvelopeContentType, without parameters.
+func envelopeContentType(r *http.Request) bool {
+	vs := r.Header.Values("Content-Type")
+	if len(vs) != 1 {
+		return false
+	}
+	mt, params, err := mime.ParseMediaType(vs[0])
+	return err == nil && mt == EnvelopeContentType && len(params) == 0
+}
+
+// accessHeader reads X-ANet-Access: one value, at most MaxAccessHeader
+// characters, base64url, and a well-formed access of kind 0 or 1
+// (decodeAccessHeader). why says what is wrong, empty when nothing is.
+func accessHeader(r *http.Request) (raw []byte, a *seal.Access, why string) {
+	vs := r.Header.Values(HeaderAccess)
+	switch {
+	case len(vs) != 1:
+		return nil, nil, "A send carries its access in " + HeaderAccess + ", once; add it and send again."
+	case len(vs[0]) > MaxAccessHeader:
+		return nil, nil, fmt.Sprintf("%s is longer than %d characters; send the access the envelope carries.", HeaderAccess, MaxAccessHeader)
+	}
+	raw, err := wire3.DecodeB64URL(HeaderAccess, vs[0])
+	if err != nil {
+		return nil, nil, HeaderAccess + " is not base64url (no padding, no white space); encode the access that way and send again."
+	}
+	if a, err = decodeAccessHeader(raw); err != nil {
+		return nil, nil, HeaderAccess + " is not an access of kind 0 or 1; send the access outer key 7 of the envelope holds."
+	}
+	return raw, a, ""
+}
+
+// decodeAccessHeader decodes the bytes of X-ANet-Access: the CoreDet
+// encoding of a seal.Access and nothing else (no unknown key, one spelling),
+// of kind 0 without a capability or a proof, or of kind 1 with a capability
+// (a body and a 64-byte signature) and a 64-byte proof. Step 4 checks the
+// same bytes again as outer key 7 (seal.ParseOuter).
+func decodeAccessHeader(raw []byte) (*seal.Access, error) {
+	var a seal.Access
+	if err := coredet.UnmarshalStrict(raw, &a); err != nil {
+		return nil, err
+	}
+	if re, err := coredet.Marshal(&a); err != nil || !bytes.Equal(re, raw) {
+		return nil, errors.New("not the CoreDet encoding of an access")
+	}
+	switch a.Kind {
+	case seal.AccessKindSession:
+		if a.Cap != nil || a.Proof != nil {
+			return nil, errors.New("a kind-0 access carries a capability or a proof")
+		}
+	case seal.AccessKindCap:
+		if a.Cap == nil || a.Cap.Body == nil || len(a.Cap.Sig) != seal.SigLen || len(a.Proof) != seal.SigLen {
+			return nil, errors.New("a kind-1 access needs a capability and a proof")
+		}
+	default:
+		return nil, fmt.Errorf("access kind %d", a.Kind)
+	}
+	return &a, nil
+}
+
+// sameOuterAccess reports whether outer key 7 of env is, byte for byte, raw
+// (core §2.12.1: X-ANet-Access is the same bytes as outer key 7).
+func sameOuterAccess(env, raw []byte) bool {
+	var fields map[uint64]cbor.RawMessage
+	if err := coredet.Unmarshal(env, &fields); err != nil {
+		return false
+	}
+	return bytes.Equal(fields[7], raw)
+}
+
+// sessionHeaders reads the session headers of a first contact: X-ANet-Session
+// (16 bytes), X-ANet-MAC (32 bytes), both base64url, and X-ANet-TS in
+// canonical decimal, each exactly once.
+func sessionHeaders(r *http.Request) (sid, mac []byte, ts uint64, ok bool) {
+	sidS, ok1 := singleHeader(r, relayauth.HeaderSession)
+	macS, ok2 := singleHeader(r, relayauth.HeaderMAC)
+	tsS, ok3 := singleHeader(r, relayauth.HeaderTS)
+	if !ok1 || !ok2 || !ok3 {
+		return nil, nil, 0, false
+	}
+	var err error
+	if sid, err = wire3.DecodeB64URLSize(relayauth.HeaderSession, sidS, relayauth.SessionIDLen); err != nil {
+		return nil, nil, 0, false
+	}
+	if mac, err = wire3.DecodeB64URLSize(relayauth.HeaderMAC, macS, relayauth.SessionMACLen); err != nil {
+		return nil, nil, 0, false
+	}
+	if ts, err = strconv.ParseUint(tsS, 10, 64); err != nil || strconv.FormatUint(ts, 10) != tsS {
+		return nil, nil, 0, false
+	}
+	return sid, mac, ts, true
+}
+
+// homeHeader reads X-ANet-Home, the sender's hint of the recipient's hub: at
+// most once, and an AID. Empty when there is none.
+func homeHeader(r *http.Request) (string, bool) {
+	vs := r.Header.Values(relayauth.HeaderHome)
+	switch {
+	case len(vs) == 0:
+		return "", true
+	case len(vs) > 1 || !ValidAID(vs[0]):
+		return "", false
+	}
+	return vs[0], true
+}
+
+// withinSkew reports whether the unix-ms time ts is within skew of now.
+func withinSkew(ts uint64, now time.Time, skew time.Duration) bool {
+	if ts > uint64(1)<<62 {
+		return false
+	}
+	d := now.UnixMilli() - int64(ts)
+	if d < 0 {
+		d = -d
+	}
+	return d <= skew.Milliseconds()
 }
 
 // hRelayPoll returns the caller's own mailbox, from after_id on when the
@@ -1520,78 +1916,6 @@ func (s *Server) hRelayAck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, RelayAckResponse{Acked: n})
-}
-
-// Retired relayauth actions: relayauth no longer defines them (wire 3 removes the signed send and
-// the rendezvous). The v0.2 routes still check them until their replacements land.
-const (
-	actionSendRetired = "send" // v030-todo(SS-4): relay v3 checks a session MAC or a capability
-)
-
-// TaskChallenge is the bytes a taskboard caller signs: the wire-1 challenge
-// "anet-relay/" + action + "/" + aid + "/" + decimal(ts), which relayauth no longer provides. The
-// board is its last user; its actions are all "task.*", so the bytes never begin like a relayauth
-// preimage ("anet-relay/v2/").
-// v030-todo(SS-4): the board gets a registered authentication form and this goes.
-func TaskChallenge(action, aid string, ts uint64) []byte {
-	return []byte("anet-relay/" + action + "/" + aid + "/" + strconv.FormatUint(ts, 10))
-}
-
-// VerifyAgentChallenge authenticates a wire-1 signed action challenge
-// (TaskChallenge in a JSON body) from a REGISTERED agent.
-//
-// The hub's own endpoints use relayauth v2 headers since wire 2 (see
-// auth2.go). This remains for the taskboard module, which authenticates
-// its own requests through this seam and is outside the wire-2 change.
-func (st *Store) VerifyAgentChallenge(action, aid string, ts, keyStateSeq uint64, sigB64 string) error {
-	kelBytes, err := st.AgentKEL(aid)
-	if err != nil {
-		return fmt.Errorf("agent not registered")
-	}
-	kel, err := identity.UnmarshalKEL(kelBytes)
-	if err != nil {
-		return fmt.Errorf("kel corrupt")
-	}
-	return verifyChallenge(kel, action, aid, ts, keyStateSeq, sigB64)
-}
-
-// verifyChallenge checks a signed action challenge against a specific KEL, within the replay window. The
-// caller signs TaskChallenge(action, aid, ts) with its current key; this rebuilds the identical
-// bytes and verifies them, binding the signature to (action, aid) so it cannot be reused elsewhere.
-func verifyChallenge(kel []identity.SignedEvent, action, aid string, ts, keyStateSeq uint64, sigB64 string) error {
-	return verifyChallengeAt(kel, action, aid, ts, keyStateSeq, sigB64, uint64(time.Now().UnixMilli()))
-}
-
-// verifyChallengeAt is verifyChallenge at the hub time now (unix ms).
-//
-// A ts above 2^62 is refused before the window is computed, as verifyV2
-// does: int64(now) - int64(ts) overflows for a ts 2^63 away, and
-// negating math.MinInt64 leaves it negative, so a challenge dated half
-// the clock away passed "skew > MaxSkew" (found by
-// FuzzTaskboardChallengeTime, ANet an internal note).
-func verifyChallengeAt(kel []identity.SignedEvent, action, aid string, ts, keyStateSeq uint64, sigB64 string,
-	now uint64) error {
-	if aid == "" || sigB64 == "" {
-		return fmt.Errorf("aid + sig required")
-	}
-	skew := int64(now) - int64(ts)
-	if skew < 0 {
-		skew = -skew
-	}
-	if ts > uint64(1)<<62 || skew > relayauth.MaxSkewMillis {
-		return fmt.Errorf("stale or future-dated challenge")
-	}
-	sig, err := base64.StdEncoding.DecodeString(sigB64)
-	if err != nil {
-		return fmt.Errorf("sig not base64")
-	}
-	pre := TaskChallenge(action, aid, ts)
-	// A bad signature costs one verification, not a replay of the KEL
-	// (kelreplay.go) [redteam:F36].
-	if verr := plausibleSignature(kel, keyStateSeq, pre, sig); verr != nil {
-		return verr
-	}
-	return identity.VerifyObject(kel, aid, keyStateSeq, ts, pre, sig)
 }
 
 func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {

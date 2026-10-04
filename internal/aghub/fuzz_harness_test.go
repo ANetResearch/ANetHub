@@ -76,7 +76,6 @@ func newFZ(tb testing.TB) *fz {
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
 	l := aghub.DefaultLimits()
-	l.SendRate, l.SendBurst = 1e6, 1<<30
 	l.RegisterPerMinute, l.RegisterBurst = 1e9, 1<<30
 	l.MailboxMessages = 1 << 20
 	if err := s.SetLimits(l); err != nil {

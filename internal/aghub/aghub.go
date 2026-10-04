@@ -20,6 +20,7 @@
 package aghub
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -185,6 +186,38 @@ type Store struct {
 	// dirNotice, when set, gives the witness notice a directory entry
 	// carries (directory.go dirNoticeOf).
 	dirNotice func(q rowQuerier, aid string) ([]byte, error)
+	// kelHooks are run when a registered agent's key history grows
+	// (OnKELExtended).
+	kelHooks kelHooks
+}
+
+// kelHooks are the callbacks a Store runs after it stored new key events of
+// a registered agent.
+type kelHooks struct {
+	mu    sync.Mutex
+	hooks []func(aid string)
+}
+
+// OnKELExtended adds a callback run with the AID of a registered agent
+// whose key history this store has just extended (a rotation, or the dip
+// that ends it), after the write committed. It is how state that a key
+// change must end, and that lives only in the hub process's memory, is
+// dropped: sealed-sender drops the agent's first-contact sessions and their
+// send buckets (SSR-H9). Callbacks must be quick.
+func (s *Store) OnKELExtended(f func(aid string)) {
+	s.kelHooks.mu.Lock()
+	defer s.kelHooks.mu.Unlock()
+	s.kelHooks.hooks = append(s.kelHooks.hooks, f)
+}
+
+// runKELHooks runs every OnKELExtended callback for aid.
+func (s *Store) runKELHooks(aid string) {
+	s.kelHooks.mu.Lock()
+	hooks := append([]func(string){}, s.kelHooks.hooks...)
+	s.kelHooks.mu.Unlock()
+	for _, f := range hooks {
+		f(aid)
+	}
 }
 
 // Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
@@ -418,13 +451,7 @@ func (s *Store) migrate() error {
 		   payee_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
-		// The wire-2 relay table; an existing wire-1 table is rebuilt by
-		// migrateRelayV2 below. See relay.go.
-		relayTableV2,
-		// What a one-time migration did, for the operator who asks later:
-		// counts and instants, never row content. Written by
-		// migrateRelayV2 (keys Meta* in relay.go) and read by
-		// deploy/cleanup-content-v0.2.sh.
+		// Small hub-wide settings, one row each (the admission mode).
 		`CREATE TABLE IF NOT EXISTS hub_meta (
 		   key TEXT PRIMARY KEY,
 		   value TEXT NOT NULL
@@ -469,6 +496,12 @@ func (s *Store) migrate() error {
 		   non_contact_bytes INTEGER NOT NULL
 		 )`,
 	}
+	// The relay tables of an earlier release are not converted (core
+	// CORE-V4): refused before CREATE TABLE IF NOT EXISTS would keep them.
+	if err := s.refuseOldRelayTable(); err != nil {
+		return err
+	}
+	stmts = append(stmts, relayTables...)
 	for _, q := range stmts {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("hub: migrate: %w", err)
@@ -495,9 +528,6 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("hub: migrate profile: %w", err)
 		}
 	}
-	if err := s.migrateRelayV2(); err != nil {
-		return err
-	}
 	if err := s.migrateContentV2(); err != nil {
 		return err
 	}
@@ -506,7 +536,7 @@ func (s *Store) migrate() error {
 	if err := s.migrateSettlement(); err != nil {
 		return err
 	}
-	for _, q := range relayIndexesV2 {
+	for _, q := range relayIndexes {
 		if _, err := s.db.Exec(q); err != nil {
 			return fmt.Errorf("hub: migrate: %w", err)
 		}
@@ -602,8 +632,8 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 		}
 	}
 	existed := false
-	var one int
-	switch err := tx.QueryRow(`SELECT 1 FROM agent WHERE aid=?`, aid).Scan(&one); {
+	var heldKEL []byte
+	switch err := tx.QueryRow(`SELECT kel FROM agent WHERE aid=?`, aid).Scan(&heldKEL); {
 	case err == nil:
 		existed = true
 	case !errors.Is(err, sql.ErrNoRows):
@@ -647,7 +677,15 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 	if err := s.refreshDirTx(tx, aid); err != nil {
 		return false, err
 	}
-	return admitted, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	// The registration took new key events (an agent re-registers with
+	// the same key history on every start, which changes nothing).
+	if existed && !bytes.Equal(heldKEL, kel) {
+		s.runKELHooks(aid)
+	}
+	return admitted, nil
 }
 
 // Bounds on what one registration may put into the capability index.
@@ -1125,9 +1163,9 @@ type HubStats struct {
 	Reviews        int     `json:"reviews"`    // verified reviews stored here
 	AvgRating      float64 `json:"avg_rating"` // mean rating over all reviews (0 if none)
 	// Modules names the optional hub modules compiled into and wired by
-	// this build (for example "federation", "taskboard"). The web UI hides
-	// the task board when "taskboard" is absent. Empty when the kernel was
-	// started without the module wiring, as in unit tests.
+	// this build (for example "federation"). A client tells a module this
+	// build lacks from one that is present and empty by it. Empty when the
+	// kernel was started without the module wiring, as in unit tests.
 	Modules []string `json:"modules"`
 }
 

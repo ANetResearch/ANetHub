@@ -27,7 +27,7 @@ type authRoute struct {
 var authRoutes = []authRoute{
 	{http.MethodPost, relayauth.ActionPoll, func(string) string { return "/relay/poll" }},
 	{http.MethodPost, relayauth.ActionAck, func(string) string { return "/relay/ack" }},
-	{http.MethodPost, actionSend, func(string) string { return "/relay/send" }},
+	{http.MethodPost, relayauth.ActionSession, func(string) string { return "/relay/session" }},
 	{http.MethodPost, relayauth.ActionProfile, func(string) string { return "/profile" }},
 	{http.MethodPost, relayauth.ActionKeys, func(a string) string { return "/agents/" + a + "/keys" }},
 	{http.MethodGet, relayauth.ActionBalance, func(a string) string { return "/agents/" + a + "/balance" }},
@@ -219,95 +219,12 @@ func signedHeaders(t *testing.T, h *fz, c *identity.Controller, action, method, 
 	return out
 }
 
-// ---- /relay/send: the outer envelope check ----
-
-// FuzzHubRelaySend sends a signed /relay/send with a fuzzed body or a
-// fuzzed envelope. Properties:
+// ---- /relay/send ----
 //
-//   - the answer is one of the relay's refusals or 200, never a 5xx;
-//   - an envelope is queued only if it parses as a sealed envelope whose
-//     outer "to" is the registered recipient the request names, and the
-//     recipient then polls exactly those bytes;
-//   - an envelope that does parse, for a registered recipient named
-//     consistently, is queued (the check refuses nothing it should pass).
-func FuzzHubRelaySend(f *testing.F) {
-	h := newFZ(f)
-	sender, _ := h.agent(f, "fuzz-sender", nil, true)
-	recip, _ := h.agent(f, "fuzz-recipient", nil, true)
-	good := fzEnvelope(f, recip.AID(), []byte("hello"))
-	f.Add(uint8(0), []byte(nil), good, "")
-	f.Add(uint8(1), []byte(nil), good, "")
-	f.Add(uint8(2), []byte(nil), good, "bafyreinobody")
-	f.Add(uint8(3), []byte(`{"to_aid":"x","envelope":"AAAA"}`), []byte(nil), "")
-	f.Add(uint8(3), []byte(`{"to_aid":"`+recip.AID()+`","envelope":"`+base64.StdEncoding.EncodeToString(good)+`"}`), []byte(nil), "")
-	f.Add(uint8(0), []byte(nil), fzEnvelope(f, sender.AID(), nil), "")
-	f.Add(uint8(0), []byte(nil), []byte{0xa0}, "")
-	f.Add(uint8(0), []byte(nil), []byte("plaintext payload"), "")
-
-	f.Fuzz(func(t *testing.T, mode uint8, rawBody, envelope []byte, toStr string) {
-		rawBody, envelope, toStr = clipB(rawBody, 64<<10), clipB(envelope, 64<<10), clip(toStr, 256)
-		to := recip.AID()
-		switch mode % 4 {
-		case 1:
-			to = sender.AID()
-		case 2:
-			to = toStr
-		}
-		body := rawBody
-		if mode%4 != 3 {
-			body = fzJSON(t, map[string]any{"to_aid": to, "envelope": base64.StdEncoding.EncodeToString(envelope)})
-		}
-		var req struct {
-			ToAID    string `json:"to_aid"`
-			Envelope string `json:"envelope"`
-		}
-		jerr := json.Unmarshal(body, &req)
-		rawEnv, berr := base64.StdEncoding.DecodeString(req.Envelope)
-		outer, perr := seal.ParseOuter(rawEnv)
-		registered := req.ToAID == recip.AID() || req.ToAID == sender.AID()
-		wellFormed := jerr == nil && req.ToAID != "" && req.Envelope != "" && berr == nil &&
-			perr == nil && outer.To == req.ToAID
-
-		before, _ := h.store.RelayPending(req.ToAID)
-		rec := h.signedDo(sender, actionSend, http.MethodPost, "/relay/send", "", body)
-		if !allowed(rec.Code, 200, 400, 404, 413, 507) {
-			t.Fatalf("send: unexpected %d %s", rec.Code, rec.Body.Bytes())
-		}
-		if rec.Code == http.StatusOK {
-			if !wellFormed || !registered {
-				t.Fatalf("send queued an envelope the outer check should refuse (to %q, parse %v): %s",
-					req.ToAID, perr, rec.Body.Bytes())
-			}
-			var out struct {
-				ID     int64  `json:"id"`
-				Status string `json:"status"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Status != "queued" || out.ID <= 0 {
-				t.Fatalf("send answered 200 with %s", rec.Body.Bytes())
-			}
-			owner := recip
-			if req.ToAID == sender.AID() {
-				owner = sender
-			}
-			msgs := pollAll(t, h, owner, out.ID-1)
-			if len(msgs) == 0 || msgs[0].ID != out.ID || msgs[0].Envelope != base64.StdEncoding.EncodeToString(rawEnv) {
-				t.Fatalf("queued id %d is not what the recipient polls: %+v", out.ID, msgs)
-			}
-			ack := h.signedDo(owner, relayauth.ActionAck, http.MethodPost, "/relay/ack", "",
-				fzJSON(t, map[string]any{"ids": []int64{out.ID}}))
-			if ack.Code != http.StatusOK {
-				t.Fatalf("ack: %d %s", ack.Code, ack.Body.Bytes())
-			}
-			return
-		}
-		if after, _ := h.store.RelayPending(req.ToAID); after != before {
-			t.Fatalf("a refused send (%d) changed the mailbox of %q: %d -> %d", rec.Code, req.ToAID, before, after)
-		}
-		if wellFormed && registered && len(rawEnv) <= int(h.srv.Limits().MaxEnvelope) {
-			t.Fatalf("a well-formed envelope for a registered recipient was refused: %d %s", rec.Code, rec.Body.Bytes())
-		}
-	})
-}
+// The wire-3 send is fuzzed in the package's own tests
+// (FuzzRelaySendV3, FuzzRelaySession, FuzzAccessHeader in
+// relay_fuzz_internal_test.go), where the session and the credentials are
+// at hand.
 
 // polledMsg is one /relay/poll entry.
 type polledMsg struct {
@@ -352,7 +269,7 @@ func FuzzHubRelayPollAck(f *testing.F) {
 	refill := func(tb testing.TB) {
 		for _, c := range []*identity.Controller{me, other} {
 			for n, _ := h.store.RelayPending(c.AID()); n < 8; n++ {
-				if _, err := h.store.RelayEnqueue(c.AID(), fzEnvelope(tb, c.AID(), []byte(h.nonce()))); err != nil {
+				if _, err := h.store.QueueEnvelope(c.AID(), fzEnvelope(tb, c.AID(), []byte(h.nonce()))); err != nil {
 					tb.Fatal(err)
 				}
 			}

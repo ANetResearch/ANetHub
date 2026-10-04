@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
@@ -140,11 +142,117 @@ func testEnvelope(t *testing.T, to string, ct []byte) []byte {
 	return b
 }
 
-// relaySend posts one envelope as sender.
+// relaySend sends one envelope from sender as a first contact (outer access
+// kind 0), under the session relaySession keeps for sender on srv, the way a
+// daemon sends before it holds a delivery credential.
 func relaySend(t *testing.T, srv *httptest.Server, sender *identity.Controller, to string, envelope []byte) (int, []byte, http.Header) {
 	t.Helper()
-	return send(t, signedRequest(t, srv, sender, actionSend, http.MethodPost, "/relay/send",
-		map[string]any{"to_aid": to, "envelope": base64.StdEncoding.EncodeToString(envelope)}))
+	return send(t, sessionSendRequest(t, srv, relaySession(t, srv, sender), envelope, ""))
+}
+
+// testSession is a first-contact session a test opened.
+type testSession struct {
+	sid, key []byte
+}
+
+// testSessions holds the session of each (hub, sender), so that a test that
+// sends many messages opens one session, as a daemon does (a hub refuses an
+// AID's 31st opening in an hour).
+var testSessions sync.Map
+
+// relaySession is sender's session on srv, opened on first use.
+func relaySession(t *testing.T, srv *httptest.Server, sender *identity.Controller) testSession {
+	t.Helper()
+	k := srv.URL + "|" + sender.AID()
+	if v, ok := testSessions.Load(k); ok {
+		return v.(testSession)
+	}
+	ts, code, b := openSession(t, srv, sender)
+	if code != http.StatusOK {
+		t.Fatalf("opening a session for %s: %d %s", sender.AID(), code, b)
+	}
+	testSessions.Store(k, ts)
+	return ts
+}
+
+// openSession opens a new first-contact session for sender on srv (POST
+// /relay/session) and returns it, or the refusal.
+func openSession(t *testing.T, srv *httptest.Server, sender *identity.Controller) (testSession, int, []byte) {
+	t.Helper()
+	esk, epk, err := relayauth.NewSessionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, b := signedDo(t, srv, sender, relayauth.ActionSession, http.MethodPost, "/relay/session",
+		map[string]string{"epk": base64.RawURLEncoding.EncodeToString(epk)})
+	if code != http.StatusOK {
+		return testSession{}, code, b
+	}
+	var out aghub.SessionResponse
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	dec := func(s string) []byte {
+		v, err := base64.RawURLEncoding.DecodeString(s)
+		if err != nil {
+			t.Fatalf("a session answer member is not base64url: %v", err)
+		}
+		return v
+	}
+	sid := dec(out.SID)
+	key, err := relayauth.OpenSessionKey(esk, hubAIDOf(t, srv), sid, dec(out.Enc), dec(out.CT))
+	if err != nil {
+		t.Fatalf("the session key does not open: %v", err)
+	}
+	return testSession{sid: sid, key: key}, code, b
+}
+
+// accessOf is outer key 7 of an envelope as X-ANet-Access carries it; a
+// kind-0 access for bytes that are not an envelope (a test of the hub's
+// refusal sends those too).
+func accessOf(envelope []byte) []byte {
+	a := &seal.Access{Kind: seal.AccessKindSession}
+	if outer, err := seal.ParseOuter(envelope); err == nil {
+		a = outer.Access
+	}
+	raw, err := coredet.Marshal(a)
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+// sessionSendRequest is a first-contact /relay/send of envelope under ss,
+// with X-ANet-Home home when it is not empty, MACed now.
+func sessionSendRequest(t *testing.T, srv *httptest.Server, ss testSession, envelope []byte, home string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/relay/send", bytes.NewReader(envelope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", aghub.EnvelopeContentType)
+	req.Header.Set("X-ANet-Wire", wireHeader)
+	req.Header.Set(aghub.HeaderAccess, base64.RawURLEncoding.EncodeToString(accessOf(envelope)))
+	if home != "" {
+		req.Header.Set(relayauth.HeaderHome, home)
+	}
+	ts := uint64(time.Now().UnixMilli())
+	mac, err := relayauth.SessionMAC(ss.key, ss.sid, ts, req.Method, req.URL.RequestURI(), home, envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(relayauth.HeaderSession, relayauth.EncodeSessionID(ss.sid))
+	req.Header.Set(relayauth.HeaderMAC, relayauth.EncodeMAC(mac))
+	req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
+	return req
+}
+
+// relaySent is the decoded 200 of /relay/send.
+type relaySent struct {
+	Status         string `json:"status"`
+	RID            string `json:"rid"`
+	ViaHub         string `json:"via_hub"`
+	RecipientQuiet bool   `json:"recipient_quiet"`
 }
 
 // polled is the decoded /relay/poll answer.
@@ -235,9 +343,3 @@ func sealFrom(t *testing.T, sender *identity.Controller, senderKeys []byte, to s
 	}
 	return env
 }
-
-// The relay v2 send action, which relayauth no longer defines; the v0.2 route under test still
-// checks it.
-const (
-	actionSend = "send" // v030-todo(SS-4)
-)

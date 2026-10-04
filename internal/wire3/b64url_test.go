@@ -124,9 +124,7 @@ func TestARefusedBinaryValueIsBadRequest(t *testing.T) {
 // pendingB64URLDecoders are the files that still decode base64url without
 // DecodeB64URL, each with the work item that moves it here. A file listed
 // here that no longer does fails, so that its entry goes too.
-var pendingB64URLDecoders = map[string]string{
-	"internal/aghub/server.go": "v030-todo(SS-4)", // /register's kel and pow
-}
+var pendingB64URLDecoders = map[string]string{}
 
 // b64urlDecodeRe matches a call that decodes base64url with the standard
 // library.

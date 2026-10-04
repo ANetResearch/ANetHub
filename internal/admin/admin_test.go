@@ -54,7 +54,7 @@ func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 	// delegate, the reply and the result below are opaque to the hub and
 	// to this admin plane, which is the property these tests pin.
 	for i, to := range []string{prov.AID(), req.AID(), req.AID()} {
-		if _, err := hs.RelayEnqueue(to, sealedForTest(t, to, fmt.Sprintf("%s %d", testCanary, i))); err != nil {
+		if _, err := hs.QueueEnvelope(to, sealedForTest(t, to, fmt.Sprintf("%s %d", testCanary, i))); err != nil {
 			t.Fatal(err)
 		}
 	}
