@@ -100,7 +100,8 @@ func TestMailboxRevoke(t *testing.T) {
 
 	id1, id2, id3 := capIDFor(1, 1), capIDFor(1, 2), capIDFor(1, 3)
 	revoked(t, srv, c, b64ids(id1, id2), 2, 2)
-	revoked(t, srv, c, b64ids(id1, id1, id3), 1, 3)
+	// A new id given twice and an old one given twice: each counts once.
+	revoked(t, srv, c, b64ids(id1, id3, id3, id1), 1, 3)
 	revoked(t, srv, c, b64ids(id1), 0, 3)
 	var batch [][]byte
 	for i := 0; i < aghub.MaxRevokeBatch; i++ {
