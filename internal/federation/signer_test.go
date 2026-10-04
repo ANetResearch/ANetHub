@@ -242,13 +242,15 @@ func FuzzStaleFloor(f *testing.F) {
 		f.Add(401, s, "")
 	}
 	f.Add(401, "5", "6")
+	f.Add(401, "", "0")
 	f.Fuzz(func(t *testing.T, code int, v1, v2 string) {
 		h := http.Header{}
-		if v1 != "" {
-			h.Add(headerTSFloor, v1)
-		}
-		if v2 != "" {
-			h.Add(headerTSFloor, v2)
+		var sent []string
+		for _, v := range []string{v1, v2} {
+			if v != "" {
+				h.Add(headerTSFloor, v)
+				sent = append(sent, v)
+			}
 		}
 		floor, ok := staleFloor(&http.Response{StatusCode: code, Header: h})
 		if !ok {
@@ -257,9 +259,9 @@ func FuzzStaleFloor(f *testing.F) {
 			}
 			return
 		}
-		if code != http.StatusUnauthorized || v2 != "" || floor < 0 || uint64(floor) > uint64(1)<<62 ||
-			strconv.FormatInt(floor, 10) != v1 {
-			t.Fatalf("code %d %q %q read as floor %d", code, v1, v2, floor)
+		if code != http.StatusUnauthorized || len(sent) != 1 || floor < 0 || uint64(floor) > uint64(1)<<62 ||
+			strconv.FormatInt(floor, 10) != sent[0] {
+			t.Fatalf("code %d %q read as floor %d", code, sent, floor)
 		}
 	})
 }
