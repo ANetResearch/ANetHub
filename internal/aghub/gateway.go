@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ANetResearch/ANetHub/internal/voucherv1" // v030-todo(PAY-8): the voucher goes with the gateway
 	"log"
 	"math"
 	"net/http"
@@ -518,7 +519,7 @@ func (s *Store) issueVoucher(settled payment.SettlementResponse, payTo, capID st
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", 0, err
 	}
-	v := &payment.Voucher{
+	v := &voucherv1.Voucher{
 		AuthID:     settled.Transaction,
 		Payer:      settled.Payer,
 		PayTo:      payTo,

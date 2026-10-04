@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 )
 
 // Reputation that stops at a hub boundary is reputation a hub owns.
