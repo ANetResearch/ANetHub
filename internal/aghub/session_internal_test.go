@@ -242,6 +242,63 @@ func TestRotationAndDeregisterDropSessions(t *testing.T) {
 	}
 }
 
+// TestASessionOpenedDuringADropEndsWithIt (SSR-H9): a rotation or a
+// deregistration that commits while a session is being opened, after the
+// signature was checked against the old key history and before the session
+// is recorded, ran its callbacks too early to end that session. The opening
+// is refused instead, and leaves no session behind and no opening counted.
+func TestASessionOpenedDuringADropEndsWithIt(t *testing.T) {
+	defer func() { sessionOpenFault = nil }()
+	sc := newScene(t)
+	h := sc.h
+	openings := func(aid string) int {
+		st := h.srv.relay.sessions
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return len(st.opens[aid])
+	}
+
+	// A rotation.
+	before := openings(sc.sender.aid)
+	sessionOpenFault = func(string) {
+		sessionOpenFault = nil
+		if err := identitytest.Rotate(sc.sender.c, identitytest.InceptTS+1); err != nil {
+			t.Error(err)
+			return
+		}
+		kel, _ := identity.MarshalKEL(sc.sender.c.KEL())
+		if err := h.store.RegisterAgent(sc.sender.aid, "n", nil, kel, sc.sender.c.KEL()); err != nil {
+			t.Error(err)
+		}
+	}
+	_, rec := h.tryOpenSession(sc.sender.c)
+	expectRefusal(t, rec, http.StatusUnauthorized, "key_retired")
+	if n := h.srv.relay.sessions.count(sc.sender.aid, h.clock()); n != 0 {
+		t.Fatalf("%d sessions outlived a rotation that raced their opening", n)
+	}
+	if got := openings(sc.sender.aid); got != before {
+		t.Errorf("the refused opening was counted: %d openings, want %d", got, before)
+	}
+	// Signed with the new key, the next opening goes through.
+	ss := h.openSession(sc.sender.c)
+	if code := h.send0(ss, sc.env(), kind0Opts{}).Code; code != 200 {
+		t.Fatalf("a session opened after the rotation: %d", code)
+	}
+
+	// A deregistration.
+	sessionOpenFault = func(string) {
+		sessionOpenFault = nil
+		if _, err := h.store.Deregister(sc.recip.aid, DeregSelf); err != nil {
+			t.Error(err)
+		}
+	}
+	_, rec = h.tryOpenSession(sc.recip.c)
+	expectRefusal(t, rec, http.StatusForbidden, "admission_required")
+	if n := h.srv.relay.sessions.count(sc.recip.aid, h.clock()); n != 0 {
+		t.Fatalf("%d sessions outlived a deregistration that raced their opening", n)
+	}
+}
+
 // TestDeregDropsSessionsWithin2s (SSR-H9, HPP PAY-O2): a deregistration in
 // the hub process ends the AID's sessions at once; one committed by another
 // process (anet-hub admissions revoke) within two seconds, through

@@ -1,7 +1,10 @@
 package aghub
 
 import (
+	"bytes"
 	"crypto/rand"
+	"database/sql"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -197,6 +200,41 @@ func (t *sessionTable) get(sid []byte, now time.Time) (*hubSession, bool) {
 	return s, true
 }
 
+// cancel undoes an open whose request was refused after it: the session
+// ends and its opening is not counted.
+func (t *sessionTable) cancel(s *hubSession) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.bySID[s.sid] == s {
+		delete(t.bySID, s.sid)
+	}
+	held := t.byAID[s.aid]
+	for i, x := range held {
+		if x == s {
+			held = append(held[:i:i], held[i+1:]...)
+			break
+		}
+	}
+	if len(held) == 0 {
+		delete(t.byAID, s.aid)
+	} else {
+		t.byAID[s.aid] = held
+	}
+	opened := s.exp.Add(-SessionLifetime)
+	opens := t.opens[s.aid]
+	for i := len(opens) - 1; i >= 0; i-- {
+		if opens[i].Equal(opened) {
+			opens = append(opens[:i:i], opens[i+1:]...)
+			break
+		}
+	}
+	if len(opens) == 0 {
+		delete(t.opens, s.aid)
+	} else {
+		t.opens[s.aid] = opens
+	}
+}
+
 // drop ends every session of aid. It keeps aid's opens: ending a session
 // does not give back the opening.
 func (t *sessionTable) drop(aid string) {
@@ -214,6 +252,25 @@ func (t *sessionTable) count(aid string, now time.Time) int {
 	defer t.mu.Unlock()
 	t.pruneLocked(aid, now)
 	return len(t.byAID[aid])
+}
+
+// sessionOpenFault, when a test sets it, runs after a session opening was
+// authenticated and before the session is recorded: a deregistration or a
+// key event committed there stands for one that raced the opening. Nil
+// outside tests.
+var sessionOpenFault func(aid string)
+
+// registeredKEL is the key history stored for aid, and whether aid is
+// registered here at all.
+func (s *Store) registeredKEL(aid string) (kel []byte, registered bool, err error) {
+	err = s.db.QueryRow(`SELECT kel FROM agent WHERE aid=?`, aid).Scan(&kel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return kel, true, nil
 }
 
 // dropSessions ends aid's sessions and empties its session send bucket: the
@@ -234,6 +291,9 @@ func (s *Server) dropSessions(aid string) {
 //	  rate_limited with Retry-After
 //	4 the body: {epk}, decoded strictly, a 32-byte base64url X25519 key
 //	5 a new random sid and session key; the key sealed to epk (core L7)
+//	6 once the session is recorded, the AID still registered with the key
+//	  history the signature was checked against; otherwise the session ends
+//	  at once: 403 admission_required, or 401 key_retired
 //
 // Nothing is written to disk, and the answer is the same whether or not
 // the AID already holds sessions.
@@ -297,10 +357,34 @@ func (s *Server) hRelaySession(w http.ResponseWriter, r *http.Request) {
 			Error: "The member \"epk\" is not a usable X25519 public key; send a newly generated one."})
 		return
 	}
+	if sessionOpenFault != nil {
+		sessionOpenFault(au.AID)
+	}
 	sess, wait := s.relay.sessions.open(au.AID, sid, key, now)
 	if sess == nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait,
 			Error: "This agent opened too many first-contact sessions in the last hour; retry after Retry-After."})
+		return
+	}
+	// The signature was checked against the key history stored when the
+	// request came in. A deregistration or a key event committed since then
+	// ran its callbacks (dropSessions) before this session existed, so look
+	// again now that it does: the session ends with them (SSR-H9). One
+	// committed after this look finds the session and drops it.
+	held, registered, err := s.store.registeredKEL(au.AID)
+	switch {
+	case err != nil:
+		s.relay.sessions.cancel(sess)
+		wire3.Internal(w, err)
+		return
+	case !registered:
+		s.relay.sessions.cancel(sess)
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonAdmissionRequired, Extra: map[string]any{"aid": au.AID}})
+		return
+	case !bytes.Equal(held, au.KEL):
+		s.relay.sessions.cancel(sess)
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKeyRetired,
+			Error: "This agent's key changed while the session was being opened; sign with the current key and open it again."})
 		return
 	}
 	writeJSON(w, http.StatusOK, SessionResponse{
