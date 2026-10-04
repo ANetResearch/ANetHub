@@ -233,7 +233,7 @@ func TestTheTrialBudget(t *testing.T) {
 		}
 		// Another network still has its budget.
 		other := g.pendingTrial()
-		g.balance(other, "198.51.101.10")
+		g.balance(other, "203.0.113.10")
 		if !g.granted(other) {
 			t.Error("an account of another /24 was not paid")
 		}

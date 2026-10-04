@@ -447,10 +447,10 @@ func TestAFullMailboxAtThePeerHubIs507ForTheSender(t *testing.T) {
 	}
 }
 
-// The replay cache records a signature only after it verifies. A request
+// RC1 records a signed time only after the signature verifies. A request
 // whose body does not match its signature is refused without spending the
-// signature, so the genuine request carrying it is still accepted, and a
-// caller without the key cannot fill the cache.
+// time, so the genuine request carrying it is still accepted, and a caller
+// without the key cannot add to the replay state.
 func TestARefusedRequestDoesNotSpendItsSignature(t *testing.T) {
 	srv := newHub(t)
 	recip, sender := twoAgents(t)

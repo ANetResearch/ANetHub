@@ -200,7 +200,74 @@ var wire3Setups = map[string]wire3test.Setup{
 	"register_open":   wire3RegisterSetup(AdmissionOpen, "open"),
 	"register_quota":  wire3RegisterSetup(AdmissionOpen, "quota"),
 	"register_window": wire3RegisterSetup(AdmissionClosed, "window"),
+	"rc1":             wire3RC1Setup,
 	"revoke":          wire3RevokeSetup,
+}
+
+// wire3RC1Setup is wire3HubSetup for the RC1 fixtures (hub-payment-privacy
+// §4.2.5). alice signs at now; alice_again signs at the time of alice's
+// last request (a time accepted before); alice_before_start signs at a
+// time before the hub started, which is at or below every signer's floor
+// (${start_floor}); alice_bad_before_start is that with a signature over
+// another body.
+func wire3RC1Setup(t *testing.T) *wire3test.Env {
+	t.Helper()
+	before := uint64(time.Now().UnixMilli()) - 1000
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	id, err := hubid.LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetHubKey(id.Ctrl)
+	s := NewServer(store)
+	s.SetHubAID(id.AID)
+	root := http.NewServeMux()
+	root.Handle("/hub/identity", id.Handler())
+	root.Handle("/", s.Handler())
+	alice, err := identity.Incept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kel, err := identity.MarshalKEL(alice.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgent(alice.AID(), "alice", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	var last uint64
+	return &wire3test.Env{
+		Handler: wire3.Contract(root),
+		Vars: map[string]string{"hub": id.AID, "alice": alice.AID(),
+			"start_floor": strconv.FormatUint(s.replay.floorOf(alice.AID()), 10)},
+		Sign: func(req *http.Request, body []byte, action, as string) error {
+			signed := body
+			var ts uint64
+			switch as {
+			case "alice":
+				ts = uint64(wire3SigningNow().UnixMilli())
+				last = ts
+			case "alice_again":
+				ts = last
+			case "alice_before_start":
+				ts = before
+			case "alice_bad_before_start":
+				ts, signed = before, append(append([]byte(nil), body...), ' ')
+			default:
+				return fmt.Errorf("no identity %q in this setup", as)
+			}
+			sig, seq := alice.Sign(relayauth.PreimageV2(action, alice.AID(), id.AID, ts, req.Method, req.URL.RequestURI(), signed))
+			req.Header.Set(relayauth.HeaderAID, alice.AID())
+			req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
+			req.Header.Set(relayauth.HeaderSeq, strconv.FormatUint(seq, 10))
+			req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
+			return nil
+		},
+	}
 }
 
 // wire3RegisterSetup is a hub for the /register fixtures (hub-payment-
@@ -448,8 +515,8 @@ func wire3Incept(t *testing.T) *identity.Controller {
 	return c
 }
 
-// wire3LastSigned is the X-ANet-TS of the last request a fixture signed. Two requests signed in
-// the same millisecond would be the same signature, which the replay cache refuses.
+// wire3LastSigned is the X-ANet-TS of the last request a fixture signed. RC1 takes each of a
+// signer's times once, so two requests signed in the same millisecond would be refused as replayed.
 var wire3LastSigned atomic.Int64
 
 // wire3SigningNow is now, at least one millisecond after the previous signature.

@@ -1,0 +1,38 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "RC1 replay protection (hub-payment-privacy §2.1 PAY-R2, PAY-R3, PAY-R8; §4.2.5; core CORE-K16): a signed request is accepted once by its signer's X-ANet-TS, not by its signature. A time accepted before is 401 replayed, whatever was signed with it; a time at or below the signer's floor (here: signed before the hub started) is 401 ts_stale, with the floor in X-ANet-TS-Floor and as the member floor; both only after the signature verified, so a bad signature at the floor is 401 unauthorized without a floor.",
+  "setup": "rc1",
+  "cases": [
+    {
+      "name": "a signed request is accepted",
+      "cite": "PAY-R2",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"},
+        "json": {}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3", "X-ANet-TS-Floor": null}}
+    },
+    {
+      "name": "a time accepted before is replayed, whatever it signs",
+      "cite": "PAY-R2 3, PAY-R3, §5.5",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice_again"},
+        "json": {"limit": 1}},
+      "response": {"status": 401, "headers": {"X-ANet-Wire": "3", "X-ANet-TS-Floor": null},
+        "body": {"reason": "replayed", "error": "This signed request was already used; sign a new one."}}
+    },
+    {
+      "name": "a time at or below the floor is ts_stale with the floor",
+      "cite": "PAY-R2 3, PAY-R3, §5.5",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice_before_start"},
+        "json": {}},
+      "response": {"status": 401, "headers": {"X-ANet-Wire": "3", "X-ANet-TS-Floor": "${start_floor}"},
+        "body_has": {"reason": "ts_stale", "error": "The signing time is not after this hub's record for this signer; sign again with a later time (see X-ANet-TS-Floor)."}}
+    },
+    {
+      "name": "a bad signature at the floor is unauthorized, without a floor",
+      "cite": "PAY-R3, PAY-R8",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice_bad_before_start"},
+        "json": {}},
+      "response": {"status": 401, "headers": {"X-ANet-Wire": "3", "X-ANet-TS-Floor": null},
+        "body_has": {"reason": "unauthorized"}}
+    }
+  ]
+}

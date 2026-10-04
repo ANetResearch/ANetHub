@@ -44,12 +44,12 @@ type Server struct {
 	fedKeys FederatedKeyLookup
 	// limits are the §3.7 bounds; sendLimiter, registerLimiter and
 	// keysLimiter are the token buckets they configure; replay is the
-	// relayauth v2 replay cache.
+	// relayauth v2 replay protection (RC1, auth2.go).
 	limits          Limits
 	sendLimiter     *rateLimiter
 	registerLimiter *rateLimiter
 	keysLimiter     *rateLimiter
-	replay          *replayCache
+	replay          *rc1State
 	// jwks caches the JWKS derived from each stored KEL (registry.go).
 	jwks *jwksCache
 	// federated, when set, answers discovery with agents learned from
@@ -141,7 +141,7 @@ func (s *Server) SetModules(names []string) {
 
 // NewServer wraps a store, with DefaultLimits.
 func NewServer(store *Store) *Server {
-	s := &Server{store: store, replay: newReplayCache(defaultReplayCacheMax, defaultReplayPerSigner),
+	s := &Server{store: store, replay: newRC1(time.Now().UnixMilli(), rc1Shards, rc1MemHigh, rc1MemLow),
 		jwks: newJWKSCache(jwksCacheBytes, a2acard.JWKS)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
@@ -159,7 +159,6 @@ func (s *Server) SetLimits(l Limits) error {
 	s.sendLimiter = newRateLimiter(l.SendRate, l.SendBurst)
 	s.registerLimiter = newRateLimiter(l.RegisterPerMinute/60, l.RegisterBurst)
 	s.keysLimiter = newRateLimiter(l.KeysLookupPerMinute/60, l.KeysLookupBurst)
-	s.replay.setPerSigner(replayPerSignerFor(l))
 	s.store.SetRelayQuota(l.MailboxMessages, l.MailboxBytes)
 	return nil
 }

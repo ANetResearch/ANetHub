@@ -629,7 +629,7 @@ func TestTheQuotaIsPerNetworkAndDay(t *testing.T) {
 	if _, ok := gate.reserveSignup(net.ParseIP("198.51.100.250"), g.now); ok {
 		t.Error("the /24 gave more than 200 places")
 	}
-	if _, ok := gate.reserveSignup(net.ParseIP("198.51.101.1"), g.now); !ok {
+	if _, ok := gate.reserveSignup(net.ParseIP("203.0.113.1"), g.now); !ok {
 		t.Error("another /24 was refused")
 	}
 	// IPv6: /64 20, /48 200, /32 1000.
