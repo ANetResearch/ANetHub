@@ -125,7 +125,6 @@ func TestARefusedBinaryValueIsBadRequest(t *testing.T) {
 // DecodeB64URL, each with the work item that moves it here. A file listed
 // here that no longer does fails, so that its entry goes too.
 var pendingB64URLDecoders = map[string]string{
-	"internal/aghub/server.go":   "v030-todo(SS-4)", // /register's kel and pow
 	"internal/aghub/registry.go": "v030-todo(SS-5)", // the /a2a/v1/agents cursor
 }
 

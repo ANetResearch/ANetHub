@@ -676,8 +676,8 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	var powSeed, powNonce []byte
 	if req.PoW != nil {
 		var e1, e2 error
-		powSeed, e1 = decodeB64URL(req.PoW.Seed)
-		powNonce, e2 = decodeB64URL(req.PoW.Nonce)
+		powSeed, e1 = wire3.DecodeB64URL("pow.seed", req.PoW.Seed)
+		powNonce, e2 = wire3.DecodeB64URL("pow.nonce", req.PoW.Nonce)
 		if e1 != nil || e2 != nil || len(powSeed) != 32 || len(powNonce) < 1 || len(powNonce) > regpow.MaxNonce {
 			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
 				Error: "The member \"pow\" must hold a 32-byte seed and a nonce of 1 to 32 bytes, both base64url; fix it and send again."})
@@ -711,7 +711,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	// 5. The KEL and the signature.
 	registerKELReplays.Add(1)
-	kelBytes, err := decodeB64URL(req.KEL)
+	kelBytes, err := wire3.DecodeB64URL("kel", req.KEL)
 	if err != nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
 			Error: "The member \"kel\" is not base64url; encode the key history without padding and send again."})
@@ -950,19 +950,6 @@ func refuseKELExtension(w http.ResponseWriter, err error) {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
 			Error: "The key history does not replay; send the agent's own key history."})
 	}
-}
-
-// decodeB64URL decodes base64url without padding (core CORE-E5): a value
-// with "=", "+", "/" or white space is refused, so each value has one
-// spelling.
-func decodeB64URL(s string) ([]byte, error) {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
-			return nil, fmt.Errorf("not base64url: byte %d", i)
-		}
-	}
-	return base64.RawURLEncoding.Strict().DecodeString(s)
 }
 
 // sentence turns an internal error into the one English sentence of an
