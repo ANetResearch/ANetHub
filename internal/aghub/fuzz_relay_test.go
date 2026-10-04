@@ -53,10 +53,18 @@ const (
 // with it as the input says, and checks the one property the scheme
 // exists for: a request whose headers, body, target or action differ from
 // what was signed is refused, and one that does not is accepted exactly
-// when its time is inside the window.
+// when its time is inside the window and above every time signed for the
+// signer before (RC1, hub-payment-privacy §4.2.5).
 //
 // "Accepted" means the answer is not the authentication refusal (401).
 // The handlers may still refuse the body (400) or the state (404, 409).
+//
+// One signer signs every input, at the time the input says, so RC1 may
+// refuse a correctly signed request inside the window: as replayed when
+// an earlier input had the same time, as ts_stale when an earlier one was
+// later. Either says so by its reason, and ts_stale names a floor at or
+// above the time. A refused tampered request is unauthorized, never
+// ts_stale or replayed, and carries no floor (PAY-R8).
 //
 // A replaced header that contains U+0000 never reaches the signature
 // check: the wire-3 contract refuses it first as bad_request (core
@@ -98,6 +106,9 @@ func FuzzHubRelayAuthV2(f *testing.F) {
 		skew %= 2*relayauth.MaxSkewMillis + 60_000
 		now := time.Now().UnixMilli()
 		ts := uint64(now + skew)
+		// Above everything signed for a before (and after the hub's RC1
+		// state was made): RC1 has nothing to refuse it for.
+		fresh := ts > h.lastSigned(a.AID()) && ts >= h.started
 
 		signedQuery, signedAction := query, rt.action
 		if tamper&tbTarget != 0 {
@@ -164,17 +175,35 @@ func FuzzHubRelayAuthV2(f *testing.F) {
 		}
 		inWindow := skew > -relayauth.MaxSkewMillis+5_000 && skew < relayauth.MaxSkewMillis-5_000
 		outWindow := skew < -relayauth.MaxSkewMillis-5_000 || skew > relayauth.MaxSkewMillis+5_000
+		var refusal struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &refusal)
+		floorHdr := rec.Header().Get("X-ANet-TS-Floor")
+		rc1 := refusal.Reason == string(wire3.ReasonTSStale) || refusal.Reason == string(wire3.ReasonReplayed)
 		switch {
 		case tampered && code != http.StatusUnauthorized:
 			t.Fatalf("%s %s: tampered request (bits %08b) answered %d, not 401: %s",
 				rt.method, path, tamper, code, rec.Body.Bytes())
-		case !tampered && inWindow && code == http.StatusUnauthorized:
-			t.Fatalf("%s %s: correctly signed request inside the window (skew %d ms) refused: %s",
-				rt.method, path, skew, rec.Body.Bytes())
+		case tampered && (rc1 || floorHdr != ""):
+			t.Fatalf("%s %s: tampered request (bits %08b) told about RC1 (floor %q): %s",
+				rt.method, path, tamper, floorHdr, rec.Body.Bytes())
+		case !tampered && inWindow && code == http.StatusUnauthorized && (fresh || !rc1):
+			t.Fatalf("%s %s: correctly signed request inside the window (skew %d ms, above every earlier time %v) refused: %s",
+				rt.method, path, skew, fresh, rec.Body.Bytes())
+		case refusal.Reason == string(wire3.ReasonTSStale) && !floorAtLeast(floorHdr, ts):
+			t.Fatalf("%s %s: ts_stale for %d with the floor %q, not at or above it", rt.method, path, ts, floorHdr)
 		case !tampered && outWindow && code != http.StatusUnauthorized:
 			t.Fatalf("%s %s: request signed %d ms off answered %d, not 401", rt.method, path, skew, code)
 		}
 	})
+}
+
+// floorAtLeast reports whether hdr, an X-ANet-TS-Floor, is a number at or
+// above ts.
+func floorAtLeast(hdr string, ts uint64) bool {
+	f, err := strconv.ParseUint(hdr, 10, 64)
+	return err == nil && f >= ts
 }
 
 // signedHeaders signs a request with the given terms and returns its

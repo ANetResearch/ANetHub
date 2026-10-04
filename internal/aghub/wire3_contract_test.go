@@ -458,8 +458,8 @@ func wire3HubSetup(t *testing.T) *wire3test.Env {
 	}
 }
 
-// wire3LastSigned is the X-ANet-TS of the last request a fixture signed. Two requests signed in
-// the same millisecond would be the same signature, which the replay cache refuses.
+// wire3LastSigned is the X-ANet-TS of the last request a fixture signed. RC1 takes each of a
+// signer's times once, so two requests signed in the same millisecond would be refused as replayed.
 var wire3LastSigned atomic.Int64
 
 // wire3SigningNow is now, at least one millisecond after the previous signature.

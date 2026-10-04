@@ -42,10 +42,10 @@ func rawBody(t *testing.T, body any) []byte {
 }
 
 // lastSignedMS is the X-ANet-TS of the last request signed "now" by these
-// helpers. Ed25519 is deterministic: the same request signed twice in one
-// millisecond is the same signature, and the hub's replay cache refuses the
-// second by design ("this signature was already used"). A daemon signs each
-// request anew at a later time; the helpers do the same.
+// helpers. The hub takes each of a signer's times once (RC1), so a second
+// request signed in the same millisecond is refused as replayed by design.
+// A daemon signs each request at a later time than the last
+// (relayauth.MonoClock); the helpers do the same.
 var lastSignedMS atomic.Int64
 
 // signingNow is the time to sign a request at "now": the current time, but

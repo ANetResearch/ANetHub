@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,13 +49,18 @@ type fz struct {
 	hub    *identity.Controller
 	db     *sql.DB // a second connection, for reading invariants
 	seq    atomic.Uint64
+	// started is a time (unix ms) taken after the hub's replay state was
+	// made: RC1 refuses as ts_stale a time signed before that.
+	started uint64
+	// signed is the largest X-ANet-TS this harness signed for each signer.
+	signedMu sync.Mutex
+	signed   map[string]uint64
 }
 
 // newFZ builds a hub whose rate limits do not end the run: the fuzzer
 // sends thousands of requests a second from one address and a handful of
-// AIDs, which the default buckets and the per-signer replay share would
-// turn into a stream of 429s that exercise nothing. The limits themselves
-// have their own tests.
+// AIDs, which the default buckets would turn into a stream of 429s that
+// exercise nothing. The limits themselves have their own tests.
 func newFZ(tb testing.TB) *fz {
 	tb.Helper()
 	dir := tb.TempDir()
@@ -82,12 +88,13 @@ func newFZ(tb testing.TB) *fz {
 		tb.Fatal(err)
 	}
 	tb.Cleanup(func() { db.Close(); store.Close() })
-	return &fz{store: store, srv: s, h: s.Handler(), hubAID: id.AID, hub: id.Ctrl, db: db}
+	return &fz{store: store, srv: s, h: s.Handler(), hubAID: id.AID, hub: id.Ctrl, db: db,
+		started: uint64(time.Now().UnixMilli()), signed: map[string]uint64{}}
 }
 
 // nonce is unique per request in this process. A signed request carries
-// it in its query, so two inputs that are otherwise identical, signed in
-// the same millisecond, are not one signature presented twice.
+// it in its query, so two inputs that are otherwise identical are two
+// different requests.
 func (f *fz) nonce() string { return strconv.FormatUint(f.seq.Add(1), 10) }
 
 // request builds a request with target as its request target. The target
@@ -112,8 +119,15 @@ func (f *fz) serve(req *http.Request) *httptest.ResponseRecorder {
 }
 
 // sign sets relayauth v2 headers on req for body, signed by c for action
-// at time ts.
+// at time ts, and records ts as signed for c unless it is further ahead
+// than any hub takes (a minute past the window), which leaves no RC1
+// state behind.
 func (f *fz) sign(req *http.Request, c *identity.Controller, action string, body []byte, ts uint64) {
+	if ts <= uint64(time.Now().UnixMilli())+relayauth.MaxSkewMillis+60_000 {
+		f.signedMu.Lock()
+		f.signed[c.AID()] = max(f.signed[c.AID()], ts)
+		f.signedMu.Unlock()
+	}
 	sig, seq := c.Sign(relayauth.PreimageV2(action, c.AID(), f.hubAID, ts, req.Method, req.URL.RequestURI(), body))
 	req.Header.Set(relayauth.HeaderAID, c.AID())
 	req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
@@ -121,14 +135,33 @@ func (f *fz) sign(req *http.Request, c *identity.Controller, action string, body
 	req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
 }
 
-// signedDo sends body to path as c, signed now. A nonce is added to the
-// query unless the caller gave one.
+// lastSigned is the largest time this harness signed for aid so far.
+func (f *fz) lastSigned(aid string) uint64 {
+	f.signedMu.Lock()
+	defer f.signedMu.Unlock()
+	return f.signed[aid]
+}
+
+// signingTime is the time to sign c's next request at: now, or just above
+// the last time signed for c, as relayauth.MonoClock hands out. RC1
+// (hub-payment-privacy §4.2.5) takes each of a signer's times once, so two
+// requests of c in one millisecond at now would be refused as replayed.
+func (f *fz) signingTime(c *identity.Controller) uint64 {
+	f.signedMu.Lock()
+	defer f.signedMu.Unlock()
+	ts := max(uint64(time.Now().UnixMilli()), f.signed[c.AID()]+1)
+	f.signed[c.AID()] = ts
+	return ts
+}
+
+// signedDo sends body to path as c, signed now (signingTime). A nonce is
+// added to the query unless the caller gave one.
 func (f *fz) signedDo(c *identity.Controller, action, method, path, rawQuery string, body []byte) *httptest.ResponseRecorder {
 	if rawQuery == "" {
 		rawQuery = "fz=" + f.nonce()
 	}
 	req := f.request(method, path, rawQuery, body)
-	f.sign(req, c, action, body, uint64(time.Now().UnixMilli()))
+	f.sign(req, c, action, body, f.signingTime(c))
 	return f.serve(req)
 }
 
