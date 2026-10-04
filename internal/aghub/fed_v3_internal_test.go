@@ -22,6 +22,8 @@ import (
 
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/dirbox"
+	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -430,8 +432,8 @@ func TestSourceRatePenalty(t *testing.T) {
 			b.srv.relay.fedSource.forget(a.hubAID)
 			before := b.sourceTokens(a)
 			expectRefusal(t, b.fedServe(b.signedForward(a, tc.env(), nil)), 403, "access_invalid")
-			if lost := before - b.sourceTokens(a); lost < FedSourcePenalty-0.01 || lost > FedSourcePenalty+0.01 {
-				t.Errorf("the source bucket lost %v tokens, want %d", lost, FedSourcePenalty)
+			if lost := before - b.sourceTokens(a); lost < 9.99 || lost > 10.01 {
+				t.Errorf("the source bucket lost %v tokens, want 10", lost)
 			}
 		})
 	}
@@ -1009,5 +1011,104 @@ func TestKind1RemoteStep2ConstantVerifyCount(t *testing.T) {
 	check("an expiry", withCap(t, envelope(t, owner.aid, []byte("x")), expiring))
 	if b.forwards() != forwards {
 		t.Fatalf("a refusal of step 2 was forwarded")
+	}
+}
+
+// TestEntryHomeIsTheServingPeer (SSR-W20, SSR-W22): a peer answers for its
+// own agents only, so an entry it serves names it as the home; one that
+// names another hub, or that does not open under the AID looked for, is
+// not taken.
+func TestEntryHomeIsTheServingPeer(t *testing.T) {
+	net := newFedNet(t, 3)
+	a, b, c := net.nodes[0], net.nodes[1], net.nodes[2]
+	owner, other := b.agent(), b.agent()
+	h, err := dirbox.Hash(owner.aid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := b.store.DirBucket(h, dirbox.HashBits, nil)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("B's entry for the owner: %v %v", entries, err)
+	}
+	pe := peerEntry{h: mustB64(t, entries[0].H), box: mustB64(t, entries[0].Box)}
+	if e, ok := a.srv.verifyEntry(owner.aid, b.hubAID, pe, a.clock()); !ok || e.home != b.hubAID || e.mbox.Epoch != owner.mbox.Epoch {
+		t.Fatalf("B's entry, served by B: %+v %v", e, ok)
+	}
+	if _, ok := a.srv.verifyEntry(owner.aid, c.hubAID, pe, a.clock()); ok {
+		t.Fatal("B's entry, served by C, was taken")
+	}
+	if _, ok := a.srv.verifyEntry(other.aid, b.hubAID, pe, a.clock()); ok {
+		t.Fatal("an entry was taken for an AID it is not filed under")
+	}
+}
+
+// TestForkedEntriesResolveNothing (SSR-W22): two peers serve entries of
+// one AID whose key histories fork (neither extends the other): the home
+// is not resolved and nothing is forwarded; the sender's hint still names
+// one.
+func TestForkedEntriesResolveNothing(t *testing.T) {
+	net := newFedNet(t, 3)
+	a, b, c := net.nodes[0], net.nodes[1], net.nodes[2]
+	c0, err := identitytest.Hub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := c0.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fork, err := identity.Restore(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotAt := uint64(time.Now().Add(-time.Minute).UnixMilli())
+	if err := identitytest.Rotate(c0, rotAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := identitytest.Rotate(fork, rotAt+7); err != nil {
+		t.Fatal(err)
+	}
+	for _, at := range []struct {
+		hub *fedNode
+		c   *identity.Controller
+	}{{b, c0}, {c, fork}} {
+		kel, err := identity.MarshalKEL(at.c.KEL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := at.hub.store.PutAgent(at.c.AID(), "forked", nil, kel); err != nil {
+			t.Fatal(err)
+		}
+		at.hub.publish(&relayAgent{c: at.c, aid: at.c.AID()}, 1)
+	}
+	expectRefusal(t, a.send0To(c0.AID(), "", "fork"), 404, "recipient_unknown")
+	if b.forwards()+c.forwards() != 0 {
+		t.Fatalf("a forked recipient was forwarded to: %d at B, %d at C", b.forwards(), c.forwards())
+	}
+	if rec := a.send0To(c0.AID(), b.hubAID, "hinted"); rec.Code != 200 {
+		t.Fatalf("with the hint: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestPeerRC1KeepsFourThousandTimes (core G17): RC1 keeps the last 4096
+// times of a peer hub, not the 64 of an agent: a peer's requests may
+// arrive out of order by more than an agent's.
+func TestPeerRC1KeepsFourThousandTimes(t *testing.T) {
+	h := newRelayHub(t)
+	const peer = "did:anet:peer-hub"
+	t0 := uint64(time.Now().UnixMilli())
+	for i := uint64(1); i <= 100; i++ {
+		rec := httptest.NewRecorder()
+		if !h.srv.PeerRC1(rec, peer, t0+i) {
+			t.Fatalf("time %d: %s", i, rec.Body)
+		}
+	}
+	rec := httptest.NewRecorder()
+	if !h.srv.PeerRC1(rec, peer, t0) {
+		t.Fatalf("a time 100 behind the latest, within the window: %d %s", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	if h.srv.PeerRC1(rec, peer, t0+5) || reasonOf(rec) != "replayed" {
+		t.Fatalf("a time taken before: %d %s", rec.Code, rec.Body)
 	}
 }

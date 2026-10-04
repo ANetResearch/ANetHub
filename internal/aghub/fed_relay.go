@@ -198,7 +198,7 @@ func (s *Server) capPrecheckRemote(w http.ResponseWriter, r *http.Request, a *se
 	if body.Epoch != mbox.Epoch || len(mbox.Pub) != ed25519.PublicKeySize {
 		return refuse(true)
 	}
-	if !verifyEd25519(mbox.Pub, a.Cap.Body, a.Cap.Sig) {
+	if !verifyEd25519(mbox.Pub, c.Body, c.Sig) {
 		return refuse(false)
 	}
 	if !capExpOK(body.CapExp, nowMS) {
