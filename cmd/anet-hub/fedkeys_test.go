@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -90,7 +91,7 @@ func newFedHubs(t *testing.T) (a, b *fedHub) {
 // under its KEL. Its card is not federated (discovery is off).
 func registerWithKeys(t *testing.T, h *fedHub) string {
 	t.Helper()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

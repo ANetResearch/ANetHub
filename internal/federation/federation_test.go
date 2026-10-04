@@ -296,7 +296,7 @@ func signedEnvelope(t *testing.T, r *rig, mutate func(*Envelope, []byte) []byte)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sig, seq := r.aid.Sign(pre)
+	sig, seq := r.aid.Ctrl.Sign(pre)
 	env.Sig, env.KeyStateSeq = base64.StdEncoding.EncodeToString(sig), seq
 	return env
 }

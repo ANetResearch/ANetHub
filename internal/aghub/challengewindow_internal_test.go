@@ -4,7 +4,7 @@ import (
 	"encoding/base64"
 	"testing"
 
-	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
@@ -17,7 +17,7 @@ import (
 // ANet an internal note). verifyV2 and the federation key lookup already
 // refuse a ts above 2^62 for this reason; the challenge now does too.
 func TestAChallengeDatedHalfTheClockAwayIsRefused(t *testing.T) {
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

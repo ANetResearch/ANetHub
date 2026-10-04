@@ -14,6 +14,7 @@ import (
 	"github.com/ANetResearch/ANetCore/ael"
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -28,7 +29,7 @@ import (
 // contents — demonstrates the rewrite without either party agreeing.
 func TestAWitnessAttestationDetectsARewrittenIssuanceChain(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +44,7 @@ func TestAWitnessAttestationDetectsARewrittenIssuanceChain(t *testing.T) {
 	if !ok {
 		t.Fatal("no head to witness")
 	}
-	witness, err := identity.Incept()
+	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestAWitnessAttestationDetectsARewrittenIssuanceChain(t *testing.T) {
 // A hub serves what it has been given, and can be asked for it.
 func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 		t.Fatalf("head = %+v", h)
 	}
 
-	witness, err := identity.Incept()
+	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +168,7 @@ func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 // made about it.
 func TestAHubRefusesAttestationsAboutOtherChains(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	witness, err := identity.Incept()
+	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestAHubRefusesAttestationsAboutOtherChains(t *testing.T) {
 // and a list padded with self-reference reads as corroboration.
 func TestAHubCannotWitnessItself(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func recordsOf(t *testing.T, entries []aghub.IssuanceEntry) []*ael.EventRecord {
 // hub with several looking hourly.
 func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +256,7 @@ func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 	}
 	var wids []string
 	for i := 0; i < 2; i++ {
-		w, err := identity.Incept()
+		w, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +306,7 @@ func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 // that makes the number readable.
 func TestWitnessHealthIsPublishedWithItsCaveat(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +343,7 @@ func TestWitnessHealthIsPublishedWithItsCaveat(t *testing.T) {
 // is what the whole trust argument rests on.
 func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +358,7 @@ func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 	at := time.Now().UnixMilli()
 	var aids []string
 	for i := 0; i < 3; i++ {
-		w, err := identity.Incept()
+		w, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -392,7 +393,7 @@ func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 	}
 
 	// The same witness repeating itself is still one attestation.
-	w, err := identity.Incept()
+	w, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +423,7 @@ func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	witness, err := identity.Incept()
+	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +496,7 @@ func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
 // numbers, and head_seq was not among the ones published.
 func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +518,7 @@ func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 	}
 
 	// A witness that pinned the head as it stands. Nothing is wrong yet.
-	near, err := identity.Incept()
+	near, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,7 +546,7 @@ func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 	// serve. That is what a fork, a rewrite or a restore from an older
 	// copy leaves behind: the witness looked when the chain was longer,
 	// and re-submits what it signed.
-	far, err := identity.Incept()
+	far, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,7 +597,7 @@ func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 // for. An operator reads the log line; anybody else reads this.
 func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +631,7 @@ func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 		t.Fatalf("an unwitnessed chain is published as rolled back: %+v", h)
 	}
 
-	witness, err := identity.Incept()
+	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +659,7 @@ func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 // to say so somewhere the person running it will see.
 func TestARolledBackChainIsLogged(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +669,7 @@ func TestARolledBackChainIsLogged(t *testing.T) {
 	if !ok {
 		t.Fatal("no head")
 	}
-	witness, err := identity.Incept()
+	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,7 +734,7 @@ func TestAHubServingNoChainWhileWitnessesHoldOneIsRolledBack(t *testing.T) {
 		t.Fatalf("an empty unwitnessed chain = %+v", h)
 	}
 
-	witness, err := identity.Incept()
+	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

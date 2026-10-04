@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 )
 
@@ -27,7 +28,7 @@ func publishAddr(t *testing.T, srv *httptest.Server, c *identity.Controller, add
 // exists, so it can answer "where do I dial this AID".
 func TestTheHubCanActAsAPeerRendezvous(t *testing.T) {
 	srv := newHub(t)
-	a, err := identity.Incept()
+	a, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +73,7 @@ func TestTheHubCanActAsAPeerRendezvous(t *testing.T) {
 // would let anybody publish where anybody else can be reached.
 func TestAPeerAddressMustBeSignedByItsOwner(t *testing.T) {
 	srv := newHub(t)
-	a, err := identity.Incept()
+	a, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,7 @@ func TestAPeerAddressMustBeSignedByItsOwner(t *testing.T) {
 // what that list contains.
 func TestThePeerDirectoryIsVisible(t *testing.T) {
 	srv := newHub(t)
-	a, err := identity.Incept()
+	a, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestThePeerDirectoryIsVisible(t *testing.T) {
 // always says something is wrong is a check people stop reading.
 func TestALedgerCorrectionIsDerivedAndVisible(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	a, err := identity.Incept()
+	a, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

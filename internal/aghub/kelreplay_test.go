@@ -21,6 +21,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
@@ -73,7 +74,7 @@ func TestABadSignatureDoesNotReplayTheKELItNames(t *testing.T) {
 	hub := hubAIDOf(t, srv)
 	long := bigKELController(t, seal.MaxKELBytes/2)
 	long2 := bigKELController(t, seal.MaxKELBytes/2)
-	payee, err := identity.Incept()
+	payee, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

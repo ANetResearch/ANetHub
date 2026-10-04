@@ -27,12 +27,13 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 func FuzzRegisterAdmission(f *testing.F) {
 	g := newGateHub(f)
-	listed, _ := identity.Incept()
+	listed, _ := identitytest.Hub()
 	if _, err := g.store.Admit(listed.AID(), 0, "", false); err != nil {
 		f.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func FuzzRegisterAdmission(f *testing.F) {
 			c = listed
 		default:
 			var err error
-			if c, err = identity.Incept(); err != nil {
+			if c, err = identitytest.Hub(); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -158,7 +159,7 @@ func (g *gateHub) light() string {
 // FuzzValidAID: ValidAID accepts exactly the canonical spelling of a
 // 36-byte CIDv1 dag-cbor sha2-256 identifier.
 func FuzzValidAID(f *testing.F) {
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	f.Add(c.AID())
 	f.Add("b" + strings.Repeat("a", 58))
 	f.Add(strings.ToUpper(c.AID()))
@@ -182,8 +183,8 @@ func FuzzValidAID(f *testing.F) {
 // is exactly its distinct AID lines; a bad line is reported by number.
 func FuzzAdmitFile(f *testing.F) {
 	g := newGateHub(f)
-	a, _ := identity.Incept()
-	b, _ := identity.Incept()
+	a, _ := identitytest.Hub()
+	b, _ := identitytest.Hub()
 	f.Add([]byte(a.AID() + "\n" + b.AID() + "\n"))
 	f.Add([]byte("# c\n\n" + a.AID() + "\r\n  " + b.AID() + "  \n"))
 	f.Add([]byte(a.AID() + "\nnope\n"))

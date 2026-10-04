@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/taskboard"
@@ -30,7 +31,7 @@ type agent struct {
 
 func newAgent(t *testing.T, store *aghub.Store, name string) agent {
 	t.Helper()
-	ctrl, err := identity.Incept()
+	ctrl, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestRealKELChallengeFlow(t *testing.T) {
 	}
 
 	// unregistered identity rejected even with a valid self-signature
-	stranger, _ := identity.Incept()
+	stranger, _ := identitytest.Hub()
 	ts := uint64(time.Now().UnixMilli())
 	sig, seq := stranger.Sign(aghub.TaskChallenge("task.claim", stranger.AID(), ts))
 	if code, _ := post("/tasks/claim", map[string]any{

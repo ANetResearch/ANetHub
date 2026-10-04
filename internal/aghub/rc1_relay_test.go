@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -63,7 +64,7 @@ func newRC1Hub(t *testing.T, r *rc1State) *rc1Hub {
 // agent registers a new agent directly in the store.
 func (h *rc1Hub) agent() *identity.Controller {
 	h.t.Helper()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -224,7 +225,7 @@ func TestRC1ARestartRefusesTimesSignedBeforeIt(t *testing.T) {
 func TestRC1KFollowsTheSignersClass(t *testing.T) {
 	h := newRC1Hub(t, nil)
 	agent, probation := h.agent(), h.agent()
-	stranger, _ := identity.Incept()
+	stranger, _ := identitytest.Hub()
 	if _, err := h.store.db.Exec(`UPDATE agent SET admitted_via=?, probation_until=?, trial=? WHERE aid=?`,
 		viaOpen, time.Now().Add(time.Hour).UnixMilli(), trialPending, probation.AID()); err != nil {
 		t.Fatal(err)
@@ -371,7 +372,7 @@ func TestRC1AStrangerAtAClosedHubLeavesNoState(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := 0; i < 20; i++ {
-			c, err := identity.Incept()
+			c, err := identitytest.Hub()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -385,7 +386,7 @@ func TestRC1AStrangerAtAClosedHubLeavesNoState(t *testing.T) {
 	if n := h.s.replay.signerCount(); n != 0 {
 		t.Fatalf("80 refused registrations left %d signers in the replay state", n)
 	}
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	if _, err := h.store.Admit(c.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}

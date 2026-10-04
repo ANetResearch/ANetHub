@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/regpow"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
@@ -301,7 +302,7 @@ func TestAdmissionGateMatrix(t *testing.T) {
 					name := fmt.Sprintf("%s/pow_%s/quota_%s/check_only_%v", state, pow, quota, checkOnly)
 					t.Run(name, func(t *testing.T) {
 						g := newGateHub(t)
-						c, err := identity.Incept()
+						c, err := identitytest.Hub()
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -421,8 +422,8 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 		t.Run(mode+"/signature", func(t *testing.T) {
 			g := newGateHub(t)
 			g.gateState(mode, nil)
-			c, _ := identity.Incept()
-			other, _ := identity.Incept()
+			c, _ := identitytest.Hub()
+			other, _ := identitytest.Hub()
 			before := g.dump()
 			code, out := g.register(c, other, g.pow(c.AID(), "good"))
 			if code != http.StatusUnauthorized || out["reason"] != "unauthorized" {
@@ -438,14 +439,14 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 		t.Run(mode+"/fork", func(t *testing.T) {
 			g := newGateHub(t)
 			g.gateState(mode, nil)
-			c, _ := identity.Incept()
-			if err := c.Rotate(kelTime()); err != nil {
+			c, _ := identitytest.Hub()
+			if err := identitytest.Rotate(c, kelTime()); err != nil {
 				t.Fatal(err)
 			}
 			// It left this hub once, so its key history is a tombstone; a
 			// fork of it comes back.
 			snap, _ := c.Export()
-			if err := c.Rotate(kelTime()); err != nil {
+			if err := identitytest.Rotate(c, kelTime()); err != nil {
 				t.Fatal(err)
 			}
 			kel, _ := identity.MarshalKEL(c.KEL())
@@ -453,7 +454,7 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 				t.Fatal(err)
 			}
 			fork, _ := identity.Restore(snap)
-			if err := fork.Rotate(kelTime()); err != nil {
+			if err := identitytest.Rotate(fork, kelTime()); err != nil {
 				t.Fatal(err)
 			}
 			code, out := g.register(fork, fork, g.pow(fork.AID(), "good"))
@@ -468,7 +469,7 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 	t.Run("window_filled_meanwhile", func(t *testing.T) {
 		g := newGateHub(t)
 		g.gateState("window_open", nil)
-		c, _ := identity.Incept()
+		c, _ := identitytest.Hub()
 		// The window fills between the gate and the write: the place the
 		// gate held was taken from the window's count; the write finds no
 		// room and the registration is refused like any other at a full
@@ -538,7 +539,7 @@ func TestARegistrationRacingARevocationIsRefused(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGateHub(t)
-			c, _ := identity.Incept()
+			c, _ := identitytest.Hub()
 			tc.setup(g, c)
 			calls := 0
 			g.store.clock = func() time.Time {
@@ -579,7 +580,7 @@ func TestARegistrationsAIDIsCheckedBeforeItIsUsed(t *testing.T) {
 	log.SetOutput(&logged)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	g := newGateHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	kel, _ := identity.MarshalKEL(c.KEL())
 	for _, aid := range []string{
 		"x; echo admitted",

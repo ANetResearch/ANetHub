@@ -18,7 +18,7 @@ func TestAKeyLookupOutsideTheSkewWindowIsRefused(t *testing.T) {
 	at := func(when time.Time) int {
 		req, _ := http.NewRequest(http.MethodGet, r.bSrv.URL+"/fed/v2/keys/aid:bob", nil)
 		ts := uint64(when.UnixMilli())
-		sig, seq := r.aid.Sign(relayauth.PreimageV2(actionFedKeys, r.aid.AID, r.bid.AID, ts,
+		sig, seq := r.aid.Ctrl.Sign(relayauth.PreimageV2(actionFedKeys, r.aid.AID, r.bid.AID, ts,
 			http.MethodGet, req.URL.RequestURI(), nil))
 		req.Header.Set(relayauth.HeaderAID, r.aid.AID)
 		req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))

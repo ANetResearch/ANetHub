@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -23,7 +24,7 @@ func TestStoreDeliveryMapsRelayRefusals(t *testing.T) {
 	}
 	defer store.Close()
 	store.SetRelayQuota(1, 1<<20)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	kel, _ := identity.MarshalKEL(c.KEL())
 	if err := store.PutAgent(c.AID(), "R", nil, kel); err != nil {
 		t.Fatal(err)

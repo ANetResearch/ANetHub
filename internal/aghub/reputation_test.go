@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -113,7 +114,7 @@ func TestAPeerCannotInventARating(t *testing.T) {
 		// A peer that could hand us its own KEL for both parties could
 		// sign an entire interaction into existence. The AIDs the objects
 		// name are checked against the histories supplied.
-		impostor, err := identity.Incept()
+		impostor, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -288,7 +289,7 @@ func TestAnInteractionThatCrossedAHubCanStillBeReviewed(t *testing.T) {
 
 	// And a stranger who never registered anywhere still cannot be
 	// reviewed — the widening is "known to this hub", not "anyone".
-	stranger, err := identity.Incept()
+	stranger, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

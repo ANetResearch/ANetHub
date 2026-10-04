@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/regpow"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/wire"
@@ -228,7 +229,7 @@ func wire3RC1Setup(t *testing.T) *wire3test.Env {
 	root := http.NewServeMux()
 	root.Handle("/hub/identity", id.Handler())
 	root.Handle("/", s.Handler())
-	alice, err := identity.Incept()
+	alice, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +313,7 @@ func wire3RegisterSetup(mode, variant string) wire3test.Setup {
 		root.Handle("/", s.Handler())
 
 		incept := func() *identity.Controller {
-			c, err := identity.Incept()
+			c, err := identitytest.Hub()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -330,12 +331,12 @@ func wire3RegisterSetup(mode, variant string) wire3test.Setup {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := rotor.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+		if err := identitytest.Rotate(rotor, uint64(time.Now().UnixMilli())); err != nil {
 			t.Fatal(err)
 		}
 		rotorOld, _ := identity.Restore(snap)
 		rotorFork, _ := identity.Restore(snap)
-		if err := rotorFork.Rotate(uint64(time.Now().UnixMilli()) + 17); err != nil {
+		if err := identitytest.Rotate(rotorFork, uint64(time.Now().UnixMilli())+17); err != nil {
 			t.Fatal(err)
 		}
 		for _, c := range []*identity.Controller{alice, rotor} {
@@ -435,7 +436,7 @@ func wire3Hub(t *testing.T) (*wire3test.Env, *Store, map[string]*identity.Contro
 	root.Handle("/hub/identity", id.Handler())
 	root.Handle("/", s.Handler())
 
-	alice, err := identity.Incept()
+	alice, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,9 +507,10 @@ func wire3RevokeSetup(t *testing.T) *wire3test.Env {
 	return env
 }
 
+// wire3Incept is one more identity for a fixture to sign as, incepted like alice.
 func wire3Incept(t *testing.T) *identity.Controller {
 	t.Helper()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

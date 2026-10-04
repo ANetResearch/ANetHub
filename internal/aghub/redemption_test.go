@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
@@ -19,7 +20,7 @@ import (
 // Credit that only goes in is a score. This is the way out.
 func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +114,11 @@ func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 // A hub must not be able to redeem an agent's balance for it.
 func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	thief, err := identity.Incept()
+	thief, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 // Redeeming more than you hold must fail, and must fail as a payment.
 func TestRedeemingMoreThanYouHoldIsRefused(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,11 +181,11 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 	// Two hubs. A payment made on peer's ledger, cleared at ours, leaves
 	// peer owing us — and then peer says it has paid.
 	ours, ourStore := newHubWithStore(t)
-	peerCtrl, err := identity.Incept()
+	peerCtrl, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 	if err := ourStore.SettleOwed(ourAID, peerCtrl.AID(), peerCtrl.KEL(), over); err == nil {
 		t.Error("a peer cleared more than it owed")
 	}
-	stranger, err := identity.Incept()
+	stranger, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +340,7 @@ func decodeB64(t *testing.T, s string) string {
 // at all.
 func TestAnOperatorGrantIsIssuedOnTheBooks(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +456,7 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 // twice and outstanding went negative by the redeemed amount.
 func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,11 +501,11 @@ func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
 // could have been settled".
 func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 	ours, ourStore := newHubWithStore(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +576,7 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	payer, err := identity.Incept()
+	payer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,11 +651,11 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 // omission rather than a ledger problem.
 func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,11 +702,11 @@ func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 func TestTwoDischargesWithTheSameReferenceBothApply(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

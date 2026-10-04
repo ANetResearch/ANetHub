@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"os"
 	"reflect"
 	"regexp"
@@ -267,7 +267,7 @@ func graphOf(t *testing.T, srv *httptest.Server) struct {
 // came from the cap rather than the ledger.
 func TestLedgerReportsTheWholeAccountNotJustThePage(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

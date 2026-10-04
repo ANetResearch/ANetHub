@@ -19,6 +19,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
@@ -237,8 +238,8 @@ func makeEvidenceWithComment(t *testing.T, prov, req *identity.Controller, ixID 
 // aggregated into the provider's average.
 func TestUploadReviewHappyPath(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := identitytest.Hub()
+	req, _ := identitytest.Hub()
 	register(t, srv, prov, "Provider", []string{"bakery"})
 	register(t, srv, req, "Requester", nil)
 
@@ -275,8 +276,8 @@ func TestUploadReviewHappyPath(t *testing.T) {
 // The same interaction cannot be reviewed twice (interaction_id is the uniqueness key).
 func TestUploadReviewDuplicateRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := identitytest.Hub()
+	req, _ := identitytest.Hub()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
 	body := makeEvidence(t, prov, req, "ix_dup", 4, "")
@@ -291,8 +292,8 @@ func TestUploadReviewDuplicateRejected(t *testing.T) {
 // A review whose subject does not match the receipt's provider is rejected (interlock check).
 func TestUploadReviewSubjectMismatchRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := identitytest.Hub()
+	req, _ := identitytest.Hub()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
 	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_bad", 5, "did:anet:someone-else")); code == 200 {
@@ -303,8 +304,8 @@ func TestUploadReviewSubjectMismatchRejected(t *testing.T) {
 // Evidence for an unregistered provider is rejected (the Hub has no KEL to verify the receipt against).
 func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := identitytest.Hub()
+	req, _ := identitytest.Hub()
 	register(t, srv, req, "R", nil) // only the requester registers
 	if code, _ := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_np", 5, "")); code == 200 {
 		t.Fatal("unregistered provider must be rejected")
@@ -316,8 +317,8 @@ func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 // rejected.
 func TestRelayBrokerSendPollAck(t *testing.T) {
 	srv := newHub(t)
-	recip, _ := identity.Incept()
-	sender, _ := identity.Incept()
+	recip, _ := identitytest.Hub()
+	sender, _ := identitytest.Hub()
 	register(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 
@@ -359,7 +360,7 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 // a stranger register/overwrite that AID.
 func TestRegisterRequiresSignature(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
+	c, _ := identitytest.Hub()
 	kelB, _ := identity.MarshalKEL(c.KEL())
 	// no ts/sig
 	if code, _ := post(t, srv.URL+"/register", map[string]any{
@@ -373,8 +374,8 @@ func TestRegisterRequiresSignature(t *testing.T) {
 // becomes listed and its summary/readme are shown. A forged profile update (wrong key) is rejected.
 func TestProfileListingAndAuth(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
-	other, _ := identity.Incept()
+	c, _ := identitytest.Hub()
+	other, _ := identitytest.Hub()
 	register(t, srv, c, "Solo", nil) // no caps
 	register(t, srv, other, "Other", nil)
 
@@ -443,8 +444,8 @@ func listedContains(t *testing.T, srv *httptest.Server, aid string) bool {
 // even when the request is properly signed by the claimed AID.
 func TestRegisterAidKelMismatchRejected(t *testing.T) {
 	srv := newHub(t)
-	a, _ := identity.Incept()
-	b, _ := identity.Incept()
+	a, _ := identitytest.Hub()
+	b, _ := identitytest.Hub()
 	kelB, _ := identity.MarshalKEL(b.KEL()) // b's KEL under a's claimed AID
 	admitForTest(t, srv, a.AID())
 	code, body := signedDo(t, srv, a, relayauth.ActionRegister, http.MethodPost, "/register", map[string]any{
@@ -516,7 +517,7 @@ func TestWireContractAcceptsALegacyCaller(t *testing.T) {
 // exists to remove.
 func TestTheHubPublishesKeyHistories(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +566,7 @@ func TestTheHubPublishesKeyHistories(t *testing.T) {
 // signature, and never ask either participant for anything.
 func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
 	srv := newHub(t)
-	prov, err := identity.Incept()
+	prov, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,15 +621,15 @@ func TestAnUnknownAgentHasNoKEL(t *testing.T) {
 // invocation.
 func TestFindByCapability(t *testing.T) {
 	srv := newHub(t)
-	store, err := identity.Incept()
+	store, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cam, err := identity.Incept()
+	cam, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prose, err := identity.Incept()
+	prose, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +690,7 @@ func TestFindByCapability(t *testing.T) {
 // worse than one that never had an index.
 func TestCapabilitiesAreIndexedForAgentsRegisteredBeforeTheIndex(t *testing.T) {
 	dir := t.TempDir()
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +739,7 @@ func TestCapabilitiesAreIndexedForAgentsRegisteredBeforeTheIndex(t *testing.T) {
 // yes would send work to a provider that will refuse it.
 func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,11 +765,11 @@ func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
 // The facilitator settles credit, once, for the payer who signed it.
 func TestCreditSettlement(t *testing.T) {
 	srv := newHub(t)
-	payer, err := identity.Incept()
+	payer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,11 +829,11 @@ func TestCreditSettlement(t *testing.T) {
 
 func TestPaymentRefusals(t *testing.T) {
 	srv := newHub(t)
-	payer, err := identity.Incept()
+	payer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -867,7 +868,7 @@ func TestPaymentRefusals(t *testing.T) {
 
 	// An unregistered payer has no key history here, so nothing can say
 	// they authorised it.
-	stranger, err := identity.Incept()
+	stranger, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -972,7 +973,7 @@ func postJSON(t *testing.T, url string, body any, out any) {
 // nobody evaluates.
 func TestRegistrationGrantsCreditOnce(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -992,7 +993,7 @@ func TestRegistrationGrantsCreditOnce(t *testing.T) {
 // hub keeping it.
 func TestABalanceCanBeExplained(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1043,7 +1044,7 @@ func TestAGrantMustBePositive(t *testing.T) {
 // bounded: we can show exactly what the peer told us.
 func TestClearingAgainstAPeerHub(t *testing.T) {
 	_, store := newHubWithStore(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1075,7 +1076,7 @@ func TestClearingAgainstAPeerHub(t *testing.T) {
 
 	// A receipt signed by somebody who is not the ledger's hub is refused
 	// — otherwise any peer could issue itself credit here.
-	impostor, err := identity.Incept()
+	impostor, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1107,11 +1108,11 @@ func hubKELOf(t *testing.T, url string) []identity.SignedEvent {
 // twoAgents mints a provider and a requester.
 func twoAgents(t *testing.T) (*identity.Controller, *identity.Controller) {
 	t.Helper()
-	prov, err := identity.Incept()
+	prov, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := identity.Incept()
+	req, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}

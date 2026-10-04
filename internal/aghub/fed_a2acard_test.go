@@ -17,6 +17,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/federation"
@@ -293,14 +294,14 @@ func TestAFederatedA2ACardThatDoesNotVerifyIsRefused(t *testing.T) {
 // it verifies against the KEL it came with.
 func TestAFederatedA2ACardCannotRollBackOrForkTheKEL(t *testing.T) {
 	peer := openPeerStore(t)
-	agent, err := identity.Incept()
+	agent, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
 	blob, _ := agent.Export()
 	before, _ := identity.Restore(blob)
 	forked, _ := identity.Restore(blob)
-	if err := agent.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 1)))); err != nil {
@@ -310,7 +311,7 @@ func TestAFederatedA2ACardCannotRollBackOrForkTheKEL(t *testing.T) {
 	if !errors.Is(err, identity.ErrKELRollback) {
 		t.Fatalf("a newer card over the pre-rotation KEL: %v, want a rollback refusal", err)
 	}
-	if err := forked.Rotate(uint64(time.Now().UnixMilli()) + 7); err != nil {
+	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+7); err != nil {
 		t.Fatal(err)
 	}
 	err = peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, forked, signA2A(t, forked, a2aCardFor(forked, 3))))
@@ -318,7 +319,7 @@ func TestAFederatedA2ACardCannotRollBackOrForkTheKEL(t *testing.T) {
 		t.Fatalf("a card over a forked KEL: %v, want a fork refusal", err)
 	}
 	// The agent itself, rotating further, still goes through.
-	if err := agent.Rotate(uint64(time.Now().UnixMilli()) + 11); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())+11); err != nil {
 		t.Fatal(err)
 	}
 	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 4)))); err != nil {
@@ -478,7 +479,7 @@ func TestARotationWithdrawsTheCardUntilItIsResigned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := agent.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	registerA2A(t, hub.srv, agent, "Agent", nil, nil)
@@ -589,7 +590,7 @@ func TestAPeerLearnedKELFollowsTheAgentsRotation(t *testing.T) {
 	if err := store.AdmitFedA2ACard(homePeerAID, a2aEntry(t, provider, signA2A(t, provider, unsigned))); err != nil {
 		t.Fatal(err)
 	}
-	if err := provider.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(provider, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AdmitFedA2ACard(homePeerAID, a2aEntry(t, provider, signA2A(t, provider, unsigned))); err != nil {

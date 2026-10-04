@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -61,7 +62,7 @@ func newX402World(f *testing.F) *x402World {
 	h := newFZ(f)
 	payer, _ := h.agent(f, "fuzz-payer", nil, false)
 	payee, _ := h.agent(f, "fuzz-payee", nil, false)
-	foreign, err := identity.Incept()
+	foreign, err := identitytest.Hub()
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -391,7 +392,7 @@ func FuzzHubX402Redeem(f *testing.F) {
 func FuzzHubGatewayTombstone(f *testing.F) {
 	w := newX402World(f)
 	h := w.h
-	seller, err := identity.Incept()
+	seller, err := identitytest.Hub()
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -474,7 +475,7 @@ func hasDotSegment(p string) bool {
 func FuzzHubClearFromPeer(f *testing.F) {
 	w := newX402World(f)
 	h := w.h
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		f.Fatal(err)
 	}

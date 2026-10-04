@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 
@@ -38,7 +39,7 @@ func LoadOrIncept(dir string) (*Identity, error) {
 		return nil, err
 	} else {
 		var ierr error
-		ctrl, ierr = identity.Incept()
+		ctrl, ierr = identity.InceptHub(uint64(time.Now().UnixMilli()))
 		if ierr != nil {
 			return nil, ierr
 		}
@@ -55,11 +56,6 @@ func LoadOrIncept(dir string) (*Identity, error) {
 		return nil, err
 	}
 	return &Identity{Ctrl: ctrl, AID: ctrl.AID(), KEL: kel}, nil
-}
-
-// Sign signs a preimage with the hub's current key.
-func (i *Identity) Sign(preimage []byte) (sig []byte, keyStateSeq uint64) {
-	return i.Ctrl.Sign(preimage)
 }
 
 // IdentityResponse is the body of GET /hub/identity.
