@@ -228,6 +228,10 @@ func TestRevocationListFull(t *testing.T) {
 // no longer counts, the janitor deletes it, and revoking the id again starts
 // a new 31 days.
 func TestRevocationJanitor31Days(t *testing.T) {
+	// 31 days (sealed-sender §2.12, SSR-H10), written out rather than taken
+	// from the hub's constant, so that a period that drifts fails here: a
+	// credential lives up to 30 days, and its revocation must outlive it.
+	const keep = 31 * 24 * time.Hour
 	srv, store := newHubWithStore(t)
 	c, _ := twoAgents(t)
 	register(t, srv, c, "Owner", nil)
@@ -247,7 +251,7 @@ func TestRevocationJanitor31Days(t *testing.T) {
 		return n
 	}
 
-	now = t0.Add(aghub.RevocationKeep - time.Millisecond)
+	now = t0.Add(keep - time.Millisecond)
 	if !capRevoked(t, store, c.AID(), id) || revocationCount(t, store, c.AID()) != 2 || purge() != 0 {
 		t.Fatal("a revocation one millisecond short of 31 days old is not in force")
 	}
@@ -256,7 +260,7 @@ func TestRevocationJanitor31Days(t *testing.T) {
 		t.Fatalf("revoking a revoked id again: %d %v", n, err)
 	}
 
-	now = t0.Add(aghub.RevocationKeep)
+	now = t0.Add(keep)
 	if capRevoked(t, store, c.AID(), id) {
 		t.Error("a revocation 31 days old still refuses")
 	}
@@ -274,11 +278,11 @@ func TestRevocationJanitor31Days(t *testing.T) {
 	if err := store.DBForTest().QueryRow(`SELECT COUNT(*) FROM cap_revocation WHERE owner=?`, c.AID()).Scan(&left); err != nil || left != 1 {
 		t.Errorf("rows left after the sweep: %d %v, want only the renewed one", left, err)
 	}
-	now = t0.Add(2*aghub.RevocationKeep - time.Millisecond)
+	now = t0.Add(2*keep - time.Millisecond)
 	if !capRevoked(t, store, c.AID(), id2) {
 		t.Error("the renewed revocation lapsed early")
 	}
-	now = t0.Add(2 * aghub.RevocationKeep)
+	now = t0.Add(2 * keep)
 	if capRevoked(t, store, c.AID(), id2) || purge() != 1 {
 		t.Error("the renewed revocation outlived its 31 days")
 	}
@@ -287,7 +291,7 @@ func TestRevocationJanitor31Days(t *testing.T) {
 	if _, _, err := store.RevokeCaps(c.AID(), [][]byte{capIDFor(1, 3)}); err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(aghub.RevocationKeep)
+	now = now.Add(keep)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { store.RunRevocationJanitor(ctx, time.Hour); close(done) }()

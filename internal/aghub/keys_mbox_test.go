@@ -53,6 +53,10 @@ func newMboxPub(t *testing.T) ed25519.PublicKey {
 // lowers it (bringing an old key back), or carries an epoch of 2^53 or more
 // is refused as invalid, and the stored set stays what it was.
 func TestPublishKeysMboxEpochMustRise(t *testing.T) {
+	// The bound of SSR-W9 and SSR-W10, written out rather than taken from
+	// the hub's constant, so that a bound that drifts from 2^53 fails here:
+	// a daemon adds one to the epoch the hub stores and must stay exact.
+	const epochBound = uint64(1) << 53
 	srv, store := newHubWithStore(t)
 	c, _ := twoAgents(t)
 	register(t, srv, c, "Agent", nil)
@@ -119,15 +123,15 @@ func TestPublishKeysMboxEpochMustRise(t *testing.T) {
 	refuse("the old key back under its old epoch", 13, seal.Mbox{Epoch: 1, Pub: a})
 	refuse("the current key under a lower epoch", 13, seal.Mbox{Epoch: 1, Pub: b})
 	accept("an epoch that skips some", 13, seal.Mbox{Epoch: 7, Pub: cc})
-	refuse("epoch 2^53", 14, seal.Mbox{Epoch: aghub.MaxMboxEpoch, Pub: d})
+	refuse("epoch 2^53", 14, seal.Mbox{Epoch: epochBound, Pub: d})
 	refuse("epoch 2^64-1", 14, seal.Mbox{Epoch: ^uint64(0), Pub: d})
-	accept("epoch 2^53-1", 14, seal.Mbox{Epoch: aghub.MaxMboxEpoch - 1, Pub: d})
+	accept("epoch 2^53-1", 14, seal.Mbox{Epoch: epochBound - 1, Pub: d})
 
 	// The bound holds for a first set too: a hub never stores an epoch a
 	// daemon cannot add one to (SSR-W10).
 	fresh, _ := twoAgents(t)
 	register(t, srv, fresh, "Fresh", nil)
-	for _, e := range []uint64{aghub.MaxMboxEpoch, aghub.MaxMboxEpoch + 1, ^uint64(0)} {
+	for _, e := range []uint64{epochBound, epochBound + 1, ^uint64(0)} {
 		raw := mboxEpochSet(t, fresh, 1, seal.Mbox{Epoch: e, Pub: newMboxPub(t)})
 		if _, err := store.PublishKeys(fresh.AID(), raw, fresh.KEL(), time.Now()); err == nil {
 			t.Errorf("a first set with epoch %d was stored", e)
