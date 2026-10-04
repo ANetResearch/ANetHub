@@ -118,8 +118,13 @@ func parseV2Headers(r *http.Request) (v2Auth, error) {
 // MaxSkew ahead stays inside the window for up to twice MaxSkew. What is
 // dropped leaves its top behind as the floor of every signer without state
 // in its part (gone), which is also where a part starts: just before the
-// time this state was made. A hub clock that steps back, or a restart,
-// therefore does not reopen the window for a request accepted before.
+// time this state was made. A hub clock that steps back therefore does not
+// reopen the window for a request accepted before, and after a restart a
+// request signed before the hub started is not accepted again. The state
+// is only in memory (hub-payment-privacy §3.3), so a restart does forget
+// the times it accepted after the start: a request signed ahead of the
+// hub's clock and accepted before a restart can be accepted once more
+// after it, until its time leaves the window.
 
 // RC1 constants (hub-payment-privacy §0.4; core G17). Code constants, not
 // configuration.
@@ -206,8 +211,10 @@ type rc1Signer struct {
 }
 
 // newRC1 makes the RC1 state at hub time now (ms) with the given number of
-// parts and valve. A time signed before now is refused: nothing this state
-// would have to remember from before it existed is accepted again.
+// parts and valve. A time signed before now is refused (ts_stale, with the
+// floor now − 1), so a request accepted before this state existed is not
+// accepted again when it was signed before now; one signed later than now
+// is not known here.
 func newRC1(now int64, shards int, high, low int64) *rc1State {
 	r := &rc1State{shards: make([]rc1Shard, shards), seed: maphash.MakeSeed(), high: high, low: low}
 	for i := range r.shards {

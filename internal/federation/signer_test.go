@@ -28,7 +28,7 @@ type fakePeer struct {
 	mu        sync.Mutex
 	floor     uint64
 	floorBump uint64
-	staleOnce bool // answer the next request ts_stale whatever its time
+	staleNext int // answer the next this many requests ts_stale whatever their time
 	seen      []uint64
 	srv       *httptest.Server
 }
@@ -59,8 +59,8 @@ func (p *fakePeer) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.seen = append(p.seen, a.ts)
-	if p.staleOnce || a.ts <= p.floor {
-		p.staleOnce = false
+	if p.staleNext > 0 || a.ts <= p.floor {
+		p.staleNext = max(p.staleNext-1, 0)
 		floor := max(p.floor, a.ts) + p.floorBump
 		w.Header().Set(headerTSFloor, strconv.FormatUint(floor, 10))
 		w.Header().Set("Content-Type", "application/json")
@@ -152,11 +152,10 @@ func TestTheSignerSignsAgainAboveAStaleFloorOnce(t *testing.T) {
 	if len(seen) != 2 || seen[0] > floor0 || seen[1] <= floor0 {
 		t.Fatalf("the peer saw %v, want two requests, the second above the floor", seen)
 	}
-	// A second ts_stale on the request signed again is returned as is:
+	// A second ts_stale, on the request signed again, is returned as is:
 	// signing again once is all the client does for one request.
 	p.mu.Lock()
-	p.staleOnce, p.floorBump = true, 0
-	p.floor = uint64(time.Now().UnixMilli()) + 120_000
+	p.staleNext, p.floorBump = 2, 0
 	p.mu.Unlock()
 	resp, err := s.Do(context.Background(), p.self.AID, actionFedKeys,
 		Request{Method: http.MethodGet, URL: p.srv.URL + "/fed/v2/keys/aid:x"})
@@ -167,8 +166,13 @@ func TestTheSignerSignsAgainAboveAStaleFloorOnce(t *testing.T) {
 	p.mu.Lock()
 	n := len(p.seen)
 	p.mu.Unlock()
-	if n != 4 {
-		t.Fatalf("the peer saw %d requests, want 4 (two for this one request)", n)
+	if n != 4 || resp.StatusCode != http.StatusUnauthorized || resp.Header.Get(headerTSFloor) == "" {
+		t.Fatalf("the peer saw %d requests and the answer was %d (floor %q); want 4, two for this one request, and its second ts_stale",
+			n, resp.StatusCode, resp.Header.Get(headerTSFloor))
+	}
+	// The next request is signed above that floor and goes through.
+	if code, err := p.ask(t, s); err != nil || code != http.StatusOK {
+		t.Fatalf("the request after: %d %v, want 200", code, err)
 	}
 }
 

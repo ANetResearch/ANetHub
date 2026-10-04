@@ -156,8 +156,8 @@ func TestRC1DropsASignerOnlyWhenTheWindowCoversItsLargestTime(t *testing.T) {
 
 // What is dropped leaves its largest time as the floor of a signer without
 // state in its part, and a part starts at the time the state was made: a
-// hub clock that steps back by more than MaxSkew, or a restart, does not
-// let an accepted time through again.
+// hub clock that steps back by more than MaxSkew does not let an accepted
+// time through again, nor does a restart one signed before it.
 func TestRC1DroppedTimesStayRefusedWhenTheClockStepsBack(t *testing.T) {
 	r := newRC1(rc1T0, 1, rc1Big, rc1Big)
 	if v, floor := r.accept("s", uint64(rc1T0)-1, rc1KAgent, rc1T0); v != rc1Stale || floor != uint64(rc1T0)-1 {

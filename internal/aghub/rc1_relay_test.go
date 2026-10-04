@@ -192,8 +192,9 @@ func TestRC1RefusalsAndTheFloorComeOnlyAfterTheSignature(t *testing.T) {
 
 // A request signed before this hub's RC1 state existed (before a restart)
 // is refused like one below a floor: the restart forgot what was accepted,
-// and does not accept it again.
-func TestRC1ARestartDoesNotReopenTheWindow(t *testing.T) {
+// and does not accept it again. (One signed ahead of the hub's clock and
+// accepted before the restart is not covered: the state is in memory.)
+func TestRC1ARestartRefusesTimesSignedBeforeIt(t *testing.T) {
 	before := nowMS() - 2_000
 	h := newRC1Hub(t, nil) // started after before was signed: a restart in between
 	a := h.agent()

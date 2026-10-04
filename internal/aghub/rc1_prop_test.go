@@ -15,9 +15,9 @@ import (
 // MaxSkew in the future, random sweeps (the hub's clock jumping forward,
 // and now and then back), and a valve that trips:
 //
-//  1. a time is accepted at most once for a signer, sweeps and clock
-//     steps notwithstanding (after a sweep, nothing accepted before is
-//     accepted again);
+//  1. a time is accepted at most once for a signer, sweeps, clock steps
+//     and the valve notwithstanding (after a sweep, nothing accepted
+//     before is accepted again);
 //  2. a time at or below the signer's floor is never accepted, and a
 //     ts_stale names a floor at or above the time;
 //  3. what a signer is told does not depend on how many other signers
@@ -53,8 +53,8 @@ func TestRC1PropAtMostOnceAndNeverAtOrBelowTheFloor(t *testing.T) {
 			t.Parallel()
 			rng := rand.New(rand.NewPCG(seed, 0x5243_3150))
 			high, low := int64(rc1Big), int64(rc1Big)
-			if rng.IntN(3) == 0 { // a valve that trips now and then
-				high = int64(2000 + rng.IntN(3000))
+			if rng.IntN(3) == 0 { // a valve that trips: a few signers' worth
+				high = int64(300 + rng.IntN(1500))
 				low = high * 7 / 8
 			}
 			shards := 1 + rng.IntN(4)
@@ -80,7 +80,11 @@ func TestRC1PropAtMostOnceAndNeverAtOrBelowTheFloor(t *testing.T) {
 				}
 				var ts uint64
 				switch x := rng.IntN(100); {
-				case x < 30 && len(all) > 0: // a replay of something accepted
+				case x < 15 && len(all) > 0: // a replay of something accepted lately,
+					// still above its signer's floor unless the valve raised it
+					p := all[len(all)-1-rng.IntN(min(len(all), 16))]
+					aid, ts = p.aid, p.ts
+				case x < 30 && len(all) > 0: // a replay of anything accepted
 					p := all[rng.IntN(len(all))]
 					aid, ts = p.aid, p.ts
 				case x < 40: // at or around the floor
