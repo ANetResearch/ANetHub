@@ -35,9 +35,6 @@ func init() {
 		fed.SetKeySource(aghub.StoreKeySource{S: d.store})
 		if fed.Enabled() {
 			d.srv0.SetForwarder(fed.TryForward)
-			// The lookup a sender here needs for a peer's hub-local agent
-			// ([C32]).
-			d.srv0.SetFederatedKeyLookup(fed.LookupKeys)
 			log.Printf("anet-hub federation: delivery=%s peers=%d", cfg.Delivery, len(cfg.Peers))
 		}
 

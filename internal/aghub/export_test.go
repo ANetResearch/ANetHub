@@ -58,3 +58,44 @@ func (s *Store) GateCountsForTest() (signup, trials int, window int) {
 	}
 	return signup, trials, window
 }
+
+// MoveBalanceWithoutEntryForTest reproduces the shape the settlement path
+// left before it wrote ledger entries: a balance that moved with nothing
+// behind it.
+func (s *Store) MoveBalanceWithoutEntryForTest(aid string, delta int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO credit_balance(aid, credits) VALUES(?,?)
+		 ON CONFLICT(aid) DO UPDATE SET credits = credits + ?`, aid, delta, delta)
+	return err
+}
+
+// SetDirBucketRateForTest replaces the per-address bucket of
+// /directory:bucket (DirBucketPerMinute, DirBucketBurst), for a test that
+// queries more often than an address may.
+func (s *Server) SetDirBucketRateForTest(perMinute float64, burst int) {
+	s.dirLimiter = newRateLimiter(perMinute/60, burst)
+}
+
+// SetDirLimiterClockForTest makes the /directory:bucket limiter read f.
+func (s *Server) SetDirLimiterClockForTest(f func() time.Time) {
+	s.dirLimiter.mu.Lock()
+	s.dirLimiter.now = f
+	s.dirLimiter.mu.Unlock()
+}
+
+// ForgetDirMaxBitsForTest makes the next DirMaxBits compute dir_max_bits
+// again, as it does when it is DirMaxBitsEvery old.
+func (s *Store) ForgetDirMaxBitsForTest() {
+	s.dirBits.mu.Lock()
+	s.dirBits.valid = false
+	s.dirBits.mu.Unlock()
+}
+
+// SetDirNoticeForTest makes the directory entries carry the notice f gives
+// (as the notices this hub keeps as a witness will).
+func (s *Store) SetDirNoticeForTest(f func(aid string) []byte) {
+	s.dirNotice = func(_ rowQuerier, aid string) ([]byte, error) { return f(aid), nil }
+}
+
+// DirMaxBitsOfForTest is dirMaxBits over the given 64-bit hash prefixes.
+func DirMaxBitsOfForTest(prefixes []uint64) int { return dirMaxBits(prefixes) }

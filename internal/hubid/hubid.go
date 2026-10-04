@@ -23,6 +23,10 @@ type Identity struct {
 	Ctrl *identity.Controller
 	AID  string
 	KEL  []byte // marshaled KEL (CoreDet-CBOR)
+	// DirMaxBits, when set, is the widest directory bucket prefix this hub
+	// answers (dir_max_bits; aghub.Server.DirMaxBits). Set it before
+	// serving; unset, /hub/identity states 0, the whole directory.
+	DirMaxBits func() int
 }
 
 // LoadOrIncept restores the persisted hub identity or incepts one on first
@@ -67,11 +71,16 @@ type IdentityResponse struct {
 	// daemon or a peer can tell before its first signed request whether
 	// it can talk to this hub at all.
 	Wire int `json:"wire"`
+	// DirMaxBits is the widest prefix, in bits, this hub answers a
+	// directory bucket for (sealed-sender SSR-W18). A daemon caps what it
+	// asks for at a constant of its own whatever this says (SSR-D15a).
+	DirMaxBits int `json:"dir_max_bits"`
 }
 
 // Handler serves GET /hub/identity: the hub's AID + KEL so peers and agents
-// can verify hub-signed objects, and the wire it speaks. Any other method
-// is 404 not_found in the wire-3 error body.
+// can verify hub-signed objects, the wire it speaks and the widest directory
+// bucket it answers. Any other method is 404 not_found in the wire-3 error
+// body.
 //
 // The body is built per request from the identity as it is then, so a KEL
 // that grows (a rotation) is served as it is, never as it was when the
@@ -85,7 +94,11 @@ func (i *Identity) Handler() http.Handler {
 			wire3.Refuse(w, wire3.ReasonNotFound)
 			return
 		}
-		body, err := json.Marshal(IdentityResponse{AID: i.AID, KEL: base64.StdEncoding.EncodeToString(i.KEL), Wire: wire3.Version})
+		out := IdentityResponse{AID: i.AID, KEL: base64.StdEncoding.EncodeToString(i.KEL), Wire: wire3.Version}
+		if i.DirMaxBits != nil {
+			out.DirMaxBits = i.DirMaxBits()
+		}
+		body, err := json.Marshal(out)
 		if err != nil {
 			wire3.Internal(w, err)
 			return

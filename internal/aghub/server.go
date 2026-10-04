@@ -39,17 +39,16 @@ type Server struct {
 	// Only the recipient and the envelope cross: the sender is not
 	// forwarded (§3.9).
 	forwardUnknown func(toAID string, envelope []byte) (bool, string, error)
-	// fedKeys, when set, asks peer hubs for the key set of an AID not
-	// registered here (/fed/v2/keys). Nil in a build without federation.
-	fedKeys FederatedKeyLookup
-	// limits are the §3.7 bounds; sendLimiter, registerLimiter and
-	// keysLimiter are the token buckets they configure; replay is the
-	// relayauth v2 replay protection (RC1, auth2.go).
+	// limits are the §3.7 bounds; sendLimiter and registerLimiter are the
+	// token buckets they configure; replay is the relayauth v2 replay
+	// protection (RC1, auth2.go).
 	limits          Limits
 	sendLimiter     *rateLimiter
 	registerLimiter *rateLimiter
-	keysLimiter     *rateLimiter
 	replay          *rc1State
+	// dirLimiter bounds /directory:bucket per client address
+	// (directory.go; a constant, not one of the limits).
+	dirLimiter *rateLimiter
 	// jwks caches the JWKS derived from each stored KEL (registry.go).
 	jwks *jwksCache
 	// federated, when set, answers discovery with agents learned from
@@ -142,7 +141,8 @@ func (s *Server) SetModules(names []string) {
 // NewServer wraps a store, with DefaultLimits.
 func NewServer(store *Store) *Server {
 	s := &Server{store: store, replay: newRC1(time.Now().UnixMilli(), rc1Shards, rc1MemHigh, rc1MemLow),
-		jwks: newJWKSCache(jwksCacheBytes, a2acard.JWKS)}
+		jwks:       newJWKSCache(jwksCacheBytes, a2acard.JWKS),
+		dirLimiter: newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
@@ -158,7 +158,6 @@ func (s *Server) SetLimits(l Limits) error {
 	s.limits = l
 	s.sendLimiter = newRateLimiter(l.SendRate, l.SendBurst)
 	s.registerLimiter = newRateLimiter(l.RegisterPerMinute/60, l.RegisterBurst)
-	s.keysLimiter = newRateLimiter(l.KeysLookupPerMinute/60, l.KeysLookupBurst)
 	s.store.SetRelayQuota(l.MailboxMessages, l.MailboxBytes)
 	return nil
 }
@@ -247,7 +246,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents", s.hAgents)
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
-	mux.HandleFunc("POST "+KELLookupPath, s.hAgentKELLookup)
 	// The JWKS named by the jku of an agent's A2A card, derived from its
 	// KEL (A2A-DESIGN §10.3, §10.5). See registry.go.
 	mux.HandleFunc("GET /agents/{aid}/jwks.json", s.hJWKS)
@@ -255,8 +253,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents/{aid}/ledger", s.hLedger)
 	// Encryption key sets (§3.7). See keys.go.
 	mux.HandleFunc("GET /agents/{aid}/keys", s.hKeysGet)
-	mux.HandleFunc("POST "+KeysLookupPath, s.hKeysLookup)
 	mux.HandleFunc("POST /agents/{aid}/keys", s.hKeysPost)
+	// The directory, answered by bucket so that no query names the agent
+	// it looks for (sealed-sender §2.9). See directory.go. There is no
+	// lookup by AID for a sender: the routes that took one in the body
+	// and the p2p rendezvous are gone and answer 404 (§2.7).
+	mux.HandleFunc("POST /directory:bucket", s.hDirectoryBucket)
 	mux.HandleFunc("POST /agents/{aid}/visibility", s.hVisibility)
 	// The other half of registration: leaving. See deregister.go.
 	mux.HandleFunc("POST /agents/{aid}/deregister", s.hDeregister)
@@ -264,9 +266,6 @@ func (s *Server) Handler() http.Handler {
 	// its own, which the spec permits outright — and for a ledger rail
 	// there is nothing to separate from, because the balances are here.
 	mux.HandleFunc("GET /x402/supported", s.hX402Supported)
-	mux.HandleFunc("POST /agents/{aid}/p2p", s.hP2PPublish)
-	mux.HandleFunc("GET /agents/{aid}/p2p", s.hP2PLookup)
-	mux.HandleFunc("GET /p2p/peers", s.hP2PDirectory)
 	// Credit going back out, and the arithmetic of what is outstanding.
 	mux.HandleFunc("POST /x402/redeem", s.hRedeem)
 	mux.HandleFunc("GET /x402/supply", s.hSupply)
@@ -301,7 +300,6 @@ func (s *Server) Handler() http.Handler {
 	// (A2A-DESIGN §10.5). See registry.go.
 	mux.HandleFunc("GET /a2a/v1/agents", s.hA2AAgents)
 	mux.HandleFunc("GET /a2a/v1/agents/{aid}/card", s.hA2ACard)
-	mux.HandleFunc("POST "+CardLookupPath, s.hA2ACardLookup)
 	mux.HandleFunc("GET /graph", s.hGraph)
 	mux.HandleFunc("GET /stats", s.hStats)
 	// Relay (wire 2): sealed envelopes only. send is authenticated so the
@@ -483,6 +481,11 @@ func (s *Server) hGraph(w http.ResponseWriter, _ *http.Request) {
 			known[aid] = true
 			agents = append(agents, s.store.GraphNodeFor(aid))
 		}
+	}
+	// The graph draws who reviewed whom. The key material a listing
+	// carries for writing to an agent (kel, keys) is not part of that.
+	for i := range agents {
+		agents[i].KEL, agents[i].Keys, agents[i].KeyStateNotice = "", "", ""
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes": agents, "edges": edges,
@@ -1454,8 +1457,8 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 	if live.Quiet {
 		out.RecipientQuiet = true
 		out.Warning = fmt.Sprintf(
-			"queued, but %s has not collected its mail for %s — it may not be running",
-			req.ToAID, live.QuietFor)
+			"queued, but %s has not collected its mail for over an hour — it may not be running",
+			req.ToAID)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -1523,7 +1526,6 @@ func (s *Server) hRelayAck(w http.ResponseWriter, r *http.Request) {
 // the rendezvous). The v0.2 routes still check them until their replacements land.
 const (
 	actionSendRetired = "send" // v030-todo(SS-4): relay v3 checks a session MAC or a capability
-	actionP2PRetired  = "p2p"  // v030-todo(SS-5): the rendezvous routes are removed
 )
 
 // TaskChallenge is the bytes a taskboard caller signs: the wire-1 challenge
@@ -1625,7 +1627,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 // cors allows the browser-based anetspace web (served by ANY origin — the official page, a local daemon
 // console, or a self-hosted deployment) to call the Hub. Open CORS is safe here because the Hub keeps no
 // browser session/cookie: state-changing endpoints authenticate per request with relayauth v2 signatures
-// (register, profile, visibility, deregister, p2p, keys, relay send/poll/ack) or accept only
+// (register, profile, visibility, deregister, keys, relay send/poll/ack) or accept only
 // self-verifying evidence (reviews), so there is no ambient authority for a cross-origin page to abuse.
 // When exposing a self-hosted Hub to the internet, front it with a reverse proxy for TLS (the body size
 // is capped, see limitBody; per-sender and per-IP rate limits are in limits.go).
@@ -1663,16 +1665,7 @@ func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
 	s.serveAgentKEL(w, r.PathValue("aid"))
 }
 
-// hAgentKELLookup serves POST /agents/kel:lookup: GET /agents/{aid}/kel
-// with the AID in the body (KeysLookupRequest), so that no request line
-// names it [redteam:F3].
-func (s *Server) hAgentKELLookup(w http.ResponseWriter, r *http.Request) {
-	if aid, ok := lookupAID(w, r); ok {
-		s.serveAgentKEL(w, aid)
-	}
-}
-
-// serveAgentKEL answers a KEL lookup for aid (hAgentKEL, hAgentKELLookup).
+// serveAgentKEL answers a KEL lookup for aid (hAgentKEL).
 func (s *Server) serveAgentKEL(w http.ResponseWriter, aid string) {
 	// The hub's own history is served here too.
 	//

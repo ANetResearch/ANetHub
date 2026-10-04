@@ -132,9 +132,8 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	return f
 }
 
-// limits collects the relay limit flags. The per-sender send bucket and the
-// federated key lookup's bucket are fixed values now (sealed-sender SSR-H20,
-// SSR-H21): no flag sets them.
+// limits collects the relay limit flags. The per-sender send bucket is a
+// fixed value now (sealed-sender SSR-H20, SSR-H21): no flag sets it.
 func (f *hubFlags) limits() aghub.Limits {
 	def := aghub.DefaultLimits()
 	return aghub.Limits{
@@ -142,7 +141,6 @@ func (f *hubFlags) limits() aghub.Limits {
 		MailboxMessages: *f.mailboxMessages, MailboxBytes: *f.mailboxBytes,
 		UndeliveredTTL: *f.undeliveredTTL, PollBudget: *f.pollBudget,
 		RegisterPerMinute: *f.registerPerMinute, RegisterBurst: *f.registerBurst,
-		KeysLookupPerMinute: def.KeysLookupPerMinute, KeysLookupBurst: def.KeysLookupBurst,
 	}
 }
 

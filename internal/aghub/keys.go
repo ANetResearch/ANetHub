@@ -2,7 +2,6 @@ package aghub
 
 import (
 	"bytes"
-	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -18,7 +17,6 @@ import (
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/federation"
-	"github.com/ANetResearch/ANetHub/internal/seamerr"
 )
 
 // Encryption key sets (A2A-DESIGN §2 X3, §3.1, §3.7).
@@ -75,40 +73,6 @@ type KeysView struct {
 	KEL    string `json:"kel"`    // base64 (std) of identity.MarshalKEL
 }
 
-// KeysLookupPath is the key-set lookup that names the AID in its body
-// rather than in its path (A2A-DESIGN §3.5 step 1, §3.7). A sender looks up
-// its recipient's key set before the first message and every ten minutes
-// of a conversation, from its own address and without authentication; a
-// reverse proxy logging request lines would write the edge
-// sender-address -> recipient-AID to the hub host's disk if the AID were
-// in the path [redteam:F3]. GET /agents/{aid}/keys answers the same and
-// stays for older daemons and for readers.
-const KeysLookupPath = "/agents/keys:lookup"
-
-// KeysLookupRequest is the POST /agents/keys:lookup body. The answer is a
-// KeysView, as for GET /agents/{aid}/keys. KELLookupPath and
-// CardLookupPath take the same body.
-type KeysLookupRequest struct {
-	AID string `json:"aid"`
-}
-
-// KELLookupPath and CardLookupPath are GET /agents/{aid}/kel and
-// GET /a2a/v1/agents/{aid}/card with the AID in the body
-// (KeysLookupRequest), as KeysLookupPath is for the key set. A daemon asks
-// for a peer's card before it writes to it (the A2A proxy card an A2A
-// client reads first, MCP get_agent_card) and for the peer's KEL to verify
-// that card, from its own address and without authentication; with the
-// AID in the path those two request lines gave a logging proxy the same
-// edge sender-address -> recipient that the key lookup did [redteam:F3].
-// The GETs answer the same and stay for older daemons and for readers.
-const (
-	KELLookupPath  = "/agents/kel:lookup"
-	CardLookupPath = "/a2a/v1/agents/card:lookup"
-)
-
-// keysLookupBodyLimit caps a lookup body: one AID in JSON.
-const keysLookupBodyLimit = 4 << 10
-
 // KeysPublishRequest is the POST /agents/{aid}/keys body.
 type KeysPublishRequest struct {
 	KeySet string `json:"keyset"` // base64 (std) of the seal.SignedEncKeySet encoding
@@ -119,17 +83,6 @@ type KeysPublishResponse struct {
 	AID        string `json:"aid"`
 	KeysStatus string `json:"keys_status"`
 }
-
-// FederatedKeyLookup asks peer hubs for an AID's key set (/fed/v2/keys).
-// accept is called on each answer; an answer it refuses is skipped and the
-// next peer is asked. It returns an error wrapping seamerr.ErrNoKeys
-// (federation.ErrNoKeys is the same value) when no peer holds the AID.
-type FederatedKeyLookup func(ctx context.Context, aid string,
-	accept func(keyset, kel []byte) error) (keyset, kel []byte, peerAID string, err error)
-
-// SetFederatedKeyLookup installs the federation hook for key sets of AIDs
-// not registered here. Nil in a build without federation.
-func (s *Server) SetFederatedKeyLookup(f FederatedKeyLookup) { s.fedKeys = f }
 
 // PublishKeys applies the publisher rule to a key set and stores it.
 // kel is the agent's KEL as this hub holds it. It returns KeysStatusOK or
@@ -192,20 +145,34 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 		return "", fmt.Errorf("%w: seq %d is above %d, the largest this hub stores", ErrKeysInvalid,
 			set.Seq, int64(math.MaxInt64))
 	}
+	if decision == seal.Same && bytes.Equal(canon, storedRaw) {
+		return KeysStatusUnchanged, nil
+	}
+	// The stored set and the agent's directory entry, which carries it
+	// (sealed-sender SSR-H17), change in one transaction.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
 	if decision == seal.Same {
 		// The same set may arrive with a new signature, for example
 		// re-signed after a KEL rotation. The set is unchanged; the
 		// signature just verified against the current KEL, so it replaces
 		// the stored one, which a consumer may no longer accept.
-		if !bytes.Equal(canon, storedRaw) {
-			if _, err := s.db.Exec(`UPDATE agent_keys SET keyset=?, stored_at=? WHERE aid=?`,
-				canon, nowStamp(), aid); err != nil {
-				return "", err
-			}
+		if _, err := tx.Exec(`UPDATE agent_keys SET keyset=?, stored_at=? WHERE aid=?`,
+			canon, nowStamp(), aid); err != nil {
+			return "", err
+		}
+		if err := s.refreshDirTx(tx, aid); err != nil {
+			return "", err
+		}
+		if err := tx.Commit(); err != nil {
+			return "", err
 		}
 		return KeysStatusUnchanged, nil
 	}
-	if _, err := s.db.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO agent_keys(aid, seq, keyset, stored_at) VALUES(?,?,?,?)
 		 ON CONFLICT(aid) DO UPDATE SET seq=excluded.seq, keyset=excluded.keyset, stored_at=excluded.stored_at`,
 		aid, set.Seq, canon, nowStamp()); err != nil {
@@ -214,12 +181,18 @@ func (s *Store) PublishKeys(aid string, raw []byte, kel []identity.SignedEvent, 
 	// A federating agent's card entry carries its key set (§3.9), and the
 	// A2A card stream is ordered by fed_seq, so the card is moved to the
 	// head of the stream for peers to pick up the new set.
-	if fed, err := agentFederates(s.db, aid); err != nil {
+	if fed, err := agentFederates(tx, aid); err != nil {
 		return "", err
 	} else if fed {
-		if err := bumpA2ACard(s.db, aid); err != nil {
+		if err := bumpA2ACard(tx, aid); err != nil {
 			return "", err
 		}
+	}
+	if err := s.refreshDirTx(tx, aid); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
 	}
 	return KeysStatusOK, nil
 }
@@ -280,23 +253,6 @@ func (s *Store) LocalKeys(aid string) (keyset, kel []byte, registered bool, err 
 	return keyset, kel, true, nil
 }
 
-// verifyKeysFor checks a key set and KEL for aid as a sender would. The
-// hub runs it on key sets it did not receive from their owner (a peer's
-// card sync, a federated lookup) before serving them, so that it does not
-// relay a set the requester will refuse. The requester verifies again.
-func verifyKeysFor(aid string, keyset, kel []byte) error {
-	signed, err := seal.UnmarshalSignedEncKeySet(keyset)
-	if err != nil {
-		return err
-	}
-	events, err := seal.ParseKEL(kel)
-	if err != nil {
-		return err
-	}
-	_, err = seal.VerifyEncKeySet(signed, aid, events, uint64(time.Now().UnixMilli()))
-	return err
-}
-
 func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 	writeJSON(w, http.StatusOK, KeysView{
 		AID:    aid,
@@ -305,102 +261,39 @@ func writeKeys(w http.ResponseWriter, aid string, keyset, kel []byte) {
 	})
 }
 
-// hKeysGet serves GET /agents/{aid}/keys; POST /agents/keys:lookup
-// (hKeysLookup) is the same with the AID in the body.
+// hKeysGet serves GET /agents/{aid}/keys: the key set and KEL of an agent
+// registered here.
 //
-// Sources, in order: an agent registered here; a key set that arrived with
-// a peer's A2A card stream; a /fed/v2/keys lookup at the peer hubs. The
-// last one covers agents whose card is not federated (the default
-// hub-local visibility), which a cross-hub sender can otherwise never
-// encrypt to ([C32]). Its answer is relayed to this caller and not stored:
-// it does not enter fed_a2a_card, /agents or any index.
+// It is a route for people and for an agent's own daemon (sealed-sender
+// SSR-W16). A sender does not look up a peer by AID: it reads the peer's
+// entry from a directory bucket (directory.go), which does not name the
+// peer. So this answers only for agents registered here; it no longer asks
+// peer hubs, nor serves key sets learned from them (§2.7).
 func (s *Server) hKeysGet(w http.ResponseWriter, r *http.Request) {
-	s.serveKeys(w, r, r.PathValue("aid"))
-}
-
-// hKeysLookup serves POST /agents/keys:lookup: GET /agents/{aid}/keys with
-// the AID in the body (KeysLookupRequest), so that no request line names it.
-func (s *Server) hKeysLookup(w http.ResponseWriter, r *http.Request) {
-	if aid, ok := lookupAID(w, r); ok {
-		s.serveKeys(w, r, aid)
-	}
-}
-
-// lookupAID reads the body of a lookup that names its AID in the body
-// (KeysLookupRequest: KeysLookupPath, KELLookupPath, CardLookupPath). On
-// failure it writes the refusal and returns false.
-func lookupAID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	body, err := readAllLimited(w, r, keysLookupBodyLimit)
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-				"error": fmt.Sprintf("a lookup body is at most %d bytes", keysLookupBodyLimit)})
-			return "", false
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reading request body: " + err.Error()})
-		return "", false
-	}
-	var req KeysLookupRequest
-	if err := json.Unmarshal(body, &req); err != nil || req.AID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": `body must be {"aid": "<AID>"}`})
-		return "", false
-	}
-	return req.AID, true
-}
-
-// serveKeys answers a key-set lookup for aid (hKeysGet, hKeysLookup).
-func (s *Server) serveKeys(w http.ResponseWriter, r *http.Request, aid string) {
+	aid := r.PathValue("aid")
 	keyset, kel, registered, err := s.store.LocalKeys(aid)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if registered {
-		if keyset == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{
-				"error": aid + " is registered here and has published no encryption key set"})
-			return
-		}
-		// A key history stored before /register capped it is not
-		// served: no sender accepts it (seal.ParseKEL) [redteam:F36].
-		if _, err := seal.ParseKEL(kel); err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{
-				"error": aid + "'s key history on this hub is not one a sender accepts: " + err.Error()})
-			return
-		}
-		writeKeys(w, aid, keyset, kel)
+	if !registered {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": aid + " is not registered here; this hub serves the key sets of its own agents only"})
 		return
 	}
-	if ks, kl, err := s.store.FedA2ACardKeys(aid); err == nil && verifyKeysFor(aid, ks, kl) == nil {
-		writeKeys(w, aid, ks, kl)
+	if keyset == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": aid + " is registered here and has published no encryption key set"})
 		return
 	}
-	if s.fedKeys != nil {
-		// The federated lookup sends one signed request to each peer
-		// hub, on behalf of an unauthenticated caller, so it is bounded
-		// per client address (Limits.KeysLookupPerMinute).
-		if ok, wait := s.keysLimiter.allow(clientIP(r)); !ok {
-			w.Header().Set("Retry-After", retryAfter(wait))
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{
-				"error": "too many key lookups for agents registered at other hubs from this address; retry later"})
-			return
-		}
-		ks, kl, _, err := s.fedKeys(r.Context(), aid, func(ks, kl []byte) error {
-			return verifyKeysFor(aid, ks, kl)
-		})
-		if err == nil {
-			writeKeys(w, aid, ks, kl)
-			return
-		}
-		if !errors.Is(err, seamerr.ErrNoKeys) {
-			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": "federated key lookup failed: " + err.Error()})
-			return
-		}
+	// A key history stored before /register capped it is not served: no
+	// sender accepts it (seal.ParseKEL) [redteam:F36].
+	if _, err := seal.ParseKEL(kel); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": aid + "'s key history on this hub is not one a sender accepts: " + err.Error()})
+		return
 	}
-	writeJSON(w, http.StatusNotFound, map[string]string{
-		"error": "no encryption key set for " + aid + " here or at any peer hub"})
+	writeKeys(w, aid, keyset, kel)
 }
 
 // hKeysPost serves POST /agents/{aid}/keys: the agent publishes a new key

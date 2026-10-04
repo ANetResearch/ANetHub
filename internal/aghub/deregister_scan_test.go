@@ -99,7 +99,7 @@ func tablesNaming(t *testing.T, db *sql.DB, aid string) []string {
 
 // TestDeregRemovesEveryAIDKeyedRow (PAY-O1): an agent with everything a hub
 // keeps for it — capabilities, both cards on federating streams, a key set,
-// a p2p address, mail waiting, credit, reviews as subject and as reviewer,
+// a directory entry, mail waiting, credit, reviews as subject and as reviewer,
 // an admission, revoked delivery credentials, a raised quota — is
 // deregistered for each reason; afterwards its AID is
 // only in the tables of deregAllowed (read row by row), and the raw bytes
@@ -119,8 +119,8 @@ func TestDeregRemovesEveryAIDKeyedRow(t *testing.T) {
 			if code, b := publishKeys(t, srv, x, raw); code != http.StatusOK {
 				t.Fatalf("keys: %d %s", code, b)
 			}
-			if code, b := publishAddr(t, srv, x, "/ip4/192.0.2.9/tcp/4001"); code != http.StatusOK {
-				t.Fatalf("p2p address: %d %s", code, b)
+			if lookUpInBucket(t, srv, x.AID(), "") == nil {
+				t.Fatal("setup: the agent has no directory entry")
 			}
 			if code, b, _ := relaySend(t, srv, y, x.AID(), testEnvelope(t, x.AID(), nil)); code != http.StatusOK {
 				t.Fatalf("send: %d %s", code, b)
@@ -132,7 +132,7 @@ func TestDeregRemovesEveryAIDKeyedRow(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if got := tablesNaming(t, store.DBForTest(), x.AID()); len(got) < 14 {
+			if got := tablesNaming(t, store.DBForTest(), x.AID()); len(got) < 13 {
 				t.Fatalf("setup: the agent is in only %v", got)
 			}
 			tx, err := store.DBForTest().Begin()
@@ -170,8 +170,8 @@ func TestDeregRemovesEveryAIDKeyedRow(t *testing.T) {
 			if store.KnowsAgent(x.AID()) {
 				t.Error("still registered")
 			}
-			if code, _ := getJSON(t, srv.URL+"/agents/"+x.AID()+"/p2p"); code != http.StatusNotFound {
-				t.Errorf("its p2p address is still served (%d)", code)
+			if lookUpInBucket(t, srv, x.AID(), "") != nil {
+				t.Error("its directory entry is still served")
 			}
 			if n := revocationCount(t, store, x.AID()); n != 0 {
 				t.Errorf("after %s it still has %d revocations", why, n)

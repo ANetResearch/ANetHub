@@ -67,6 +67,10 @@ func (s *Store) WithdrawA2ACard(aid string) error {
 			return err
 		}
 	}
+	// The directory entry no longer carries it (sealed-sender SSR-H17).
+	if err := s.refreshDirTx(tx, aid); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

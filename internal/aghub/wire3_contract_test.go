@@ -97,19 +97,19 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("POST", "/relay/status", nil, "v030-todo(RC-3)"),
 		req("POST", "/mailbox/revoke", reflect.TypeFor[MailboxRevokeRequest](), ""),
 		resp("POST", "/mailbox/revoke", reflect.TypeFor[MailboxRevokeResponse](), ""),
-		req("POST", "/directory:bucket", nil, "v030-todo(SS-5)"),
-		resp("POST", "/directory:bucket", nil, "v030-todo(SS-5)"),
+		req("POST", "/directory:bucket", reflect.TypeFor[DirBucketRequest](), ""),
+		resp("POST", "/directory:bucket", reflect.TypeFor[DirBucketResponse](), ""),
 		req("POST", "/register", reflect.TypeFor[RegisterRequest](), ""),
 		{"POST", "/register", true, "registration", reflect.TypeFor[RegisterResponse](), "v030-todo(KEL-5)"},
 		{"POST", "/register", true, "check_only", reflect.TypeFor[CheckOnlyResponse](), ""},
 		req("POST", "/agents/{aid}/keys", reflect.TypeFor[KeysPublishRequest](), "v030-todo(FS-3)"),
 		req("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
 		resp("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
-		resp("GET", "/hub/identity", reflect.TypeFor[hubid.IdentityResponse](), "v030-todo(SS-5)"),
+		resp("GET", "/hub/identity", reflect.TypeFor[hubid.IdentityResponse](), ""),
 		resp("GET", "/hub/kels", nil, "v030-todo(KEL-7)"),
 		resp("GET", "/agents/{aid}/kel", nil, "v030-todo(KEL-5)"),
-		resp("GET", "/a2a/v1/agents", nil, "v030-todo(SS-5)"),
-		resp("GET", "/agents", nil, "v030-todo(SS-5)"),
+		resp("GET", "/a2a/v1/agents", reflect.TypeFor[A2AAgentEntry](), ""), // per entry
+		resp("GET", "/agents", reflect.TypeFor[AgentView](), ""),            // per entry
 		resp("GET", "/agents/{aid}/balance", reflect.TypeFor[Balance](), ""),
 		resp("GET", "/agents/{aid}/ledger", nil, "v030-todo(PAY-4)"),
 		resp("GET", "/agents/{aid}/redemptions", nil, "v030-todo(PAY-4)"),
@@ -433,6 +433,7 @@ func wire3Hub(t *testing.T) (*wire3test.Env, *Store, map[string]*identity.Contro
 	s.SetHubAID(id.AID)
 	t.Cleanup(func() { store.Close() })
 	root := http.NewServeMux()
+	id.DirMaxBits = s.DirMaxBits // as cmd/anet-hub newRoot does
 	root.Handle("/hub/identity", id.Handler())
 	root.Handle("/", s.Handler())
 

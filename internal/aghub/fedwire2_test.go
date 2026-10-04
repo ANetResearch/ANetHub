@@ -1,8 +1,6 @@
 package aghub_test
 
 import (
-	"bytes"
-	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -50,18 +48,17 @@ type fedHubNode struct {
 	h     http.Handler
 }
 
-// twoFederatedHubs starts hubs A and B peered for delivery. keyLookup
-// controls whether A installs the federated key lookup.
-func twoFederatedHubs(t *testing.T, keyLookup bool) (a, b *fedHubNode) {
+// twoFederatedHubs starts hubs A and B peered for delivery.
+func twoFederatedHubs(t *testing.T) (a, b *fedHubNode) {
 	t.Helper()
-	return federatedHubs(t, keyLookup, false)
+	return federatedHubs(t, false)
 }
 
 // federatedHubs is twoFederatedHubs, with the discovery sub-plane on as
 // well when discovery is set: each hub publishes its directory with its
 // own URL as home, pulls the other's (n.fed.SyncOnce), and lists what it
 // learned, as wire_federation.go wires it.
-func federatedHubs(t *testing.T, keyLookup, discovery bool) (a, b *fedHubNode) {
+func federatedHubs(t *testing.T, discovery bool) (a, b *fedHubNode) {
 	t.Helper()
 	mk := func() *fedHubNode {
 		n := &fedHubNode{dir: t.TempDir()}
@@ -88,7 +85,7 @@ func federatedHubs(t *testing.T, keyLookup, discovery bool) (a, b *fedHubNode) {
 		return n
 	}
 	a, b = mk(), mk()
-	wire := func(n, peer *fedHubNode, lookup bool) {
+	wire := func(n, peer *fedHubNode) {
 		cfg := federation.Config{Delivery: "allowlist",
 			Peers: []federation.Peer{{AID: peer.id.AID, Endpoint: peer.srv.URL}}}
 		if discovery {
@@ -105,9 +102,6 @@ func federatedHubs(t *testing.T, keyLookup, discovery bool) (a, b *fedHubNode) {
 		t.Cleanup(func() { _ = fed.Close() })
 		fed.SetKeySource(aghub.StoreKeySource{S: n.store})
 		n.s.SetForwarder(fed.TryForward)
-		if lookup {
-			n.s.SetFederatedKeyLookup(fed.LookupKeys)
-		}
 		n.fed = fed
 		mux := http.NewServeMux()
 		mux.Handle("/hub/identity", n.id.Handler())
@@ -116,17 +110,19 @@ func federatedHubs(t *testing.T, keyLookup, discovery bool) (a, b *fedHubNode) {
 		mux.Handle("/", n.s.Handler())
 		n.h = mux
 	}
-	wire(a, b, keyLookup)
-	wire(b, a, keyLookup)
+	wire(a, b)
+	wire(b, a)
 	return a, b
 }
 
-// A sender on hub A can fetch the key set of an agent registered on hub
-// B with the default hub-local visibility, seal to it, and have the
-// envelope forwarded; the agent is not listed at A and nothing about it is
-// stored there ([C32]).
+// A sender on hub A writes to an agent registered on hub B with the default
+// hub-local visibility: it seals to the key set B publishes for its agent
+// (which a daemon reads from a directory bucket), sends at A, and the
+// envelope is forwarded to B. Hub A serves nothing of the agent: not its
+// keys (it answers only for its own agents, sealed-sender §2.7), not a
+// listing, and it stores nothing about it ([C32]).
 func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
-	a, b := twoFederatedHubs(t, true)
+	a, b := twoFederatedHubs(t)
 	recip, sender := twoAgents(t)
 	register(t, b.srv, recip, "Provider", []string{"work.do"})
 	register(t, a.srv, sender, "Requester", nil)
@@ -135,27 +131,27 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 		t.Fatalf("publish at B: %d %s", code, body)
 	}
 
-	code, body := getJSON(t, a.srv.URL+"/agents/"+recip.AID()+"/keys")
+	if code, body := getJSON(t, a.srv.URL+"/agents/"+recip.AID()+"/keys"); code != http.StatusNotFound {
+		t.Fatalf("keys of a peer's agent, asked at A: %d %s, want 404", code, body)
+	}
+	code, body := getJSON(t, b.srv.URL+"/agents/"+recip.AID()+"/keys")
 	if code != 200 {
-		t.Fatalf("keys of a hub-local agent on a peer: %d %s", code, body)
+		t.Fatalf("keys at the agent's own hub: %d %s", code, body)
 	}
 	var view aghub.KeysView
 	if err := json.Unmarshal(body, &view); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
-	if !bytes.Equal(raw, recipKeys) || view.AID != recip.AID() {
-		t.Fatalf("hub A relayed a different key set: %+v", view)
-	}
 	// Nothing about the agent became part of A's directory.
 	if listedContains(t, a.srv, recip.AID()) {
-		t.Error("the looked-up agent is listed at A")
+		t.Error("the peer's agent is listed at A")
 	}
 	if _, _, err := a.store.FedA2ACardKeys(recip.AID()); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("the lookup was stored at A: %v", err)
+		t.Errorf("something about the peer's agent was stored at A: %v", err)
 	}
 
-	// Seal with what A served, send at A, collect at B.
+	// Seal to what B publishes, send at A, collect at B.
+	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
 	kelRaw, _ := base64.StdEncoding.DecodeString(view.KEL)
 	events, _ := identity.UnmarshalKEL(kelRaw)
 	signed, _ := seal.UnmarshalSignedEncKeySet(raw)
@@ -187,38 +183,5 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 			[]byte(sender.AID())).Scan(&hits); err != nil || hits != 0 {
 			t.Errorf("a relay row names the sender: %d %v", hits, err)
 		}
-	}
-}
-
-// Without the federated lookup the same request is 404: the lookup, not
-// some other path, is what serves a hub-local agent's keys to a peer.
-func TestWithoutTheFederatedLookupAPeersHubLocalAgentHasNoKeys(t *testing.T) {
-	a, b := twoFederatedHubs(t, false)
-	recip, _ := twoAgents(t)
-	register(t, b.srv, recip, "Provider", []string{"work.do"})
-	k, _ := mintKeySet(t, recip, 1)
-	if code, body := publishKeys(t, b.srv, recip, k); code != 200 {
-		t.Fatalf("publish: %d %s", code, body)
-	}
-	if code, body := getJSON(t, a.srv.URL+"/agents/"+recip.AID()+"/keys"); code != http.StatusNotFound {
-		t.Fatalf("without the lookup: %d %s, want 404", code, body)
-	}
-}
-
-// A key set a peer serves is relayed only when it verifies for the AID
-// that was asked for; another AID's valid set is not passed off as it.
-func TestAPeersKeySetForAnotherAIDIsNotRelayed(t *testing.T) {
-	srv := newHub(t)
-	asked, other := twoAgents(t)
-	otherKeys, _ := mintKeySet(t, other, 1)
-	otherKEL, _ := identity.MarshalKEL(other.KEL())
-	serverOf(t, srv).SetFederatedKeyLookup(func(_ context.Context, aid string, accept func(ks, kel []byte) error) ([]byte, []byte, string, error) {
-		if err := accept(otherKeys, otherKEL); err != nil {
-			return nil, nil, "", fmt.Errorf("peer answer refused: %w", err)
-		}
-		return otherKeys, otherKEL, "did:anet:peer", nil
-	})
-	if code, body := getJSON(t, srv.URL+"/agents/"+asked.AID()+"/keys"); code == http.StatusOK {
-		t.Fatalf("another AID's key set was relayed: %s", body)
 	}
 }

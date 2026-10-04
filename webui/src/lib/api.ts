@@ -13,7 +13,7 @@ export interface AgentView {
   // 只在从对等 hub 学来的条目上有:这个 agent 住在哪个 hub。
   // 空表示本 hub。缺了它,页面就分不清本地和联邦来的 agent。
   home_hub?: string;
-  // 它最后一次取信的时间,以及是否已经很久没取了。
+  // 它最后一次取信的时间(只到小时),以及是否已经很久没取了。
   // 一个只列出 agent 而不说谁已经不再应答的目录,是在让人去等死人。
   last_seen?: string;
   quiet?: boolean;
@@ -25,6 +25,11 @@ export interface AgentView {
   // 只在 /graph 的节点上有意义:false 表示这个 agent 已不在本 hub 注册
   // —— 它离开了,或长期未取信。它的评价仍在,因为那些记录的是发生过的事。
   registered?: boolean;
+  // 给它写信要用的密钥历史、加密钥集与见证通告(base64url),供 daemon
+  // 直接取用而不必再按 AID 查询。页面不读它们。
+  kel?: string;
+  keys?: string;
+  key_state_notice?: string;
 }
 
 // 一条已验证的评价。hub 不持有交互内容(A2A-DESIGN §9):没有 goal、没有

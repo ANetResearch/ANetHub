@@ -34,7 +34,6 @@ var authRoutes = []authRoute{
 	{http.MethodGet, relayauth.ActionLedger, func(a string) string { return "/agents/" + a + "/ledger" }},
 	{http.MethodGet, relayauth.ActionRedemptions, func(a string) string { return "/agents/" + a + "/redemptions" }},
 	{http.MethodPost, relayauth.ActionVisibility, func(a string) string { return "/agents/" + a + "/visibility" }},
-	{http.MethodPost, actionP2P, func(a string) string { return "/agents/" + a + "/p2p" }},
 }
 
 // Tamper bits of FuzzHubRelayAuthV2.

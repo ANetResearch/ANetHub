@@ -380,6 +380,10 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 			if err := clearA2AWithdrawal(tx, aid); err != nil {
 				return CardStatusInvalid, "not stored: " + err.Error()
 			}
+			// A delisted card listed again is back in the directory entry.
+			if err := s.refreshDirTx(tx, aid); err != nil {
+				return CardStatusInvalid, "not stored: " + err.Error()
+			}
 			if err := tx.Commit(); err != nil {
 				return CardStatusInvalid, "not stored: " + err.Error()
 			}
@@ -390,6 +394,10 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 		// the new bytes replace it. Same rule as keys.go.
 	}
 	if err := storeAdmittedA2ACard(tx, aid, raw, v, now); err != nil {
+		return CardStatusInvalid, "not stored: " + err.Error()
+	}
+	// The directory entry carries the card (sealed-sender SSR-H17).
+	if err := s.refreshDirTx(tx, aid); err != nil {
 		return CardStatusInvalid, "not stored: " + err.Error()
 	}
 	if err := tx.Commit(); err != nil {
@@ -458,6 +466,10 @@ func (s *Store) recheckA2ACard(aid string, kel []identity.SignedEvent, now time.
 			if err := withdrawA2ACard(tx, aid, withdrawDelisted); err != nil {
 				return err
 			}
+		}
+		// The directory entry no longer carries it (sealed-sender SSR-H17).
+		if err := s.refreshDirTx(tx, aid); err != nil {
+			return err
 		}
 		return tx.Commit()
 	}
