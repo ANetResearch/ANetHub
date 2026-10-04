@@ -89,8 +89,7 @@ type DirBucketEntry struct {
 // DirBucketResponse is the /directory:bucket answer. Next is set when the
 // bucket continues on another page. Partial is set (only ever true) when a
 // peer hub's part of the bucket is missing from it, which a reader must not
-// take for "no such agent" (SSR-W21); a hub answers partial only once it
-// merges its peers' buckets (federation v3).
+// take for "no such agent" (SSR-W21).
 type DirBucketResponse struct {
 	MaxBits uint             `json:"max_bits"`
 	Entries []DirBucketEntry `json:"entries"`
@@ -411,7 +410,10 @@ func hasIdentityHeaders(r *http.Request) bool {
 //     bits at most 256: 400 bad_request;
 //  5. bits at most dir_max_bits: 400 bucket_too_narrow with max_bits;
 //  6. a cursor this hub gave for this bucket: 400 bad_request;
-//  7. 200 with the bucket's entries, a page at a time.
+//  7. 200 with the bucket's entries, a page at a time: this hub's own and
+//     its delivery peers' for the same bucket (mergedBucket, SSR-W19), with
+//     partial when a peer did not answer and nothing it answered is cached
+//     (SSR-W21).
 func (s *Server) hDirectoryBucket(w http.ResponseWriter, r *http.Request) {
 	if ok, wait := s.dirLimiter.allow(clientIP(r)); !ok {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait,
@@ -422,34 +424,70 @@ func (s *Server) hDirectoryBucket(w http.ResponseWriter, r *http.Request) {
 		wire3.Refuse(w, wire3.ReasonIdentityHeadersNotAllowed)
 		return
 	}
-	var req DirBucketRequest
-	if !wire3.ReadStrict(w, r, dirBucketBodyLimit, &req) {
+	body, ok := wire3.ReadBody(w, r, dirBucketBodyLimit)
+	if !ok {
 		return
+	}
+	q, ok := s.decodeBucketQuery(w, body)
+	if !ok {
+		return
+	}
+	entries, next, partial, err := s.mergedBucket(r.Context(), q.prefix, q.bits, q.after)
+	if err != nil {
+		wire3.Internal(w, err)
+		return
+	}
+	out := DirBucketResponse{MaxBits: uint(q.maxBits), Entries: entries, Partial: partial}
+	if next != nil {
+		out.Next = wire3.EncodeB64URL(next)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// bucketQuery is a decoded and checked bucket request.
+type bucketQuery struct {
+	prefix  []byte
+	bits    int
+	maxBits int
+	after   []byte
+}
+
+// decodeBucketQuery decodes and checks a bucket request body (steps 3 to 6
+// of hDirectoryBucket): strictly, with prefix and bits; prefix in base64url,
+// ceil(bits/8) bytes with the bits past bits zero, bits at most 256 (400
+// bad_request); bits at most this hub's dir_max_bits (400
+// bucket_too_narrow, with max_bits); a cursor inside the bucket (400
+// bad_request). It writes the refusal and answers false.
+func (s *Server) decodeBucketQuery(w http.ResponseWriter, body []byte) (bucketQuery, bool) {
+	var req DirBucketRequest
+	if err := wire3.DecodeStrict(body, &req); err != nil {
+		wire3.RefuseDecode(w, err)
+		return bucketQuery{}, false
 	}
 	if req.Prefix == nil || req.Bits == nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
 			Error: "A directory query carries prefix and bits; add them and send again."})
-		return
+		return bucketQuery{}, false
 	}
 	prefix, err := wire3.DecodeB64URL("prefix", *req.Prefix)
 	if err != nil {
 		wire3.RefuseDecode(w, err)
-		return
+		return bucketQuery{}, false
 	}
 	if *req.Bits > dirbox.HashBits || dirbox.CheckPrefix(prefix, int(*req.Bits)) != nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
 			Error: "The member \"prefix\" must be the first ceil(bits/8) bytes of a directory hash with the bits past bits set to zero; send that prefix and send again."})
-		return
+		return bucketQuery{}, false
 	}
 	bits := int(*req.Bits)
 	maxBits, err := s.store.DirMaxBits()
 	if err != nil {
 		wire3.Internal(w, err)
-		return
+		return bucketQuery{}, false
 	}
 	if bits > maxBits {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBucketTooNarrow, Extra: map[string]any{"max_bits": maxBits}})
-		return
+		return bucketQuery{}, false
 	}
 	var after []byte
 	if req.Cursor != "" {
@@ -458,19 +496,10 @@ func (s *Server) hDirectoryBucket(w http.ResponseWriter, r *http.Request) {
 		if err != nil || len(after) != dirbox.HashLen || bytes.Compare(after, lo) < 0 || bytes.Compare(after, hi) > 0 {
 			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
 				Error: "The member \"cursor\" is not one this hub gave for this bucket; query the bucket again without it."})
-			return
+			return bucketQuery{}, false
 		}
 	}
-	entries, next, err := s.store.DirBucket(prefix, bits, after)
-	if err != nil {
-		wire3.Internal(w, err)
-		return
-	}
-	out := DirBucketResponse{MaxBits: uint(maxBits), Entries: entries}
-	if next != nil {
-		out.Next = wire3.EncodeB64URL(next)
-	}
-	writeJSON(w, http.StatusOK, out)
+	return bucketQuery{prefix: prefix, bits: bits, maxBits: maxBits, after: after}, true
 }
 
 // DirMaxBits is the store's dir_max_bits for GET /hub/identity. A failure

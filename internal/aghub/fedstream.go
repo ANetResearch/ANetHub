@@ -2,7 +2,6 @@ package aghub
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,15 +162,11 @@ func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // seq with different content is ignored. In every case the set must pass
 // seal.VerifyEncKeySet with expectAID = aid against the entry's KEL, so a
 // peer cannot attach another AID's keys to this card.
-func fedKeysToStore(aid, incomingB64 string, stored []byte, kel []identity.SignedEvent) []byte {
-	if incomingB64 == "" {
+func fedKeysToStore(aid string, incoming, stored []byte, kel []identity.SignedEvent) []byte {
+	if len(incoming) == 0 {
 		return stored
 	}
-	raw, err := base64.StdEncoding.DecodeString(incomingB64)
-	if err != nil {
-		return stored
-	}
-	signed, err := seal.UnmarshalSignedEncKeySet(raw)
+	signed, err := seal.UnmarshalSignedEncKeySet(incoming)
 	if err != nil {
 		return stored
 	}

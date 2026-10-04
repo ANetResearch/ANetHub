@@ -51,7 +51,7 @@ func (p *fakePeer) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsigned", http.StatusUnauthorized)
 		return
 	}
-	pre := relayauth.PreimageV2(actionFedKeys, a.aid, p.self.AID, a.ts, r.Method, r.URL.RequestURI(), nil)
+	pre := relayauth.PreimageV2(relayauth.ActionFedCards, a.aid, p.self.AID, a.ts, r.Method, r.URL.RequestURI(), nil)
 	if err := identity.VerifyObject(p.signer.Ctrl.KEL(), a.aid, a.seq, a.ts, pre, a.sig); err != nil {
 		http.Error(w, "bad signature", http.StatusUnauthorized)
 		return
@@ -74,8 +74,8 @@ func (p *fakePeer) serve(w http.ResponseWriter, r *http.Request) {
 
 func (p *fakePeer) ask(t *testing.T, s *Signer) (int, error) {
 	t.Helper()
-	resp, err := s.Do(context.Background(), p.self.AID, actionFedKeys,
-		Request{Method: http.MethodGet, URL: p.srv.URL + "/fed/v2/keys/aid:x"})
+	resp, err := s.Do(context.Background(), p.self.AID, relayauth.ActionFedCards,
+		Request{Method: http.MethodGet, URL: p.srv.URL + "/fed/v3/cards"})
 	if err != nil {
 		return 0, err
 	}
@@ -107,8 +107,8 @@ func TestTheSignerHandsEachPeerIncreasingTimes(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 8; j++ {
-				resp, err := s.Do(context.Background(), p.self.AID, actionFedKeys,
-					Request{Method: http.MethodGet, URL: p.srv.URL + "/fed/v2/keys/aid:x"})
+				resp, err := s.Do(context.Background(), p.self.AID, relayauth.ActionFedCards,
+					Request{Method: http.MethodGet, URL: p.srv.URL + "/fed/v3/cards"})
 				if err != nil {
 					errs <- err
 					return
@@ -157,8 +157,8 @@ func TestTheSignerSignsAgainAboveAStaleFloorOnce(t *testing.T) {
 	p.mu.Lock()
 	p.staleNext, p.floorBump = 2, 0
 	p.mu.Unlock()
-	resp, err := s.Do(context.Background(), p.self.AID, actionFedKeys,
-		Request{Method: http.MethodGet, URL: p.srv.URL + "/fed/v2/keys/aid:x"})
+	resp, err := s.Do(context.Background(), p.self.AID, relayauth.ActionFedCards,
+		Request{Method: http.MethodGet, URL: p.srv.URL + "/fed/v3/cards"})
 	if err != nil {
 		t.Fatal(err)
 	}

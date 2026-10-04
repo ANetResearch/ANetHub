@@ -42,7 +42,7 @@ import (
 // (a2acard.go) while AgentView.Browsable lists them. Every query joins the
 // agent table, so a card whose agent row an operator deleted is not
 // served. On a hub whose discovery federation is on, the listed A2A cards
-// learned from peers (/fed/v2/cards, fed_a2acard.go) appear too, with the
+// learned from peers (/fed/v3/cards, fed_a2acard.go) appear too, with the
 // home hub they live on, unless the agent is registered here: an agent
 // registered here speaks for itself.
 //

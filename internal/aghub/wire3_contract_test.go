@@ -26,6 +26,7 @@ import (
 	"github.com/ANetResearch/ANetCore/wire"
 	"github.com/ANetResearch/ANetCore/wire/scan"
 
+	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 	"github.com/ANetResearch/ANetHub/internal/wire3/wire3test"
@@ -118,13 +119,13 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("GET", "/agents/{aid}/liability-proof", nil, "v030-todo(PAY-3)"),
 		req("POST", "/reviews", reflect.TypeFor[UploadReviewRequest](), "v030-todo(PAY-6)"),
 		resp("POST", "/reviews", nil, "v030-todo(PAY-6)"),
-		resp("POST", "/fed/v3/forward", nil, "v030-todo(SS-6)"),
-		req("POST", "/fed/v3/directory:bucket", nil, "v030-todo(SS-6)"),
-		resp("POST", "/fed/v3/directory:bucket", nil, "v030-todo(SS-6)"),
+		resp("POST", "/fed/v3/forward", reflect.TypeFor[FedForwardResponse](), ""),
+		req("POST", "/fed/v3/directory:bucket", reflect.TypeFor[DirBucketRequest](), ""),
+		resp("POST", "/fed/v3/directory:bucket", reflect.TypeFor[FedBucketResponse](), ""),
 		req("POST", "/fed/v3/relay-status", nil, "v030-todo(RC-3)"),
 		resp("POST", "/fed/v3/relay-status", nil, "v030-todo(RC-3)"),
 		resp("GET", "/fed/v3/reviews", nil, "v030-todo(PAY-6)"),
-		resp("GET", "/fed/v3/cards", nil, "v030-todo(SS-6)"),
+		resp("GET", "/fed/v3/cards", reflect.TypeFor[federation.FedA2ACardEntry](), ""), // per entry
 	}
 	covered := map[string]bool{}
 	for _, rw := range rows {

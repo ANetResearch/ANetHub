@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,23 +16,8 @@ import (
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
-
-// fedDelivery adapts a store to federation.LocalDelivery the way
-// cmd/anet-hub does, including the error mapping.
-type fedDelivery struct{ s *aghub.Store }
-
-func (d fedDelivery) HasAgent(aid string) bool { _, err := d.s.AgentKEL(aid); return err == nil }
-func (d fedDelivery) Enqueue(to string, env []byte) (int64, error) {
-	q, err := d.s.QueueEnvelope(to, env)
-	switch {
-	case errors.Is(err, aghub.ErrMailboxFull), errors.Is(err, aghub.ErrStrangersBusy):
-		return 0, fmt.Errorf("%w: %v", federation.ErrMailboxFull, err)
-	case errors.Is(err, aghub.ErrBadEnvelope):
-		return 0, fmt.Errorf("%w: %v", federation.ErrBadEnvelope, err)
-	}
-	return q.ID, err
-}
 
 // fedHubNode is one hub with its federation service, wired as main.go
 // and wire_federation.go wire them.
@@ -90,7 +74,7 @@ func federatedHubs(t *testing.T, discovery bool) (a, b *fedHubNode) {
 		if discovery {
 			cfg.Discovery, cfg.Home = "allowlist", n.srv.URL
 		}
-		fed, err := federation.New(t.TempDir(), cfg, n.id, fedDelivery{n.store})
+		fed, err := federation.New(t.TempDir(), cfg, n.id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,14 +83,14 @@ func federatedHubs(t *testing.T, discovery bool) (a, b *fedHubNode) {
 			n.s.SetFederatedDirectory(n.store.FederatedAgents)
 		}
 		t.Cleanup(func() { _ = fed.Close() })
-		fed.SetKeySource(aghub.StoreKeySource{S: n.store})
+		fed.SetKernel(n.s)
+		n.s.SetFederation(fed)
 		n.fed = fed
 		mux := http.NewServeMux()
 		mux.Handle("/hub/identity", n.id.Handler())
-		mux.Handle("/fed/v1/", fed.Handler())
-		mux.Handle("/fed/v2/", fed.Handler())
+		mux.Handle("/fed/v3/", fed.Handler())
 		mux.Handle("/", n.s.Handler())
-		n.h = mux
+		n.h = wire3.Contract(mux)
 	}
 	wire(a, b)
 	wire(b, a)
@@ -163,7 +147,6 @@ func TestAHubLocalAgentOnAPeerCanBeReachedEncrypted(t *testing.T) {
 // A forwards to B, the recipient's one home, and the recipient collects it
 // there. Neither hub's relay table names the sender.
 func TestASendAtAHubReachesAPeersAgent(t *testing.T) {
-	t.Skip("v030-todo(SS-6): /relay/send forwards a recipient registered at a peer to its home hub (federation v3)")
 	a, b := twoFederatedHubs(t)
 	recip, sender := twoAgents(t)
 	register(t, b.srv, recip, "Provider", []string{"work.do"})

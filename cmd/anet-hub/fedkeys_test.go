@@ -4,14 +4,17 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/dirbox"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
@@ -21,8 +24,8 @@ import (
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
-// fedHub is one hub wired the way main wires it (wireMounts), behind a
-// real listener so a peer can reach its /fed/v2/keys.
+// fedHub is one hub wired the way main wires it (wireMounts, hubHandler),
+// behind a real listener so a peer can reach its /fed/v3 routes.
 type fedHub struct {
 	dir   string
 	store *aghub.Store
@@ -46,7 +49,7 @@ func newFedHubs(t *testing.T) (a, b *fedHub) {
 			t.Fatal(err)
 		}
 		root := http.NewServeMux()
-		srv := httptest.NewServer(root)
+		srv := httptest.NewServer(hubHandler(root))
 		t.Cleanup(srv.Close)
 		return &fedHub{dir: dir, store: store, id: id, url: srv.URL}, root
 	}
@@ -66,6 +69,7 @@ func newFedHubs(t *testing.T) (a, b *fedHub) {
 	write(a, b)
 	write(b, a)
 	wire := func(h *fedHub, root *http.ServeMux) {
+		h.store.SetHubKey(h.id.Ctrl)
 		srv0 := aghub.NewServer(h.store)
 		srv0.SetHubAID(h.id.AID)
 		root.Handle("/hub/identity", h.id.Handler())
@@ -144,6 +148,60 @@ func TestAHubServesKeysOnlyForItsOwnAgents(t *testing.T) {
 	}
 	if code := keysAt(b, atB); code != http.StatusOK {
 		t.Fatalf("the peer's own agent, asked at the peer: %d, want 200", code)
+	}
+}
+
+// Wired as main wires it, a hub answers a directory bucket with its own
+// entries and its peers' for the same bucket (sealed-sender SSR-W19): the
+// kernel asks the federation module (SetFederation), which asks the peer
+// over /fed/v3/directory:bucket, signed, and the peer's module answers
+// through its kernel (SetKernel).
+func TestTheWiredHubMergesItsPeersBuckets(t *testing.T) {
+	a, b := newFedHubs(t)
+	atB := registerWithKeys(t, b)
+	atA := registerWithKeys(t, a)
+	q, _ := http.NewRequest(http.MethodPost, a.url+"/directory:bucket", strings.NewReader(`{"prefix":"","bits":0}`))
+	q.Header.Set("Content-Type", "application/json")
+	q.Header.Set("X-ANet-Wire", "3")
+	resp, err := http.DefaultClient.Do(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Entries []struct{ H, Box string } `json:"entries"`
+		Partial bool                      `json:"partial"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /directory:bucket at A: %d %v", resp.StatusCode, err)
+	}
+	if out.Partial || len(out.Entries) != 2 {
+		t.Fatalf("A's whole-directory bucket: %d entries, partial %v; want A's and B's agent", len(out.Entries), out.Partial)
+	}
+	for _, aid := range []string{atA, atB} {
+		h, _ := dirbox.Hash(aid)
+		found := false
+		for _, e := range out.Entries {
+			if e.H == base64.RawURLEncoding.EncodeToString(h) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("the merged bucket has no entry for %s", aid)
+		}
+	}
+	// The v0.2 federation routes are gone from the binary.
+	for _, p := range []string{"/fed/v1/forward", "/fed/v1/reviews", "/fed/v2/keys/" + atB, "/fed/v2/cards"} {
+		req, _ := http.NewRequest(http.MethodPost, b.url+p, strings.NewReader("{}"))
+		req.Header.Set("X-ANet-Wire", "3")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("POST %s: %d, want 404", p, resp.StatusCode)
+		}
 	}
 }
 

@@ -15,7 +15,7 @@ import (
 // "a2a_card": null as "withdraw my card": the card row and its skill and
 // tag index rows are deleted, the agent's directory name and capability
 // ids go back to what the registration declared (RegisterAgent has just
-// written them), a peer that learned the card is told on /fed/v2/cards,
+// written them), a peer that learned the card is told on /fed/v3/cards,
 // and card_status says "withdrawn". An absent a2a_card still means "no
 // change": a daemon that predates the field, or one that only refreshes
 // its registration, must not unpublish a card by omission.

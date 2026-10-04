@@ -15,8 +15,6 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
-
-	"github.com/ANetResearch/ANetHub/internal/federation"
 )
 
 // Encryption key sets (A2A-DESIGN §2 X3, §3.1, §3.7).
@@ -363,21 +361,4 @@ func keysStatusOf(status string, err error) (string, string) {
 	default:
 		return KeysStatusInvalid, err.Error()
 	}
-}
-
-// StoreKeySource adapts the store to federation.KeySource: it answers
-// /fed/v2/keys for any AID registered here, whatever its visibility
-// (A2A-DESIGN §3.9, [C32]).
-type StoreKeySource struct{ S *Store }
-
-// LocalKeys implements federation.KeySource.
-func (k StoreKeySource) LocalKeys(aid string) (keyset, kel []byte, err error) {
-	keyset, kel, registered, err := k.S.LocalKeys(aid)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !registered || keyset == nil {
-		return nil, nil, federation.ErrNoKeys
-	}
-	return keyset, kel, nil
 }

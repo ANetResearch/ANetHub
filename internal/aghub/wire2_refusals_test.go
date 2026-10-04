@@ -355,11 +355,17 @@ func TestRegistrationIsRateLimitedPerIPv6Prefix(t *testing.T) {
 // same answer a full local mailbox gives, not as a generic 502
 // (sealed-sender SSR-H13).
 func TestAFullMailboxAtThePeerHubIs507ForTheSender(t *testing.T) {
-	t.Skip("v030-todo(SS-6): /relay/send forwards a recipient registered at a peer to its home hub (federation v3)")
 	a, b := twoFederatedHubs(t)
 	recip, sender := twoAgents(t)
 	register(t, b.srv, recip, "Provider", nil)
 	register(t, a.srv, sender, "Requester", nil)
+	// A recipient is in its hub's directory, which is how the sender's hub
+	// finds where it lives, once it has published a key set.
+	if keys, _ := mintKeySet(t, recip, 1); true {
+		if code, body := publishKeys(t, b.srv, recip, keys); code != 200 {
+			t.Fatalf("publish at B: %d %s", code, body)
+		}
+	}
 	l := aghub.DefaultLimits()
 	l.MailboxMessages = 1
 	if err := b.s.SetLimits(l); err != nil {

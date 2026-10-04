@@ -71,6 +71,12 @@ type Server struct {
 	// publicURL is this hub's configured public base URL (publicurl.go);
 	// empty means the origin of each request.
 	publicURL string
+	// fed, when set, is the federation module: the peers this hub
+	// forwards to and asks for buckets (fed_home.go). Nil in a build
+	// without federation. fedState is what the kernel keeps in memory of
+	// them: resolved homes, refused credentials, peers' buckets.
+	fed      Federation
+	fedState *fedState
 }
 
 // SetPeerEndpointResolver installs the federation hook for "where does
@@ -144,7 +150,7 @@ func NewServer(store *Store) *Server {
 	s := &Server{store: store, replay: newRC1(time.Now().UnixMilli(), rc1Shards, rc1MemHigh, rc1MemLow),
 		jwks:       newJWKSCache(jwksCacheBytes, a2acard.JWKS),
 		dirLimiter: newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst),
-		relay:      newRelayState(store.now)}
+		relay:      newRelayState(store.now), fedState: newFedState()}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
@@ -285,13 +291,13 @@ func (s *Server) Handler() http.Handler {
 	//
 	// The peer-facing review STREAM is deliberately absent here. It
 	// belongs to the federation plane and is served at GET
-	// /fed/v1/reviews by internal/federation, behind the discovery switch
-	// and the no_federation tag. The kernel served the same stream at GET
+	// /fed/v3/reviews by internal/federation, to peers only, behind the
+	// discovery switch and the no_federation tag. The kernel served the same stream at GET
 	// /federation/reviews behind neither, so a hub built -tags
 	// no_federation — an organisation's internal hub, which has opted out
 	// of federation entirely — still published every signed review it
 	// held to anyone who asked. Nothing called the kernel copy: peers
-	// sync from /fed/v1/reviews, and no daemon, CLI, script or page in
+	// sync from /fed/v3/reviews, and no daemon, CLI, script or page in
 	// these repositories names /federation/reviews.
 	mux.HandleFunc("GET /agents/{aid}/reputation", s.hReputation)
 	mux.HandleFunc("POST /x402/verify", s.hX402Verify)
@@ -1369,11 +1375,14 @@ type relayState struct {
 	// addrFailure is each client address's bucket of refused kind-1 sends
 	// (clientIP: IPv4 address, IPv6 /64).
 	addrFailure *bucketSet
+	// fedSource is each peer hub's bucket at this hub as the home of the
+	// recipients it forwards to (/fed/v3/forward, §4.2.7), by its AID.
+	fedSource *bucketSet
 }
 
 func newRelayState(now func() time.Time) *relayState {
 	return &relayState{sessions: newSessionTable(), sessionSend: newBucketSet(now), caps: newBucketSet(now),
-		firstContact: newBucketSet(now), addrFailure: newBucketSet(now)}
+		firstContact: newBucketSet(now), addrFailure: newBucketSet(now), fedSource: newBucketSet(now)}
 }
 
 // HeaderAccess carries the delivery credential of a send, base64url of the
@@ -1469,6 +1478,7 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 	var sess *hubSession
 	var capBody *seal.CapBody
 	var mbox seal.Mbox
+	var capHome string // the owner's home when it is a peer hub
 	if access.Kind == seal.AccessKindSession {
 		var ok bool
 		if sess, ok = s.relay.sessions.get(sid, now); !ok || !withinSkew(ts, now, SessionSkew) {
@@ -1481,7 +1491,7 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		var ok bool
-		if capBody, mbox, ok = s.capPrecheck(w, access, addr, now); !ok {
+		if capBody, mbox, capHome, ok = s.capPrecheck(w, r, access, addr, home, now); !ok {
 			return
 		}
 		if empty, wait := s.relay.caps.peek(capKey(capBody), capRate(capBody)); empty {
@@ -1537,17 +1547,30 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 		s.refuseAccess(w, addr)
 		return
 	}
-	// 6. The route. A credential admits only to its owner, and step 2
-	// found the owner registered here. A first contact must name an agent
-	// registered here.
-	//
-	// v030-todo(SS-6): a recipient registered at a peer hub (§4.2.6):
-	// resolve its home and forward to that one hub.
+	// 6. The route. A credential admits only to its owner (step 5): to
+	// this hub's mailbox when step 2 found the owner registered here, else
+	// to the owner's home, which step 2 resolved (§4.2.6). A first contact
+	// names an agent registered here, or one whose home this hub resolves;
+	// any other recipient is unknown. A send for another hub is handed to
+	// that one hub, after taking the sender's own bucket, and this hub
+	// keeps nothing of it (forwardSend, SSR-H13).
+	if capHome != "" {
+		s.forwardSend(w, r, fwdSend{home: capHome, to: outer.To, envelope: body, access: accessRaw,
+			take: bucketTake{s.relay.caps, capKey(capBody), capRate(capBody)}, addr: addr, capBody: capBody})
+		return
+	}
 	if sess != nil {
 		registered, err := s.store.agentRegistered(outer.To)
 		if err != nil {
 			wire3.Internal(w, err)
 			return
+		}
+		if !registered && s.delivering() {
+			if to, ok := s.resolveRecipient(r.Context(), outer.To, home); ok {
+				s.forwardSend(w, r, fwdSend{home: to, to: outer.To, envelope: body, access: accessRaw,
+					take: bucketTake{s.relay.sessionSend, sess.aid, s.sessionRate(sess.aid)}, addr: addr})
+				return
+			}
 		}
 		if !registered {
 			wire3.Refuse(w, wire3.ReasonRecipientUnknown)
@@ -1658,31 +1681,38 @@ func (s *Server) refuseAccess(w http.ResponseWriter, addr string) {
 // cap_exp is in the window of core §2.1; the owner has not revoked it. A
 // refusal is answered by refuseAccess.
 //
+// An owner registered at a peer hub is checked against the mailbox key its
+// home's directory entry or its federated card carries, and against the
+// credentials its home refused instead of the revocation table, which only
+// the home holds (capPrecheckRemote, §4.2.6, SSR-H14a); home is then that
+// peer, and empty for an owner registered here. hint is the sender's
+// X-ANet-Home.
+//
 // Every refusal costs one Ed25519 verification (SSR-H3a): one that comes
 // before Cap.sig is checked verifies under equalVerifyKey and throws the
 // result away, so that how long the answer takes does not say which check
 // refused. Looking the owner up in this hub's database is the same work
 // whether or not it is registered.
-//
-// v030-todo(SS-6): an owner registered at a peer hub (§4.2.6): its mailbox
-// key from the federation's cards or directory, and the negative cache of
-// SSR-H14a instead of the revocation table.
-func (s *Server) capPrecheck(w http.ResponseWriter, a *seal.Access, addr string, now time.Time) (*seal.CapBody, seal.Mbox, bool) {
-	refuse := func(equal bool) (*seal.CapBody, seal.Mbox, bool) {
+func (s *Server) capPrecheck(w http.ResponseWriter, r *http.Request, a *seal.Access, addr, hint string, now time.Time) (*seal.CapBody, seal.Mbox, string, bool) {
+	refuse := func(equal bool) (*seal.CapBody, seal.Mbox, string, bool) {
 		if equal {
 			_ = verifyEd25519(equalVerifyKey, a.Cap.Body, a.Cap.Sig)
 		}
 		s.refuseAccess(w, addr)
-		return nil, seal.Mbox{}, false
+		return nil, seal.Mbox{}, "", false
 	}
 	body, err := seal.UnmarshalCapBody(a.Cap.Body)
 	if err != nil || body.Class != seal.CapClassContact && body.Class != seal.CapClassStranger || body.Type != seal.CapType {
 		return refuse(true)
 	}
-	mbox, found, err := s.store.ownerMbox(body.Owner)
+	mbox, found, registered, err := s.store.ownerMboxOf(body.Owner)
 	if err != nil {
 		wire3.Internal(w, err)
-		return nil, seal.Mbox{}, false
+		return nil, seal.Mbox{}, "", false
+	}
+	if !registered && s.delivering() {
+		m, home, ok := s.capPrecheckRemote(w, r, a, body, addr, hint, now)
+		return body, m, home, ok
 	}
 	if !found || mbox.Epoch == 0 || body.Epoch != mbox.Epoch || len(mbox.Pub) != ed25519.PublicKeySize {
 		return refuse(true)
@@ -1696,12 +1726,12 @@ func (s *Server) capPrecheck(w http.ResponseWriter, a *seal.Access, addr string,
 	revoked, err := s.store.CapRevoked(body.Owner, body.CapID)
 	if err != nil {
 		wire3.Internal(w, err)
-		return nil, seal.Mbox{}, false
+		return nil, seal.Mbox{}, "", false
 	}
 	if revoked {
 		return refuse(false)
 	}
-	return body, mbox, true
+	return body, mbox, "", true
 }
 
 // capExpOK is the window of core §2.1 seal.VerifyAccess checks cap_exp in:
