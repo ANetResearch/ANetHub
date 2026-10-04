@@ -620,6 +620,19 @@ func TestRelaySendOrder_Step10(t *testing.T) {
 				fill(sc, 3, seal.CapClassContact, sc.contact.body.CapID)
 			},
 			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.send1(sc.env(), sc.contact) }},
+		{name: "a mailbox full by its bytes", status: 507, reason: "mailbox_full",
+			setup: func(sc *relayScene) {
+				l := DefaultLimits()
+				l.MailboxBytes = 4096
+				if err := sc.h.srv.SetLimits(l); err != nil {
+					sc.h.t.Fatal(err)
+				}
+				fillBytes(sc, seal.CapClassContact, sc.contact.body.CapID, l.MailboxBytes-16)
+			},
+			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.send1(sc.env(), sc.contact) }},
+		{name: "a non-contact share full by its bytes", status: 429, reason: "strangers_busy",
+			setup: func(sc *relayScene) { fillBytes(sc, seal.CapClassStranger, nil, DefaultNonContactBytes-16) },
+			send:  func(sc *relayScene) *httptest.ResponseRecorder { return sc.send0(nil) }},
 		{name: "a full non-contact share, for a first contact", status: 429, reason: "strangers_busy",
 			setup: func(sc *relayScene) { fill(sc, DefaultNonContactMsgs, seal.CapClassStranger, nil) },
 			send:  func(sc *relayScene) *httptest.ResponseRecorder { return sc.send0(nil) }},
@@ -660,6 +673,52 @@ func TestAnOuterExpiryBeyondTheTableIsRefused(t *testing.T) {
 		{name: "under a credential", status: 400, reason: "bad_envelope",
 			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.send1(far(sc), sc.contact) }},
 	})
+}
+
+// fillBytes queues one row of class (and capID) for the scene's recipient
+// that counts as n bytes against the mailbox, as an envelope of n bytes
+// would: the capacity checks add up the size column, and writing n real
+// bytes would only make the test slower.
+func fillBytes(sc *relayScene, class uint64, capID []byte, n int64) {
+	sc.h.t.Helper()
+	env := envelope(sc.h.t, sc.recip.aid, []byte("a large one"))
+	d, _ := seal.EnvDigest(env)
+	var capCol any
+	if capID != nil {
+		capCol = capID
+	}
+	if _, err := sc.h.store.db.Exec(`INSERT INTO relay_message(rid, to_aid, env_digest, class, cap_id, size, created_at, payload)
+	    VALUES(?,?,?,?,?,?,?,?)`, bytes.Repeat([]byte{0xfe}, RIDLen), sc.recip.aid, d[:], class, capCol, n,
+		sc.h.clock().UnixMilli(), env); err != nil {
+		sc.h.t.Fatal(err)
+	}
+}
+
+// The janitor deletes the redelivery count of an envelope once its window
+// has closed (sealed-sender §3.1), and not before.
+func TestTheJanitorForgetsClosedRedeliveryWindows(t *testing.T) {
+	sc := newScene(t)
+	decodeSent(t, sc.send1(sc.env(), sc.contact))
+	counts := func() int {
+		var n int
+		if err := sc.h.store.db.QueryRow(`SELECT COUNT(*) FROM relay_redelivery`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	ttl := DefaultLimits().UndeliveredTTL
+	if _, err := sc.h.store.PurgeExpiredRelay(ttl, sc.h.clock().Add(RedeliveryWindow-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if n := counts(); n != 1 {
+		t.Fatalf("%d redelivery counts while the window is open, want 1", n)
+	}
+	if _, err := sc.h.store.PurgeExpiredRelay(ttl, sc.h.clock().Add(RedeliveryWindow)); err != nil {
+		t.Fatal(err)
+	}
+	if n := counts(); n != 0 {
+		t.Fatalf("%d redelivery counts after the window closed, want 0", n)
+	}
 }
 
 // Step 11: what a queued send answers, writes and takes.
