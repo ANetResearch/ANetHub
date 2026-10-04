@@ -508,27 +508,14 @@ func clearOwed(dir, peerAID string, credits int64, reason, endpoint, payeeAID st
 	// CORE-V1), or a wire-3 peer answers the POST below with 426.
 	peer := &http.Client{Transport: wire3.Transport(nil)}
 
-	// What the peer says it is owed before we start, so the answer after
-	// can be checked against something rather than taken on faith.
-	owedBefore := int64(-1)
-	if endpoint != "" {
-		if resp, gerr := peer.Get(strings.TrimSuffix(endpoint, "/") + "/x402/supply"); gerr == nil {
-			var sup struct {
-				Supply struct {
-					Owed int64 `json:"owed_by_peers"`
-				} `json:"supply"`
-			}
-			if json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&sup) == nil {
-				owedBefore = sup.Supply.Owed
-			}
-			resp.Body.Close()
-		}
-	}
-	if owedBefore < 0 {
-		// Unknown rather than zero. Treating "could not ask" as "owes
-		// nothing" would make the check below pass for the wrong reason.
-		owedBefore = credits
-	}
+	// What the peer was owed before this discharge is unknown here: a
+	// wire-3 peer's /x402/supply states its latest supply epoch and
+	// nothing about what peers owe it (hub-payment-privacy §2.3). It used
+	// to be read from there; decoded from the new answer it read as 0, and
+	// every discharge, applied or not, was then reported as not applied.
+	// Unknown is taken as the amount itself, never as zero, so the check
+	// below passes only when the peer shows nothing left owed.
+	owedBefore := credits
 
 	rec, err := store.IssueOwedSettlement(id.AID, peerAID, amount, reason)
 	if err != nil {
@@ -577,11 +564,15 @@ func clearOwed(dir, peerAID string, credits int64, reason, endpoint, payeeAID st
 	}
 	if json.Unmarshal(out, &ack) == nil {
 		if ack.Owed > owedBefore-credits {
+			// Without the figure from before, a peer still owed something
+			// may have applied this statement or not: say so, rather than
+			// that it was not, so the operator compares with the peer before
+			// sending anything again (a second statement would be applied).
 			return fmt.Errorf(
-				"%s still shows %d owed after a discharge of %d (it was %d) — "+
-					"the statement was accepted and not applied, most likely as a repeat "+
-					"of one already on file; nothing was reduced here",
-				peerAID, ack.Owed, amount, owedBefore)
+				"%s still shows %d owed after a discharge of %d, and what it was owed before is not "+
+					"published, so whether it applied this statement cannot be told from here; nothing "+
+					"was reduced here — compare with %s's operator before sending another",
+				peerAID, ack.Owed, amount, peerAID)
 		}
 		fmt.Printf("peer now owes %d\n", ack.Owed)
 	}
