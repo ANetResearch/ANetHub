@@ -124,9 +124,8 @@ func TestHubTextJSON(t *testing.T) {
 }
 
 // pendingOperatorCodes are registered operator codes whose rows the areas
-// that own them add (the release plan: text.go is PAY-5, then SS-3, then
-// KEL-7). Each goes when its row lands; a row present while still listed
-// here fails.
+// that own them add, in the order those work items land. Each goes when its
+// row lands; a row present while still listed here fails.
 var pendingOperatorCodes = map[string]string{
 	"hub_recovery_setup_required": "v030-todo(KEL-7)",
 	"hub_running":                 "v030-todo(KEL-7)",
