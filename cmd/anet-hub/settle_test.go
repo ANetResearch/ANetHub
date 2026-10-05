@@ -36,6 +36,7 @@ type ledgerHub struct {
 	store *aghub.Store
 	id    *hubid.Identity
 	url   string
+	dir   string
 
 	mu     sync.Mutex
 	bodies [][]byte
@@ -62,6 +63,7 @@ type crossHubRig struct {
 	a      *aghub.Store
 	aID    *hubid.Identity
 	aURL   string
+	aDir   string
 	b      *ledgerHub
 	payer  *identity.Controller // banks on B
 	payee  *identity.Controller // banks on A
@@ -97,7 +99,7 @@ func newCrossHubRig(t *testing.T) *crossHubRig {
 	storeB.SetHubKey(idB.Ctrl)
 	srvB := aghub.NewServer(storeB)
 	srvB.SetHubAID(idB.AID)
-	b := &ledgerHub{store: storeB, id: idB}
+	b := &ledgerHub{store: storeB, id: idB, dir: dirB}
 	kernelB := srvB.Handler()
 	identityB := idB.Handler()
 	httpB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +157,7 @@ func newCrossHubRig(t *testing.T) *crossHubRig {
 	httpA := httptest.NewServer(srvA.Handler())
 	t.Cleanup(httpA.Close)
 
-	r := &crossHubRig{a: storeA, aID: idA, aURL: httpA.URL, b: b, netB: payment.CreditNetwork(idB.AID)}
+	r := &crossHubRig{a: storeA, aID: idA, aURL: httpA.URL, aDir: dirA, b: b, netB: payment.CreditNetwork(idB.AID)}
 	r.payer, _ = identitytest.Hub()
 	r.payee, _ = identitytest.Hub()
 	r.other, _ = identitytest.Hub()

@@ -1,9 +1,7 @@
 package aghub
 
 import (
-	"database/sql"
 	"encoding/base64"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -146,45 +144,30 @@ func TestARepeatOfALegacyRowIsStable(t *testing.T) {
 	}
 }
 
-// A hub upgraded with two settlements already on one binding starts, and
-// the earlier settlement holds the binding. An index over every row would
-// fail to build on such a table and the hub would not start.
-func TestUpgradingAHubWithDuplicateBindingsKeepsTheFirstAsHolder(t *testing.T) {
-	dir := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
+// The binding index is part of the schema a hub is created with: one bound
+// settlement per (payer, interaction_id), any number without an
+// interaction id.
+func TestTheBindingIndexHoldsOneSettlementPerBinding(t *testing.T) {
+	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{
-		`CREATE TABLE credit_settled (
-		   auth_id TEXT PRIMARY KEY, payer TEXT NOT NULL, pay_to TEXT NOT NULL,
-		   amount INTEGER NOT NULL, interaction_id TEXT NOT NULL DEFAULT '', at TEXT NOT NULL)`,
-		`INSERT INTO credit_settled VALUES('a1','P','Q',5,'ix-1','2026-01-01T00:00:00Z')`,
-		`INSERT INTO credit_settled VALUES('a2','P','Q',5,'ix-1','2026-01-02T00:00:00Z')`,
-		`INSERT INTO credit_settled VALUES('a3','P','Q',5,'','2026-01-03T00:00:00Z')`,
-		`INSERT INTO credit_settled VALUES('a4','P','Q',5,'','2026-01-04T00:00:00Z')`,
-	} {
-		if _, err := db.Exec(q); err != nil {
-			t.Fatal(err)
+	defer s.Close()
+	ins := func(id, ix string) error {
+		_, err := s.db.Exec(`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at, bound)
+			VALUES(?,'P','Q',5,?,'x',1)`, id, ix)
+		return err
+	}
+	for _, r := range []struct{ id, ix string }{{"a1", "ix-1"}, {"a3", ""}, {"a4", ""}} {
+		if err := ins(r.id, r.ix); err != nil {
+			t.Fatalf("%s: %v", r.id, err)
 		}
 	}
-	db.Close()
-
-	for round := 0; round < 2; round++ {
-		s, err := Open(dir)
-		if err != nil {
-			t.Fatalf("round %d: the upgraded hub did not open: %v", round, err)
-		}
-		holder, err := s.bindingHolder("P", "ix-1")
-		if err != nil || holder != "a1" {
-			t.Errorf("round %d: holder = %q (%v), want the first settlement a1", round, holder, err)
-		}
-		// A new row on a held binding is refused by the index.
-		if _, err := s.db.Exec(`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at, bound)
-			VALUES('a5-` + string(rune('0'+round)) + `','P','Q',5,'ix-1','x',1)`); err == nil {
-			t.Errorf("round %d: a second bound row for one binding was accepted", round)
-		}
-		s.Close()
+	if err := ins("a2", "ix-1"); err == nil {
+		t.Error("a second bound settlement for one binding was accepted")
+	}
+	if holder, err := s.bindingHolder("P", "ix-1"); err != nil || holder != "a1" {
+		t.Errorf("holder = %q (%v), want a1", holder, err)
 	}
 }
 

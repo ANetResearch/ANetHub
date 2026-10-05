@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -366,19 +367,16 @@ var oldSchema = []string{
 	   requester_aid TEXT NOT NULL DEFAULT '', completed_at TEXT NOT NULL)`,
 }
 
-// Opening a store written before this change removes the content columns,
-// the completed_task table and the guest quota, keeps every review and
-// agent, and leaves none of the removed bytes in hub.db or hub.db-wal.
-// The search runs while the store is still open, because closing the last
-// connection checkpoints the WAL by itself and would hide a missing
-// checkpoint in the migration.
-func TestOpeningAnOldStoreRemovesItsContent(t *testing.T) {
+// A store written before this change, content and all, is not opened: 0.3.0
+// converts no hub.db (core CORE-V4), so it is refused as anet-hub 0.2's data
+// (hub_identity_v02) and the file is left byte for byte as it was. Nothing
+// of it is served. Removing the old content from disk is the operator's
+// step of moving the directory away, not something a start does.
+func TestAnOldStoreWithContentIsRefusedUntouched(t *testing.T) {
 	dir := t.TempDir()
 	goal := []byte("canary-old-goal-5d61e0")
-	deliv := []byte("canary-old-deliverable-a8c3f2")
-	doc := []byte("canary-old-request-doc-0b7e19")
 	func() {
-		db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=journal_mode(WAL)")
+		db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -399,101 +397,23 @@ func TestOpeningAnOldStoreRemovesItsContent(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for i := 0; i < 50; i++ {
-			ix := "ix-old-" + string(rune('A'+i%26)) + string(rune('a'+i/26))
-			if _, err := db.Exec(`INSERT INTO review(interaction_id,subject_aid,reviewer_aid,rating,comment,
-			     receipt_cid,goal,deliverable,request_cid,result_cid,completed_at,created_at,stored_at)
-			     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				ix, prov.AID(), req.AID(), 4, "ok", "bafy-receipt-"+ix, string(goal), string(deliv),
-				"bafy-req", "bafy-res", 1000, 2000+i, "2026-08-01T00:00:00Z"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec(`INSERT INTO review_blob VALUES(?,?,?,?,?)`,
-				ix, []byte("receipt"), []byte("review"), doc, deliv); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec(`INSERT INTO completed_task VALUES(?,?,?,?)`,
-				ix, prov.AID(), req.AID(), "2026-08-01T00:00:00Z"); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}()
-	for _, c := range [][]byte{goal, deliv, doc} {
-		if len(filesContaining(t, dir, c)) == 0 {
-			t.Fatalf("the old store does not hold %q; the test would pass for the wrong reason", c)
-		}
-	}
-
-	store, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatalf("open an old store: %v", err)
-	}
-	defer store.Close()
-
-	for _, c := range [][]byte{goal, deliv, doc} {
-		if hits := filesContaining(t, dir, c); len(hits) > 0 {
-			t.Errorf("%q is still on disk after the migration, in %v", c, hits)
-		}
-	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	// VACUUM rebuilt the file: the pages the dropped tables occupied are
-	// not kept on the freelist. (secure_delete zeroes them either way; the
-	// design asks for the rebuild so the file does not keep their space.)
-	var free int
-	if err := db.QueryRow(`PRAGMA freelist_count`).Scan(&free); err != nil {
-		t.Fatal(err)
-	}
-	if free != 0 {
-		t.Errorf("hub.db has %d free pages after the migration; VACUUM did not run", free)
-	}
-	columns := func(table string) map[string]bool {
-		rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-		if err != nil {
+		if _, err := db.Exec(`INSERT INTO review(interaction_id,subject_aid,reviewer_aid,rating,comment,
+		     receipt_cid,goal,deliverable,request_cid,result_cid,completed_at,created_at,stored_at)
+		     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			"ix-old", prov.AID(), req.AID(), 4, "ok", "bafy-receipt", string(goal), "d",
+			"bafy-req", "bafy-res", 1000, 2000, "2026-08-01T00:00:00Z"); err != nil {
 			t.Fatal(err)
 		}
-		defer rows.Close()
-		out := map[string]bool{}
-		for rows.Next() {
-			var n string
-			if err := rows.Scan(&n); err != nil {
-				t.Fatal(err)
-			}
-			out[n] = true
+	}()
+	before := dirSnapshot(t, dir)
+	store, err := aghub.Open(dir)
+	if !errors.Is(err, aghub.ErrHubDataV02) {
+		if store != nil {
+			store.Close()
 		}
-		return out
+		t.Fatalf("open an old store: %v, want ErrHubDataV02", err)
 	}
-	for table, gone := range map[string][]string{
-		"review":      {"goal", "deliverable"},
-		"review_blob": {"request_doc_raw", "deliverable_raw"},
-		"agent":       {"guest_quota"},
-	} {
-		cols := columns(table)
-		for _, c := range gone {
-			if cols[c] {
-				t.Errorf("%s.%s survived the migration", table, c)
-			}
-		}
-	}
-	if len(columns("completed_task")) != 0 {
-		t.Error("completed_task survived the migration")
-	}
-	var reviews, blobs, agents int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM review`).Scan(&reviews)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM review_blob`).Scan(&blobs)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&agents)
-	if reviews != 50 || blobs != 50 || agents != 2 {
-		t.Errorf("rows lost: reviews=%d blobs=%d agents=%d, want 50/50/2", reviews, blobs, agents)
-	}
-	// The migrated store serves the old reviews through the new shape.
-	st, err := store.Stats()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Reviews != 50 || st.TasksCompleted != 50 {
-		t.Errorf("stats after migration: %+v", st)
+	if after := dirSnapshot(t, dir); after != before {
+		t.Errorf("refusing the old store changed the directory:\n%s\n%s", before, after)
 	}
 }

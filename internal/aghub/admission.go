@@ -190,9 +190,9 @@ func (s *Store) now() time.Time {
 	return time.Now()
 }
 
-// migrateAdmission creates the admission tables (hub-payment-privacy §3.2).
-func (s *Store) migrateAdmission() error {
-	for _, q := range []string{
+// admissionSchema is the admission tables (hub-payment-privacy §3.2).
+func admissionSchema() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS admitted (
 		   aid TEXT PRIMARY KEY,
 		   label TEXT NOT NULL DEFAULT '',
@@ -214,12 +214,7 @@ func (s *Store) migrateAdmission() error {
 		   aid TEXT PRIMARY KEY,
 		   at INTEGER NOT NULL
 		 )`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate admission: %w", err)
-		}
 	}
-	return nil
 }
 
 // ---- the mode ----

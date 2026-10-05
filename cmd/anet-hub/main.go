@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -250,9 +251,8 @@ func beforeServing(f *hubFlags, fs *flag.FlagSet, c *console) (code int, done bo
 
 // versionLine is what -version prints: the release, and the wire contract
 // it speaks with the anet release that contract needs. The wire is what an
-// operator upgrading from wire 1 has to know about the binary in hand
-// before starting it (the first start migrates the database; internal notes
-// 0027 in the ANet repository).
+// operator has to know about the binary in hand before starting it: a data
+// directory another release wrote is refused, not converted (core CORE-V4).
 func versionLine() string {
 	return fmt.Sprintf("anet-hub %s (wire %d, nodes need anet >= %s; commit %s, built %s)",
 		version.V, aghub.WireVersion, aghub.RequiredAnet, version.Commit, version.BuiltAt)
@@ -261,16 +261,17 @@ func versionLine() string {
 func main() {
 	f := defineFlags(flag.CommandLine)
 	flag.Parse()
-	if code, done := beforeServing(f, flag.CommandLine, newConsole(os.Stdout, os.Stderr)); done {
+	c := newConsole(os.Stdout, os.Stderr)
+	if code, done := beforeServing(f, flag.CommandLine, c); done {
 		os.Exit(code)
 	}
 	if err := refuseEmptyModeFlags(flag.CommandLine); err != nil {
 		log.Fatalf("anet-hub: %v", err)
 	}
 
-	store, err := aghub.Open(*f.data)
-	if err != nil {
-		log.Fatalf("anet-hub: open store: %v", err)
+	store, code := openStore(c, *f.data)
+	if store == nil {
+		os.Exit(code)
 	}
 	defer store.Close()
 
@@ -314,23 +315,12 @@ func main() {
 	// into every relayauth v2 signature, so a signature made for this hub
 	// is refused by any other.
 	srv0.SetHubAID(hubID.AID)
-	// The identity settlements are signed with, so a payer holds a receipt
-	// it can show without asking this hub to agree.
+	// The identity settlements and supply epochs are signed with, so a
+	// payer holds a receipt it can show without asking this hub to agree.
 	store.SetHubKey(hubID.Ctrl)
-	// A hub upgraded into having an issuance chain has credit
-	// outstanding from before the chain existed. Record that once, as
-	// what it is, rather than leaving the chain permanently disagreeing
-	// with the balances or backfilling a reconstruction and signing it as
-	// though it were contemporaneous.
-	if sup, err := store.Supply(hubID.AID); err == nil && sup.Outstanding > 0 {
-		if err := store.OpenBalance(sup.Outstanding); err != nil {
-			log.Printf("anet-hub: opening balance: %v", err)
-		} else if sup.ChainIssued == 0 && sup.ChainOpening == 0 {
-			log.Printf("anet-hub: issuance chain opened at %d outstanding "+
-				"(issued before this chain existed; not attested outside this hub)",
-				sup.Outstanding)
-		}
-	}
+	// A supply epoch is published when one is due: now, for a hub that was
+	// down over a midnight, and after every UTC midnight (PAY-S2).
+	go store.RunSupplyEpochs(ctx)
 	// Envelopes nobody collects are deleted after the undelivered TTL.
 	go srv0.RunRelayJanitor(ctx, 10*time.Minute)
 	// This process is the hub: it drops what it holds in memory for an AID
@@ -380,6 +370,31 @@ func main() {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+}
+
+// openStore opens the hub's database in dir for serving. A database this
+// release does not open (core CORE-V4) is refused with its sentence, exit 1:
+// one of 0.2 or earlier (hub_identity_v02), or one a newer anet-hub wrote
+// (hub_data_too_new; it is valid data, so the next step is to upgrade, not
+// to move it away).
+func openStore(c *console, dir string) (*aghub.Store, int) {
+	store, err := aghub.Open(dir)
+	if err != nil {
+		return nil, c.refuseData(err)
+	}
+	return store, 0
+}
+
+// refuseData answers an aghub.Open error: the sentence of a database this
+// release does not open, or the error itself (exit 1).
+func (c *console) refuseData(err error) int {
+	switch {
+	case errors.Is(err, aghub.ErrHubDataV02):
+		return c.say("hub_identity_v02", nil)
+	case errors.Is(err, aghub.ErrHubDataTooNew):
+		return c.say("hub_data_too_new", nil)
+	}
+	return c.fail(err)
 }
 
 // clearOwed signs this hub's statement that it has discharged what it
@@ -469,27 +484,14 @@ func clearOwed(dir, peerAID string, credits int64, reason, endpoint, payeeAID st
 	// CORE-V1), or a wire-3 peer answers the POST below with 426.
 	peer := &http.Client{Transport: wire3.Transport(nil)}
 
-	// What the peer says it is owed before we start, so the answer after
-	// can be checked against something rather than taken on faith.
-	owedBefore := int64(-1)
-	if endpoint != "" {
-		if resp, gerr := peer.Get(strings.TrimSuffix(endpoint, "/") + "/x402/supply"); gerr == nil {
-			var sup struct {
-				Supply struct {
-					Owed int64 `json:"owed_by_peers"`
-				} `json:"supply"`
-			}
-			if json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&sup) == nil {
-				owedBefore = sup.Supply.Owed
-			}
-			resp.Body.Close()
-		}
-	}
-	if owedBefore < 0 {
-		// Unknown rather than zero. Treating "could not ask" as "owes
-		// nothing" would make the check below pass for the wrong reason.
-		owedBefore = credits
-	}
+	// What the peer was owed before this discharge is unknown here: a
+	// wire-3 peer's /x402/supply states its latest supply epoch and
+	// nothing about what peers owe it (hub-payment-privacy §2.3). It used
+	// to be read from there; decoded from the new answer it read as 0, and
+	// every discharge, applied or not, was then reported as not applied.
+	// Unknown is taken as the amount itself, never as zero, so the check
+	// below passes only when the peer shows nothing left owed.
+	owedBefore := credits
 
 	rec, err := store.IssueOwedSettlement(id.AID, peerAID, amount, reason)
 	if err != nil {
@@ -538,11 +540,15 @@ func clearOwed(dir, peerAID string, credits int64, reason, endpoint, payeeAID st
 	}
 	if json.Unmarshal(out, &ack) == nil {
 		if ack.Owed > owedBefore-credits {
+			// Without the figure from before, a peer still owed something
+			// may have applied this statement or not: say so, rather than
+			// that it was not, so the operator compares with the peer before
+			// sending anything again (a second statement would be applied).
 			return fmt.Errorf(
-				"%s still shows %d owed after a discharge of %d (it was %d) — "+
-					"the statement was accepted and not applied, most likely as a repeat "+
-					"of one already on file; nothing was reduced here",
-				peerAID, ack.Owed, amount, owedBefore)
+				"%s still shows %d owed after a discharge of %d, and what it was owed before is not "+
+					"published, so whether it applied this statement cannot be told from here; nothing "+
+					"was reduced here — compare with %s's operator before sending another",
+				peerAID, ack.Owed, amount, peerAID)
 		}
 		fmt.Printf("peer now owes %d\n", ack.Owed)
 	}

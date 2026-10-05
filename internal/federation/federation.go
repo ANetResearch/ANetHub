@@ -767,11 +767,11 @@ type Witness interface {
 // SetWitness wires the witnessing seam.
 func (s *Service) SetWitness(w Witness) { s.witness = w }
 
-// WitnessOnce pins each peer's current issuance head.
+// WitnessOnce pins each peer's current supply epoch chain head.
 //
 // Per peer, and failures are logged rather than fatal: a peer that is
-// down, or running a build with no issuance chain, must not stop the
-// others being witnessed.
+// down, or that has published no epoch yet, must not stop the others being
+// witnessed.
 //
 // The attestation is stored locally first and sent to the peer second.
 // That order is the whole point — evidence about a party that only that
@@ -794,10 +794,13 @@ func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
 			log.Printf("hub: witness %s: %v", p.AID, err)
 			continue
 		}
+		// The head of the peer's supply epoch chain: {seq, id}, or {}
+		// before its first epoch (hub-payment-privacy §2.3). It moves once
+		// per epoch. What this hub signs is what the peer served as its
+		// own head, so the attestation names the peer's AID as the chain.
 		var head struct {
-			ChainDID string `json:"chain_did"`
-			Seq      uint64 `json:"seq"`
-			HeadID   string `json:"head_id"`
+			Seq uint64 `json:"seq"`
+			ID  string `json:"id"`
 		}
 		derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&head)
 		resp.Body.Close()
@@ -805,23 +808,15 @@ func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
 			log.Printf("hub: witness %s: %v", p.AID, derr)
 			continue
 		}
-		// HeadID alone says whether there is a head. Seq must not be part
+		// The id alone says whether there is a head. Seq must not be part
 		// of this test: an AEL's first record is seq 0, so a chain
-		// holding exactly one record — the opening entry every upgraded
-		// hub starts with — was skipped as though it had nothing to pin.
-		// On the live topology that meant one hub witnessed the other and
-		// was never witnessed back.
-		if head.HeadID == "" {
-			continue // nothing issued yet; there is no head to pin
+		// holding exactly one record was skipped as though it had nothing
+		// to pin. On the live topology that meant one hub witnessed the
+		// other and was never witnessed back.
+		if head.ID == "" {
+			continue // no epoch published yet; there is no head to pin
 		}
-		// The peer must be attesting to its own chain. A peer serving
-		// somebody else's chain_did would have this hub sign a statement
-		// about a third party it never looked at.
-		if head.ChainDID != p.AID {
-			log.Printf("hub: witness %s: served a head for %s, not itself", p.AID, head.ChainDID)
-			continue
-		}
-		raw, err := s.witness.Attest(p.AID, head.HeadID, head.Seq)
+		raw, err := s.witness.Attest(p.AID, head.ID, head.Seq)
 		if err != nil {
 			log.Printf("hub: witness %s: %v", p.AID, err)
 			continue
@@ -836,7 +831,7 @@ func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
 // the copy that matters is already stored here.
 func (s *Service) sendAttestation(ctx context.Context, endpoint string, raw []byte) {
 	body, err := json.Marshal(map[string]string{
-		"attestation": base64.StdEncoding.EncodeToString(raw)})
+		"attestation": base64.RawURLEncoding.EncodeToString(raw)})
 	if err != nil {
 		return
 	}

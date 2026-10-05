@@ -109,30 +109,28 @@ func addToRow(ex execer, table, keyCol, col, key string, delta int64) error {
 // issuanceRoom refuses an issuance of amt when it would take what this
 // hub has issued in total past math.MaxInt64, with invalid_amount.
 //
-// addToRow bounds each row, which is not enough for the sums /x402/supply
-// publishes. Supply adds up every issuance entry on the hub's row, every
-// agent balance, and the chain's issued events, and each of those totals
-// is at most what was ever issued. A peer receipt for 2^63-1-100 to an
-// empty account passed every row bound, and on a hub that had granted
-// anything before, the issuance sum no longer fit: /x402/supply answered
-// "integer overflow" from then on (found by FuzzHubClearFromPeer, ANet
-// an internal note). Bounding the total issued keeps every sum Supply
-// takes inside int64. Every way credit is created checks it: a peer's
-// receipt (ClearFromPeer, holding Store.issueMu from the check to the
-// write), and the operator's grant, the admission grant and the trial
-// credit (Store.issueTx, the check and the write in one transaction), so
-// that concurrent issuance cannot pass the check together. Store.Credit
-// and creditTx do not check, so a new caller of them must.
-func issuanceRoom(q rowQuerier, hubAID string, amt int64) error {
-	var issued int64
-	if err := q.QueryRow(`SELECT COALESCE(SUM(delta),0) FROM credit_entry WHERE aid=? AND delta<0`,
-		hubAID).Scan(&issued); err != nil {
+// addToRow bounds each row, which is not enough for the sums a supply epoch
+// states. Every agent balance, the hub's own row and outstanding are each at
+// most what was ever issued, so bounding the total issued (supply_totals,
+// supply.go) keeps every one of them inside int64: a peer receipt for
+// 2^63-1-100 to an empty account passed every row bound, and on a hub that
+// had granted anything before, the issuance sum no longer fit (found by
+// FuzzHubClearFromPeer, ANet an internal note). Every way credit is created
+// checks it inside the transaction that creates it: a peer's receipt
+// (ClearFromPeer) and the operator's grant, the admission grant and the
+// trial credit (Store.issueTx). The transaction holds the database's write
+// lock from its start, so concurrent issuance cannot pass the check
+// together. Store.Credit and creditTx do not check, so a new caller of them
+// must.
+func issuanceRoom(q rowQuerier, amt int64) error {
+	issued, err := issuedTotal(q)
+	if err != nil {
 		return fmt.Errorf("reading what this hub has issued: %w", err)
 	}
-	if -issued > math.MaxInt64-amt {
+	if issued > math.MaxInt64-amt {
 		return refuse(payment.ReasonInvalidAmount,
 			"issuing %d on top of the %d this hub has issued would pass %d, the most its supply can add up to",
-			amt, -issued, int64(math.MaxInt64))
+			amt, issued, int64(math.MaxInt64))
 	}
 	return nil
 }

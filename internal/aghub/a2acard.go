@@ -104,28 +104,28 @@ func carriesPrices(card []byte) bool {
 // refuses a larger one before parsing it.
 const maxA2ACardBytes = a2acard.MaxCardBytes
 
-// migrateA2ACard brings agent_a2a_card to the admission schema and adds
-// the skill and tag indexes.
+// a2aCardSchema is the A2A card an agent submitted at registration, stored
+// as the raw bytes it sent once it passed admission (A2A-DESIGN §10.3), and
+// the skill and tag indexes of the admitted cards.
 //
 // seq and payload_hash are the high-water mark (a2acard.Mark). verified_at
 // is when the card last verified against the agent's KEL; NULL means the
-// row is not listed, either because the KEL moved past the key that signed
-// it or because it predates admission. search is the lowercased text the
-// registry's q parameter matches. fed_seq orders the rows for the
-// federation stream (§10.6).
-func (s *Store) migrateA2ACard() error {
-	for _, q := range []string{
-		`ALTER TABLE agent_a2a_card ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN payload_hash BLOB`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN verified_at TEXT`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN search TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN fed_seq INTEGER NOT NULL DEFAULT 0`,
-	} {
-		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("hub: migrate a2a card: %w", err)
-		}
-	}
-	for _, q := range []string{
+// row is not listed, because the KEL moved past the key that signed it.
+// search is the lowercased text the registry's q parameter matches. fed_seq
+// orders the rows for the federation stream (§10.6).
+func a2aCardSchema() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS agent_a2a_card (
+		   aid TEXT PRIMARY KEY,
+		   card BLOB NOT NULL,
+		   stored_at TEXT NOT NULL,
+		   seq INTEGER NOT NULL DEFAULT 0,
+		   payload_hash BLOB,
+		   verified_at TEXT,
+		   search TEXT NOT NULL DEFAULT '',
+		   fed_seq INTEGER NOT NULL DEFAULT 0
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_a2a_card_fedseq ON agent_a2a_card(fed_seq)`,
 		// One row per skill of an admitted card. Written only by
 		// admission, so a skill id here is one the agent signed.
 		`CREATE TABLE IF NOT EXISTS agent_skill (
@@ -142,86 +142,7 @@ func (s *Store) migrateA2ACard() error {
 		   PRIMARY KEY (aid, tag)
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_tag ON agent_tag(tag)`,
-		`CREATE INDEX IF NOT EXISTS idx_a2a_card_fedseq ON agent_a2a_card(fed_seq)`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate a2a card: %w", err)
-		}
 	}
-	// The federation stream's withdrawals share fed_seq with the cards,
-	// so they exist before any card is stored (fed_a2acard.go).
-	if err := s.migrateFedA2ACard(); err != nil {
-		return err
-	}
-	if err := s.migrateA2AFedSeqHead(); err != nil {
-		return err
-	}
-	return s.readmitLegacyA2ACards()
-}
-
-// readmitLegacyA2ACards verifies the rows stored before admission existed
-// (no payload_hash): a card that verifies against its agent's stored KEL is
-// admitted, anything else is deleted. Such rows exist only in development
-// databases, since no wire-2 hub stored cards unverified in production.
-func (s *Store) readmitLegacyA2ACards() error {
-	rows, err := s.db.Query(
-		`SELECT c.aid, c.card, a.kel FROM agent_a2a_card c LEFT JOIN agent a ON a.aid = c.aid
-		  WHERE c.payload_hash IS NULL`)
-	if err != nil {
-		return fmt.Errorf("hub: migrate a2a card: %w", err)
-	}
-	type legacy struct {
-		aid       string
-		card, kel []byte
-	}
-	var pending []legacy
-	for rows.Next() {
-		var l legacy
-		if err := rows.Scan(&l.aid, &l.card, &l.kel); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, l)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	now := time.Now()
-	verify := func(aid string, card, kelBytes []byte) *a2acard.Verified {
-		if len(kelBytes) == 0 {
-			return nil // no agent row: nobody to speak for
-		}
-		kel, err := identity.UnmarshalKEL(kelBytes)
-		if err != nil {
-			return nil
-		}
-		v, err := verifyA2ACardFor(aid, card, kel, now)
-		if err != nil {
-			return nil
-		}
-		return v
-	}
-	for _, l := range pending {
-		v := verify(l.aid, l.card, l.kel)
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		if v == nil {
-			_, err = tx.Exec(`DELETE FROM agent_a2a_card WHERE aid=?`, l.aid)
-		} else {
-			err = storeAdmittedA2ACard(tx, l.aid, l.card, v, now)
-		}
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("hub: migrate a2a card of %s: %w", l.aid, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // registrantResolver is the a2acard.Resolver for a card submitted by aid:
@@ -499,8 +420,8 @@ func a2aMark(tx *sql.Tx, aid string) (*a2acard.Mark, []byte, error) {
 		return nil, nil, err
 	}
 	if len(hash) != 32 {
-		// A row with no mark is not a card this hub admitted (migration
-		// readmits or deletes such rows); the next card replaces it.
+		// A row with no mark is not a card this hub admitted (every
+		// admitted card is stored with its mark); the next card replaces it.
 		return nil, raw, nil
 	}
 	m := &a2acard.Mark{Seq: seq}

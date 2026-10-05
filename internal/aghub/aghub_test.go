@@ -2,7 +2,6 @@ package aghub_test
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -682,55 +680,6 @@ func TestFindByCapability(t *testing.T) {
 	// A LIKE wildcard inside the id must not widen the query.
 	if got := names("cas.%"); len(got) != 0 {
 		t.Errorf("cap=cas.%% must be literal, returned %v", got)
-	}
-}
-
-// An upgraded hub already holds agents whose capabilities were only ever a
-// JSON blob. A directory that silently forgets its contents on upgrade is
-// worse than one that never had an index.
-func TestCapabilitiesAreIndexedForAgentsRegisteredBeforeTheIndex(t *testing.T) {
-	dir := t.TempDir()
-	c, err := identitytest.Hub()
-	if err != nil {
-		t.Fatal(err)
-	}
-	kel, err := identity.MarshalKEL(c.KEL())
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.PutAgent(c.AID(), "Old", []string{"cas.put"}, kel); err != nil {
-		t.Fatal(err)
-	}
-	s.Close()
-
-	// The pre-index state: the agent row exists, the index does not. Done
-	// with raw SQL rather than a production method that exists only for a
-	// test — the point is what an old database looks like, and an old
-	// database has no such method either.
-	raw, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`DROP TABLE agent_cap`); err != nil {
-		t.Fatal(err)
-	}
-	raw.Close()
-
-	reopened, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	got, err := reopened.FindByCapability("cas.put")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Name != "Old" {
-		t.Errorf("an agent registered before the index is invisible to it: %v", got)
 	}
 }
 

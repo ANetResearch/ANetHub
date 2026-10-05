@@ -275,15 +275,18 @@ func (s *Server) Handler() http.Handler {
 	// its own, which the spec permits outright — and for a ledger rail
 	// there is nothing to separate from, because the balances are here.
 	mux.HandleFunc("GET /x402/supported", s.hX402Supported)
-	// Credit going back out, and the arithmetic of what is outstanding.
+	// Credit going back out.
 	mux.HandleFunc("POST /x402/redeem", s.hRedeem)
+	// What this hub owes, once per supply epoch: the latest epoch, the
+	// signed chain of them and its head, the witnesses who have pinned it,
+	// and each account's proof that its balance is counted. See supply.go
+	// and witness.go.
 	mux.HandleFunc("GET /x402/supply", s.hSupply)
-	// The signed record of every supply change, and the witnesses who
-	// have pinned it. See issuance.go and witness.go.
 	mux.HandleFunc("GET /x402/issuance", s.hIssuance)
 	mux.HandleFunc("GET /x402/issuance/head", s.hIssuanceHead)
 	mux.HandleFunc("POST /x402/witness", s.hWitnessSubmit)
 	mux.HandleFunc("GET /x402/witnesses", s.hWitnesses)
+	mux.HandleFunc("GET /agents/{aid}/liability-proof", s.hLiabilityProof)
 	mux.HandleFunc("GET /agents/{aid}/redemptions", s.hRedemptions)
 	mux.HandleFunc("POST /federation/clear", s.hClear)
 	// Reputation across hub boundaries — the signed evidence, never an

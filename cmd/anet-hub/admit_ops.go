@@ -10,6 +10,7 @@ package main
 //	anet-hub admissions revoke <AID>
 //	anet-hub admission [open|closed]
 //	anet-hub grant <AID> --amount N [--reason R]
+//	anet-hub supply                       (supply.go)
 //
 // Each opens the hub's database beside a running hub (WAL, a busy timeout,
 // IMMEDIATE transactions), so none needs the hub stopped. What they print
@@ -36,7 +37,8 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 	"admissions": runAdmissions,
 	"admission":  runAdmission,
 	"grant":      runGrant,
-	"quota":      runQuota, // quota.go
+	"quota":      runQuota,  // quota.go
+	"supply":     runSupply, // supply.go
 }
 
 // runSubcommand runs the subcommand name with args; data is the --data the
@@ -44,7 +46,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 func runSubcommand(c *console, name, data string, args []string) int {
 	f, ok := subcommands[name]
 	if !ok {
-		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota …")
+		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply …")
 	}
 	return f(c, data, args)
 }
@@ -84,7 +86,7 @@ func openHub(c *console, dir string) (*aghub.Store, int) {
 	}
 	store, err := aghub.Open(dir)
 	if err != nil {
-		return nil, c.fail(err)
+		return nil, c.refuseData(err)
 	}
 	id, err := hubid.LoadOrIncept(dir)
 	if err != nil {

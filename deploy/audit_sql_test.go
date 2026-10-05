@@ -156,7 +156,7 @@ func TestTheAmountAuditListsWhatTheOverflowWroteAndNothingOnACleanHub(t *testing
 	// What the bug wrote: a settlement of 2^64-1000 (stored -1000, the
 	// attacker up and the victim down), a redemption of 2^64-1000 (the
 	// redeemer credited), a peer receipt of 0, a negative discharge, a
-	// negative debt, and the chain record of the redemption.
+	// negative debt, and supply totals that went negative.
 	for _, q := range []string{
 		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at) VALUES('ov-settle', '` +
 			attacker + `', '` + victim + `', -1000, '', '` + at + `')`,
@@ -169,8 +169,7 @@ func TestTheAmountAuditListsWhatTheOverflowWroteAndNothingOnACleanHub(t *testing
 		`INSERT INTO hub_cleared(auth_id, peer_aid, amount, at) VALUES('ov-discharge', '` + peer + `', -5, '` + at + `')`,
 		`INSERT INTO hub_owed(peer_aid, amount) VALUES('` + peer + `', -1000)`,
 		`UPDATE credit_balance SET credits = -910 WHERE aid = '` + victim + `'`,
-		`INSERT INTO credit_issuance(seq, id, prev_id, kind, aid, amount, reason, at, record) VALUES(1, 'rec-1', 'g', ` +
-			`'anet.credit.retired', '` + attacker + `', -1000, 'x', 1756684800000, x'00')`,
+		`UPDATE supply_totals SET redeemed = -1000 WHERE id = 1`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
@@ -184,7 +183,7 @@ func TestTheAmountAuditListsWhatTheOverflowWroteAndNothingOnACleanHub(t *testing
 	heads, rows = auditSections(t, conn)
 	for n, want := range map[string]string{
 		"1": "ov-settle", "1b": attacker, "2": "ov-redeem", "3": "ov-clear", "4": "ov-discharge",
-		"5": peer, "6": victim, "8": "anet.credit.retired", "9": attacker,
+		"5": peer, "6": victim, "8": "supply_totals", "9": attacker,
 	} {
 		got := strings.Join(rows[section(t, heads, n)], "\n")
 		if !strings.Contains(got, want) {

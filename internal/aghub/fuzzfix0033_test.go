@@ -59,7 +59,7 @@ func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 	if got := balanceOf(t, srv, payer.AID()); got != before {
 		t.Errorf("a refused settlement moved the payer %d -> %d", before, got)
 	}
-	if sup := supplyFull(t, srv); !sup.ChainAgrees || sup.Outstanding != sup.Balances {
+	if sup := supplyOf(t, srv); !sup.Consistent() || sup.Outstanding != sup.Balances {
 		t.Errorf("supply after the refused settlement: %+v", sup)
 	}
 
@@ -72,7 +72,7 @@ func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 	if got := balanceOf(t, srv, payer.AID()); got != before-10 {
 		t.Errorf("redeeming 10 moved the payer %d -> %d", before, got)
 	}
-	if sup := supplyFull(t, srv); !sup.ChainAgrees || sup.Redeemed != 10 {
+	if sup := supplyOf(t, srv); !sup.Consistent() || sup.Redeemed != 10 {
 		t.Errorf("supply after the redemption: %+v", sup)
 	}
 }
@@ -129,7 +129,7 @@ func TestAPeerReceiptPayingThisHubIsNotCleared(t *testing.T) {
 	if owed, _ := store.Owed(peer.AID()); owed != 0 {
 		t.Errorf("the peer is recorded as owing %d", owed)
 	}
-	if sup := supplyFull(t, srv); !sup.ChainAgrees || sup.Outstanding != sup.Balances {
+	if sup := supplyOf(t, srv); !sup.Consistent() || sup.Outstanding != sup.Balances {
 		t.Errorf("supply after the refused receipt: %+v", sup)
 	}
 }
@@ -161,7 +161,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 		}
 		return rec
 	}
-	issued := supplyFull(t, srv).Issued // the two registration grants
+	issued := supplyOf(t, srv).Issued // the two registration grants
 
 	err = store.ClearFromPeer(peer.AID(), peer.KEL(), receipt("past-supply", stranger.AID(), math.MaxInt64-100))
 	if err == nil || !strings.Contains(err.Error(), payment.ReasonInvalidAmount) {
@@ -180,7 +180,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 		t.Fatalf("a receipt that fills the supply exactly: %v", err)
 	}
 	sup, err := store.Supply(hubAIDOf(t, srv))
-	if err != nil || sup.Issued != math.MaxInt64 || !sup.ChainAgrees || sup.Outstanding != sup.Balances {
+	if err != nil || sup.Issued != math.MaxInt64 || !sup.Consistent() || sup.Outstanding != sup.Balances {
 		t.Fatalf("supply at the edge: %+v, %v", sup, err)
 	}
 	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), receipt("one-more", payee.AID(), 1)); err == nil {
@@ -213,13 +213,14 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 }
 
 // GET /x402/issuance?from= above 2^63-1 answered 500: the uint64 went to
-// database/sql, which refuses a uint64 with the high bit set. No chain
+// database/sql, which refuses a uint64 with the high bit set. No epoch's
 // seq is that high, so the answer is an empty page (FuzzHubPublicRoutes,
 // boundary seed).
 func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 	srv := newHub(t)
 	c, _ := identitytest.Hub()
-	register(t, srv, c, "Grantee", nil) // one issuance on the chain
+	register(t, srv, c, "Grantee", nil)
+	publishEpoch(t, storeOf(t, srv)) // one epoch on the chain, seq 0
 	for _, from := range []string{"18446744073709551615", "9223372036854775808", "9223372036854775807"} {
 		code, b := getJSON(t, srv.URL+"/x402/issuance?from="+from)
 		var out struct {
@@ -291,7 +292,7 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 		t.Fatal(err)
 	}
 	stranger, _ := identitytest.Hub()
-	issued := supplyFull(t, srv).Issued
+	issued := supplyOf(t, srv).Issued
 	// Room for one grant of testRegistrationFunds, not for two.
 	fill := uint64(math.MaxInt64 - issued - 3*testRegistrationFunds/2)
 	rec := &payment.Receipt{AuthID: "near-the-bound", Payer: "did:anet:their-user", PayTo: stranger.AID(),
@@ -353,7 +354,7 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("supply after %d concurrent grants at the bound: %v", n, err)
 	}
-	if want := issued + int64(fill) + testRegistrationFunds; sup.Issued != want || !sup.ChainAgrees {
+	if want := issued + int64(fill) + testRegistrationFunds; sup.Issued != want || !sup.Consistent() {
 		t.Fatalf("supply after %d concurrent grants with room for one: %+v, want issued %d", n, sup, want)
 	}
 }

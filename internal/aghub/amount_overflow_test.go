@@ -52,13 +52,13 @@ const victimFunds = 5000
 // moneyTables is every table a payment, redemption or clearing writes.
 var moneyTables = []string{
 	"credit_balance", "credit_entry", "credit_settled", "credit_cleared",
-	"credit_redemption", "credit_issuance", "hub_owed", "hub_due", "hub_cleared",
+	"credit_redemption", "supply_totals", "supply_chain", "hub_owed", "hub_due", "hub_cleared",
 }
 
 // moneyState dumps every row of every money table, so "nothing moved"
 // is checked against the database rather than against the few balances a
-// test thought to look at. credit_issuance is the signed issuance chain,
-// so an unchanged dump also means no new chain record.
+// test thought to look at. supply_totals counts every supply event, so an
+// unchanged dump also means nothing was issued or redeemed.
 func moneyState(t *testing.T, dir string) string {
 	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=busy_timeout(15000)")
@@ -654,9 +654,17 @@ func TestPeerReceiptsInRangeCannotSumPastWhatALedgerHolds(t *testing.T) {
 
 // The same on this hub's own ledger: a payee whose balance cannot take
 // the payment. The payer is not debited, and no receipt is signed.
+//
+// The supply bounds every balance by what was ever issued, at most 2^63-1
+// in all, so a payee this close to the edge beside a payer with credit is
+// a ledger that was written outside it (an old hub, a hand edit); the row
+// guard holds there too.
 func TestASettlementThatWouldOverflowThePayeeMovesNothing(t *testing.T) {
 	w := newOverflowWorld(t)
-	fundAgent(t, w.srv, w.victim.AID(), math.MaxInt64-50-balanceOf(t, w.srv, w.victim.AID()))
+	if err := w.store.MoveBalanceWithoutEntryForTest(w.victim.AID(),
+		math.MaxInt64-50-balanceOf(t, w.srv, w.victim.AID())); err != nil {
+		t.Fatal(err)
+	}
 	own := payment.CreditNetwork(w.hubAID)
 	before := moneyState(t, w.dir)
 	auth := signedAuth(t, w.attacker, w.victim.AID(), 100, w.hubAID, "ov-sum-settle")

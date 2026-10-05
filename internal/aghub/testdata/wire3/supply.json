@@ -1,0 +1,143 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "The supply epochs and balance proofs (hub-payment-privacy §2.3, core §2.12.2): /x402/supply, /x402/issuance and /x402/issuance/head serve only published epochs, with the record base64url and the root as 64 lowercase hex digits (CORE-E5); GET /agents/{aid}/liability-proof (relayauth liab_proof) answers the account holder only, for the latest epoch or ?to_day, and 404 proof_unavailable for a period never published or an account not on its books; POST /x402/witness takes an attestation base64url and refuses with G1 bodies. The setup is wire3SupplySetup: two epochs, 20454..20460 (65 outstanding) and 20461..20467 (67).",
+  "setup": "supply",
+  "cases": [
+    {
+      "name": "supply_is_the_latest_epoch",
+      "cite": "PAY-S4",
+      "request": {"method": "GET", "path": "/x402/supply", "headers": {"X-ANet-Wire": "3"}},
+      "response": {
+        "status": 200,
+        "body": {
+          "hub": "${hub}",
+          "epoch": {"seq": 1, "from_day": 20461, "to_day": 20467, "root": "${e1_root}", "outstanding": 67, "depth": 4},
+          "record": "${e1_record}",
+          "note": "${supply_note}"
+        }
+      }
+    },
+    {
+      "name": "issuance_lists_every_epoch_from_the_first",
+      "cite": "HPP §2.3",
+      "request": {"method": "GET", "path": "/x402/issuance", "headers": {"X-ANet-Wire": "3"}},
+      "response": {
+        "status": 200,
+        "body": {"entries": [
+          {"seq": 0, "id": "${e0_id}", "prev_id": "${e0_prev}", "from_day": 20454, "to_day": 20460,
+           "root": "${e0_root}", "outstanding": 65, "record": "${e0_record}"},
+          {"seq": 1, "id": "${e1_id}", "prev_id": "${e0_id}", "from_day": 20461, "to_day": 20467,
+           "root": "${e1_root}", "outstanding": 67, "record": "${e1_record}"}
+        ]}
+      }
+    },
+    {
+      "name": "issuance_from_a_cursor_is_inclusive",
+      "request": {"method": "GET", "path": "/x402/issuance?from=1", "headers": {"X-ANet-Wire": "3"}},
+      "response": {
+        "status": 200,
+        "body": {"entries": [
+          {"seq": 1, "id": "${e1_id}", "prev_id": "${e0_id}", "from_day": 20461, "to_day": 20467,
+           "root": "${e1_root}", "outstanding": 67, "record": "${e1_record}"}
+        ]}
+      }
+    },
+    {
+      "name": "issuance_past_the_head_is_empty",
+      "request": {"method": "GET", "path": "/x402/issuance?from=2", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 200, "body": {"entries": []}}
+    },
+    {
+      "name": "issuance_cursor_not_a_number",
+      "request": {"method": "GET", "path": "/x402/issuance?from=one", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "issuance_cursor_given_twice",
+      "request": {"method": "GET", "path": "/x402/issuance?from=0&from=1", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "head_is_the_latest_epoch",
+      "request": {"method": "GET", "path": "/x402/issuance/head", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 200, "body": {"seq": 1, "id": "${e1_id}"}}
+    },
+    {
+      "name": "proof_of_the_latest_epoch",
+      "cite": "PAY-S5",
+      "request": {"method": "GET", "path": "/agents/${alice}/liability-proof", "headers": {"X-ANet-Wire": "3"},
+                  "sign": {"action": "liab_proof", "as": "alice"}},
+      "response": {
+        "status": 200,
+        "body_has": {"to_day": 20467, "from_day": 20461, "aid": "${alice}", "balance": 42, "ledger_hw": 6,
+                     "record": "${e1_record}"}
+      }
+    },
+    {
+      "name": "proof_of_a_named_epoch",
+      "request": {"method": "GET", "path": "/agents/${bob}/liability-proof?to_day=20460", "headers": {"X-ANet-Wire": "3"},
+                  "sign": {"action": "liab_proof", "as": "bob"}},
+      "response": {
+        "status": 200,
+        "body_has": {"to_day": 20460, "from_day": 20454, "aid": "${bob}", "balance": 25, "ledger_hw": 4,
+                     "record": "${e0_record}"}
+      }
+    },
+    {
+      "name": "proof_unsigned",
+      "request": {"method": "GET", "path": "/agents/${alice}/liability-proof", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "proof_of_another_account",
+      "request": {"method": "GET", "path": "/agents/${alice}/liability-proof", "headers": {"X-ANet-Wire": "3"},
+                  "sign": {"action": "liab_proof", "as": "bob"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "proof_signed_for_another_action",
+      "request": {"method": "GET", "path": "/agents/${alice}/liability-proof", "headers": {"X-ANet-Wire": "3"},
+                  "sign": {"action": "balance", "as": "alice"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "proof_of_a_period_never_published",
+      "request": {"method": "GET", "path": "/agents/${alice}/liability-proof?to_day=20461", "headers": {"X-ANet-Wire": "3"},
+                  "sign": {"action": "liab_proof", "as": "alice"}},
+      "response": {"status": 404, "body": {"reason": "proof_unavailable",
+        "error": "No balance proof is kept for that period (proofs are kept for 14 days); fetch a newer period."}}
+    },
+    {
+      "name": "proof_of_an_account_not_on_the_books",
+      "request": {"method": "GET", "path": "/agents/${late}/liability-proof", "headers": {"X-ANet-Wire": "3"},
+                  "sign": {"action": "liab_proof", "as": "late"}},
+      "response": {"status": 404, "body_has": {"reason": "proof_unavailable"}}
+    },
+    {
+      "name": "proof_to_day_not_a_number",
+      "request": {"method": "GET", "path": "/agents/${alice}/liability-proof?to_day=last", "headers": {"X-ANet-Wire": "3"},
+                  "sign": {"action": "liab_proof", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "witness_attestation_not_base64url",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/x402/witness", "headers": {"X-ANet-Wire": "3"},
+                  "json": {"attestation": "a+b/cw=="}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "witness_unknown_member",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/x402/witness", "headers": {"X-ANet-Wire": "3"},
+                  "json": {"attestation": "", "note": "x"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "witness_not_an_attestation",
+      "request": {"method": "POST", "path": "/x402/witness", "headers": {"X-ANet-Wire": "3"},
+                  "json": {"attestation": "AAEC"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    }
+  ]
+}

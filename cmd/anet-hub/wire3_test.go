@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ANetResearch/ANetHub/internal/wire3"
@@ -72,7 +74,7 @@ func TestClearStatesTheWireToThePeer(t *testing.T) {
 		seen = append(seen, r.Method+" "+r.URL.Path+" "+r.Header.Get(wire3.Header))
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"peer":"x","owed":245,"supply":{"owed_by_peers":250}}`))
+		_, _ = w.Write([]byte(`{"peer":"x","owed":0}`))
 	})))
 	defer peer.Close()
 	if err := clearOwed(t.TempDir(), "did:anet:peer-hub", 5, "wire", peer.URL, ""); err != nil {
@@ -80,7 +82,44 @@ func TestClearStatesTheWireToThePeer(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if strings.Join(seen, ", ") != "GET /x402/supply 3, POST /federation/clear 3" {
+	if strings.Join(seen, ", ") != "POST /federation/clear 3" {
 		t.Fatalf("the peer saw %q", seen)
+	}
+}
+
+// A wire-3 peer publishes no figure of what it is owed (/x402/supply
+// states its latest supply epoch only), so -clear does not ask for one:
+// a peer that shows nothing left owed after the discharge is a discharge
+// applied; one that still shows something owed may or may not have
+// applied it, and the operator is told exactly that, not that it was not
+// applied — sending another statement on that word would be applied too.
+func TestClearToAWire3PeerDoesNotGuessWhatWasOwed(t *testing.T) {
+	for _, c := range []struct {
+		owedAfter int
+		ok        bool
+	}{{0, true}, {7, false}} {
+		var supplyAsked atomic.Int32
+		peer := httptest.NewServer(wire3.Contract(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/x402/supply":
+				supplyAsked.Add(1)
+				_, _ = w.Write([]byte(`{"hub":"did:anet:peer-hub","note":"epochs only"}`))
+			case "/federation/clear":
+				_, _ = fmt.Fprintf(w, `{"peer":"x","owed":%d}`, c.owedAfter)
+			}
+		})))
+		err := clearOwed(t.TempDir(), "did:anet:peer-hub", 5, "wire", peer.URL, "")
+		peer.Close()
+		if c.ok && err != nil {
+			t.Errorf("owed %d after: %v", c.owedAfter, err)
+		}
+		if !c.ok && (err == nil || !strings.Contains(err.Error(), "cannot be told") ||
+			strings.Contains(err.Error(), "not applied")) {
+			t.Errorf("owed %d after: %v, want an error saying it cannot be told", c.owedAfter, err)
+		}
+		if n := supplyAsked.Load(); n != 0 {
+			t.Errorf("-clear asked the peer's /x402/supply %d time(s) for a figure it does not publish", n)
+		}
 	}
 }

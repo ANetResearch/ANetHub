@@ -129,7 +129,6 @@ func TestHubTextJSON(t *testing.T) {
 var pendingOperatorCodes = map[string]string{
 	"hub_recovery_setup_required": "v030-todo(KEL-7)",
 	"hub_running":                 "v030-todo(KEL-7)",
-	"hub_identity_v02":            "v030-todo(KEL-7)",
 }
 
 // UX-T2 for the L group: every registered operator code has a row, every

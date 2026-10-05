@@ -31,10 +31,11 @@ import (
 //	             it does is destroy the credit and sign a statement of
 //	             what was destroyed and against which external reference,
 //	             so the agent holds a claim it can produce later.
-//	supply       what the hub has issued, what has come back, and what is
-//	             therefore outstanding. Published, because a custodian
-//	             whose liabilities cannot be counted is being trusted for
-//	             more than it said.
+//	supply       what the hub owes in total, published once per supply
+//	             epoch with a tree each account checks its own balance
+//	             against (supply.go). Published, because a custodian whose
+//	             liabilities cannot be counted is being trusted for more
+//	             than it said.
 //	clearing     two hubs settling what they owe each other, so hub_owed
 //	             comes down instead of only up.
 //
@@ -143,17 +144,11 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	// whole ledger sum to zero and a hub's outstanding liability is a
 	// number anyone can compute rather than one it reports.
 	//
-	// The entry is NOT written here. A redemption is a payment whose
-	// payee is the hub, and settleAuth writes an entry for both
-	// parties — so adding one here counted the hub's row twice and drove
-	// outstanding negative by the redeemed amount.
-	// And on the signed chain, so the supply is auditable in both
-	// directions. A redemption missing from the chain would leave the
-	// chain overstating what is outstanding.
-	if err := s.appendIssuance(EvCreditRetired, auth.Payer, amt, reference); err != nil {
-		log.Printf("hub: redemption %s not recorded on the issuance chain: %v",
-			settled.Transaction, err)
-	}
+	// Neither the entry nor the supply event is written here. A
+	// redemption is a payment whose payee is the hub, and settleAuth
+	// writes an entry for both parties and records the credit leaving
+	// circulation, in the settlement's transaction — so adding either here
+	// would count it twice.
 
 	out := Redemption{AuthID: settled.Transaction, AID: auth.Payer, Amount: auth.Amount,
 		Reference: reference, At: at}
@@ -251,106 +246,6 @@ func (s *Store) Redemptions(aid string, limit int) ([]Redemption, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
-}
-
-// Supply is what this hub has put into circulation and what has come
-// back, so its liability can be counted rather than asserted.
-type Supply struct {
-	Issued      int64 `json:"issued"`
-	Redeemed    int64 `json:"redeemed"`
-	Outstanding int64 `json:"outstanding"`
-	// Balances is what every agent row adds up to. It must equal
-	// Outstanding; a hub where it does not has a bug or a thumb on the
-	// scale, and either way the number is the way to find out.
-	Balances int64 `json:"balances"`
-	// Owed is what peer hubs owe this one, kept apart from the local
-	// supply because a claim on another hub is not credit here.
-	Owed int64 `json:"owed_by_peers"`
-	// Due is the other direction: credit this hub destroyed to pay agents
-	// that bank on peers, and therefore owes to those peers' hubs.
-	//
-	// Published because it is the only place the obligation appears. The
-	// credit is already off this ledger — outstanding fell when it left —
-	// so a reader looking only at supply would see a hub that had retired
-	// credit and owed nobody anything.
-	Due int64 `json:"due_to_peers"`
-	// ChainIssued and ChainRetired are the same totals derived from the
-	// signed issuance chain instead of the balance table.
-	//
-	// Published alongside rather than instead, because the point is the
-	// comparison. The two are written by the same process and should
-	// always agree; when they do not, this hub moved credit without
-	// recording it on the chain, and a reader can see that without
-	// trusting either number. ChainAgrees says whether they match.
-	ChainIssued  int64 `json:"chain_issued"`
-	ChainRetired int64 `json:"chain_retired"`
-	// ChainOpening is supply that predates the chain: outstanding when
-	// the chain began, issued before anything recorded issuance.
-	//
-	// Reported separately rather than folded into ChainIssued, because
-	// the two are not equally supported. Everything in ChainIssued has a
-	// signed, ordered record that a witness can pin. ChainOpening is this
-	// hub's own statement about its own past, and nothing outside the hub
-	// vouches for it.
-	ChainOpening int64 `json:"chain_opening,omitempty"`
-	// ChainOutstanding is what the chain says is outstanding now:
-	// opening + issued - retired.
-	//
-	// This, not the issued/redeemed split, is what the chain and the
-	// table can be held to. A chain that begins partway through a hub's
-	// life knows nothing about how much was issued and redeemed before
-	// it — only the net that was outstanding when it opened. Comparing
-	// the historical split reported false disagreement on any hub that
-	// had processed a redemption before the chain existed.
-	ChainOutstanding int64 `json:"chain_outstanding"`
-	ChainAgrees      bool  `json:"chain_agrees"`
-	// ChainHead is the current head of the issuance chain, which is what
-	// a witness attests to.
-	//
-	// ChainHeadSeq has no omitempty: an AEL's first record is seq 0, and
-	// omitting it would make a one-record chain indistinguishable from no
-	// chain to every reader deciding whether there is a head to pin.
-	ChainHead    string `json:"chain_head,omitempty"`
-	ChainHeadSeq uint64 `json:"chain_head_seq"`
-}
-
-// Supply computes the hub's position.
-func (s *Store) Supply(hubAID string) (Supply, error) {
-	var out Supply
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(delta),0) FROM credit_entry WHERE aid=? AND delta<0`,
-		hubAID).Scan(&out.Issued); err != nil {
-		return out, err
-	}
-	out.Issued = -out.Issued
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(delta),0) FROM credit_entry WHERE aid=? AND delta>0`,
-		hubAID).Scan(&out.Redeemed); err != nil {
-		return out, err
-	}
-	out.Outstanding = out.Issued - out.Redeemed
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(credits),0) FROM credit_balance WHERE aid<>?`,
-		hubAID).Scan(&out.Balances); err != nil {
-		return out, err
-	}
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(amount),0) FROM hub_owed`).Scan(&out.Owed); err != nil {
-		return out, err
-	}
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(amount),0) FROM hub_due`).Scan(&out.Due); err != nil {
-		return out, err
-	}
-	ci, cr, co, cerr := s.IssuanceTotals()
-	if cerr != nil {
-		return out, cerr
-	}
-	out.ChainIssued, out.ChainRetired, out.ChainOpening = ci, cr, co
-	out.ChainOutstanding = co + ci - cr
-	out.ChainAgrees = out.ChainOutstanding == out.Outstanding
-	out.ChainHead, out.ChainHeadSeq, _ = s.IssuanceHead()
-	return out, nil
 }
 
 // ---- clearing between hubs ----
@@ -544,27 +439,6 @@ func (s *Server) hRedemptions(w http.ResponseWriter, r *http.Request) {
 			"Reconcile against sum, not against the page."
 	}
 	writeJSON(w, http.StatusOK, body)
-}
-
-// hSupply publishes what this hub owes its users.
-//
-// Public and unauthenticated. A custodian that would only tell you its
-// liabilities if you asked nicely is one whose liabilities you should
-// assume are worse than it says.
-func (s *Server) hSupply(w http.ResponseWriter, _ *http.Request) {
-	out, err := s.store.Supply(s.hubAID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"hub":    s.hubAID,
-		"supply": out,
-		"note": "outstanding is what this hub owes its users. balances is what those users' rows " +
-			"add up to; the two must agree. credit is issued by this hub and redeemed back to it — " +
-			"what a redemption is worth outside this ledger is between the hub and the agent, and " +
-			"is not something this software can vouch for.",
-	})
 }
 
 // clearingRequest is a peer hub saying it has paid what it owed.

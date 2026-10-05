@@ -116,7 +116,7 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("GET", "/agents/{aid}/balance", reflect.TypeFor[Balance](), ""),
 		resp("GET", "/agents/{aid}/ledger", nil, "v030-todo(PAY-4)"),
 		resp("GET", "/agents/{aid}/redemptions", nil, "v030-todo(PAY-4)"),
-		resp("GET", "/agents/{aid}/liability-proof", nil, "v030-todo(PAY-3)"),
+		resp("GET", "/agents/{aid}/liability-proof", reflect.TypeFor[LiabilityProof](), ""),
 		req("POST", "/reviews", reflect.TypeFor[UploadReviewRequest](), "v030-todo(PAY-6)"),
 		resp("POST", "/reviews", nil, "v030-todo(PAY-6)"),
 		resp("POST", "/fed/v3/forward", reflect.TypeFor[FedForwardResponse](), ""),
@@ -207,6 +207,61 @@ var wire3Setups = map[string]wire3test.Setup{
 	"rc1":             wire3RC1Setup,
 	"revoke":          wire3RevokeSetup,
 	"relay":           wire3RelaySetup,
+	"supply":          wire3SupplySetup,
+}
+
+// wire3SupplySetup is the hub of wire3HubSetup with two published supply
+// epochs, on a clock that starts at 2026-01-01T12:00Z (UTC day 20454; the
+// supply epochs of hub-payment-privacy §2.3). alice (40) and bob (25) are
+// granted credit on day 20454, so the first epoch, published seven days on,
+// covers 20454..20460 with 65 outstanding; alice is granted 2 more, and the
+// second, published on day 20468, covers 20461..20467 with 67. late is
+// registered after that, so it is on neither epoch's books. Each epoch's
+// id, prev_id, root and record are ${e0_…} and ${e1_…}.
+func wire3SupplySetup(t *testing.T) *wire3test.Env {
+	t.Helper()
+	env, store, signers := wire3Hub(t)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	store.clock = func() time.Time { return now }
+	bob, late := wire3Incept(t), wire3Incept(t)
+	signers["bob"], signers["late"] = bob, late
+	put := func(c *identity.Controller, name string) {
+		kel, err := identity.MarshalKEL(c.KEL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PutAgent(c.AID(), name, nil, kel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(bob, "bob")
+	grant := func(c *identity.Controller, n int64) {
+		if err := store.GrantCredit(c.AID(), n, "fixture"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	grant(signers["alice"], 40)
+	grant(bob, 25)
+	var epochs []*SupplyEpochEntry
+	publish := func(days int) {
+		now = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).AddDate(0, 0, days)
+		e, err := store.publishDueAt(now)
+		if err != nil || e == nil {
+			t.Fatalf("publish on day +%d: %+v %v", days, e, err)
+		}
+		epochs = append(epochs, e)
+	}
+	publish(7)
+	grant(signers["alice"], 2)
+	publish(14)
+	put(late, "late")
+	env.Vars["bob"], env.Vars["late"] = bob.AID(), late.AID()
+	for i, e := range epochs {
+		p := "e" + strconv.Itoa(i) + "_"
+		env.Vars[p+"id"], env.Vars[p+"prev"], env.Vars[p+"root"], env.Vars[p+"record"] = e.ID, e.PrevID, e.Root, e.Record
+	}
+	env.Vars["supply_note"] = supplyNote
+	return env
 }
 
 // wire3RelaySetup is the hub of wire3HubSetup for the /relay/session and
