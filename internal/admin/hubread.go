@@ -255,7 +255,7 @@ func (h *HubDB) DeleteAgent(aid string) error {
 }
 
 // withdrawA2ACards puts a withdrawal on the hub's A2A card federation
-// stream (/fed/v2/cards) for every agent matching cond (over agent a)
+// stream (/fed/v3/cards) for every agent matching cond (over agent a)
 // whose A2A card is there to withdraw, before the operator's delete
 // removes the rows, as the hub does when an agent deregisters
 // (aghub.withdrawA2ACard). Without it a peer that learned the card keeps

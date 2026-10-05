@@ -26,7 +26,7 @@ func TestPeerRequestsStateTheWire(t *testing.T) {
 
 	svc, err := New(t.TempDir(),
 		Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: peer.URL}}},
-		idSelf, newFakeLocal())
+		idSelf)
 	if err != nil {
 		t.Fatal(err)
 	}

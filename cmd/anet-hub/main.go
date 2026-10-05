@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -26,34 +25,10 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"github.com/ANetResearch/ANetHub/internal/version"
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
-
-// storeDelivery adapts the hub kernel store to federation.LocalDelivery,
-// the receiving half of the federation v2 forward. The kernel's relay errors
-// are mapped onto federation's, so that the forward handler can answer 507
-// and 400 without importing the kernel.
-//
-// v030-todo(SS-6): /fed/v3/forward checks the delivery credential itself and
-// queues through the kernel's /relay/send steps; this adapter goes with v2.
-type storeDelivery struct{ s *aghub.Store }
-
-func (d storeDelivery) HasAgent(aid string) bool { _, err := d.s.AgentKEL(aid); return err == nil }
-func (d storeDelivery) Enqueue(to string, envelope []byte) (int64, error) {
-	q, err := d.s.QueueEnvelope(to, envelope)
-	var limited *aghub.RedeliveryLimitedError
-	switch {
-	case errors.Is(err, aghub.ErrMailboxFull), errors.Is(err, aghub.ErrStrangersBusy), errors.As(err, &limited):
-		// Federation v2 has one "cannot take it now" answer.
-		return 0, fmt.Errorf("%w: %v", federation.ErrMailboxFull, err)
-	case errors.Is(err, aghub.ErrBadEnvelope):
-		return 0, fmt.Errorf("%w: %v", federation.ErrBadEnvelope, err)
-	}
-	return q.ID, err
-}
 
 // hubFlags is every flag this binary takes.
 //

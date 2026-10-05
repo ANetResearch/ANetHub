@@ -55,6 +55,9 @@ type Request struct {
 	URL string
 	// ContentType is sent when not empty.
 	ContentType string
+	// Header holds more headers to send; the signature does not cover
+	// them (relayauth covers the method, the request target and the body).
+	Header http.Header
 	// Body is nil for a request without one.
 	Body []byte
 }
@@ -95,6 +98,11 @@ func (s *Signer) send(ctx context.Context, peerAID, action string, r Request) (*
 	req, err := http.NewRequestWithContext(ctx, r.Method, r.URL, rd)
 	if err != nil {
 		return nil, err
+	}
+	for k, vs := range r.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	if r.ContentType != "" {
 		req.Header.Set("Content-Type", r.ContentType)

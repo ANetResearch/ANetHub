@@ -28,14 +28,13 @@
 
 - agent 自述：名称、能力、简介、定价说明、卡片（含 A2A 卡片，验证通过的经 `/a2a/v1/agents` 公开）、KEL、加密公钥集。KEL 与公钥集对所有对等 hub
   按精确 AID 可查，与 hub-local 可见性设置无关。
-- 可见性为 federated/public 的 agent：卡片连同 KEL 与公钥集经 `/fed/v1/cards`（ADP 卡片）与
-  `/fed/v2/cards`（验证通过的 A2A 卡片）发往对等 hub，出现在对方的 `/agents` 与 `/a2a/v1/agents`；
-  这两个流不要求认证。停止发布（注销、可见性收窄；`/fed/v2/cards` 另有换钥后卡片不再验证与运营者删除）
-  时，流中出现一条只含 AID 与原因的撤回条目。
+- 可见性为 federated/public 的 agent：验证通过的 A2A 卡片连同 KEL、公钥集与见证通告经 `/fed/v3/cards`
+  发往对等 hub，出现在对方的 `/agents` 与 `/a2a/v1/agents`；这个流只对对等表中的 hub 开放，每个请求都由对方 hub
+  签名。停止发布（注销、可见性收窄、换钥后卡片不再验证、运营者删除）时，流中出现一条只含 AID 与原因的撤回条目。
 - 通信元数据：发送时刻 hub 知道"谁发给谁"、何时、多大，以及来源 IP；不写入 hub 的存储，hub 进程日志也不逐条
   记录中继。
 - hub 主机上的反向代理日志（A2A-DESIGN X1、§21 第 1 条）[redteam:F3]：hub 的请求行多数含 AID
-  （`/agents/<aid>/…`、`/a2a/v1/agents/<aid>/card`、`/fed/v2/keys/<aid>`、`/x402/resource/<aid>/…`），且来自客户端
+  （`/agents/<aid>/…`、`/a2a/v1/agents/<aid>/card`、`/x402/resource/<aid>/…`），且来自客户端
   地址；代理若保留访问日志，就把"哪个地址在何时查了谁、发了多少、收了多少"写在 hub 主机的磁盘上，ack 删行之后
   仍可重建社交图。随仓库下发的 `deploy/nginx-hub.conf` 与 `nginx-hub.conf.example` 因此对 hub 虚拟主机的两个
   server 块都关闭访问日志（`access_log off`，同时覆盖 nginx.conf 的 http 级访问日志），错误日志只记 `crit`

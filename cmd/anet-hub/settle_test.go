@@ -145,7 +145,7 @@ func newCrossHubRig(t *testing.T) *crossHubRig {
 	srvA := aghub.NewServer(storeA)
 	srvA.SetHubAID(idA.AID)
 	fedA, err := federation.New(dirA, federation.Config{Delivery: "allowlist",
-		Peers: []federation.Peer{{AID: idB.AID, Endpoint: httpB.URL}}}, idA, storeDelivery{storeA})
+		Peers: []federation.Peer{{AID: idB.AID, Endpoint: httpB.URL}}}, idA)
 	if err != nil {
 		t.Fatal(err)
 	}

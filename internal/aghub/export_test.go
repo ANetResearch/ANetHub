@@ -99,3 +99,11 @@ func (s *Store) SetDirNoticeForTest(f func(aid string) []byte) {
 
 // DirMaxBitsOfForTest is dirMaxBits over the given 64-bit hash prefixes.
 func DirMaxBitsOfForTest(prefixes []uint64) int { return dirMaxBits(prefixes) }
+
+// FedCardNoticeForTest is the witness notice the row of a card learned from
+// a peer keeps for aid, nil for none.
+func (s *Store) FedCardNoticeForTest(aid string) []byte {
+	var n []byte
+	_ = s.db.QueryRow(`SELECT notice FROM fed_a2a_card WHERE aid=?`, aid).Scan(&n)
+	return n
+}

@@ -406,12 +406,13 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 			"aid", "avgRating", "card", "cardVerification", "homeHub", "kel", "key_state_notice", "keys", "lastSeen", "quiet",
 			"reviewCount", "verifiedAt"}},
 		{"A2AAgentList", aghub.A2AAgentList{}, []string{"agents", "nextCursor"}},
-		{"federation.Envelope", federation.Envelope{}, []string{
-			"dest_aid", "hop", "key_state_seq", "origin_hub_aid", "payload", "payload_cid", "seen_hubs", "sig", "ts", "v"}},
-		{"federation.KeysAnswer", federation.KeysAnswer{}, []string{"kel", "keyset"}},
-		// GET /fed/v2/cards (A2A-DESIGN §10.6), read by peer hubs.
+		// POST /fed/v3/forward and /fed/v3/directory:bucket, answered to
+		// peer hubs (sealed-sender §2.8).
+		{"FedForwardResponse", aghub.FedForwardResponse{}, []string{"recipient_quiet", "rid", "status"}},
+		{"FedBucketResponse", aghub.FedBucketResponse{}, []string{"entries", "max_bits", "next"}},
+		// GET /fed/v3/cards (A2A-DESIGN §10.6), read by peer hubs.
 		{"federation.FedA2ACardEntry", federation.FedA2ACardEntry{}, []string{
-			"card", "fed_seq", "format", "home", "kel", "keys"}},
+			"card", "fed_seq", "format", "home", "kel", "key_state_notice", "keys"}},
 		{"federation.FedA2ACardPage", federation.FedA2ACardPage{}, []string{"cards", "cursor"}},
 	} {
 		got := goJSONFields(t, tc.value)
@@ -428,7 +429,7 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{aghub.CardStatusWithdrawn, "withdrawn"},
 		{aghub.CardVerificationOK, "ok"},
 		{aghub.CardErrorPriceInPublicCard, "price_in_public_card"},
-		// The /fed/v2/cards entry formats a peer hub dispatches on.
+		// The /fed/v3/cards entry formats a peer hub dispatches on.
 		{federation.FormatA2ACard, "a2a-card/1"}, {federation.FormatWithdrawal, "withdrawal/1"},
 	} {
 		if pair[0] != pair[1] {
@@ -442,9 +443,6 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 func TestTheWireVersionsAndHeadersArePinned(t *testing.T) {
 	if aghub.WireVersion != 3 {
 		t.Errorf("hub wire version %d, want 3", aghub.WireVersion)
-	}
-	if federation.ForwardVersion != 2 {
-		t.Errorf("federation forward version %d, want 2", federation.ForwardVersion)
 	}
 	for _, pair := range [][2]string{
 		{relayauth.HeaderAID, "X-ANet-AID"}, {relayauth.HeaderTS, "X-ANet-TS"},

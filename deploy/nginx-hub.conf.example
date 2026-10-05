@@ -22,7 +22,7 @@
 # Logs (A2A-DESIGN X1, §21 item 1) [redteam:F3]. The hub stores no record
 # of who sent what to whom; nginx's default access log would. Every hub
 # request line names agents (/agents/<aid>/..., /a2a/v1/agents/<aid>/card,
-# /fed/v2/keys/<aid>, /x402/resource/<aid>/...) and comes from the client's
+# /x402/resource/<aid>/...) and comes from the client's
 # address, so a kept log rebuilds the social graph — sender address ->
 # recipient, with times and sizes — long after the envelope was acked and
 # deleted. Both server blocks therefore keep no access log (access_log off

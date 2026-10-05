@@ -22,21 +22,22 @@ func init() {
 		if err != nil {
 			return nil, err
 		}
-		fed, err := federation.New(d.data, cfg, d.hubID, storeDelivery{d.store})
+		fed, err := federation.New(d.data, cfg, d.hubID)
 		if err != nil {
 			return nil, err
 		}
-		d.root.Handle("/fed/v1/", fed.Handler())
-		d.root.Handle("/fed/v2/", fed.Handler())
-		// Forwarded envelopes are bounded like local ones.
-		fed.SetMaxEnvelope(d.srv0.Limits().MaxEnvelope)
-		// /fed/v2/keys answers for any AID registered here, by exact AID,
-		// to peers only (A2A-DESIGN §3.9).
-		fed.SetKeySource(aghub.StoreKeySource{S: d.store})
+		// Federation v3 (core G21): every route a peer calls is under
+		// /fed/v3 and signed by that peer. The kernel answers the parts
+		// that are its own (the credential, the mailbox, the directory)
+		// through the Kernel seam, and asks the module for the peers and
+		// for its requests to them through the Federation seam: a send
+		// for an agent registered at a peer is handed to that one hub
+		// (sealed-sender §4.2.6), and a directory bucket merges the
+		// peers' answers (SSR-W19).
+		d.root.Handle("/fed/v3/", fed.Handler())
+		fed.SetKernel(d.srv0)
+		d.srv0.SetFederation(fed)
 		if fed.Enabled() {
-			// v030-todo(SS-6): /relay/send forwards a recipient registered
-			// at a peer to its one home hub (federation v3); the v2 forward
-			// that tried each peer is not wired to the wire-3 send.
 			log.Printf("anet-hub federation: delivery=%s peers=%d", cfg.Delivery, len(cfg.Peers))
 		}
 

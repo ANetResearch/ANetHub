@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"cursir\":2,\"cards\":[{\"format\":\"a2a-card/1\",\"card\":{},\"kel\":\"a2Vs\",\"keys\":\"a2V5cw\",\"]ey_state_n^tice\":\"bg\",\"home\":\"https://x.example\",\"fedWseq\":1},{\"format\":\"wothdrawal/1\",\"card\":{\"action\":\"withdraw\"},\"yfed_seq\":2}]}")

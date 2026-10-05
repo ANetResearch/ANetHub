@@ -1,53 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"errors"
 	"flag"
 	"testing"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
-	"github.com/ANetResearch/ANetCore/seal"
-
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/federation"
 )
-
-// The kernel's relay refusals reach the federation forward handler as
-// federation's own errors, which it answers with 507 and 400.
-func TestStoreDeliveryMapsRelayRefusals(t *testing.T) {
-	store, err := aghub.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	store.SetRelayQuota(1, 1<<20)
-	c, _ := identitytest.Hub()
-	kel, _ := identity.MarshalKEL(c.KEL())
-	if err := store.PutAgent(c.AID(), "R", nil, kel); err != nil {
-		t.Fatal(err)
-	}
-	env := func(ct string) []byte {
-		b, err := (&seal.SealedEnvelope{V: seal.EnvelopeVersion, To: c.AID(), Suite: seal.SuiteX25519,
-			KID: bytes.Repeat([]byte{7}, 16), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct), Access: &seal.Access{Kind: seal.AccessKindSession}}).Marshal()
-		if err != nil {
-			t.Fatal(err)
-		}
-		return b
-	}
-	d := storeDelivery{store}
-	if _, err := d.Enqueue(c.AID(), []byte("plaintext")); !errors.Is(err, federation.ErrBadEnvelope) {
-		t.Errorf("plaintext: %v, want federation.ErrBadEnvelope", err)
-	}
-	if _, err := d.Enqueue(c.AID(), env("one")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.Enqueue(c.AID(), env("two")); !errors.Is(err, federation.ErrMailboxFull) {
-		t.Errorf("over quota: %v, want federation.ErrMailboxFull", err)
-	}
-}
 
 // Every §3.7 relay limit that is still a setting is a flag, each flag sets
 // its own field, and with no flags the limits are the design defaults. The

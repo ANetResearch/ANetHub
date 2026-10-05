@@ -402,6 +402,16 @@ func (b *bucketSet) refund(key string, r relayRate) {
 	x.tokens = math.Min(r.burst, x.tokens+1)
 }
 
+// debit takes up to n tokens from key's bucket at rate r, as many as it
+// holds: a penalty, not a request, so it never refuses and never takes the
+// bucket below empty.
+func (b *bucketSet) debit(key string, r relayRate, n float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	x := b.level(key, r, b.now())
+	x.tokens = math.Max(0, x.tokens-n)
+}
+
 // forget drops key's bucket: it starts full the next time.
 func (b *bucketSet) forget(key string) {
 	b.mu.Lock()

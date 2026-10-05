@@ -288,11 +288,11 @@ func (s *Store) RelayEnqueue(it RelayItem) (Queued, error) {
 var enqueueFault func() error
 
 // QueueEnvelope queues an envelope for toAID that reached this hub without
-// a credential checked here: the federation v2 forward of a peer hub
-// (v030-todo(SS-6): /fed/v3/forward checks the credential and calls
-// RelayEnqueue), an operator tool, a test. It is checked structurally
-// (CheckEnvelope) and queued as non-contact mail, the class that cannot
-// crowd out the recipient's contacts.
+// a credential checked here: an operator tool, a test. (A peer hub's
+// forward is checked like a local send, ServeForward, and queued with
+// RelayEnqueue.) It is checked structurally (CheckEnvelope) and queued as
+// non-contact mail, the class that cannot crowd out the recipient's
+// contacts.
 func (s *Store) QueueEnvelope(toAID string, envelope []byte) (Queued, error) {
 	outer, err := CheckEnvelope(toAID, envelope)
 	if err != nil {
@@ -510,21 +510,22 @@ func (s *Store) agentRegistered(aid string) (bool, error) {
 	return err == nil, err
 }
 
-// ownerMbox is the mailbox signing key of the key set an agent registered
-// here published (sealed-sender §2.4): found is false when aid is not
-// registered here or has published no key set.
-func (s *Store) ownerMbox(aid string) (mbox seal.Mbox, found bool, err error) {
+// ownerMboxOf is the mailbox signing key of the key set an agent registered
+// here published (sealed-sender §2.4), and whether the agent is registered
+// here at all: found is false when aid is not registered here or has
+// published no key set.
+func (s *Store) ownerMboxOf(aid string) (mbox seal.Mbox, found, registered bool, err error) {
 	keyset, _, registered, err := s.LocalKeys(aid)
 	if err != nil || !registered || keyset == nil {
-		return seal.Mbox{}, false, err
+		return seal.Mbox{}, false, registered, err
 	}
 	signed, err := seal.UnmarshalSignedEncKeySet(keyset)
 	if err != nil {
-		return seal.Mbox{}, false, fmt.Errorf("hub: a stored key set does not decode: %w", err)
+		return seal.Mbox{}, false, true, fmt.Errorf("hub: a stored key set does not decode: %w", err)
 	}
 	m, err := mboxOf(signed.Set)
 	if err != nil {
-		return seal.Mbox{}, false, fmt.Errorf("hub: a stored key set does not decode: %w", err)
+		return seal.Mbox{}, false, true, fmt.Errorf("hub: a stored key set does not decode: %w", err)
 	}
-	return *m, true, nil
+	return *m, true, true, nil
 }
