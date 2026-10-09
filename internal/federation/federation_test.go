@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -143,6 +144,38 @@ func TestTheReviewStreamIsSignedV3(t *testing.T) {
 	}
 	if c := svcB.peerReviewCursor(a.id.AID); c != 2 {
 		t.Fatalf("review cursor %d, want 2", c)
+	}
+}
+
+// A review refused for now (its peer signed under a key state this hub has
+// not caught up with) holds the review cursor just before it, so the next
+// round reads it again; one refused for good is passed, like a card.
+func TestTheReviewCursorWaitsForAReviewRefusedForNow(t *testing.T) {
+	entry := func(seq int) json.RawMessage {
+		return json.RawMessage(fmt.Sprintf(`{"format":"review/2","fed_seq":%d}`, seq))
+	}
+	source := &fakeDirectory{reviews: []json.RawMessage{entry(1), entry(2), entry(3), entry(4)}}
+	sink := &fakeDirectory{revRejectForever: map[int64]bool{2: true}, revRefuseForNow: map[int64]bool{3: true}}
+	a, svcB := discoveryPair(t, source, sink)
+	if admitted, refused := svcB.SyncOnce(context.Background()); admitted != 1 || refused != 2 {
+		t.Fatalf("admitted %d refused %d, want 1 and 2", admitted, refused)
+	}
+	if c := svcB.peerReviewCursor(a.id.AID); c != 2 {
+		t.Fatalf("review cursor %d, want 2: just before the entry refused for now", c)
+	}
+	// The refusal stops applying: the entry is read again and the stream
+	// moves to its end.
+	sink.mu.Lock()
+	sink.revRefuseForNow = nil
+	sink.mu.Unlock()
+	if admitted, _ := svcB.SyncOnce(context.Background()); admitted != 2 {
+		t.Fatalf("the second round admitted %d, want entries 3 and 4", admitted)
+	}
+	if c := svcB.peerReviewCursor(a.id.AID); c != 4 {
+		t.Fatalf("review cursor %d, want 4", c)
+	}
+	if len(sink.gotRevs) != 3 {
+		t.Fatalf("admitted %d reviews, want 3 (1, 3 and 4)", len(sink.gotRevs))
 	}
 }
 

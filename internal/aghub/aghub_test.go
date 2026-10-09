@@ -14,12 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/anetcid"
+	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
-	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 
 	_ "modernc.org/sqlite"
 
@@ -229,48 +228,32 @@ func registerBody(t *testing.T, c *identity.Controller, name string, caps []stri
 	}
 }
 
-// testRequestDoc and testDeliverable stand in for an interaction's request and result. They are
-// hashed into the receipt's anchors and never sent to the hub: the tests below check that no path
-// stores or returns them.
-var (
-	testRequestDoc  = []byte("the request: bake sourdough")
-	testDeliverable = []byte("the deliverable: a crusty loaf recipe")
-)
-
-// makeEvidence builds an interlocking provider-signed receipt + requester-signed review for one
-// interaction, with the receipt's content anchors set to the hashes of testRequestDoc /
-// testDeliverable. Returns the two objects base64-encoded, ready to POST to /reviews.
-func makeEvidence(t *testing.T, prov, req *identity.Controller, ixID string, rating int, subjectOverride string) map[string]string {
+// makeEvidence is a review by req of a task prov completed today
+// (evidence v2, aghub.ReviewKit): the receipt prov signs and the review req
+// signs with the task's one-time key, rated rating. subjectOverride, when
+// set, is the AID the review names in place of the provider.
+func makeEvidence(t *testing.T, prov, req *identity.Controller, ixID string, rating int, subjectOverride string) *aghub.ReviewKit {
 	t.Helper()
 	return makeEvidenceWithComment(t, prov, req, ixID, rating, subjectOverride, "")
 }
 
 // makeEvidenceWithComment is makeEvidence with a review comment.
 func makeEvidenceWithComment(t *testing.T, prov, req *identity.Controller, ixID string, rating int,
-	subjectOverride, comment string) map[string]string {
+	subjectOverride, comment string) *aghub.ReviewKit {
 	t.Helper()
-	reqCID, _ := anetcid.Sum(testRequestDoc)
-	resCID, _ := anetcid.Sum(testDeliverable)
-	rc := &evidence.Receipt{InteractionID: ixID, RequesterAID: req.AID(), ProviderAID: prov.AID(), RequestCID: reqCID, ResultCID: resCID, CompletedAt: 1000}
-	if err := rc.Sign(prov); err != nil {
-		t.Fatal(err)
-	}
-	rcid, _ := rc.CID()
-	subject := prov.AID()
+	k := aghub.NewReviewKitForTest(t, prov, req, ixID, uint64(rating))
 	if subjectOverride != "" {
-		subject = subjectOverride
+		k.Review.Subject = subjectOverride
 	}
-	rv := &evidence.Review{InteractionID: ixID, SubjectAID: subject, ReviewerAID: req.AID(), Rating: rating,
-		Comment: comment, ReceiptCID: rcid, CreatedAt: 2000}
-	if err := rv.Sign(req); err != nil {
-		t.Fatal(err)
-	}
-	rcB, _ := rc.Marshal()
-	rvB, _ := rv.Marshal()
-	return map[string]string{
-		"receipt": base64.StdEncoding.EncodeToString(rcB),
-		"review":  base64.StdEncoding.EncodeToString(rvB),
-	}
+	k.Review.Comment = comment
+	return k
+}
+
+// uploadReview posts k's review to /reviews, signed as its requester
+// (relayauth review), as the requester's daemon does.
+func uploadReview(t *testing.T, srv *httptest.Server, k *aghub.ReviewKit) (int, []byte) {
+	t.Helper()
+	return signedDo(t, srv, k.Requester, relayauth.ActionReview, http.MethodPost, "/reviews", k.Body(t))
 }
 
 // The happy path: two registered agents, one real interaction → the review is verified, stored, and
@@ -282,7 +265,7 @@ func TestUploadReviewHappyPath(t *testing.T) {
 	register(t, srv, prov, "Provider", []string{"bakery"})
 	register(t, srv, req, "Requester", nil)
 
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_1", 5, "")); code != 200 {
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_1", 5, "")); code != 200 {
 		t.Fatalf("upload: %d %s", code, b)
 	}
 
@@ -302,29 +285,26 @@ func TestUploadReviewHappyPath(t *testing.T) {
 	if len(got.Reviews) != 1 || got.Reviews[0].Rating != 5 {
 		t.Fatalf("reviews = %+v", got.Reviews)
 	}
-	// The receipt's anchors are served; whether they match any content is
-	// stated as not checked here.
-	if got.Reviews[0].ResultCID == "" || got.Reviews[0].RequestCID == "" {
-		t.Fatalf("review missing the receipt anchors: %+v", got.Reviews[0])
-	}
-	if got.Reviews[0].ContentBinding != aghub.ContentBindingUnverified {
-		t.Fatalf("content_binding = %q, want %q", got.Reviews[0].ContentBinding, aghub.ContentBindingUnverified)
+	// The receipt it is anchored on is served, and the days; never the
+	// reviewer.
+	if got.Reviews[0].ReceiptCID == "" || got.Reviews[0].CreatedDay != aghub.TodayForTest() {
+		t.Fatalf("review missing its receipt or day: %+v", got.Reviews[0])
 	}
 }
 
-// The same interaction cannot be reviewed twice (interaction_id is the uniqueness key).
+// The same interaction cannot be reviewed twice (ix_commit is the uniqueness key).
 func TestUploadReviewDuplicateRejected(t *testing.T) {
 	srv := newHub(t)
 	prov, _ := aghub.NewAgentForTest()
 	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
-	body := makeEvidence(t, prov, req, "ix_dup", 4, "")
-	if code, _ := post(t, srv.URL+"/reviews", body); code != 200 {
-		t.Fatal("first upload should succeed")
+	k := makeEvidence(t, prov, req, "ix_dup", 4, "")
+	if code, b := uploadReview(t, srv, k); code != 200 {
+		t.Fatalf("first upload should succeed: %d %s", code, b)
 	}
-	if code, _ := post(t, srv.URL+"/reviews", body); code == 200 {
-		t.Fatal("duplicate interaction must be rejected")
+	if code, b := uploadReview(t, srv, k); code != http.StatusConflict || !strings.Contains(string(b), `"review_exists"`) {
+		t.Fatalf("duplicate interaction: %d %s, want 409 review_exists", code, b)
 	}
 }
 
@@ -335,19 +315,22 @@ func TestUploadReviewSubjectMismatchRejected(t *testing.T) {
 	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_bad", 5, "did:anet:someone-else")); code == 200 {
-		t.Fatalf("subject mismatch must be rejected, got %d %s", code, b)
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_bad", 5, "did:anet:someone-else")); code != 400 ||
+		!strings.Contains(string(b), `"receipt_not_reviewable"`) {
+		t.Fatalf("subject mismatch: %d %s, want 400 receipt_not_reviewable", code, b)
 	}
 }
 
-// Evidence for an unregistered provider is rejected (the Hub has no KEL to verify the receipt against).
+// Evidence for a provider this hub has no key history of is rejected (nothing to verify the receipt
+// against).
 func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 	srv := newHub(t)
 	prov, _ := aghub.NewAgentForTest()
 	req, _ := aghub.NewAgentForTest()
 	register(t, srv, req, "R", nil) // only the requester registers
-	if code, _ := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_np", 5, "")); code == 200 {
-		t.Fatal("unregistered provider must be rejected")
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_np", 5, "")); code != 400 ||
+		!strings.Contains(string(b), `"receipt_not_reviewable"`) {
+		t.Fatalf("unknown provider: %d %s, want 400 receipt_not_reviewable", code, b)
 	}
 }
 
@@ -611,16 +594,15 @@ func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
 	}
 	register(t, srv, prov, "Provider", []string{"translate"})
 
-	rc := &evidence.Receipt{
-		InteractionID: "ix-1", RequesterAID: "did:anet:someone",
-		ProviderAID: prov.AID(), RequestCID: "bafyreq", ResultCID: "bafyres",
-		CompletedAt: uint64(time.Now().UnixMilli()),
-	}
-	if err := rc.Sign(prov); err != nil {
+	other, _ := aghub.NewAgentForTest()
+	k := aghub.NewReviewKitForTest(t, prov, other, "ix-1", 5)
+	rcB, _ := k.Wires(t)
+	rc, err := evidence.UnmarshalReceiptWire(rcB)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(srv.URL + "/agents/" + rc.ProviderAID + "/kel")
+	resp, err := http.Get(srv.URL + "/agents/" + prov.AID() + "/kel")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +618,7 @@ func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rc.Verify(kel, rc.CompletedAt); err != nil {
+	if _, err := rc.Verify(kel, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("a stranger with the published KEL must be able to verify: %v", err)
 	}
 }
@@ -1138,8 +1120,8 @@ func setVisibility(t *testing.T, srv *httptest.Server, c *identity.Controller, v
 func uploadInterlockedReview(t *testing.T, srv *httptest.Server, prov, req *identity.Controller,
 	rating int, comment string) {
 	t.Helper()
-	body := makeEvidence(t, prov, req, "ix-"+comment+"-"+prov.AID()[:8], rating, "")
-	if code, b := post(t, srv.URL+"/reviews", body); code != 200 {
+	k := makeEvidenceWithComment(t, prov, req, "ix-"+comment+"-"+prov.AID()[:8], rating, "", comment)
+	if code, b := uploadReview(t, srv, k); code != 200 {
 		t.Fatalf("upload review: %d %s", code, b)
 	}
 }

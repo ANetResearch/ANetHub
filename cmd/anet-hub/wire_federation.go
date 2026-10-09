@@ -44,7 +44,9 @@ func init() {
 		// The discovery sub-plane switches independently: a hub may carry
 		// a peer's traffic without also publishing its directory, and
 		// those are genuinely different decisions to make about a peer.
-		fed.SetDirectory(aghub.FedDirectory{S: d.store})
+		// A peer's review carries the peer's attestation, checked
+		// against the peer's key history as federation holds it.
+		fed.SetDirectory(aghub.FedDirectory{S: d.store, PeerKEL: fed.PeerKEL})
 		// A payment on a peer's ledger is that peer's to settle. We ask
 		// it, verify the receipt it signs, credit our own payee, and
 		// record what the peer now owes us.

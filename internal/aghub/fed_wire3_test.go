@@ -3,6 +3,7 @@ package aghub
 import (
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -73,6 +75,35 @@ func wire3FedSetup(t *testing.T) *wire3test.Env {
 	_, g.holder, _ = ed25519.GenerateKey(nil)
 	forged := withCap(t, envelope(t, bob.aid, []byte("forged")), g)
 	vars["env_forged"], vars["access_forged"] = b64(forged), b64(accessRaw(t, forged))
+	// One review uploaded here, of an agent that federates, as the
+	// handler stores it: ${rv_receipt}, ${rv_review}, ${rv_att} and
+	// ${rv_kel} are what the review stream serves of it.
+	subject, reviewer := h.bareAgent(), h.bareAgent()
+	if err := h.store.SetVisibility(subject.aid, VisibilityFederated); err != nil {
+		t.Fatal(err)
+	}
+	kit := NewReviewKitForTest(t, subject.c, reviewer.c, "ix-fed-fixture", 5)
+	upRaw, err := json.Marshal(kit.Body(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, rf := decodeReviewUpload(upRaw)
+	if rf != nil {
+		t.Fatalf("the fixture's upload: %+v", rf)
+	}
+	stored, att, err := h.store.attest(reviewer.aid, up, reviewDay(h.store.now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.StoreReview(stored, up.receiptRaw, up.reviewRaw, att); err != nil {
+		t.Fatal(err)
+	}
+	subjectKEL, err := identity.MarshalKEL(subject.c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	vars["rv_receipt"], vars["rv_review"] = b64(up.receiptRaw), b64(up.reviewRaw)
+	vars["rv_att"], vars["rv_kel"] = b64(att), b64(subjectKEL)
 	signers := map[string]*hubid.Identity{"peer": peerID, "stranger": strangerID}
 	return &wire3test.Env{
 		Handler: wire3.Contract(root),

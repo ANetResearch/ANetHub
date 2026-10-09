@@ -307,14 +307,14 @@ func TestTheInactiveSweep(t *testing.T) {
 		"polled": func(aid string) { g.store.SeenPolling(aid) },
 		"funded": func(aid string) { _ = g.store.Credit(aid, 1, "test") },
 		"reviewed": func(aid string) {
-			if _, err := g.store.db.Exec(`INSERT INTO review(interaction_id, subject_aid, reviewer_aid, rating, receipt_cid, completed_at, created_at, stored_at)
-			    VALUES(?,?,?,?,?,?,?,?)`, "ix-"+aid, aid, "someone", 5, "cid", 0, 0, "x"); err != nil {
+			if _, err := g.store.db.Exec(`INSERT INTO review(ix_commit, subject_aid, tag, tag_key_id, rating, receipt_cid, completed_day, created_day, stored_day)
+			    VALUES(?,?,?,?,?,?,?,?,?)`, []byte("ix-"+aid), aid, []byte("tag"), 1, 5, "cid", 0, 0, 0); err != nil {
 				t.Fatal(err)
 			}
 		},
 		"reviewed_on_a_peer": func(aid string) {
-			if _, err := g.store.db.Exec(`INSERT INTO fed_review(interaction_id, subject_aid, reviewer_aid, rating, receipt_cid, peer_aid, created_at, stored_at)
-			    VALUES(?,?,?,?,?,?,?,?)`, "fix-"+aid, aid, "someone", 5, "cid", "peer", 0, "x"); err != nil {
+			if _, err := g.store.db.Exec(`INSERT INTO fed_review(ix_commit, subject_aid, tag, tag_key_id, peer_aid, rating, receipt_cid, created_day, stored_day)
+			    VALUES(?,?,?,?,?,?,?,?,?)`, []byte("fix-"+aid), aid, []byte("tag"), 1, "peer", 5, "cid", 0, 0); err != nil {
 				t.Fatal(err)
 			}
 		},

@@ -9,11 +9,12 @@
 //	           acks what it processed (/relay/ack, which deletes the rows). The hub sees the
 //	           recipient, the size and the time, and stores neither the sender nor anything inside
 //	           the ciphertext. See relay.go.
-//	reviews  — a requester uploads {provider-signed receipt, requester-signed review}. The Hub verifies
-//	           BOTH signatures against the registered KELs and checks they interlock (same interaction,
-//	           reviewer == receipt.requester, subject == receipt.provider, review→receipt CID). Neither
-//	           party can forge the other's signature, so a stored rating provably came from a real
-//	           counterparty of a real interaction. interaction_id is the uniqueness key (one review each).
+//	reviews  — a requester uploads, signed as itself, the receipt its provider signed and the review it
+//	           signed with the one-time key the receipt names (evidence v2). The Hub checks the provider's
+//	           signature, the review key's, that the two are about one task and that the uploader is the
+//	           requester the receipt committed to, then keeps the review WITHOUT the reviewer: a tag under
+//	           a key only this hub holds counts distinct reviewers, and every stored time is a day. The
+//	           interaction's ix_commit is the uniqueness key (one review each). See reviews.go.
 //
 // v0.1 is deliberately centralized: there is no P2P. Aggregation is intentionally simple (mean + count);
 // richer reputation and a decentralized transport are later versions.
@@ -35,8 +36,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/seal"
-	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
-	_ "modernc.org/sqlite"                                         // pure-Go driver (K207 A3: no cgo in distributed runtime)
+	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
 
 // AgentView is an agent's public registry entry plus its aggregate rating. Agents are addressed purely
@@ -66,15 +66,13 @@ type AgentView struct {
 	// It is NOT a route: a departed agent is not deliverable, and
 	// nothing here puts it back in a listing.
 	Departed bool `json:"departed,omitempty"`
-	// Registered is false on a graph node reconstructed from a review
-	// whose subject or reviewer is no longer in the registry.
+	// Registered is false on the view of an AID this hub knows only from
+	// a peer, or from reviews stored after it left.
 	//
 	// Leaving a hub removes the routing and keeps the evidence, which is
-	// the right trade — reviews record things that happened. The
-	// consequence lands here: the graph had edges naming agents with no
-	// node, and a renderer either drops them silently or fails. Saying
-	// "this agent is no longer registered here" keeps the graph
-	// self-consistent and keeps what happened visible.
+	// the right trade — reviews record things that happened. Saying "this
+	// agent is no longer registered here" keeps what happened visible
+	// without offering a route.
 	Registered bool `json:"registered"`
 	// LastSeen and Quiet report whether this agent is still collecting
 	// its mail (liveness.go: the hour of the last poll, and a boolean). A
@@ -100,50 +98,29 @@ type AgentView struct {
 	KeyStateNotice string `json:"key_state_notice,omitempty"`
 }
 
-// ReviewView is one stored, verified review: the rating, the reviewer's comment and the anchors of
-// the provider-signed receipt it is interlocked with.
+// ReviewView is one review stored here, as /agents/{aid} serves it: the rating, the comment, the
+// receipt it is anchored on and the two days the objects carry (hub-payment-privacy §2.5).
 //
-// It carries no interaction content (A2A-DESIGN §0 decision 2, §9 row 评价). The hub verifies both
-// signatures and the interlock, but it never receives the request or the deliverable, so it cannot
-// check that the receipt's request_cid and result_cid are the hashes of any particular bytes.
-// ContentBinding states that explicitly as "UNVERIFIED" rather than leaving the field out: an absent
-// check and a passed check are different states and must not look alike. A party holding the
-// content can recompute the CIDs offline and reach its own verdict.
+// It names no reviewer and no interaction, and holds no time finer than a UTC day (SI-48): the
+// hub keeps none of them (reviews.go). The receipt and the review were checked here against the
+// provider's key history and the receipt's one-time review key; a party holding the interaction's
+// content can recompute receipt_cid's commitments for itself.
 type ReviewView struct {
-	InteractionID  string `json:"interaction_id"`
-	SubjectAID     string `json:"subject_aid"`
-	ReviewerAID    string `json:"reviewer_aid"`
-	Rating         int    `json:"rating"`
-	Comment        string `json:"comment,omitempty"`
-	ReceiptCID     string `json:"receipt_cid"`
-	RequestCID     string `json:"request_cid"`     // the receipt's commitment to the request
-	ResultCID      string `json:"result_cid"`      // the receipt's commitment to the result
-	ContentBinding string `json:"content_binding"` // always ContentBindingUnverified on this hub
-	CompletedAt    uint64 `json:"completed_at"`    // provider's receipt time (unix millis)
-	CreatedAt      uint64 `json:"created_at"`      // review time (unix millis)
-}
-
-// ContentBindingUnverified is ReviewView.ContentBinding on every review this hub serves: the hub
-// holds no content, so whether the receipt's request_cid and result_cid match any bytes was not
-// checked here.
-const ContentBindingUnverified = "UNVERIFIED"
-
-// MaxReviewCommentRunes bounds a review comment, in Unicode code points. The comment is the only
-// free text a review carries, it is published to anyone who reads the agent, and it is signed by
-// the reviewer, so an over-long one is refused rather than truncated (truncating would break the
-// signature). 280 is short enough that a comment cannot carry a pasted transcript.
-const MaxReviewCommentRunes = 280
-
-// ReviewDetail is what the Hub stores beside a verified review: the receipt's anchors and time,
-// copied from the provider-signed receipt. No content.
-type ReviewDetail struct {
-	RequestCID  string
-	ResultCID   string
-	CompletedAt uint64
+	SubjectAID   string `json:"subject_aid"`
+	Rating       int    `json:"rating"`
+	Comment      string `json:"comment,omitempty"`
+	ReceiptCID   string `json:"receipt_cid"`
+	CompletedDay uint64 `json:"completed_day"` // the receipt's UTC day
+	CreatedDay   uint64 `json:"created_day"`   // the review's UTC day
 }
 
 // Store is the Hub's durable registry + relay + review store (SQLite).
 type Store struct {
+	// dir is the data directory: hub.db, and the review tag key in
+	// keys/ (tagkey.go).
+	dir string
+	// tagKey is the review tag key as this process loaded it.
+	tagKey tagKeyState
 	// hubKey signs settlement receipts. Nil until the application wires
 	// it, and a store without one settles without signing rather than
 	// refusing — an unsigned settlement is weaker, not broken.
@@ -265,7 +242,7 @@ func Open(dir string) (*Store, error) {
 	// keeps as many idle connections as the hub serves requests at once in
 	// practice; an idle connection costs its page cache and nothing else.
 	db.SetMaxIdleConns(dbIdleConns)
-	s := &Store{db: db, quota: relayQuota{
+	s := &Store{dir: dir, db: db, quota: relayQuota{
 		messages: DefaultLimits().MailboxMessages,
 		bytes:    DefaultLimits().MailboxBytes,
 	}}
@@ -371,6 +348,7 @@ func judgeSchema(version, objects int) error {
 // CORE-V4), so there is no ALTER TABLE, no rebuild and no backfill.
 var schema = [][]string{
 	coreSchema(),
+	reviewSchema(),
 	relayTables,
 	relayIndexes,
 	a2aCardSchema(),
@@ -456,9 +434,6 @@ func coreSchema() []string {
 		   dir_hash BLOB UNIQUE,
 		   dir_box BLOB
 		 )`,
-		// No interaction content (A2A-DESIGN §9 row 评价).
-		reviewTableV2,
-		`CREATE INDEX IF NOT EXISTS idx_review_subject ON review(subject_aid)`,
 		// A capability id is precise, structured and machine-resolvable —
 		// "cas.put", "ptz.absolute@onvif/camera-006" — and discovery could
 		// only match it as a substring inside a JSON blob, alongside the
@@ -520,26 +495,6 @@ func coreSchema() []string {
 		// Credit taken back out of circulation, one row per authorization
 		// the agent signed away. The reference is what the hub agreed to
 		// settle against outside this system; opaque here on purpose.
-		// The exact signed objects a review was verified from. Kept because
-		// a hub that stored the conclusion and discarded the evidence can
-		// only pass on its own say-so, and federating reputation on say-so
-		// is the thing this design exists to avoid. Only the receipt and
-		// the review: no content.
-		reviewBlobTableV2,
-		// Reviews learned from a peer hub, kept apart from local ones so
-		// the arithmetic can stay per source.
-		`CREATE TABLE IF NOT EXISTS fed_review (
-			interaction_id TEXT PRIMARY KEY,
-			subject_aid    TEXT NOT NULL,
-			reviewer_aid   TEXT NOT NULL,
-			rating         INTEGER NOT NULL,
-			comment        TEXT NOT NULL DEFAULT '',
-			receipt_cid    TEXT NOT NULL DEFAULT '',
-			peer_aid       TEXT NOT NULL,
-			created_at     INTEGER NOT NULL DEFAULT 0,
-			stored_at      TEXT NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_fed_review_subject ON fed_review(subject_aid)`,
 		// Attestations: what somebody signed about a chain's head at a
 		// moment. Both directions live here — what others said about
 		// this hub's supply epoch chain, and what this hub said about its
@@ -916,13 +871,13 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 	}
 	rows, err := s.db.Query(
 		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
-		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		        COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 		 FROM agent a
 		 JOIN agent_cap c ON c.aid = a.aid
 		 LEFT JOIN review r ON r.subject_aid = a.aid
 		 WHERE `+strings.Join(preds, " OR ")+`
 		 GROUP BY a.aid
-		 ORDER BY AVG(r.rating) DESC, COUNT(r.interaction_id) DESC, a.registered_at`, args...)
+		 ORDER BY AVG(r.rating) DESC, COUNT(r.ix_commit) DESC, a.registered_at`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -986,26 +941,33 @@ func (s *Store) AgentKEL(aid string) ([]byte, error) {
 // not pass it — the KEL is what the arithmetic is done against, not a
 // permission to skip the arithmetic.
 func (s *Store) AnyKEL(aid string) ([]byte, error) {
-	if kel, err := s.AgentKEL(aid); err == nil {
-		return kel, nil
+	kel, err := s.anyKEL(aid)
+	if err == nil && kel == nil {
+		err = fmt.Errorf("hub: %s is neither registered here, known from a peer, nor a former registrant", aid)
 	}
-	// From a peer's A2A card stream (fed_a2a_card, fed_a2acard.go; a
-	// withdrawn row still holds the KEL, which is proof, not routing). The
-	// row only ever extends its own copy (§3.8).
-	var kel []byte
-	err := s.db.QueryRow(`SELECT kel FROM fed_a2a_card WHERE aid=?`, aid).Scan(&kel)
-	if err == nil {
-		return kel, nil
+	return kel, err
+}
+
+// anyKEL is AnyKEL with nil, nil for an AID this hub knows nothing of, so a
+// caller can tell "unknown" from a failed read.
+func (s *Store) anyKEL(aid string) ([]byte, error) {
+	for _, q := range []string{
+		`SELECT kel FROM agent WHERE aid=?`,
+		// From a peer's A2A card stream (fed_a2a_card, fed_a2acard.go; a
+		// withdrawn row still holds the KEL, which is proof, not
+		// routing). The row only ever extends its own copy (§3.8).
+		`SELECT kel FROM fed_a2a_card WHERE aid=?`,
+		// An agent that left. Its routing is gone and its proof is not.
+		`SELECT kel FROM departed_kel WHERE aid=?`,
+	} {
+		var kel []byte
+		err := s.db.QueryRow(q, aid).Scan(&kel)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && len(kel) == 0 {
+			continue
+		}
+		return kel, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-	// An agent that left. Its routing is gone and its proof is not.
-	if derr := s.db.QueryRow(`SELECT kel FROM departed_kel WHERE aid=?`, aid).Scan(&kel); derr == nil {
-		return kel, nil
-	}
-	return nil, fmt.Errorf(
-		"hub: %s is neither registered here, known from a peer, nor a former registrant", aid)
+	return nil, nil
 }
 
 // KnownKEL returns the KEL this hub holds for aid from a registration:
@@ -1038,28 +1000,6 @@ func knownKEL(q rowQuerier, aid string) ([]identity.SignedEvent, error) {
 	return identity.UnmarshalKEL(raw)
 }
 
-// HasInteraction reports whether a review for interactionID already exists (one-review-per-interaction).
-func (s *Store) HasInteraction(interactionID string) bool {
-	var one int
-	err := s.db.QueryRow(`SELECT 1 FROM review WHERE interaction_id=?`, interactionID).Scan(&one)
-	return err == nil
-}
-
-// PutReview stores a verified review and the anchors of its receipt (interaction_id is the unique
-// key). No interaction content is stored.
-func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
-		`INSERT INTO review(interaction_id,subject_aid,reviewer_aid,rating,comment,receipt_cid,
-		   request_cid,result_cid,completed_at,created_at,stored_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		rv.InteractionID, rv.SubjectAID, rv.ReviewerAID, rv.Rating, rv.Comment, rv.ReceiptCID,
-		d.RequestCID, d.ResultCID, d.CompletedAt, rv.CreatedAt, now)
-	return err
-}
-
 // ListAgents returns LISTED agents (those advertising a service — caps or a profile) with their
 // aggregate rating, best-rated first. A non-empty query filters to agents whose AID, name, caps or
 // profile contain it (case-insensitive) — the `find` backend. Pure requesters (registered but with no
@@ -1067,7 +1007,7 @@ func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
 // that has published no key set yet (sealed-sender SSR-H18): nobody could write to it.
 func (s *Store) ListAgents(query string) ([]AgentView, error) {
 	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, ` + agentKeyColumns + `,
-	             COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+	             COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 	      FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid`
 	var args []any
 	if query != "" {
@@ -1075,7 +1015,7 @@ func (s *Store) ListAgents(query string) ([]AgentView, error) {
 		q += ` WHERE a.aid LIKE ? OR a.name LIKE ? OR a.caps LIKE ? OR a.summary LIKE ? OR a.readme LIKE ?`
 		args = append(args, like, like, like, like, like)
 	}
-	q += ` GROUP BY a.aid ORDER BY AVG(r.rating) DESC, COUNT(r.interaction_id) DESC, a.registered_at`
+	q += ` GROUP BY a.aid ORDER BY AVG(r.rating) DESC, COUNT(r.ix_commit) DESC, a.registered_at`
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -1151,7 +1091,7 @@ func (s *Store) departedView(aid string) (*AgentView, error) {
 	var count int
 	var avg float64
 	if err := s.db.QueryRow(
-		`SELECT COUNT(interaction_id), COALESCE(AVG(rating),0) FROM review WHERE subject_aid=?`,
+		`SELECT COUNT(*), COALESCE(AVG(rating),0) FROM review WHERE subject_aid=?`,
 		aid).Scan(&count, &avg); err != nil {
 		return nil, err
 	}
@@ -1178,7 +1118,7 @@ func (s *Store) departedView(aid string) (*AgentView, error) {
 func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 	row := s.db.QueryRow(
 		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
-		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		        COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 		 FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		 WHERE a.aid=? GROUP BY a.aid`, aid)
 	av, err := scanAgent(row)
@@ -1204,24 +1144,11 @@ func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 	} else if err != nil {
 		return nil, nil, err
 	}
-	rrows, err := s.db.Query(
-		`SELECT interaction_id, subject_aid, reviewer_aid, rating, comment, receipt_cid,
-		        request_cid, result_cid, completed_at, created_at
-		 FROM review WHERE subject_aid=? ORDER BY created_at DESC`, aid)
+	reviews, err := s.reviewsOf(aid)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rrows.Close()
-	var reviews []ReviewView
-	for rrows.Next() {
-		rv := ReviewView{ContentBinding: ContentBindingUnverified}
-		if err := rrows.Scan(&rv.InteractionID, &rv.SubjectAID, &rv.ReviewerAID, &rv.Rating, &rv.Comment, &rv.ReceiptCID,
-			&rv.RequestCID, &rv.ResultCID, &rv.CompletedAt, &rv.CreatedAt); err != nil {
-			return nil, nil, err
-		}
-		reviews = append(reviews, rv)
-	}
-	return &av, reviews, rrows.Err()
+	return &av, reviews, nil
 }
 
 // HubStats are the headline metrics shown on the public landing page.
@@ -1286,32 +1213,6 @@ func (s *Store) Stats() (HubStats, error) {
 	return out, nil
 }
 
-// Edge is a verified review relationship: the reviewer rated the subject. It is the real, cryptographically
-// backed collaboration signal the starfield draws (reviewer → subject).
-type Edge struct {
-	Source string `json:"source"` // reviewer AID
-	Target string `json:"target"` // subject (provider) AID
-	Rating int    `json:"rating"`
-}
-
-// ReviewEdges returns one edge per stored review (reviewer → subject).
-func (s *Store) ReviewEdges() ([]Edge, error) {
-	rows, err := s.db.Query(`SELECT reviewer_aid, subject_aid, rating FROM review`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Edge
-	for rows.Next() {
-		var e Edge
-		if err := rows.Scan(&e.Source, &e.Target, &e.Rating); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
 type scanner interface{ Scan(dest ...any) error }
 
 // agentKeyColumns are the key history, the key set and the cached witness
@@ -1357,8 +1258,8 @@ func aidFromKEL(kel []identity.SignedEvent) (string, error) {
 	return states[len(states)-1].AID, nil
 }
 
-// GraphNodeFor builds a node for an AID that appears in an edge but not
-// in the listing.
+// GraphNodeFor builds the view of an AID that is not in the listing: one
+// reviewed here, or one a peer told this hub about.
 //
 // It looks the agent up first: an agent that is registered but merely
 // unlisted or quiet has a name and capabilities worth showing, and only
@@ -1368,7 +1269,7 @@ func (s *Store) GraphNodeFor(aid string) AgentView {
 	row := s.db.QueryRow(
 		`SELECT a.aid, a.name, a.caps, a.summary, a.readme,
 		        a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
-		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		        COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 		   FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		  WHERE a.aid=? GROUP BY a.aid`, aid)
 	if av, err := scanAgent(row); err == nil {

@@ -1,9 +1,13 @@
 package aghub_test
 
 import (
+	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/wire"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // TestPreimageRejectsNUL (core CORE-E9, ANetHub). The hub computes two inputs that separate
@@ -20,7 +24,7 @@ func TestPreimageRejectsNUL(t *testing.T) {
 		fn   func(field string) error
 		todo string
 	}{
-		"L31": {nil, "v030-todo(PAY-6)"}, // review tag: reviewer_aid, subject_aid
+		"L31": {reviewTagRow, ""},        // review tag: reviewer_aid, subject_aid
 		"L33": {nil, "v030-todo(PAY-4)"}, // settlement guard: payer, pay_bind
 	}
 	r, err := wire.Load()
@@ -57,4 +61,18 @@ func TestPreimageRejectsNUL(t *testing.T) {
 			t.Errorf("row %s is not a registered ANetHub nul_guard", label)
 		}
 	}
+}
+
+// reviewTagRow is L31's row: the hub's review tag (the tag of every review it
+// stores, aghub reviews.go) with field as the reviewer and as the subject.
+// It is an error only when both positions refuse field, so a position that
+// takes U+0000 fails the row.
+func reviewTagRow(field string) error {
+	key := bytes.Repeat([]byte{1}, 32)
+	_, e1 := aghub.ReviewTagForTest(key, field, "ab")
+	_, e2 := aghub.ReviewTagForTest(key, "ab", field)
+	if e1 == nil || e2 == nil {
+		return nil
+	}
+	return errors.Join(e1, e2)
 }

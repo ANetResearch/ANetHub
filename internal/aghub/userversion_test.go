@@ -299,12 +299,11 @@ func TestThePoolKeepsItsConnections(t *testing.T) {
 }
 
 // No migration is left in the hub (core CORE-V4): no ALTER TABLE in the
-// non-test code, except the review tables' rebuild in content_v2.go, which
-// goes when the reviews are rewritten; and no function of hub.db's code
-// that converts another release's data by name.
+// non-test code, and no function of hub.db's code that converts another
+// release's data by name.
 func TestNoHubMigrationStatements(t *testing.T) {
 	root := hubModuleRoot(t)
-	allowed := map[string]bool{filepath.Join("internal", "aghub", "content_v2.go"): true}
+	allowed := map[string]bool{}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err

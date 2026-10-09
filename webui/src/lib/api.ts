@@ -32,22 +32,18 @@ export interface AgentView {
   key_state_notice?: string;
 }
 
-// 一条已验证的评价。hub 不持有交互内容(A2A-DESIGN §9):没有 goal、没有
-// deliverable。request_cid / result_cid 是回执里提供方签名的承诺值;hub 没有
-// 内容可以核对它们,所以 content_binding 恒为 "UNVERIFIED" —— "没有核对"与
-// "核对通过"是两种状态,页面不得把前者显示成后者。
+// 一条本 hub 保存的评价(评价 v2)。它不含评价人、不含交互编号,也没有精确到
+// 日以下的时间:hub 不保存这些(只用一个本 hub 才能算出的标签统计有几位不同
+// 的评价人)。receipt_cid 是这条评价所依据的、提供方签名的回执;评价由回执里的
+// 一次性评价钥签名,两处签名 hub 都核对过。hub 不持有交互内容(A2A-DESIGN §9)。
+// completed_day、created_day 是 UTC 日序号(自 1970-01-01 起的天数)。
 export interface ReviewView {
-  interaction_id: string;
   subject_aid: string;
-  reviewer_aid: string;
   rating: number;
   comment?: string;
   receipt_cid: string;
-  request_cid: string;
-  result_cid: string;
-  content_binding: string;
-  completed_at: number;
-  created_at: number;
+  completed_day: number;
+  created_day: number;
 }
 
 export interface Stats {

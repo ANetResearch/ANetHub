@@ -294,7 +294,7 @@ func FuzzHubFedAdmission(f *testing.F) {
 	f.Add(uint8(0), uint8(1), uint64(6), []byte(nil), []byte(nil), "")
 	f.Add(uint8(0), uint8(2), uint64(7), []byte(nil), []byte(nil), "")
 	f.Add(uint8(1), uint8(2), uint64(7), []byte(nil), []byte(nil), "")
-	f.Add(uint8(0), uint8(3), uint64(8), []byte(`{"receipt":"AAAA","review":"AAAA"}`), []byte(nil), "")
+	f.Add(uint8(0), uint8(3), uint64(8), []byte(`{"format":"review/2","receipt":"AAAA","review":"AAAA","attestation":"AAAA","provider_kel":"AAAA","fed_seq":1}`), []byte(nil), "")
 
 	f.Fuzz(func(t *testing.T, mode, stream uint8, seq uint64, raw, kelRaw []byte, home string) {
 		raw, kelRaw, home = clipB(raw, 70<<10), clipB(kelRaw, 16<<10), clip(home, 256)
@@ -335,10 +335,9 @@ func FuzzHubFedAdmission(f *testing.F) {
 				Card: fzA2ACardOrRaw(t, remote, seq, withExtension(priceExtension(uri)))}
 			_ = h.store.AdmitFedA2ACard(peer, e)
 		case 3:
-			var fr aghub.FedReview
-			if json.Unmarshal(raw, &fr) == nil {
-				_ = h.store.AdmitFedReview(peer, fr)
-			}
+			// A review stream entry, raw (the peer's KEL is not one this
+			// fuzzer signs with, so nothing it sends is admitted).
+			_ = aghub.FedDirectory{S: h.store}.AdmitFedReview(peer, json.RawMessage(raw))
 		}
 		fedInvariants(t, h, local.AID())
 	})

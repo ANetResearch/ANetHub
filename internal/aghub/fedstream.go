@@ -207,12 +207,19 @@ func decodeEncKeySet(set []byte) (*seal.EncKeySet, error) {
 
 // FedDirectory adapts the store to federation's Directory seam, so the
 // federation module never imports the kernel's internals.
-type FedDirectory struct{ S *Store }
+//
+// PeerKEL resolves a peer hub's key history (federation.Service.PeerKEL):
+// a peer's review comes with that peer's attestation, which is checked
+// against it (CORE-L8). Without it no peer's review is admitted.
+type FedDirectory struct {
+	S       *Store
+	PeerKEL func(peerAID string) ([]identity.SignedEvent, error)
+}
 
 // ReviewsSince and AdmitFedReview complete the Directory seam (the card
 // stream's half is in fed_a2acard.go). Federation carries the bytes; what
-// a review means stays here, because a module with an opinion about
-// reputation is a module that would need to be trusted about it.
+// a review means stays here (reviews.go), because a module with an opinion
+// about reputation is a module that would need to be trusted about it.
 func (d FedDirectory) ReviewsSince(cursor int64, limit int) ([]json.RawMessage, int64, error) {
 	revs, next, err := d.S.ReviewsSince(cursor, limit)
 	if err != nil {
@@ -229,12 +236,22 @@ func (d FedDirectory) ReviewsSince(cursor int64, limit int) ([]json.RawMessage, 
 	return out, next, nil
 }
 
+// AdmitFedReview admits one entry of peerAID's review stream. Members it
+// does not know are ignored: what is stored is only what was checked.
 func (d FedDirectory) AdmitFedReview(peerAID string, raw json.RawMessage) error {
-	var fr FedReview
-	if err := json.Unmarshal(raw, &fr); err != nil {
-		return err
+	var e FedReviewEntry
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return fmt.Errorf("the review stream entry is not JSON of the review/2 shape: %w", err)
 	}
-	return d.S.AdmitFedReview(peerAID, fr)
+	var kel []identity.SignedEvent
+	if d.PeerKEL != nil {
+		k, err := d.PeerKEL(peerAID)
+		if err != nil {
+			return fmt.Errorf("%w: the key history of %s: %v", federation.ErrRefusedForNow, peerAID, err)
+		}
+		kel = k
+	}
+	return d.S.AdmitFedReview(peerAID, kel, e)
 }
 
 var _ federation.Directory = FedDirectory{}

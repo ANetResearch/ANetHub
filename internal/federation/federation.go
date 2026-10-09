@@ -543,10 +543,9 @@ func (s *Service) DiscoveryEnabled() bool {
 }
 
 // hFedReviewStream serves GET /fed/v3/reviews?cursor=<c> (core §2.12.2,
-// relayauth fed_reviews), to the peers of the discovery sub-plane.
-//
-// v030-todo(PAY-6): the entries are still the v0.2 review records
-// ({cursor, reviews}); the stream serves review/2 entries.
+// relayauth fed_reviews), to the peers of the discovery sub-plane:
+// {cursor, reviews}, each entry review/2 as the kernel made it (receipt,
+// review, this hub's attestation, the provider's key history, fed_seq).
 func (s *Service) hFedReviewStream(w http.ResponseWriter, r *http.Request) {
 	if _, _, ok := s.authPeer(w, r, relayauth.ActionFedReviews, s.DiscoveryEnabled() && s.dir != nil, 0, nil); !ok {
 		return
@@ -631,19 +630,46 @@ func (s *Service) syncReviews(ctx context.Context) (admitted, refused int) {
 			log.Printf("hub: reputation sync %s: HTTP %d: %s", p.AID, status, detail)
 			continue
 		}
+		// An entry refused for now (the peer signed it under a key state
+		// this hub has not caught up with) holds the cursor just before
+		// it, so it is read again; one refused for good is passed, like a
+		// card (syncA2ACards).
+		stalled, stall := false, int64(0)
 		for _, rv := range out.Reviews {
 			if err := s.dir.AdmitFedReview(p.AID, rv); err != nil {
 				log.Printf("hub: federated review from %s refused: %v", p.AID, err)
 				refused++
+				if errors.Is(err, ErrRefusedForNow) {
+					stalled, stall = true, reviewFedSeq(rv)
+					break
+				}
 				continue
 			}
 			admitted++
 		}
-		if out.Cursor > cursor {
+		switch {
+		case stalled && stall > cursor:
+			s.setPeerReviewCursor(p.AID, stall-1)
+		case stalled:
+			// At or before the cursor, or of no readable place: the
+			// cursor stays.
+		case out.Cursor > cursor:
 			s.setPeerReviewCursor(p.AID, out.Cursor)
 		}
 	}
 	return admitted, refused
+}
+
+// reviewFedSeq is the fed_seq of a review stream entry, or 0 when it has
+// none the module can read. The module reads nothing else of an entry.
+func reviewFedSeq(raw json.RawMessage) int64 {
+	var e struct {
+		FedSeq int64 `json:"fed_seq"`
+	}
+	if json.Unmarshal(raw, &e) != nil || e.FedSeq < 0 {
+		return 0
+	}
+	return e.FedSeq
 }
 
 func (s *Service) peerReviewCursor(aid string) int64 {

@@ -18,7 +18,6 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
-	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/version"
@@ -62,11 +61,14 @@ func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 			t.Fatal(err)
 		}
 	}
-	// One review, stored as the hub stores it: rating, comment and the
-	// receipt anchors, no content.
-	rv := &evidence.Review{InteractionID: "ix-admin-1", SubjectAID: prov.AID(), ReviewerAID: req.AID(),
-		Rating: 4, Comment: "fine", ReceiptCID: "bafy-receipt-admin-1", CreatedAt: 2000}
-	if err := hs.PutReview(rv, aghub.ReviewDetail{RequestCID: "bafy-req", ResultCID: "bafy-res", CompletedAt: 1000}); err != nil {
+	// One review, stored as the hub stores it (evidence v2): the subject,
+	// a tag in place of the reviewer, rating, comment, the receipt and
+	// days; no content and no reviewer. The objects are placeholders: the
+	// admin plane reads the row, not the evidence.
+	if err := hs.StoreReview(aghub.StoredReview{IXCommit: bytes.Repeat([]byte{0x1c}, 32), Subject: prov.AID(),
+		Tag: bytes.Repeat([]byte{0x7a}, 16), TagKeyID: 1, Rating: 4, Comment: "fine",
+		ReceiptCID: "bafy-receipt-admin-1", CompletedDay: 20000, CreatedDay: 20001, StoredDay: 20001},
+		[]byte{0xa0}, []byte{0xa0}, []byte{0xa0}); err != nil {
 		t.Fatal(err)
 	}
 	return dir, prov.AID(), req.AID()
@@ -776,8 +778,10 @@ func TestAdminReadersOfTheCurrentHubSchema(t *testing.T) {
 	if p := byAID[provAID]; p.ReviewCount != 1 || p.MailboxBacklog != 1 {
 		t.Errorf("provider: reviews=%d backlog=%d, want 1/1", p.ReviewCount, p.MailboxBacklog)
 	}
-	if r := byAID[reqAID]; r.ReviewsWritten != 1 || r.MailboxBacklog != 2 {
-		t.Errorf("requester: written=%d backlog=%d, want 1/2", r.ReviewsWritten, r.MailboxBacklog)
+	// A v2 review names no reviewer (SI-48), so no account has reviews
+	// written. v030-todo(PAY-16): the field goes with the rewritten view.
+	if r := byAID[reqAID]; r.ReviewsWritten != 0 || r.MailboxBacklog != 2 {
+		t.Errorf("requester: written=%d backlog=%d, want 0/2", r.ReviewsWritten, r.MailboxBacklog)
 	}
 	tot, err := hub.Totals()
 	if err != nil {

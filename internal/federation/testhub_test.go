@@ -258,6 +258,10 @@ type fakeDirectory struct {
 	gotA2A           []FedA2ACardView
 	a2aRefuseForNow  map[int64]bool
 	a2aRejectForever map[int64]bool
+	// revRefuseForNow and revRejectForever are the same for the review
+	// stream, by an entry's fed_seq.
+	revRefuseForNow  map[int64]bool
+	revRejectForever map[int64]bool
 }
 
 func (f *fakeDirectory) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACardView, int64, error) {
@@ -310,6 +314,13 @@ func (f *fakeDirectory) ReviewsSince(cursor int64, limit int) ([]json.RawMessage
 func (f *fakeDirectory) AdmitFedReview(peerAID string, raw json.RawMessage) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	seq := reviewFedSeq(raw)
+	if f.revRefuseForNow[seq] {
+		return fmt.Errorf("%w: signed under a key state not held yet", ErrRefusedForNow)
+	}
+	if f.revRejectForever[seq] {
+		return fmt.Errorf("the review does not verify")
+	}
 	f.gotRevs = append(f.gotRevs, storedReview{peer: peerAID, raw: raw})
 	return nil
 }

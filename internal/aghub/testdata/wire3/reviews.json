@@ -1,0 +1,135 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /reviews (core §2.12.2; hub-payment-privacy §2.5, PAY-V1): relayauth review, signed by the requester, a registered agent; the body {receipt, review, rsalt}, strict, each base64url (rsalt 32 bytes), at most 16 KiB. Checked in order, the first failing step answering: the signature (401 unauthorized); the signer on probation (403 probation); the body (400 bad_request: not the shape, not base64url, not CBOR, a rating outside 1..5, a comment over 280 characters, a subject with U+0000; 400 receipt_not_reviewable: not a 0.3.0 receipt and review); the provider's signature on the receipt and the review's by the receipt's review_key, naming this receipt and its provider (400 receipt_not_reviewable); the signer is the requester the receipt committed to (400 requester_commit_mismatch); created_day within 30 days of completed_day and not after tomorrow (400 review_window_closed); the interaction not reviewed here yet (409 review_exists). Accepted: 200 {status: stored, attestation}.",
+  "setup": "reviews",
+  "cases": [
+    {
+      "name": "a review by its requester",
+      "cite": "PAY-V1, PAY-V2",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok_receipt}", "review": "${ok_review}", "rsalt": "${ok_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 200, "body_has": {"status": "stored"}}
+    },
+    {
+      "name": "the same interaction again",
+      "cite": "PAY-V1 step 9",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok_receipt}", "review": "${ok_review}", "rsalt": "${ok_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 409, "body_has": {"reason": "review_exists"}}
+    },
+    {
+      "name": "uploaded by somebody who is not the requester",
+      "cite": "PAY-V1 step 6",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}"},
+        "sign": {"action": "review", "as": "carol"}},
+      "response": {"status": 400, "body_has": {"reason": "requester_commit_mismatch"}}
+    },
+    {
+      "name": "created 31 days after the task",
+      "cite": "PAY-V1 step 7",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${late_receipt}", "review": "${late_review}", "rsalt": "${late_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "review_window_closed"}}
+    },
+    {
+      "name": "a review not signed by the receipt's review key",
+      "cite": "PAY-V1 step 5",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${forged_receipt}", "review": "${forged_review}", "rsalt": "${forged_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "receipt_not_reviewable"}}
+    },
+    {
+      "name": "a rating of 6",
+      "cite": "PAY-V1 step 3",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${rated6_receipt}", "review": "${rated6_review}", "rsalt": "${rated6_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a receipt that is not CBOR",
+      "cite": "PAY-V1 step 3",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "AAAA", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "an rsalt that is not 32 bytes",
+      "cite": "PAY-V1 step 3",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}", "review": "${ok2_review}", "rsalt": "AAAA"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "the interaction's content sent along",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}", "deliverable": "AAAA"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "the receipt in standard base64",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}=", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a reviewer on probation",
+      "cite": "PAY-V1 step 2",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${probie_receipt}", "review": "${probie_review}", "rsalt": "${probie_rsalt}"},
+        "sign": {"action": "review", "as": "probie"}},
+      "response": {"status": 403, "body": {"reason": "probation",
+        "error": "New accounts cannot upload reviews during probation; retry after it ends."}}
+    },
+    {
+      "name": "a reviewer on probation sending what is not a review",
+      "cite": "PAY-V1 steps 2, 3",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "AAAA"},
+        "sign": {"action": "review", "as": "probie"}},
+      "response": {"status": 403, "body_has": {"reason": "probation"}}
+    },
+    {
+      "name": "not signed",
+      "cite": "PAY-V1 step 1",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "signed by an agent not registered here",
+      "cite": "PAY-V1 step 1",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}"},
+        "sign": {"action": "review", "as": "stranger"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "signed for another action",
+      "cite": "PAY-V1 step 1",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}"},
+        "sign": {"action": "profile", "as": "alice"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "the second review, by its requester",
+      "cite": "PAY-V1",
+      "request": {"method": "POST", "path": "/reviews", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"receipt": "${ok2_receipt}", "review": "${ok2_review}", "rsalt": "${ok2_rsalt}"},
+        "sign": {"action": "review", "as": "alice"}},
+      "response": {"status": 200, "body_has": {"status": "stored"}}
+    }
+  ]
+}
