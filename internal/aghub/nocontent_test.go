@@ -17,7 +17,6 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // Tests for A2A-DESIGN §9: the hub holds no interaction content. Reviews
@@ -33,10 +32,7 @@ func hubInDir(t *testing.T) (*httptest.Server, *aghub.Store, *aghub.Server, stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := aghub.HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)

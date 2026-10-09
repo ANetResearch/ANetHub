@@ -106,19 +106,19 @@ var dirEntriesTooLarge atomic.Int64
 func DirEntriesTooLarge() int64 { return dirEntriesTooLarge.Load() }
 
 // dirNoticeOf returns the witness notice (NoticeWire) aid's directory entry
-// carries, or nil for none.
-// v030-todo(KEL-5): read the notice the hub keeps for aid's KEL tip
-// (notice_cache), and call RefreshDirEntry when it changes (at most once
-// every 10 minutes per AID, KEL H-11).
-func (s *Store) dirNoticeOf(q rowQuerier, aid string) ([]byte, error) {
-	if s.dirNotice == nil {
-		return nil, nil
+// carries, or nil for none: the notice this hub keeps as aid's witness for
+// the tip of kel, aid's key history as stored (notice.go cachedNoticeOf).
+// A new notice, at most one every NoticeReissue per AID (KEL H-11), is
+// written in a transaction that recomputes the entry (NoticeFor).
+func (s *Store) dirNoticeOf(q rowQuerier, aid string, kel []byte) ([]byte, error) {
+	if s.dirNotice != nil {
+		return s.dirNotice(q, aid)
 	}
-	return s.dirNotice(q, aid)
+	return cachedNoticeOf(q, aid, kel)
 }
 
 // RefreshDirEntry recomputes aid's directory entry (SSR-H17), for a change
-// to it that is not written by the store itself: a new witness notice.
+// to it that is not written by the store itself.
 func (s *Store) RefreshDirEntry(aid string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -151,7 +151,7 @@ func (s *Store) refreshDirTx(tx *sql.Tx, aid string) error {
 	if err != nil {
 		return err
 	}
-	notice, err := s.dirNoticeOf(tx, aid)
+	notice, err := s.dirNoticeOf(tx, aid, kel)
 	if err != nil {
 		return err
 	}
@@ -261,7 +261,11 @@ func (s *Store) dirPrefixes() ([]uint64, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// A card learned from a peer counts when it came with a key set: an
+	// agent without one is in nobody's bucket (SSR-H18), and counting it
+	// would make the buckets narrower than DirMinBucket entries.
 	rows, err = s.db.Query(`SELECT f.aid FROM fed_a2a_card f WHERE f.verified_at IS NOT NULL
+	    AND f.keys IS NOT NULL AND length(f.keys) > 0
 	    AND NOT EXISTS (SELECT 1 FROM agent a WHERE a.aid = f.aid)`)
 	if err != nil {
 		return nil, err

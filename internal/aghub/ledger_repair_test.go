@@ -4,8 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // A correcting entry closes the gap once, is visible, and cannot move
@@ -17,7 +18,7 @@ import (
 // always says something is wrong is a check people stop reading.
 func TestALedgerCorrectionIsDerivedAndVisible(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	a, err := identitytest.Hub()
+	a, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

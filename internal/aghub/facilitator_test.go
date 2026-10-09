@@ -141,7 +141,7 @@ func TestSettleAndVerifyRequirePaymentRequirements(t *testing.T) {
 func TestSettleRefusesPaymentsThatDoNotMeetTheRequirements(t *testing.T) {
 	srv := newHub(t)
 	payer, payee := twoAgents(t)
-	third, _ := identitytest.Hub()
+	third, _ := aghub.NewAgentForTest()
 	register(t, srv, payer, "Payer", nil)
 	register(t, srv, payee, "Payee", nil)
 	register(t, srv, third, "Third", nil)
@@ -311,7 +311,7 @@ func TestARepeatedSettlementIsAnsweredWithTheOriginalReceipt(t *testing.T) {
 func TestASecondAuthorizationForOneBindingMovesNothing(t *testing.T) {
 	srv := newHub(t)
 	payer, payee := twoAgents(t)
-	other, _ := identitytest.Hub()
+	other, _ := aghub.NewAgentForTest()
 	register(t, srv, payer, "Payer", nil)
 	register(t, srv, payee, "Payee", nil)
 	register(t, srv, other, "Other", nil)
@@ -406,7 +406,7 @@ func TestAFailedSettlementLeavesTheBindingFree(t *testing.T) {
 func TestEveryRefusalCarriesAReasonConstant(t *testing.T) {
 	srv := newHub(t)
 	payer, payee := twoAgents(t)
-	stranger, _ := identitytest.Hub()
+	stranger, _ := aghub.NewAgentForTest()
 	register(t, srv, payer, "Payer", nil)
 	register(t, srv, payee, "Payee", nil)
 	hubAID := hubAIDOf(t, srv)
@@ -647,7 +647,7 @@ func TestTheEntryHubClearsOnlyAReceiptForTheRequiredTerms(t *testing.T) {
 	_, store := newHubWithStore(t)
 	ledgerHub, _ := identitytest.Hub()
 	payer, payee := twoAgents(t)
-	other, _ := identitytest.Hub()
+	other, _ := aghub.NewAgentForTest()
 	network := payment.CreditNetwork(ledgerHub.AID())
 	now := time.Now().UnixMilli()
 	auth := authFor(t, payer, payee.AID(), 60, network, "", "clear-1", now-1000, now+60_000)
@@ -705,7 +705,7 @@ func TestTheEntryHubClearsOnlyAReceiptForTheRequiredTerms(t *testing.T) {
 	good := answer(id, payee.AID(), 60)
 	// The receipt does not verify against the key history this hub holds
 	// for the ledger hub (a key rotation this hub has not seen, say).
-	stale, _ := identitytest.Hub()
+	stale, _ := aghub.NewAgentForTest()
 	staleKEL := func(string) ([]identity.SignedEvent, error) { return stale.KEL(), nil }
 	if got := store.ClearPeerSettlement(ledgerHub.AID(), staleKEL, good, auth, req); got.Success ||
 		got.ErrorReason != payment.ReasonSettlementPending || got.Extensions[payment.ExtReceipt] == nil {
@@ -770,7 +770,7 @@ func TestARepeatWithABrokenSignatureIsNotAnsweredWithTheReceipt(t *testing.T) {
 // already recorded and its receipt; the credit is taken once.
 func TestARepeatedRedemptionReturnsTheRecordedRedemption(t *testing.T) {
 	srv := newHub(t)
-	agent, _ := identitytest.Hub()
+	agent, _ := aghub.NewAgentForTest()
 	register(t, srv, agent, "Agent", nil)
 	hubAID := hubAIDOf(t, srv)
 	opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),

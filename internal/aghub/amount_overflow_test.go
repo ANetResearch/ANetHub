@@ -315,7 +315,7 @@ func TestAnUnholdableAmountIsNotForwardedToAPeer(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		foreignPayer, err := identitytest.Hub() // banks on the peer, never registered here
+		foreignPayer, err := aghub.NewAgentForTest() // banks on the peer, never registered here
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -366,7 +366,7 @@ func TestAPeerReceiptForAnUnholdableAmountIsNotClearedForAForwardedPayment(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		foreignPayer, err := identitytest.Hub()
+		foreignPayer, err := aghub.NewAgentForTest()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -699,7 +699,7 @@ func TestAPeerReceiptForMoreThanTheForwardedAuthorizationIsNotCleared(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreignPayer, err := identitytest.Hub()
+	foreignPayer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

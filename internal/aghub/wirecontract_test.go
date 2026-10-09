@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"os"
 	"reflect"
 	"regexp"
@@ -267,7 +266,7 @@ func graphOf(t *testing.T, srv *httptest.Server) struct {
 // came from the cap rather than the ledger.
 func TestLedgerReportsTheWholeAccountNotJustThePage(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +379,7 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{"SessionResponse", aghub.SessionResponse{}, []string{"ct", "enc", "exp", "sid"}},
 		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"recipient_quiet", "rid", "status", "via_hub"}},
 		{"RelayPollRequest", aghub.RelayPollRequest{}, []string{"after_id", "limit"}},
-		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"messages", "more"}},
+		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"key_state_notice", "key_state_notice_error", "messages", "more"}},
 		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"accepted_at", "envelope", "id"}},
 		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"ids"}},
 		{"RelayAckResponse", aghub.RelayAckResponse{}, []string{"acked"}},
@@ -388,8 +387,12 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 			"a2a_card", "aid", "caps", "check_only", "enc_keys", "kel", "name", "pow", "prev_seq",
 			"readme", "summary"}},
 		{"RegisterResponse", aghub.RegisterResponse{}, []string{
-			"aid", "card_error", "card_status", "keys_error", "keys_status", "probation_until", "revocations", "status",
-			"trial"}},
+			"aid", "card_error", "card_status", "key_state_notice", "key_state_notice_error", "keys_error", "keys_status",
+			"probation_until", "revocations", "status", "trial"}},
+		// POST /agents/kel:push and GET /agents/{aid}/kel (KEL §2.7).
+		{"KELPushRequest", aghub.KELPushRequest{}, []string{"aid", "kel"}},
+		{"KELPushResponse", aghub.KELPushResponse{}, []string{"aid", "head", "seq", "unchanged"}},
+		{"AgentKELView", aghub.AgentKELView{}, []string{"aid", "kel", "registered"}},
 		{"CheckOnlyResponse", aghub.CheckOnlyResponse{}, []string{"status"}},
 		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "readme", "summary"}},
 		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keys"}},
@@ -428,6 +431,8 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{aghub.CardStatusInvalid, "invalid"}, {aghub.CardStatusConflict, "conflict"},
 		{aghub.CardStatusWithdrawn, "withdrawn"},
 		{aghub.CardVerificationOK, "ok"},
+		{aghub.NoticeErrQuarantine, "quarantine"}, {aghub.NoticeErrNotAdmitted, "not_admitted"},
+		{aghub.NoticeErrNotWitness, "not_witness"},
 		{aghub.CardErrorPriceInPublicCard, "price_in_public_card"},
 		// The /fed/v3/cards entry formats a peer hub dispatches on.
 		{federation.FormatA2ACard, "a2a-card/1"}, {federation.FormatWithdrawal, "withdrawal/1"},

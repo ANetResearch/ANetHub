@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -25,7 +24,7 @@ import (
 // stopped collecting will not, whatever else it may still answer.
 func TestPollingIsWhatSaysAnAgentIsStillThere(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,8 +114,8 @@ func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 func TestTheDirectorySaysWhoHasGoneQuiet(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	live, quiet := twoAgents(t)
-	register(t, srv, live, "Live", []string{"work.do"})
-	register(t, srv, quiet, "Quiet", []string{"work.do"})
+	registerWithKeys(t, srv, live, "Live", []string{"work.do"})
+	registerWithKeys(t, srv, quiet, "Quiet", []string{"work.do"})
 	pollAs(t, srv, live)
 	backdatePoll(t, store, quiet.AID(), time.Now().Add(-6*time.Hour))
 
@@ -144,8 +143,8 @@ func TestTheDirectorySaysWhoHasGoneQuiet(t *testing.T) {
 func TestAnAbandonedAgentLeavesTheListingAndNothingElse(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	gone, requester := twoAgents(t)
-	register(t, srv, gone, "Gone", []string{"work.do"})
-	register(t, srv, requester, "Requester", nil)
+	registerWithKeys(t, srv, gone, "Gone", []string{"work.do"})
+	registerWithKeys(t, srv, requester, "Requester", nil)
 	uploadInterlockedReview(t, srv, gone, requester, 5, "good")
 	fundAgent(t, srv, gone.AID(), 400)
 	backdatePoll(t, store, gone.AID(), time.Now().Add(-40*24*time.Hour))

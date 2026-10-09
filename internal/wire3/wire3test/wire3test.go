@@ -178,11 +178,20 @@ func Load(t testing.TB, dir string) []*File {
 // Run runs every file in dir: the error bodies through wire3.Write, the
 // cases against the setup each file names. It also checks that the error
 // bodies of all files together cover every hub reason code once.
+//
+// That check needs every file: it is made when every file's subtest ran,
+// and skipped (with a log line) when -run selected only some, as in
+// go test -run 'TestWire3Fixtures/kel_push.json'. A run of one file, or of
+// one case, is therefore green on code that is (a mutation run that only
+// needs that file's cases relies on it). Within a file that ran, its error
+// bodies are always checked, and one code given twice is an error.
 func Run(t *testing.T, dir string, setups map[string]Setup) {
 	files := Load(t, dir)
 	covered := map[wire3.Reason]string{}
+	ran := 0
 	for _, f := range files {
 		t.Run(f.name, func(t *testing.T) {
+			ran++
 			for i, e := range f.Errors {
 				reason := checkErrorEntry(t, f.name, i, e)
 				if reason == "" {
@@ -214,6 +223,11 @@ func Run(t *testing.T, dir string, setups map[string]Setup) {
 				t.Run(c.Name, func(t *testing.T) { runCase(t, env, c) })
 			}
 		})
+	}
+	if ran < len(files) {
+		t.Logf("%d of %d fixture files ran (-run): whether every hub reason has an error body is checked only when all of them run",
+			ran, len(files))
+		return
 	}
 	for _, r := range wire3.Reasons() {
 		if _, ok := covered[r]; !ok {

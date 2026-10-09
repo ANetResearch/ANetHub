@@ -17,12 +17,10 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // The fuzz harness (ANet an internal note).
@@ -68,10 +66,7 @@ func newFZ(tb testing.TB) *fz {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(tb.TempDir())
-	if err != nil {
-		tb.Fatal(err)
-	}
+	id := aghub.HubIdentityForTest(tb)
 	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
@@ -169,7 +164,7 @@ func (f *fz) signedDo(c *identity.Controller, action, method, path, rawQuery str
 // pair (nil without keys).
 func (f *fz) agent(tb testing.TB, name string, caps []string, withKeys bool) (*identity.Controller, *seal.KeyPair) {
 	tb.Helper()
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		tb.Fatal(err)
 	}

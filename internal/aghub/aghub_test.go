@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 func newHub(t *testing.T) *httptest.Server {
@@ -36,11 +36,15 @@ func newHub(t *testing.T) *httptest.Server {
 // operator does directly rather than over HTTP.
 func newHubWithStore(t *testing.T) (*httptest.Server, *aghub.Store) {
 	t.Helper()
+	// The identity the agents of aghub.NewAgentForTest name as their
+	// witness, so that this hub takes their registrations (KEL H-1).
+	return newHubSigningAs(t, aghub.HubIdentityForTest(t))
+}
+
+// newHubSigningAs is newHubWithStore for a hub of identity id.
+func newHubSigningAs(t *testing.T, id *hubid.Identity) (*httptest.Server, *aghub.Store) {
+	t.Helper()
 	store, err := aghub.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,11 +162,48 @@ func registerFunded(t *testing.T, srv *httptest.Server, c *identity.Controller, 
 	store := storeOf(t, srv)
 	first := !store.KnowsAgent(c.AID())
 	admitForTest(t, srv, c.AID())
+	witnessHere(t, srv, c, body)
 	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
 	if code == http.StatusOK && first && store.KnowsAgent(c.AID()) {
 		fundAgent(t, srv, c.AID(), testRegistrationFunds)
 	}
 	return code, b
+}
+
+// witnessHere makes c, when it is the agent body registers and its key
+// history names another hub as its witness, name the hub at srv instead
+// before it registers there (a hub registers only the agents it witnesses,
+// KEL H-1), as a daemon that moves to another hub does (KEL D-32), and puts
+// the extended history in body. The agents of aghub.NewAgentForTest name the
+// test hubs' identity already, so for most tests this does nothing; a test
+// of two hubs moves its agents to the second one with it.
+func witnessHere(t *testing.T, srv *httptest.Server, c *identity.Controller, body map[string]any) {
+	t.Helper()
+	if body["aid"] != c.AID() || body["check_only"] == true || c.Toad() != identity.ToadAgent {
+		return
+	}
+	hubAID := hubAIDOf(t, srv)
+	states, err := identity.Replay(c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states[len(states)-1].Witness == hubAID {
+		return
+	}
+	before, err := identity.MarshalKEL(c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := identitytest.SwitchWitness(c, hubAID, uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatal(err)
+	}
+	if body["kel"] == base64.RawURLEncoding.EncodeToString(before) {
+		after, err := identity.MarshalKEL(c.KEL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body["kel"] = base64.RawURLEncoding.EncodeToString(after)
+	}
 }
 
 // admitForTest puts aid on the test hub's admission list, as the operator
@@ -236,8 +277,8 @@ func makeEvidenceWithComment(t *testing.T, prov, req *identity.Controller, ixID 
 // aggregated into the provider's average.
 func TestUploadReviewHappyPath(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identitytest.Hub()
-	req, _ := identitytest.Hub()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "Provider", []string{"bakery"})
 	register(t, srv, req, "Requester", nil)
 
@@ -274,8 +315,8 @@ func TestUploadReviewHappyPath(t *testing.T) {
 // The same interaction cannot be reviewed twice (interaction_id is the uniqueness key).
 func TestUploadReviewDuplicateRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identitytest.Hub()
-	req, _ := identitytest.Hub()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
 	body := makeEvidence(t, prov, req, "ix_dup", 4, "")
@@ -290,8 +331,8 @@ func TestUploadReviewDuplicateRejected(t *testing.T) {
 // A review whose subject does not match the receipt's provider is rejected (interlock check).
 func TestUploadReviewSubjectMismatchRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identitytest.Hub()
-	req, _ := identitytest.Hub()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
 	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_bad", 5, "did:anet:someone-else")); code == 200 {
@@ -302,8 +343,8 @@ func TestUploadReviewSubjectMismatchRejected(t *testing.T) {
 // Evidence for an unregistered provider is rejected (the Hub has no KEL to verify the receipt against).
 func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identitytest.Hub()
-	req, _ := identitytest.Hub()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, req, "R", nil) // only the requester registers
 	if code, _ := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_np", 5, "")); code == 200 {
 		t.Fatal("unregistered provider must be rejected")
@@ -315,8 +356,8 @@ func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 // rejected.
 func TestRelayBrokerSendPollAck(t *testing.T) {
 	srv := newHub(t)
-	recip, _ := identitytest.Hub()
-	sender, _ := identitytest.Hub()
+	recip, _ := aghub.NewAgentForTest()
+	sender, _ := aghub.NewAgentForTest()
 	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 
@@ -358,7 +399,7 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 // a stranger register/overwrite that AID.
 func TestRegisterRequiresSignature(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := aghub.NewAgentForTest()
 	kelB, _ := identity.MarshalKEL(c.KEL())
 	// no ts/sig
 	if code, _ := post(t, srv.URL+"/register", map[string]any{
@@ -372,10 +413,10 @@ func TestRegisterRequiresSignature(t *testing.T) {
 // becomes listed and its summary/readme are shown. A forged profile update (wrong key) is rejected.
 func TestProfileListingAndAuth(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identitytest.Hub()
-	other, _ := identitytest.Hub()
-	register(t, srv, c, "Solo", nil) // no caps
-	register(t, srv, other, "Other", nil)
+	c, _ := aghub.NewAgentForTest()
+	other, _ := aghub.NewAgentForTest()
+	registerWithKeys(t, srv, c, "Solo", nil) // no caps
+	registerWithKeys(t, srv, other, "Other", nil)
 
 	// Not listed yet: absent from /agents.
 	if listedContains(t, srv, c.AID()) {
@@ -442,8 +483,8 @@ func listedContains(t *testing.T, srv *httptest.Server, aid string) bool {
 // even when the request is properly signed by the claimed AID.
 func TestRegisterAidKelMismatchRejected(t *testing.T) {
 	srv := newHub(t)
-	a, _ := identitytest.Hub()
-	b, _ := identitytest.Hub()
+	a, _ := aghub.NewAgentForTest()
+	b, _ := aghub.NewAgentForTest()
 	kelB, _ := identity.MarshalKEL(b.KEL()) // b's KEL under a's claimed AID
 	admitForTest(t, srv, a.AID())
 	code, body := signedDo(t, srv, a, relayauth.ActionRegister, http.MethodPost, "/register", map[string]any{
@@ -515,7 +556,7 @@ func TestWireContractAcceptsALegacyCaller(t *testing.T) {
 // exists to remove.
 func TestTheHubPublishesKeyHistories(t *testing.T) {
 	srv := newHub(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,9 +580,9 @@ func TestTheHubPublishesKeyHistories(t *testing.T) {
 	if out.KEL == "" {
 		t.Fatal("no kel published — a third party cannot check this agent's signatures")
 	}
-	raw, err := base64.StdEncoding.DecodeString(out.KEL)
+	raw, err := base64.RawURLEncoding.DecodeString(out.KEL)
 	if err != nil {
-		t.Fatalf("kel is not base64: %v", err)
+		t.Fatalf("kel is not base64url (core CORE-E5): %v", err)
 	}
 	kel, err := identity.UnmarshalKEL(raw)
 	if err != nil {
@@ -564,7 +605,7 @@ func TestTheHubPublishesKeyHistories(t *testing.T) {
 // signature, and never ask either participant for anything.
 func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
 	srv := newHub(t)
-	prov, err := identitytest.Hub()
+	prov, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +631,7 @@ func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := base64.StdEncoding.DecodeString(out.KEL)
+	raw, _ := base64.RawURLEncoding.DecodeString(out.KEL)
 	kel, err := identity.UnmarshalKEL(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -619,23 +660,23 @@ func TestAnUnknownAgentHasNoKEL(t *testing.T) {
 // invocation.
 func TestFindByCapability(t *testing.T) {
 	srv := newHub(t)
-	store, err := identitytest.Hub()
+	store, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cam, err := identitytest.Hub()
+	cam, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prose, err := identitytest.Hub()
+	prose, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	register(t, srv, store, "StoreNode", []string{"cas.put", "cas.get"})
-	register(t, srv, cam, "CameraNode", []string{"ptz.absolute@onvif/camera-006", "ptz.home@onvif/camera-006"})
+	registerWithKeys(t, srv, store, "StoreNode", []string{"cas.put", "cas.get"})
+	registerWithKeys(t, srv, cam, "CameraNode", []string{"ptz.absolute@onvif/camera-006", "ptz.home@onvif/camera-006"})
 	// An agent that merely talks about capabilities must not answer for
 	// them. This is the substring search's failure mode, written down.
-	register(t, srv, prose, "Blogger", []string{"writing"})
+	registerWithKeys(t, srv, prose, "Blogger", []string{"writing"})
 
 	names := func(q string) []string {
 		resp, err := http.Get(srv.URL + "/agents?cap=" + url.QueryEscape(q))
@@ -688,7 +729,7 @@ func TestFindByCapability(t *testing.T) {
 // yes would send work to a provider that will refuse it.
 func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
 	srv := newHub(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -714,11 +755,11 @@ func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
 // The facilitator settles credit, once, for the payer who signed it.
 func TestCreditSettlement(t *testing.T) {
 	srv := newHub(t)
-	payer, err := identitytest.Hub()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identitytest.Hub()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -778,11 +819,11 @@ func TestCreditSettlement(t *testing.T) {
 
 func TestPaymentRefusals(t *testing.T) {
 	srv := newHub(t)
-	payer, err := identitytest.Hub()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identitytest.Hub()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -817,7 +858,7 @@ func TestPaymentRefusals(t *testing.T) {
 
 	// An unregistered payer has no key history here, so nothing can say
 	// they authorised it.
-	stranger, err := identitytest.Hub()
+	stranger, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,7 +963,7 @@ func postJSON(t *testing.T, url string, body any, out any) {
 // nobody evaluates.
 func TestRegistrationGrantsCreditOnce(t *testing.T) {
 	srv := newHub(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -942,7 +983,7 @@ func TestRegistrationGrantsCreditOnce(t *testing.T) {
 // hub keeping it.
 func TestABalanceCanBeExplained(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1025,7 +1066,7 @@ func TestClearingAgainstAPeerHub(t *testing.T) {
 
 	// A receipt signed by somebody who is not the ledger's hub is refused
 	// — otherwise any peer could issue itself credit here.
-	impostor, err := identitytest.Hub()
+	impostor, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1054,14 +1095,28 @@ func hubKELOf(t *testing.T, url string) []identity.SignedEvent {
 	return v.(*identity.Controller).KEL()
 }
 
+// hubKELsOf is the identity.HubKELSource of a reader that holds the key
+// history of the hub at srv, and only that one: what it takes to check the
+// witness notices that hub signs.
+func hubKELsOf(t *testing.T, srv *httptest.Server) identity.HubKELSource {
+	t.Helper()
+	aid, kel := hubAIDOf(t, srv), hubKELOf(t, srv.URL)
+	return func(hubAID string) ([]identity.SignedEvent, bool) {
+		if hubAID != aid {
+			return nil, false
+		}
+		return kel, true
+	}
+}
+
 // twoAgents mints a provider and a requester.
 func twoAgents(t *testing.T) (*identity.Controller, *identity.Controller) {
 	t.Helper()
-	prov, err := identitytest.Hub()
+	prov, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := identitytest.Hub()
+	req, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

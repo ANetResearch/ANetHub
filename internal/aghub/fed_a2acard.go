@@ -174,7 +174,7 @@ func (s *Store) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACar
 		if out[i].Format != federation.FormatA2ACard {
 			continue
 		}
-		n, err := s.dirNoticeOf(s.db, aids[j])
+		n, err := s.dirNoticeOf(s.db, aids[j], out[i].KEL)
 		if err != nil {
 			return nil, cursor, err
 		}
@@ -558,10 +558,13 @@ func (s *Store) FedA2ACardKeys(aid string) (keyset, kel []byte, err error) {
 }
 
 // federatedA2AAgents is the /agents view of the listed A2A cards learned
-// from peers: the card's name and skill ids, its home, and the key history
-// and key set the card arrived with (sealed-sender SSR-H18).
+// from peers: the card's name and skill ids, its home, and the key history,
+// key set and witness notice the card arrived with (sealed-sender SSR-H18).
+// A card that came without a key set is not listed, as a local agent
+// without one is not.
 func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
-	rows, err := s.db.Query(`SELECT aid, name, caps, home, kel, keys FROM fed_a2a_card WHERE verified_at IS NOT NULL`)
+	rows, err := s.db.Query(`SELECT aid, name, caps, home, kel, keys, notice FROM fed_a2a_card
+	    WHERE verified_at IS NOT NULL AND keys IS NOT NULL AND length(keys) > 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -569,8 +572,8 @@ func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
 	var out []AgentView
 	for rows.Next() {
 		var aid, name, capsJSON, home string
-		var kel, keys []byte
-		if err := rows.Scan(&aid, &name, &capsJSON, &home, &kel, &keys); err != nil {
+		var kel, keys, notice []byte
+		if err := rows.Scan(&aid, &name, &capsJSON, &home, &kel, &keys, &notice); err != nil {
 			return nil, err
 		}
 		var caps []string
@@ -581,7 +584,7 @@ func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
 			continue
 		}
 		out = append(out, AgentView{AID: aid, Name: name, Caps: caps, Listed: len(caps) > 0, HomeHub: home,
-			KEL: b64url(kel), Keys: b64url(keys)})
+			KEL: b64url(kel), Keys: b64url(keys), KeyStateNotice: b64url(noticeOfTip(kel, notice))})
 	}
 	return out, rows.Err()
 }

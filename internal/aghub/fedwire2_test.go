@@ -88,6 +88,9 @@ func federatedHubs(t *testing.T, discovery bool) (a, b *fedHubNode) {
 		t.Cleanup(func() { _ = fed.Close() })
 		fed.SetKernel(n.s)
 		n.s.SetFederation(fed)
+		// As wire_federation.go does: the peer's key history, which checks
+		// the witness notice its directory entries carry.
+		n.s.SetPeerKELResolver(fed.PeerKEL)
 		n.fed = fed
 		mux := http.NewServeMux()
 		mux.Handle("/hub/identity", n.id.Handler())

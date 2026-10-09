@@ -66,9 +66,19 @@ func singleHeader(r *http.Request, name string) (string, bool) {
 	return vs[0], true
 }
 
+// errSignerNotAnAID is the refusal of an X-ANet-AID that is not an AID.
+var errSignerNotAnAID = errors.New(relayauth.HeaderAID +
+	" is not an AID; sign the request as the agent's own AID, the one anet prints")
+
 // parseV2Headers reads and syntax-checks the authentication headers. The
 // numbers must be in canonical decimal form so that each request has one
 // accepted spelling.
+//
+// The signer must be an AID in its one spelling (ValidAID, the test every
+// party applies, KEL R-3). A header that is not one is refused here, as 401
+// unauthorized (hub-payment-privacy PAY-R3), before this hub looks the
+// signer up, reads the body, checks a signature or asks RC1: a string that
+// names nobody gets no state in this hub and costs it nothing.
 func parseV2Headers(r *http.Request) (v2Auth, error) {
 	aid, ok1 := singleHeader(r, relayauth.HeaderAID)
 	ts, ok2 := singleHeader(r, relayauth.HeaderTS)
@@ -76,6 +86,9 @@ func parseV2Headers(r *http.Request) (v2Auth, error) {
 	sig, ok4 := singleHeader(r, relayauth.HeaderSig)
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return v2Auth{}, errNoAuthHeaders
+	}
+	if !ValidAID(aid) {
+		return v2Auth{}, errSignerNotAnAID
 	}
 	var a v2Auth
 	a.AID = aid
@@ -415,7 +428,8 @@ type authFailure struct {
 	// code picks the reason: 401 (reason below), 413 too_large,
 	// 400 bad_request, 500 internal.
 	code int
-	// reason, for a 401: unauthorized (empty), ts_stale or replayed.
+	// reason, for a 401: unauthorized (empty), key_retired, ts_stale or
+	// replayed.
 	reason wire3.Reason
 	err    error
 	// floor is the signer's floor, for ts_stale.
@@ -447,6 +461,8 @@ func writeAuthFailure(w http.ResponseWriter, f *authFailure) {
 			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonTSStale, Extra: map[string]any{"floor": f.floor}})
 		case wire3.ReasonReplayed:
 			wire3.Refuse(w, wire3.ReasonReplayed)
+		case wire3.ReasonKeyRetired:
+			wire3.Refuse(w, wire3.ReasonKeyRetired)
 		default:
 			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: sentence(f)})
 		}
@@ -468,8 +484,9 @@ var errOutsideWindow = fmt.Errorf("%s is more than %d minutes from this hub's cl
 // verifyV2 checks a parsed header tuple against kel for one request.
 //
 // The order is: time window, signature, then RC1. RC1 is asked only about
-// a signature that verified (PAY-R8): an unauthenticated caller adds no
-// state and learns no floor.
+// a signature that verified under the tip of kel (PAY-R8): an
+// unauthenticated caller adds no state and learns no floor, and neither
+// does one signing with a key it has rotated away from (key_retired).
 func (s *Server) verifyV2(r *http.Request, action string, body []byte, a v2Auth, kel []identity.SignedEvent) *authFailure {
 	if s.hubAID == "" {
 		return &authFailure{code: http.StatusInternalServerError,
@@ -486,12 +503,36 @@ func (s *Server) verifyV2(r *http.Request, action string, body []byte, a v2Auth,
 	return s.rc1Check(a, action, now)
 }
 
-// signatureFailure verifies a's signature over pre against kel.
+// signatureFailure verifies a's signature over pre against kel. A request
+// is signed under the tip of kel, while that tip is active (KEL H-3, core
+// CORE-K16): only the identity's current key speaks for it now, with no
+// grace for a key it has rotated away from. A signature that verifies
+// under an earlier key state, one the signer has retired, is 401
+// key_retired, which tells the signer to look at its key history;
+// anything else (a key state past kel, a bad signature, a deactivated
+// identity's own state) is 401 unauthorized.
+//
+// Checking the signature against the signing time instead, as an object's
+// signature is (identity.VerifyObject at msgTime), would let a retired key
+// sign requests for as long as the signing time may lie in the past
+// (relayauth.MaxSkewMillis): a thief of the old key could keep polling the
+// mailbox after the owner rotated.
 func signatureFailure(action string, a v2Auth, pre []byte, kel []identity.SignedEvent) *authFailure {
 	// The key the KEL names first, so that a bad signature does not cost a
 	// replay of the signer's KEL (kelreplay.go) [redteam:F36].
 	if verr := plausibleSignature(kel, a.Seq, pre, a.Sig); verr != nil {
 		return unauthorized("signature does not verify for action %q: %v", action, verr)
+	}
+	states, err := identity.Replay(kel)
+	if err != nil || states[len(states)-1].AID != a.AID {
+		return unauthorized("signature does not verify for action %q: the key history does not replay to the signer", action)
+	}
+	if tip := states[len(states)-1]; a.Seq != tip.KeyStateSeq || tip.Status != identity.StatusActive {
+		// plausibleSignature verified the signature under the key of
+		// state a.Seq, which this replay holds: a key the signer had and
+		// has since retired.
+		return &authFailure{code: http.StatusUnauthorized, reason: wire3.ReasonKeyRetired,
+			err: fmt.Errorf("signed at key state %d for action %q; the signer's key history is at %d", a.Seq, action, tip.KeyStateSeq)}
 	}
 	if err := identity.VerifyObject(kel, a.AID, a.Seq, a.TS, pre, a.Sig); err != nil {
 		return unauthorized("signature does not verify for action %q: %v", action, err)
@@ -588,7 +629,10 @@ func (s *Server) authRegistered(w http.ResponseWriter, r *http.Request, action s
 // path: the signer must be that AID.
 func (s *Server) authSelf(w http.ResponseWriter, r *http.Request, action string, limit int64) (authed, bool) {
 	aid := r.PathValue("aid")
-	if hdr, ok := singleHeader(r, relayauth.HeaderAID); ok && hdr != aid {
+	if hdr, ok := singleHeader(r, relayauth.HeaderAID); ok && !ValidAID(hdr) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: sentence(errSignerNotAnAID)})
+		return authed{}, false
+	} else if ok && hdr != aid {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
 			Error: relayauth.HeaderAID + " does not name the agent in the path; an agent acts only on itself."})
 		return authed{}, false

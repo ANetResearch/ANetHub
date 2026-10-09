@@ -37,7 +37,7 @@ import (
 // takes the same authorization.
 func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	payer, err := identitytest.Hub()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 // this hub as payee, and clearing it would credit the hub's own row.
 func TestAPaymentToTheHubIsNotForwardedToAPeer(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	payer, err := identitytest.Hub()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestAPeerReceiptPayingThisHubIsNotCleared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payer, _ := identitytest.Hub()
+	payer, _ := aghub.NewAgentForTest()
 	rec := &payment.Receipt{AuthID: "peer-auth-to-hub", Payer: payer.AID(), PayTo: hubAID, Amount: 10,
 		Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
 	if err := rec.Sign(peer); err != nil {
@@ -152,7 +152,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stranger, _ := identitytest.Hub()
+	stranger, _ := aghub.NewAgentForTest()
 	receipt := func(id, payTo string, amount uint64) *payment.Receipt {
 		rec := &payment.Receipt{AuthID: id, Payer: "did:anet:their-user", PayTo: payTo, Amount: amount,
 			Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
@@ -191,7 +191,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	}
 	// An admission grant past the full supply is refused with the admission,
 	// and a registration at the bound pays nothing anyway (PAY-A5).
-	late, _ := identitytest.Hub()
+	late, _ := aghub.NewAgentForTest()
 	admitForTest(t, srv, late.AID())
 	if code, b := signedDo(t, srv, late, relayauth.ActionRegister, http.MethodPost, "/register",
 		registerBody(t, late, "Late", nil)); code != http.StatusOK {
@@ -218,7 +218,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 // boundary seed).
 func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := aghub.NewAgentForTest()
 	register(t, srv, c, "Grantee", nil)
 	publishEpoch(t, storeOf(t, srv)) // one epoch on the chain, seq 0
 	for _, from := range []string{"18446744073709551615", "9223372036854775808", "9223372036854775807"} {
@@ -242,7 +242,7 @@ func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 // is kept; 2^63-1 itself still stores.
 func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := aghub.NewAgentForTest()
 	register(t, srv, c, "Keys", nil)
 	raw, _ := mintKeySet(t, c, 1)
 	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
@@ -291,7 +291,7 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stranger, _ := identitytest.Hub()
+	stranger, _ := aghub.NewAgentForTest()
 	issued := supplyOf(t, srv).Issued
 	// Room for one grant of testRegistrationFunds, not for two.
 	fill := uint64(math.MaxInt64 - issued - 3*testRegistrationFunds/2)
@@ -307,7 +307,7 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	const n = 16
 	admitted := make([]string, n)
 	for i := 0; i < n; i += 2 {
-		c, err := identitytest.Hub()
+		c, err := aghub.NewAgentForTest()
 		if err != nil {
 			t.Fatal(err)
 		}

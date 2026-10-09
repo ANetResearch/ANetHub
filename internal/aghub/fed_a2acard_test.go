@@ -95,6 +95,15 @@ func a2aEntry(t *testing.T, c *identity.Controller, card json.RawMessage) aghub.
 	return aghub.FedA2ACard{Format: federation.FormatA2ACard, Card: card, KEL: kel, Home: testHome}
 }
 
+// keyedEntry is a2aEntry with a key set of c, as the stream carries the card
+// of an agent whose daemon runs.
+func keyedEntry(t *testing.T, c *identity.Controller, card json.RawMessage) aghub.FedA2ACard {
+	t.Helper()
+	e := a2aEntry(t, c, card)
+	e.Keys, _ = mintKeySet(t, c, uint64(time.Now().UnixMilli()))
+	return e
+}
+
 // fedRegistry is the registry a store answers with its federated cards.
 func fedRegistry(t *testing.T, st *aghub.Store, q aghub.RegistryQuery) map[string]aghub.A2AAgentEntry {
 	t.Helper()
@@ -150,7 +159,10 @@ func withdrawnAID(t *testing.T, e aghub.FedA2ACard) (aid, reason string) {
 // the agent opts in, nothing travels.
 func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
 	a, b := federatedHubs(t, true)
-	agent, _ := twoAgents(t)
+	agent, err := aghub.NewAgentWitnessedBy(b.id.AID, time.Now()) // B is its hub
+	if err != nil {
+		t.Fatal(err)
+	}
 	card := signA2A(t, agent, a2aCardFor(agent, 1, relayAt(b.srv.URL),
 		withSkills([]string{"echo", "Echo", "text"})))
 	if got := registerA2A(t, b.srv, agent, "Agent", nil, card); got.CardStatus != aghub.CardStatusOK {
@@ -205,9 +217,9 @@ func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
 		t.Fatalf("B's registry: %+v", l)
 	}
 
-	// A key set published later moves the card on the stream, and the
+	// A new key set published later moves the card on the stream, and the
 	// peer's registry entry carries it.
-	ks, _ := mintKeySet(t, agent, 1)
+	ks, _ := mintKeySet(t, agent, storedKeySeq(t, b.srv, agent.AID())+1)
 	if code, body := publishKeys(t, b.srv, agent, ks); code != http.StatusOK {
 		t.Fatalf("publish keys: %d %s", code, body)
 	}
@@ -306,7 +318,7 @@ func TestAFederatedA2ACardThatDoesNotVerifyIsRefused(t *testing.T) {
 // it verifies against the KEL it came with.
 func TestAFederatedA2ACardCannotRollBackOrForkTheKEL(t *testing.T) {
 	peer := openPeerStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,8 +362,9 @@ func TestAFederatedA2ACardsHomeIsTheCardsRelayInterface(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	// a2aCardFor's relay interface is https://hub.example.org/relay; the
-	// entry says testHome.
-	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 1)))); err != nil {
+	// entry says testHome. Both entries carry a key set: a card without one
+	// is not listed (SSR-H18).
+	if err := peer.AdmitFedA2ACard(homePeerAID, keyedEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 1)))); err != nil {
 		t.Fatal(err)
 	}
 	noRelay := func(card map[string]any) {
@@ -359,7 +372,7 @@ func TestAFederatedA2ACardsHomeIsTheCardsRelayInterface(t *testing.T) {
 			"url": "https://direct.example/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "1.0",
 		}}
 	}
-	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, direct, signA2A(t, direct, a2aCardFor(direct, 1, noRelay)))); err != nil {
+	if err := peer.AdmitFedA2ACard(homePeerAID, keyedEntry(t, direct, signA2A(t, direct, a2aCardFor(direct, 1, noRelay)))); err != nil {
 		t.Fatal(err)
 	}
 	reg := fedRegistry(t, peer, aghub.RegistryQuery{})
@@ -398,7 +411,7 @@ func TestAWithdrawnA2ACardLeavesThePeersRegistry(t *testing.T) {
 	if err := peer.AdmitFedA2ACard(homePeerAID, entries[0]); err != nil {
 		t.Fatal(err)
 	}
-	ks, _ := mintKeySet(t, agent, 1)
+	ks, _ := mintKeySet(t, agent, storedKeySeq(t, hub.srv, agent.AID())+1)
 	if code, body := publishKeys(t, hub.srv, agent, ks); code != http.StatusOK {
 		t.Fatalf("publish keys: %d %s", code, body)
 	}
@@ -711,7 +724,8 @@ func TestKeysTravelWithTheCardAndAreVerifiedOnArrival(t *testing.T) {
 	hub := newFedHub(t)
 	agent, stranger := twoAgents(t)
 	federate(t, hub, agent, "Keyed", []string{"work.do"})
-	k1, _ := mintKeySet(t, agent, 1)
+	base := storedKeySeq(t, hub.srv, agent.AID()) // the set it registered with
+	k1, _ := mintKeySet(t, agent, base+1)
 	if code, body := publishKeys(t, hub.srv, agent, k1); code != http.StatusOK {
 		t.Fatalf("publish: %d %s", code, body)
 	}
@@ -732,7 +746,7 @@ func TestKeysTravelWithTheCardAndAreVerifiedOnArrival(t *testing.T) {
 	}
 
 	// A new set moves the card past the cursor a peer holds.
-	k2, _ := mintKeySet(t, agent, 2)
+	k2, _ := mintKeySet(t, agent, base+2)
 	if code, body := publishKeys(t, hub.srv, agent, k2); code != http.StatusOK {
 		t.Fatalf("publish 2: %d %s", code, body)
 	}
@@ -758,7 +772,7 @@ func TestKeysTravelWithTheCardAndAreVerifiedOnArrival(t *testing.T) {
 	}
 	// Only the peer that taught the card may update it: a valid, newer
 	// set on the same card from a different peer is not stored.
-	k3, _ := mintKeySet(t, agent, 3)
+	k3, _ := mintKeySet(t, agent, base+3)
 	fromOther := after[0]
 	fromOther.Keys = k3
 	if err := peer.AdmitFedA2ACard("did:anet:other-hub", fromOther); err != nil {
@@ -791,7 +805,8 @@ func TestAPeerCannotForkOrCorruptAStoredKeySet(t *testing.T) {
 	hub := newFedHub(t)
 	agent, _ := twoAgents(t)
 	federate(t, hub, agent, "Keyed", []string{"work.do"})
-	k2, _ := mintKeySet(t, agent, 2)
+	base := storedKeySeq(t, hub.srv, agent.AID()) // the set it registered with
+	k2, _ := mintKeySet(t, agent, base+2)
 	if code, body := publishKeys(t, hub.srv, agent, k2); code != http.StatusOK {
 		t.Fatalf("publish: %d %s", code, body)
 	}
@@ -810,8 +825,8 @@ func TestAPeerCannotForkOrCorruptAStoredKeySet(t *testing.T) {
 	if !bytes.Equal(stored(), k2) {
 		t.Fatal("setup: the peer did not store the set")
 	}
-	k1, _ := mintKeySet(t, agent, 1)
-	fork, _ := mintKeySet(t, agent, 2) // same seq, other keys, validly signed
+	k1, _ := mintKeySet(t, agent, base+1)
+	fork, _ := mintKeySet(t, agent, base+2) // same seq, other keys, validly signed
 	for name, keys := range map[string][]byte{
 		"a lower seq (a rollback)":                k1,
 		"a fork (same seq, other content)":        fork,

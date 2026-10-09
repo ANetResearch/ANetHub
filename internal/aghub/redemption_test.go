@@ -20,7 +20,7 @@ import (
 // Credit that only goes in is a score. This is the way out.
 func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,11 +114,11 @@ func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 // A hub must not be able to redeem an agent's balance for it.
 func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	thief, err := identitytest.Hub()
+	thief, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 // Redeeming more than you hold must fail, and must fail as a payment.
 func TestRedeemingMoreThanYouHoldIsRefused(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identitytest.Hub()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 	if err := ourStore.SettleOwed(ourAID, peerCtrl.AID(), peerCtrl.KEL(), over); err == nil {
 		t.Error("a peer cleared more than it owed")
 	}
-	stranger, err := identitytest.Hub()
+	stranger, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func decodeB64(t *testing.T, s string) string {
 // at all.
 func TestAnOperatorGrantIsIssuedOnTheBooks(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +449,7 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 // twice and outstanding went negative by the redeemed amount.
 func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identitytest.Hub()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	payer, err := identitytest.Hub()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +650,7 @@ func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identitytest.Hub()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +700,7 @@ func TestTwoDischargesWithTheSameReferenceBothApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identitytest.Hub()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
