@@ -25,6 +25,7 @@ import (
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/federation"
 	"github.com/ANetResearch/ANetHub/internal/hubid"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // Cross-hub settlement through the real wiring: hub A (the entry hub, the
@@ -523,5 +524,47 @@ func TestAnAnswerWithoutAReasonIsPending(t *testing.T) {
 	}
 	if got := mustBalance(t, r.b.store, r.payer.AID()); got != 930 {
 		t.Errorf("payer balance %d, want 930", got)
+	}
+}
+
+// A forwarded settlement that the ledger hub refused before its ledger saw
+// it (its federation layer does not count this hub as a peer, or did not
+// take the signature) is known not to have settled: the entry hub answers
+// settlement_failed, which the merchant does not retry forever, and nothing
+// is charged or credited. A busy ledger hub has not said whether it
+// settled: that is settlement_pending, and the retry completes it once.
+func TestAForwardRefusedBeforeTheLedgerIsFailedNotPending(t *testing.T) {
+	r := newCrossHubRig(t)
+	req := r.requires(r.payee.AID(), 40)
+	payee := func() int64 { return mustBalance(t, r.a, r.payee.AID()) }
+	payer := func() int64 { return mustBalance(t, r.b.store, r.payer.AID()) }
+	refuseWith := func(reason wire3.Reason) {
+		r.b.mu.Lock()
+		r.b.settleHook = func(w http.ResponseWriter, _ *http.Request, _ http.Handler) { wire3.Refuse(w, reason) }
+		r.b.mu.Unlock()
+	}
+	for _, reason := range []wire3.Reason{wire3.ReasonNotPeer, wire3.ReasonUnauthorized} {
+		refuseWith(reason)
+		p := r.pay(t, r.payee.AID(), 40, "bind-"+string(reason), "refused-"+string(reason))
+		if out := settleAt(t, r.aURL, p, req); out.Success || out.ErrorReason != payment.ReasonSettlementFailed {
+			t.Errorf("the ledger hub's federation layer answered %s: %+v, want %s", reason, out, payment.ReasonSettlementFailed)
+		}
+	}
+	if payer() != 1000 || payee() != 0 {
+		t.Fatalf("after the refusals: payer %d payee %d, want 1000 and 0", payer(), payee())
+	}
+	refuseWith(wire3.ReasonRateLimited)
+	p := r.pay(t, r.payee.AID(), 40, "bind-busy", "busy")
+	if out := settleAt(t, r.aURL, p, req); out.Success || out.ErrorReason != payment.ReasonSettlementPending {
+		t.Fatalf("a busy ledger hub: %+v, want %s", out, payment.ReasonSettlementPending)
+	}
+	r.b.mu.Lock()
+	r.b.settleHook = nil
+	r.b.mu.Unlock()
+	if out := settleAt(t, r.aURL, p, req); !out.Success {
+		t.Fatalf("the retry once the ledger hub is not busy: %+v", out)
+	}
+	if payer() != 960 || payee() != 40 {
+		t.Errorf("at the end: payer %d payee %d, want 960 and 40", payer(), payee())
 	}
 }

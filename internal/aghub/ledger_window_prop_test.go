@@ -20,6 +20,14 @@ import (
 // of the ledger window past its time, the settlement guard holds hashes
 // only, the largest ledger seq ever written stays where it was, and the
 // supply invariant holds (P-PAY-3).
+//
+// The times are also checked against what the rig itself signed rather
+// than what the hub stored: a settled row is kept exactly until 7 days past
+// its authorization's NotAfter, and a peer's clearing exactly until 8 days
+// past its receipt's SettleAt. And deleting them reopens nothing (PAY-L3):
+// every authorization that ever settled is sent again after every round,
+// through the door it settled by, and is answered with its original
+// settlement or refused as expired, never settled a second time.
 
 // windowRig is a hub on a clock the test moves, with a few accounts and a
 // peer hub.
@@ -35,12 +43,28 @@ type windowRig struct {
 	// done counts what succeeded, by kind, so the property is known to
 	// have been tested on rows of every table.
 	done map[string]int
+	// paid is every authorization that settled, to send again; cleared is
+	// the SettleAt of every peer receipt cleared, by its authorization id.
+	paid    []*windowPaid
+	cleared map[string]int64
+}
+
+// windowPaid is an authorization that settled, and the door it settled by.
+type windowPaid struct {
+	kind     string // "settled", "forwarded" or "redeemed"
+	p        *payment.PaymentPayload
+	req      *payment.PaymentRequirements
+	id       string
+	notAfter int64
+	// expired: a repeat was refused as expired, which time does not undo.
+	expired bool
 }
 
 func newWindowRig(t *testing.T) *windowRig {
 	t.Helper()
 	s, hub, payer, payee := settlementStore(t)
-	r := &windowRig{t: t, s: s, hubAID: hub.AID(), now: time.Now().Truncate(time.Millisecond), done: map[string]int{}}
+	r := &windowRig{t: t, s: s, hubAID: hub.AID(), now: time.Now().Truncate(time.Millisecond), done: map[string]int{},
+		cleared: map[string]int64{}}
 	s.clock = func() time.Time { return r.now }
 	r.agents = []*identity.Controller{payer, payee}
 	for i := 0; i < 2; i++ {
@@ -96,6 +120,54 @@ func (r *windowRig) pay(rng *rand.Rand, payTo string, forPeer bool) {
 		if bind != "" {
 			r.done["bound"]++
 		}
+		id, err := a.ID()
+		if err != nil {
+			r.t.Fatal(err)
+		}
+		r.paid = append(r.paid, &windowPaid{kind: kind, p: p, req: req, id: id, notAfter: a.NotAfter})
+	}
+}
+
+// replay sends every authorization that settled again, by the door it
+// settled by: the answer is its original settlement (a repeat), or a
+// refusal as expired once the settled row may be gone, and the ledger does
+// not move either way.
+func (r *windowRig) replay(step string) {
+	t := r.t
+	t.Helper()
+	before := ledgerRows(t, r.s)
+	for _, x := range r.paid {
+		if x.expired {
+			continue
+		}
+		var ok bool
+		var reason string
+		switch x.kind {
+		case "redeemed":
+			red, err := r.s.Redeem(r.hubAID, x.p, "ref-again")
+			ok = err == nil && red.AuthID == x.id
+			if rf, isRefusal := err.(*Refusal); isRefusal {
+				reason = rf.Reason
+			} else if err != nil {
+				reason = err.Error()
+			}
+		case "forwarded":
+			out := r.s.SettleForPeer(r.hubAID, r.peer.AID(), x.p, x.req)
+			ok, reason = out.Success && out.Transaction == x.id && out.Extensions[payment.ExtReplayed] == true, out.ErrorReason
+		default:
+			out := r.s.SettleWithRequirements(r.hubAID, x.p, x.req)
+			ok, reason = out.Success && out.Transaction == x.id && out.Extensions[payment.ExtReplayed] == true, out.ErrorReason
+		}
+		switch {
+		case ok:
+		case reason == payment.ReasonExpiredPayment:
+			x.expired = true
+		default:
+			t.Fatalf("%s: %s %s sent again: neither its settlement nor expired (%q)", step, x.kind, x.id, reason)
+		}
+	}
+	if after := ledgerRows(t, r.s); after != before {
+		t.Fatalf("%s: sending settled authorizations again moved the ledger:\n%s\n%s", step, before, after)
 	}
 }
 
@@ -111,6 +183,7 @@ func (r *windowRig) clear(rng *rand.Rand) {
 	if err := r.s.ClearFromPeer(r.peer.AID(), r.peer.KEL(), rec); err != nil {
 		r.t.Fatalf("clearing a receipt %v old: %v", r.now.Sub(at), err)
 	}
+	r.cleared[rec.AuthID] = rec.SettleAt
 	r.done["cleared"]++
 }
 
@@ -192,6 +265,23 @@ func (r *windowRig) check(step string) {
 	if sup, err := r.s.Supply(r.hubAID); err != nil || !sup.Consistent() {
 		t.Fatalf("%s: the supply does not add up: %+v (%v)", step, sup, err)
 	}
+	// Each settled row and each clearing is there exactly while its time,
+	// counted from what was signed, has not passed.
+	for _, x := range r.paid {
+		kept := x.notAfter > now.Add(-7*24*time.Hour).UnixMilli()
+		if n := count(`SELECT COUNT(*) FROM credit_settled WHERE auth_id = ?`, x.id); (n == 1) != kept {
+			t.Fatalf("%s: the settled row of %s (NotAfter %v before now) is there: %v, want %v",
+				step, x.id, now.Sub(time.UnixMilli(x.notAfter)), n == 1, kept)
+		}
+	}
+	for id, settleAt := range r.cleared {
+		kept := settleAt > now.Add(-8*24*time.Hour).UnixMilli()
+		if n := count(`SELECT COUNT(*) FROM credit_cleared WHERE auth_id = ?`, id); (n == 1) != kept {
+			t.Fatalf("%s: the clearing of %s (settled %v before now) is there: %v, want %v",
+				step, id, now.Sub(time.UnixMilli(settleAt)), n == 1, kept)
+		}
+	}
+	r.replay(step)
 }
 
 func TestPropTheLedgerWindowKeepsNothingPastItsTime(t *testing.T) {

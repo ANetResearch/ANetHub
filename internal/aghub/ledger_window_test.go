@@ -107,7 +107,16 @@ func TestTheLedgerReadsServeTheWindow(t *testing.T) {
 	if l := ledger(); l.Total != 3 || l.Returned != 2 || !l.Truncated || l.Note == "" || l.Sum != 3 {
 		t.Errorf("a page of the window: %+v", l)
 	}
-	if bal, _ := store.Balance(owner.AID()); bal != int64(testRegistrationFunds)+100-7+50-3+3 {
+	// So does a page of redemptions, newest first, and oldest_seq is still
+	// the window's earliest, which this page does not list.
+	redeem(1, "r-1")
+	redeem(2, "r-2")
+	if r := redemptions(); r.Total != 2 || r.Sum != 3 || r.Returned != 1 || !r.Truncated || r.Note == "" ||
+		len(r.Redemptions) != 1 || r.Redemptions[0].Reference != "r-2" ||
+		r.OldestSeq == 0 || r.OldestSeq >= r.Redemptions[0].Seq {
+		t.Errorf("a page of the redemption window: %+v", r)
+	}
+	if bal, _ := store.Balance(owner.AID()); bal != int64(testRegistrationFunds)+100-7+50-3+3-1-2 {
 		t.Errorf("the balance is %d; the window changes what is listed, never the balance", bal)
 	}
 }
