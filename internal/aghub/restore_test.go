@@ -2,6 +2,7 @@ package aghub_test
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -322,6 +323,45 @@ func TestRestoreReleaseNeedsMoreEventsNotOtherBytes(t *testing.T) {
 	}
 	if !bytes.Equal(stored, canon) {
 		t.Error("the hub kept the history in the bytes it was sent, not its CoreDet encoding")
+	}
+}
+
+// KEL H-20 b, H-22: the hub process starts serving a restored database by
+// itself. Its notice refresher (what anet-hub runs) starts the wait and files
+// the agents in the directory again; without it the wait never starts and an
+// agent whose node has nothing newer to send stays held.
+func TestTheRefresherStartsServingARestoredHub(t *testing.T) {
+	dir := t.TempDir()
+	srv, store := serveAt(t, dir)
+	a, _ := twoAgents(t)
+	joinWithKeys(t, srv, a, "A")
+	backup := filepath.Join(t.TempDir(), "b.db")
+	backupOf(t, store, backup)
+	stop(srv, store)
+	if _, err := aghub.Restore(dir, backup, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	srv, store = serveAt(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { store.RunNoticeRefresher(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, err := store.Quarantine()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.ServingSince.IsZero() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the refresher did not start serving the restored database: %+v", st)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if e := lookUpInBucket(t, srv, a.AID(), ""); e == nil || len(e.Notice) != 0 {
+		t.Errorf("A's directory entry once the hub serves: %+v, want one without a notice", e)
 	}
 }
 

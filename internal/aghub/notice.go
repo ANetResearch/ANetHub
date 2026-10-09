@@ -250,14 +250,20 @@ func kelTip(kel []byte) (seq uint64, head string, ok bool) {
 //
 // It is also where the hub process starts serving a restored database
 // (BeginServing): before its first round, so the directory has its entries
-// again by the time notices are renewed.
+// again by the time notices are renewed; and, should that fail, again each
+// round until it does, since until then the wait of H-20 b does not start.
 func (s *Store) RunNoticeRefresher(ctx context.Context) {
-	if err := s.BeginServing(); err != nil {
-		log.Printf("hub: starting to serve the restored database: %v", err)
-	}
 	t := time.NewTicker(noticeRefreshEvery)
 	defer t.Stop()
+	serving := false
 	for {
+		if !serving {
+			if err := s.BeginServing(); err != nil {
+				log.Printf("hub: starting to serve the restored database (tried again in %v): %v", noticeRefreshEvery, err)
+			} else {
+				serving = true
+			}
+		}
 		if err := s.EndQuarantineWhenNoneHeld(); err != nil {
 			log.Printf("hub: closing the restore quarantine: %v", err)
 		}
