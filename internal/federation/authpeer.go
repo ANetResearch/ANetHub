@@ -114,8 +114,9 @@ type peerGate func(w http.ResponseWriter, peerAID string) bool
 //
 // It returns the peer and the body, or false once it has answered.
 func (s *Service) authPeer(w http.ResponseWriter, r *http.Request, action string, open bool, limit int64, gate peerGate) (*Peer, []byte, bool) {
+	var peer *Peer
 	if vs := r.Header.Values(relayauth.HeaderAID); len(vs) == 1 && vs[0] != "" {
-		if !open || s.peer(vs[0]) == nil || s.kernel == nil {
+		if peer = s.peer(vs[0]); !open || peer == nil || s.kernel == nil {
 			wire3.Refuse(w, wire3.ReasonNotPeer)
 			return nil, nil, false
 		}
@@ -125,7 +126,12 @@ func (s *Service) authPeer(w http.ResponseWriter, r *http.Request, action string
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: err.Error()})
 		return nil, nil, false
 	}
-	peer := s.peer(a.aid)
+	if peer == nil || peer.AID != a.aid {
+		// parseHubAuth read the one signer checked above; anything else
+		// is no peer.
+		wire3.Refuse(w, wire3.ReasonNotPeer)
+		return nil, nil, false
+	}
 	if gate != nil && !gate(w, peer.AID) {
 		return nil, nil, false
 	}
