@@ -20,12 +20,8 @@ import (
 	"sort"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
-
-// hubIdentityFile is the hub identity in its data directory (internal/hubid).
-// A database restored beside no identity would be served under a new one, and
-// its ledger, kept on the hub's own account, would no longer be this hub's.
-const hubIdentityFile = "hub_identity.kel"
 
 // backupName is the name deploy/hub-db-roll.sh gives a backup.
 var backupName = regexp.MustCompile(`^hub-backup-[0-9]{8}\.db$`)
@@ -42,8 +38,14 @@ func runRestore(c *console, data string, args []string) int {
 		return c.say("restore.no_backup", map[string]string{"path": pos[0]})
 	}
 	dir := *dataDir
-	if st, err := os.Stat(filepath.Join(dir, hubIdentityFile)); err != nil || !st.Mode().IsRegular() {
+	// The identity the restored database is served under. Without it the
+	// hub would start under a new one, and the ledger, kept on the hub's own
+	// account, would no longer be this hub's; one of 0.2 does not start.
+	if !hubid.Exists(dir) {
 		return c.say("restore.no_identity", map[string]string{"path": dir})
+	}
+	if err := hubid.CheckFile(dir); err != nil {
+		return c.refuseIdentity(err)
 	}
 	res, err := aghub.Restore(dir, backup, c.now())
 	switch {

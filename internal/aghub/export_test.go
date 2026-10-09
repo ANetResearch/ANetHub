@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // What the external tests (package aghub_test) may reach of the admission
@@ -162,17 +164,11 @@ func (s *Store) NoticeRowForTest(aid string) (seq uint64, head string, observedA
 // of the test).
 func HoldDataDirForTest(t *testing.T, dir string) func() {
 	t.Helper()
-	release, err := lockDataDir(dir)
+	lock, err := hubid.Lock(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var once bool
-	done := func() {
-		if !once {
-			once = true
-			release()
-		}
-	}
+	done := func() { lock.Release() }
 	t.Cleanup(done)
 	return done
 }

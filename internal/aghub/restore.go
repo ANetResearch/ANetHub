@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // A hub restored from a backup, or whose database went back to an older copy
@@ -585,7 +587,8 @@ func writeKELHWM(dir string, n uint64) error {
 // ---- anet-hub restore ----
 
 // ErrHubRunning is Restore's refusal while another process holds the data
-// directory's lock: the hub is serving from it.
+// directory's lock (hubid.Lock): the hub is serving from it, or an identity
+// operation is changing it.
 var ErrHubRunning = errors.New("hub: the hub is running from this data directory")
 
 // ErrNotABackup is Restore's refusal of a file that is not a whole hub
@@ -611,8 +614,8 @@ type RestoreResult struct {
 
 // Restore puts the hub database in the file backup into the data directory
 // dir as its hub.db, in quarantine (KEL H-20, H-23). The hub must not be
-// running: Restore takes the data directory's lock, the one the hub holds
-// while it serves, and refuses with ErrHubRunning when it cannot.
+// running: Restore takes the data directory's lock (hubid.Lock), the one the
+// hub holds while it serves, and refuses with ErrHubRunning when it cannot.
 //
 // The backup is checked then (a 0.3.0 hub database, whole: ErrNotABackup,
 // ErrBackupTooNew) and nothing in dir changes when it is refused. It is
@@ -623,11 +626,14 @@ type RestoreResult struct {
 // replaces hub.db (its write-ahead log goes first: it belongs to the database
 // being replaced) and kel_hwm is written.
 func Restore(dir, backup string, now time.Time) (RestoreResult, error) {
-	release, err := lockDataDir(dir)
-	if err != nil {
-		return RestoreResult{}, err
+	lock, err := hubid.Lock(dir)
+	if errors.Is(err, hubid.ErrLocked) {
+		return RestoreResult{}, ErrHubRunning
 	}
-	defer release()
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("hub: restore: %w", err)
+	}
+	defer lock.Release()
 	if err := checkBackup(backup); err != nil {
 		return RestoreResult{}, err
 	}
