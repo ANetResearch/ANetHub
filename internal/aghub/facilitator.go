@@ -492,23 +492,18 @@ func (s *Store) keyAtFirstVerify(auth *payment.Authorization, id string, kel []i
 // either before the record or after it, never between.
 func (s *Store) recordFirstVerify(auth *payment.Authorization, id string, now int64) (bool, error) {
 	seq := auth.Envelope.KeyStateSeq
+	// Recorded already, as for a settlement after the merchant's verify: read
+	// without the write lock a transaction here takes.
+	if tip, found, err := firstVerifyOf(s.db, id, auth.Payer, seq); err != nil || found {
+		return tip, err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	var payer string
-	var rowSeq int64
-	var tip bool
-	err = tx.QueryRow(`SELECT payer, key_state_seq, tip_at_first FROM x402_first_verify WHERE auth_id = ?`, id).
-		Scan(&payer, &rowSeq, &tip)
-	if err == nil {
-		// Recorded already: the record speaks for the key state it was made
-		// for (the id covers the terms, not the signature).
-		return tip && payer == auth.Payer && rowSeq >= 0 && uint64(rowSeq) == seq, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return false, err
+	if tip, found, err := firstVerifyOf(tx, id, auth.Payer, seq); err != nil || found {
+		return tip, err
 	}
 	var raw []byte
 	if err := tx.QueryRow(`SELECT kel FROM agent WHERE aid = ?`, auth.Payer).Scan(&raw); err != nil {
@@ -523,7 +518,7 @@ func (s *Store) recordFirstVerify(auth *payment.Authorization, id string, now in
 		return false, err
 	}
 	last := states[len(states)-1]
-	tip = last.KeyStateSeq == seq && last.Status == identity.StatusActive
+	tip := last.KeyStateSeq == seq && last.Status == identity.StatusActive
 	if seq > math.MaxInt64 {
 		return false, fmt.Errorf("key state %d is beyond what this hub stores", seq)
 	}
@@ -535,6 +530,25 @@ func (s *Store) recordFirstVerify(auth *payment.Authorization, id string, now in
 		return false, err
 	}
 	return tip, nil
+}
+
+// firstVerifyOf reads the first verification recorded for the authorization
+// id, through q: found when there is one, and tip when it says the key state
+// that signed was the active tip. A record speaks only for the payer and the
+// key state it was made for: the id covers the terms, not the signature.
+func firstVerifyOf(q rowQuerier, id, payer string, seq uint64) (tip, found bool, err error) {
+	var rowPayer string
+	var rowSeq int64
+	var rowTip bool
+	err = q.QueryRow(`SELECT payer, key_state_seq, tip_at_first FROM x402_first_verify WHERE auth_id = ?`, id).
+		Scan(&rowPayer, &rowSeq, &rowTip)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return rowTip && rowPayer == payer && rowSeq >= 0 && uint64(rowSeq) == seq, true, nil
 }
 
 // firstVerifyDeleteAfter is when a first verification of an authorization
