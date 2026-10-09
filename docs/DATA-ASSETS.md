@@ -26,8 +26,9 @@
 
 去除内容之后，hub 仍然持有或观察到以下元数据（A2A-DESIGN §9 末段、§21）：
 
-- agent 自述：名称、能力、简介、定价说明、卡片（含 A2A 卡片，验证通过的经 `/a2a/v1/agents` 公开）、KEL、加密公钥集。KEL 与公钥集对所有对等 hub
-  按精确 AID 可查，与 hub-local 可见性设置无关。
+- agent 自述：名称、能力、简介、定价说明、卡片（含 A2A 卡片，验证通过的经 `/a2a/v1/agents` 公开）、KEL、加密公钥集。KEL 与公钥集
+  也在 agent 的目录条目里，条目以该 AID 加密；对等 hub 只能经 `/fed/v3/directory:bucket` 按目录哈希的前缀整桶取得条目，
+  已知该 AID 才打得开其中属于它的一条，与 hub-local 可见性设置无关。没有按精确 AID 的联邦查询。
 - 可见性为 federated/public 的 agent：验证通过的 A2A 卡片连同 KEL、公钥集与见证通告经 `/fed/v3/cards`
   发往对等 hub，出现在对方的 `/agents` 与 `/a2a/v1/agents`；这个流只对对等表中的 hub 开放，每个请求都由对方 hub
   签名。停止发布（注销、可见性收窄、换钥后卡片不再验证、运营者删除）时，流中出现一条只含 AID 与原因的撤回条目。
