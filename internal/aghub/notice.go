@@ -286,12 +286,18 @@ func (s *Store) RunNoticeRefresher(ctx context.Context) {
 // The agents with a key set are those a sender can find in the directory
 // and the registry: what they carry is then at most NoticeReissue and a
 // minute old, whether or not the agent polled lately.
+//
+// An agent whose notice cannot be signed (its stored key history does not
+// replay, the store fails on it) gets none, and the error says how many
+// did not; the agents after it are renewed all the same. One bad record
+// must not leave every other agent's notice to go stale.
 func (s *Store) RefreshNotices(ctx context.Context) (int, error) {
 	now := s.now()
 	rows, err := s.db.Query(`SELECT a.aid FROM agent a
 	    JOIN agent_keys k ON k.aid = a.aid
 	    LEFT JOIN notice_cache n ON n.aid = a.aid
-	   WHERE n.aid IS NULL OR n.observed_at < ? OR n.observed_at > ?`,
+	   WHERE n.aid IS NULL OR n.observed_at < ? OR n.observed_at > ?
+	   ORDER BY a.aid`,
 		now.Add(-NoticeReissue).UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return 0, err
@@ -309,19 +315,27 @@ func (s *Store) RefreshNotices(ctx context.Context) (int, error) {
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	signed := 0
+	signed, failed := 0, 0
+	var first error
 	for _, aid := range due {
 		if ctx.Err() != nil {
-			return signed, nil
+			break
 		}
 		before, _ := cachedNoticeRow(s.db, aid)
 		notice, _, err := s.NoticeFor(aid)
 		if err != nil {
-			return signed, err
+			if first == nil {
+				first = err
+			}
+			failed++
+			continue
 		}
 		if notice != nil && !bytes.Equal(notice, before) {
 			signed++
 		}
+	}
+	if first != nil {
+		return signed, fmt.Errorf("hub: %d of %d due witness notices not renewed; the first: %w", failed, len(due), first)
 	}
 	return signed, nil
 }

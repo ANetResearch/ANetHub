@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -413,9 +415,10 @@ func TestKELPushExtendsOnlyAndIsIdempotent(t *testing.T) {
 }
 
 // KEL R-10 at a push: an event this hub is the first to take as its witness
-// (a rot that names it) is held to its clock from below as well; one that
-// names another hub, pushed to the old witness, only from above (R-9). The
-// old witness takes a late push of the agent's move (M27).
+// (a rot that names it, a dip whose state before it names it) is held to
+// its clock from below as well; one that names another hub, pushed to the
+// old witness, only from above (R-9). The old witness takes a late push of
+// the agent's move (M27), and of the dip that came after the move.
 func TestKELPushTimesOnlyTheWitnessesOwnEvents(t *testing.T) {
 	srv, store := newWitnessHub(t)
 	hubAID := hubAIDOf(t, srv)
@@ -436,12 +439,89 @@ func TestKELPushTimesOnlyTheWitnessesOwnEvents(t *testing.T) {
 	if code, b := pushKEL(t, srv, c.AID(), kelURL(t, stale)); code != http.StatusBadRequest || !reasonIs(b, "kel_ts_out_of_window") {
 		t.Errorf("a rot naming this hub, an hour old: %d %s, want 400 kel_ts_out_of_window", code, b)
 	}
+	// A dip ends a state that names this hub: this hub is the witness that
+	// first takes it, and an hour is too late.
+	staleDip := snapshotOf(t, c)
+	if err := identitytest.Deactivate(staleDip, anHourAgo); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := pushKEL(t, srv, c.AID(), kelURL(t, staleDip)); code != http.StatusBadRequest || !reasonIs(b, "kel_ts_out_of_window") {
+		t.Errorf("a dip of an agent this hub witnesses, an hour old: %d %s, want 400 kel_ts_out_of_window", code, b)
+	}
+	if !store.KnowsAgent(c.AID()) {
+		t.Fatal("a dip refused for its time deregistered the agent")
+	}
 	other, _ := identitytest.Hub()
 	if err := identitytest.SwitchWitness(c, other.AID(), anHourAgo); err != nil {
 		t.Fatal(err)
 	}
 	if code, b := pushKEL(t, srv, c.AID(), kelURL(t, c)); code != http.StatusOK {
 		t.Errorf("a move to another hub, pushed an hour late to the old one: %d %s, want 200", code, b)
+	}
+	// After the move a dip ends a state that names the other hub: here it
+	// is held to R-9 only, and deregisters the agent.
+	if err := identitytest.Deactivate(c, anHourAgo+1); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := pushKEL(t, srv, c.AID(), kelURL(t, c)); code != http.StatusOK {
+		t.Errorf("a dip after the move, pushed an hour late to the old witness: %d %s, want 200", code, b)
+	}
+	if store.KnowsAgent(c.AID()) {
+		t.Error("the dip pushed to the old witness did not deregister the agent")
+	}
+}
+
+// KEL H-2, H-4: a pushed extension of a registered agent's key history ends
+// what its retired key signed there, as a registration of it would (a KEL
+// write that is not a registration runs the KEL hooks once it commits): the
+// A2A card is re-verified against the new history and delisted
+// (KEY_NOT_CURRENT), and the store's KEL hooks run (they end the agent's
+// relay sessions, SSR-H9). A push that changes nothing ends nothing.
+func TestKELPushEndsWhatTheRetiredKeySigned(t *testing.T) {
+	srv, store := newWitnessHub(t)
+	c, _ := aghub.NewAgentForTest()
+	registerA2A(t, srv, c, "Agent", []string{"work.do"}, signA2A(t, c, a2aCardNamed(c, 1, "Agent", []string{"work.do"})))
+	var mu sync.Mutex
+	var hooked []string
+	store.OnKELExtended(func(aid string) {
+		mu.Lock()
+		hooked = append(hooked, aid)
+		mu.Unlock()
+	})
+	ran := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), hooked...)
+	}
+	listed := func() bool {
+		t.Helper()
+		var n int
+		if err := store.DBForTest().QueryRow(`SELECT COUNT(*) FROM agent_a2a_card WHERE aid=? AND verified_at IS NOT NULL`,
+			c.AID()).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+	if !listed() {
+		t.Fatal("setup: the card is not listed")
+	}
+	if code, b := pushKEL(t, srv, c.AID(), kelURL(t, c)); code != http.StatusOK {
+		t.Fatalf("the history held, pushed: %d %s", code, b)
+	}
+	if got := ran(); len(got) != 0 || !listed() {
+		t.Fatalf("a push that changed nothing: hooks ran for %v, card listed %v", got, listed())
+	}
+	if err := identitytest.Rotate(c, tsAfter(c)); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := pushKEL(t, srv, c.AID(), kelURL(t, c)); code != http.StatusOK {
+		t.Fatalf("push the rotation: %d %s", code, b)
+	}
+	if got := ran(); len(got) != 1 || got[0] != c.AID() {
+		t.Errorf("after the pushed rotation the KEL hooks ran for %v, want once for the agent", got)
+	}
+	if listed() {
+		t.Error("the card the retired key signed is still listed after the pushed rotation")
 	}
 }
 
@@ -799,6 +879,45 @@ func TestNoticesOfAgentsWithAKeySetAreKeptFresh(t *testing.T) {
 	}
 }
 
+// RefreshNotices: an agent whose stored key history no longer replays gets
+// no notice and is reported, and the agents after it (the refresher goes in
+// AID order) are renewed all the same: one bad record does not leave every
+// other agent's notice to go stale.
+func TestNoticeRefreshGoesOnPastABadRecord(t *testing.T) {
+	srv, store := newWitnessHub(t)
+	t0 := time.UnixMilli(time.Now().UnixMilli())
+	now := t0
+	store.SetClockForTest(func() time.Time { return now })
+	bad, good := twoAgents(t)
+	if bad.AID() > good.AID() {
+		bad, good = good, bad
+	}
+	registerWithKeys(t, srv, bad, "Bad", nil)
+	registerWithKeys(t, srv, good, "Good", nil)
+	kel := slices.Clone(bad.KEL())
+	sig := slices.Clone(kel[len(kel)-1].Sig)
+	sig[0] ^= 1
+	kel[len(kel)-1].Sig = sig
+	raw, err := identity.MarshalKEL(kel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DBForTest().Exec(`UPDATE agent SET kel=? WHERE aid=?`, raw, bad.AID()); err != nil {
+		t.Fatal(err)
+	}
+	now = t0.Add(aghub.NoticeReissue + time.Second)
+	n, err := store.RefreshNotices(t.Context())
+	if err == nil {
+		t.Error("a stored key history that does not replay was not reported")
+	}
+	if n != 1 {
+		t.Errorf("renewed %d notices, want the good agent's 1", n)
+	}
+	if _, _, observed, _, _ := store.NoticeRowForTest(good.AID()); observed != now.UnixMilli() {
+		t.Errorf("the good agent's notice was observed at %d, want %d: the bad record held it up", observed, now.UnixMilli())
+	}
+}
+
 // KEL-5 (2026-10-04, SSR-H18): an agent that has published no key set is
 // not listed — not in /agents (with or without ?cap= and ?q=), not in
 // /a2a/v1/agents, not in a directory bucket — and every listed entry
@@ -885,6 +1004,66 @@ func TestAgentsWithoutKeysAreNotListed(t *testing.T) {
 	}
 	if code, b := getJSON(t, srv.URL+"/agents/"+bare.AID()); code != http.StatusOK {
 		t.Errorf("an agent without a key set by its AID: %d %s", code, b)
+	}
+}
+
+// KEL §2.7 (registry entries carry the notice a peer's card stream brought):
+// a card a peer taught is listed with the witness notice it came with only
+// while that notice states the tip of the key history it came with; one
+// about another key state is not handed on, in /a2a/v1/agents or /agents.
+func TestPeerNoticeListedOnlyForTheKELTip(t *testing.T) {
+	srv, store := newWitnessHub(t)
+	witness, err := identitytest.Hub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	noticeAt := func(c *identity.Controller, i int) []byte {
+		t.Helper()
+		ev := c.KEL()[i]
+		n, err := identity.SignNotice(witness, identity.NoticeBody{
+			AID: c.AID(), Seq: ev.Event.Seq, Head: ev.EventID, ObservedAt: uint64(time.Now().UnixMilli())})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	atTip, behind := twoAgents(t)
+	for _, x := range []struct {
+		c      *identity.Controller
+		notice []byte
+	}{
+		{atTip, noticeAt(atTip, len(atTip.KEL())-1)},
+		{behind, noticeAt(behind, 0)},
+	} {
+		e := keyedEntry(t, x.c, signA2A(t, x.c, a2aCardNamed(x.c, 1, "Peer", []string{"work.do"})))
+		e.Notice = x.notice
+		if err := store.AdmitFedA2ACard(homePeerAID, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	serverOf(t, srv).SetFederatedDirectory(store.FederatedAgents)
+	check := func(where, aid, notice string, want bool) {
+		t.Helper()
+		if (notice != "") != want {
+			t.Errorf("%s: the entry of %s carries notice %q, want one: %v", where, aid, notice, want)
+		}
+	}
+	reg := fedRegistry(t, store, aghub.RegistryQuery{})
+	check("/a2a/v1/agents", atTip.AID(), reg[atTip.AID()].KeyStateNotice, true)
+	check("/a2a/v1/agents", behind.AID(), reg[behind.AID()].KeyStateNotice, false)
+	seen := 0
+	for _, a := range getAgentsList(t, srv) {
+		switch a.AID {
+		case atTip.AID():
+			check("/agents", a.AID, a.KeyStateNotice, true)
+			seen++
+		case behind.AID():
+			check("/agents", a.AID, a.KeyStateNotice, false)
+			seen++
+		}
+	}
+	if seen != 2 {
+		t.Errorf("/agents lists %d of the two peer cards", seen)
 	}
 }
 
