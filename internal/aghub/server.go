@@ -68,6 +68,9 @@ type Server struct {
 	// history. Nil in a build without federation — which is also a build
 	// with no peers, so nothing that needs it can happen.
 	peerKELs func(aid string) ([]identity.SignedEvent, error)
+	// hubKELSet, when set, lists the peer hubs' key histories pinned here,
+	// for GET /hub/kels (hubkels.go). Nil in a build without federation.
+	hubKELSet func() ([]HubKEL, error)
 	// peerEndpoints, when set, answers where a peer hub can be reached.
 	peerEndpoints func(aid string) string
 	// publicURL is this hub's configured public base URL (publicurl.go);
@@ -258,6 +261,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents", s.hAgents)
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
+	mux.HandleFunc("GET /hub/kels", s.hHubKELs)
 	// A key history this hub knows, extended by anyone who holds the
 	// extension: how an agent tells a hub it no longer uses as its witness
 	// that it rotated or deactivated (KEL H-4). See kelpush.go.

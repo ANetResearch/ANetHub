@@ -106,10 +106,11 @@ func TestWire3JSONFields(t *testing.T) {
 		{"POST", "/register", true, "registration", reflect.TypeFor[RegisterResponse](), ""},
 		{"POST", "/register", true, "check_only", reflect.TypeFor[CheckOnlyResponse](), ""},
 		req("POST", "/agents/{aid}/keys", reflect.TypeFor[KeysPublishRequest](), ""),
+		resp("GET", "/agents/{aid}/keys", reflect.TypeFor[KeysView](), ""),
 		req("POST", "/agents/kel:push", reflect.TypeFor[KELPushRequest](), ""),
 		resp("POST", "/agents/kel:push", reflect.TypeFor[KELPushResponse](), ""),
 		resp("GET", "/hub/identity", reflect.TypeFor[hubid.IdentityResponse](), ""),
-		resp("GET", "/hub/kels", nil, "v030-todo(KEL-7)"),
+		resp("GET", "/hub/kels", reflect.TypeFor[HubKELsView](), ""),
 		resp("GET", "/agents/{aid}/kel", reflect.TypeFor[AgentKELView](), ""),
 		resp("GET", "/a2a/v1/agents", reflect.TypeFor[A2AAgentEntry](), ""), // per entry
 		resp("GET", "/agents", reflect.TypeFor[AgentView](), ""),            // per entry

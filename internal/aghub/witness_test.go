@@ -482,15 +482,20 @@ func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
 	}
 }
 
-// The witness's key history, from GET /hub/kels, verifies what it signed.
+// The witness's key history, from GET /hub/kels, verifies what it signed:
+// the witness is a peer hub whose key history the federation module pinned
+// (KEL H-16).
 func TestAWitnessKeyHistoryVerifiesItsAttestation(t *testing.T) {
-	t.Skip("v030-todo(KEL-7): GET /hub/kels serves the key histories of the peer hubs this hub pins (KEL H-16)")
 	srv, _ := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
 	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
+	serverOf(t, srv).SetHubKELSet(func() ([]aghub.HubKEL, error) {
+		kel, err := identity.MarshalKEL(witness.KEL())
+		return []aghub.HubKEL{{AID: witness.AID(), KEL: kel}}, err
+	})
 	code, body := getJSON(t, srv.URL+"/hub/kels")
 	if code != 200 {
 		t.Fatalf("GET /hub/kels: %d %s", code, body)

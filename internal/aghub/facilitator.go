@@ -980,7 +980,7 @@ func (s *Store) ClearPeerSettlement(peerAID string,
 		return withReceipt(refuse(payment.ReasonInvalidAmount,
 			"%s settled %d; the authorization it was forwarded pays %d", peerAID, rec.Amount, auth.Amount))
 	}
-	kel, err := peerKEL(peerAID)
+	kel, err := s.peerKELFor(peerKEL, peerAID, receiptSeq(rec))
 	if err != nil {
 		return SettlementPending(auth, network,
 			"settled at "+peerAID+" but not cleared here: "+err.Error(), &out)
@@ -997,8 +997,10 @@ func (s *Store) ClearPeerSettlement(peerAID string,
 }
 
 // SetHubKey gives the store the identity it signs settlements with, and
-// the row credit is issued from and redeemed back into.
-func (s *Store) SetHubKey(c *identity.Controller) {
+// the row credit is issued from and redeemed back into. It takes the hub
+// identity as a Signer (KEL H-36): the Controller itself, whose Sign takes
+// one key state at a time, or a snapshot.
+func (s *Store) SetHubKey(c identity.Signer) {
 	s.hubKey = c
 	s.hubAID = c.AID()
 }
@@ -1039,7 +1041,9 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 			"%s's receipt pays this hub (%s); a peer's settlement credits an agent here, never the hub's own row",
 			peerAID, rec.PayTo)
 	}
-	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
+	// At the time the peer settled (KEL H-34): a receipt the peer signed
+	// before it rotated still verifies under the key it had then.
+	if err := rec.Verify(peerKEL, peerAID, rec.SettleAt); err != nil {
 		return fmt.Errorf("settlement receipt from %s: %w", peerAID, err)
 	}
 	// One transaction, which holds the database's write lock from its

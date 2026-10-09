@@ -279,7 +279,8 @@ func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEven
 	if rec.PayTo != hubAID {
 		return fmt.Errorf("this statement discharges an obligation to %s, not to us", rec.PayTo)
 	}
-	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
+	// At the time the peer signed it (KEL H-34).
+	if err := rec.Verify(peerKEL, peerAID, rec.SettleAt); err != nil {
 		return fmt.Errorf("clearing statement from %s: %w", peerAID, err)
 	}
 	tx, err := s.db.Begin()
@@ -465,7 +466,7 @@ func (s *Server) hClear(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	kel, err := s.peerKEL(req.PeerAID)
+	kel, err := s.store.peerKELFor(s.peerKEL, req.PeerAID, receiptSeq(rec))
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return

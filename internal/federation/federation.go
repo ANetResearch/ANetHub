@@ -130,10 +130,18 @@ type Service struct {
 	// so that a peer not yet upgraded is logged once rather than every
 	// round. Touched only from the sync loop.
 	a2aStreamStatus map[string]int
-	// kelFetches is each peer's first fetch of its KEL (peerKEL), by
-	// peer AID, under kelFetchesMu.
+	// kelFetches is each peer's fetches of its KEL (peerKEL, the
+	// periodic and on-demand refreshes of peerkel.go), by peer AID, under
+	// kelFetchesMu.
 	kelFetchesMu sync.Mutex
 	kelFetches   map[string]*peerKELFetch
+	// forks are the peers whose /hub/identity served a key history that
+	// contradicts the pinned one (KEL H-15), with when it was first seen
+	// and what differed, under kelFetchesMu.
+	forks map[string]PeerKELFork
+	// bodies is what the /fed/v3 routes hold of request bodies at once
+	// (sealed-sender SSR-H16; authpeer.go).
+	bodies *bodyBudget
 }
 
 // peerKELFetch serializes the fetches of one peer's KEL and remembers how
@@ -143,6 +151,10 @@ type peerKELFetch struct {
 	ended   time.Time  // when the last fetch ended
 	err     error      // how it failed; nil when it pinned
 	refused time.Time  // zero, or when the peer last served a KEL that does not prove its AID
+	// asked is when a use last fetched the KEL again because the pinned one
+	// did not reach the key state it needed (RefreshPeerKEL): at most once
+	// per peerKELRetry.
+	asked time.Time
 }
 
 // testHookPeerKELAsked, when a test sets it, is called by each use of a
@@ -151,7 +163,9 @@ type peerKELFetch struct {
 var testHookPeerKELAsked func()
 
 // peerKELRetry is how long after the peer served a KEL that does not prove
-// its AID the next fetch waits.
+// its AID the next fetch waits, and how often at most a use fetches a
+// peer's KEL again because the pinned one does not reach the key state it
+// needs (KEL H-15, H-34: once a minute per hub).
 const peerKELRetry = time.Minute
 
 // errUnprovenPeerKEL is a fetched KEL that does not replay to the peer's
@@ -183,7 +197,8 @@ CREATE TABLE IF NOT EXISTS fed_cursor_v3 (peer_aid TEXT PRIMARY KEY, cursor INTE
 		return nil, err
 	}
 	s := &Service{cfg: cfg, id: id, db: db, now: time.Now,
-		a2aStreamStatus: map[string]int{}, kelFetches: map[string]*peerKELFetch{}}
+		a2aStreamStatus: map[string]int{}, kelFetches: map[string]*peerKELFetch{},
+		forks: map[string]PeerKELFork{}, bodies: newBodyBudget(fedBodyBudget)}
 	// Every request to a peer states the hub wire (core CORE-V1), and
 	// every answer of a peer is checked for it (peerwire.go).
 	s.wire = newPeerWire(wire3.Transport(nil), func() time.Time { return s.now() })
@@ -300,8 +315,10 @@ func errNotADeliveryPeer(aid string) error {
 }
 
 // peerKEL returns the pinned KEL for a peer, fetching it from the peer's
-// /hub/identity on first contact (pin-on-first-fetch; rotation re-fetch is a
-// registered follow-up).
+// /hub/identity on first contact (pin on first fetch). Afterwards the pin
+// only grows: the sync every peerKELSyncEvery and a use that needs a later
+// key state (RefreshPeerKEL) extend it, never replace it (KEL H-15,
+// pinPeerKEL in peerkel.go).
 //
 // A fetched KEL is pinned only when it replays to the configured peer AID
 // (provenPeerKEL). The "aid" the peer serves beside it is a claim; the
@@ -328,13 +345,7 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	if kel, err := s.pinnedPeerKEL(p.AID); err == nil || err != sql.ErrNoRows {
 		return kel, err
 	}
-	s.kelFetchesMu.Lock()
-	f := s.kelFetches[p.AID]
-	if f == nil {
-		f = &peerKELFetch{}
-		s.kelFetches[p.AID] = f
-	}
-	s.kelFetchesMu.Unlock()
+	f := s.peerKELFetchOf(p.AID)
 	asked := time.Now()
 	if testHookPeerKELAsked != nil {
 		testHookPeerKELAsked()
@@ -363,6 +374,18 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	return kel, err
 }
 
+// peerKELFetchOf is the fetch state of peer aid.
+func (s *Service) peerKELFetchOf(aid string) *peerKELFetch {
+	s.kelFetchesMu.Lock()
+	defer s.kelFetchesMu.Unlock()
+	f := s.kelFetches[aid]
+	if f == nil {
+		f = &peerKELFetch{}
+		s.kelFetches[aid] = f
+	}
+	return f
+}
+
 // pinnedPeerKEL is the KEL pinned for peer aid, or sql.ErrNoRows.
 func (s *Service) pinnedPeerKEL(aid string) ([]identity.SignedEvent, error) {
 	var blob []byte
@@ -372,8 +395,11 @@ func (s *Service) pinnedPeerKEL(aid string) ([]identity.SignedEvent, error) {
 	return identity.UnmarshalKEL(blob)
 }
 
-// fetchPeerKEL fetches p's KEL from its /hub/identity and pins it when it
-// replays to p.AID.
+// fetchPeerKEL fetches p's KEL from its /hub/identity and, when it replays
+// to p.AID as a hub's key history, pins it or extends the pin with it
+// (pinPeerKEL). It returns the KEL pinned afterwards, which is the one held
+// before when what the peer served does not extend it. The caller holds
+// the peer's fetch lock.
 func (s *Service) fetchPeerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	resp, err := s.http.Get(p.Endpoint + "/hub/identity")
 	if err != nil {
@@ -398,11 +424,7 @@ func (s *Service) fetchPeerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("peer %s served a key history that %v; not pinned: %w", p.AID, err, errUnprovenPeerKEL)
 	}
-	if _, err := s.db.Exec(`INSERT OR REPLACE INTO fed_peer_kel (aid, kel, fetched_at) VALUES (?,?,?)`,
-		p.AID, blob, time.Now().UnixMilli()); err != nil {
-		return nil, err
-	}
-	return kel, nil
+	return s.pinPeerKEL(p.AID, kel, blob)
 }
 
 // peerIdentityLimit bounds a peer's /hub/identity answer, which is an AID
@@ -415,7 +437,10 @@ const peerIdentityLimit = 1 << 20
 // It is decoded under the caps every sender applies to a KEL
 // (seal.ParseKEL), and the AID is checked on the inception first: it is
 // the icp's, and costs one verification, where replaying all of a KEL that
-// is somebody else's costs one per event.
+// is somebody else's costs one per event. A key history whose icp is not a
+// hub's (toad 0) is refused whatever it replays to (KEL H-15): a hub's key
+// history names no witness, and an agent's would make every notice check
+// against it meaningless.
 func provenPeerKEL(blob []byte, aid string) ([]identity.SignedEvent, error) {
 	kel, err := seal.ParseKEL(blob)
 	if err != nil {
@@ -433,6 +458,9 @@ func provenPeerKEL(blob []byte, aid string) ([]identity.SignedEvent, error) {
 	}
 	if got := states[len(states)-1].AID; got != aid {
 		return nil, fmt.Errorf("replays to %s, not to %s", got, aid)
+	}
+	if t := states[len(states)-1].Toad; t != identity.ToadHub {
+		return nil, fmt.Errorf("is not a hub's key history (toad %d)", t)
 	}
 	return kel, nil
 }
@@ -491,7 +519,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /fed/v3/cards", s.hA2ACards)
 	mux.HandleFunc("GET /fed/v3/reviews", s.hFedReviewStream)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { wire3.Refuse(w, wire3.ReasonNotFound) })
-	return mux
+	return s.holdBodies(mux)
 }
 
 // ---- sub-plane B: discovery federation (K208 §5) ----
@@ -741,8 +769,10 @@ func (s *Service) SettleAtPeer(ctx context.Context, network string, body []byte)
 	return out, peerAID, err
 }
 
-// PeerKEL exposes a peer's verified key history, so the kernel can check
-// a settlement receipt the peer signed.
+// PeerKEL exposes a peer's verified key history, as pinned, so the kernel
+// can check what the peer signed: a settlement receipt, a witness notice
+// (KEL H-34). When the object names a key state past it, the kernel asks
+// RefreshPeerKEL once.
 func (s *Service) PeerKEL(peerAID string) ([]identity.SignedEvent, error) {
 	p := s.peer(peerAID)
 	if p == nil {

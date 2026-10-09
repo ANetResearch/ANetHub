@@ -146,8 +146,14 @@ type ReviewDetail struct {
 type Store struct {
 	// hubKey signs settlement receipts. Nil until the application wires
 	// it, and a store without one settles without signing rather than
-	// refusing — an unsigned settlement is weaker, not broken.
-	hubKey *identity.Controller
+	// refusing — an unsigned settlement is weaker, not broken. It is the
+	// hub identity as a Signer (KEL H-36): what signs here never holds the
+	// key, and each signature names the key state that made it.
+	hubKey identity.Signer
+	// refreshPeerKEL, when set, fetches a peer hub's key history again
+	// for an object that peer signed under a key state past the pinned
+	// one (KEL H-34; hubobjects.go). Nil in a build without federation.
+	refreshPeerKEL func(aid string) ([]identity.SignedEvent, error)
 	// peerSettle forwards a payment on another hub'''s ledger to that hub.
 	peerSettle PeerSettler
 	clearable  func() []string
