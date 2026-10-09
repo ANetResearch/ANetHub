@@ -196,6 +196,69 @@ func TestHubDataOfAnotherReleaseIsRefusedUntouched(t *testing.T) {
 	}
 }
 
+// What another release wrote can still be only in hub.db's write-ahead log:
+// a 0.2 hub that stopped before SQLite moved its log into the file, or a
+// newer anet-hub that raised user_version and stopped the same way. CheckData
+// reads the file alone and sees a new or a 0.3.0 database; Open reads through
+// the log and must refuse it there, before it creates a single table or
+// writes user_version 3 over the other release's.
+func TestADatabaseKnownOnlyThroughItsLogIsRefused(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		created bool     // a 0.3.0 hub.db is in the file before the log takes over
+		inLog   []string // what only the log holds
+		version int      // the user_version the log holds
+		want    error
+	}{
+		{"0.2 tables", false, []string{v02AgentTable}, 0, aghub.ErrHubDataV02},
+		{"a newer version", true, []string{`PRAGMA user_version = 4`}, 4, aghub.ErrHubDataTooNew},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if c.created {
+				s, err := aghub.Open(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s.Close()
+			}
+			// The other release's process, still holding the database: one
+			// connection, and no checkpoint moves the log into the file.
+			w, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			w.SetMaxOpenConns(1)
+			defer w.Close()
+			for _, q := range append([]string{`PRAGMA journal_mode=WAL`, `PRAGMA wal_autocheckpoint=0`}, c.inLog...) {
+				if _, err := w.Exec(q); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := aghub.CheckData(dir); err != nil {
+				t.Fatalf("setup: the file alone already says %v", err)
+			}
+			s, err := aghub.Open(dir)
+			if !errors.Is(err, c.want) {
+				if s != nil {
+					s.Close()
+				}
+				t.Fatalf("Open: %v, want %v", err, c.want)
+			}
+			// Nothing of 0.3.0 was written into it.
+			if v := userVersion(t, w); v != c.version {
+				t.Errorf("user_version is %d after the refusal, want %d", v, c.version)
+			}
+			if !c.created {
+				var n int
+				if err := w.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = 'supply_totals'`).Scan(&n); err != nil || n != 0 {
+					t.Errorf("the refused database gained 0.3.0 tables (%d, %v)", n, err)
+				}
+			}
+		})
+	}
+}
+
 // The pool keeps idle connections in step with the hub's concurrency: a
 // burst of concurrent reads leaves its connections idle for the next burst
 // instead of closing all but two of them, each of which would parse the
