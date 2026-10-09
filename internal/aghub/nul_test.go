@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/wire"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // TestPreimageRejectsNUL (core CORE-E9, ANetHub). The hub computes two inputs that separate
@@ -21,7 +23,13 @@ func TestPreimageRejectsNUL(t *testing.T) {
 		todo string
 	}{
 		"L31": {nil, "v030-todo(PAY-6)"}, // review tag: reviewer_aid, subject_aid
-		"L33": {nil, "v030-todo(PAY-4)"}, // settlement guard: payer, pay_bind
+		"L33": {func(f string) error { // settlement guard: payer, pay_bind
+			if _, err := aghub.SettleGuardKeyForTest(f, "bind"); err != nil {
+				return err
+			}
+			_, err := aghub.SettleGuardKeyForTest("bafypayer", f)
+			return err
+		}, ""},
 	}
 	r, err := wire.Load()
 	if err != nil {

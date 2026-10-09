@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,8 +91,16 @@ func (r *supplyRig) pay(payer *identity.Controller, payTo string, amt uint64) bo
 		_, err := r.store.Redeem(r.hubAID, p, "ref-"+r.next())
 		return err == nil
 	}
+	if strings.HasPrefix(payTo, elsewhere) {
+		// An agent of the peer: only the peer's forwarded settlement pays
+		// it (/fed/v3/settle).
+		return r.store.SettleForPeer(r.hubAID, r.peer.AID(), p, &p.Accepted).Success
+	}
 	return r.store.SettleWithRequirements(r.hubAID, p, &p.Accepted).Success
 }
+
+// elsewhere starts the AIDs of the peer's agents.
+const elsewhere = "did:anet:elsewhere-"
 
 // clear credits payTo with the peer's settlement of amt.
 func (r *supplyRig) clear(payTo string, amt uint64) bool {
@@ -174,7 +183,7 @@ func TestPropEpochsFollowTheRuleAndThePublicSupplyHoldsStill(t *testing.T) {
 					}
 				case op == 6: // a payment to an agent on a peer
 					amt := uint64(1 + rng.IntN(20))
-					if r.pay(r.agents[rng.IntN(len(r.agents))], "did:anet:elsewhere-"+r.next(), amt) {
+					if r.pay(r.agents[rng.IntN(len(r.agents))], elsewhere+r.next(), amt) {
 						event(-int64(amt))
 					}
 				case op == 7: // a peer's settlement cleared here

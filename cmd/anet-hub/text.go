@@ -54,6 +54,7 @@ const (
 
 	nextCommand     = "command"
 	nextChangeInput = "change_input"
+	nextContact     = "contact"
 )
 
 // hubText is every sentence of anet-hub.
@@ -123,13 +124,23 @@ var hubText = []textRow{
 		Zh: "{aid} 没有在本 hub 注册，没有发放；请核对 AID 后重试。",
 		En: "{aid} is not registered here, so nothing was granted; check the AID and try again."},
 
-	// anet-hub clear (the subcommand comes with the ledger window work)
+	// anet-hub clear: the peer accepted the discharge; it would be more than
+	// is due; the peer refused it (its reason as {value}); or no answer came
+	// back, so whether the peer recorded it is unknown. In the last two this
+	// hub's record is unchanged, and a second clear would be a second
+	// discharge, so the next step is the peer's operator.
 	{Key: "clear.ok", Class: classI,
 		Zh: "已向 {peer} 结清 {n} credits；本 hub 仍欠它 {m}。",
 		En: "Paid {n} credits to {peer}; this hub still owes it {m}."},
 	{Key: "clear.over_due", Class: classC, Exit: 1, NextKind: nextCommand, Next: "anet-hub due",
 		Zh: "本 hub 只欠 {peer} {m} credits，不能结清 {n}；请用 anet-hub due 查看。",
 		En: "This hub owes {peer} only {m} credits, so {n} cannot be cleared; see anet-hub due."},
+	{Key: "clear.refused", Class: classC, Exit: 1, NextKind: nextContact,
+		Zh: "{peer} 没有接受这次结清（{value}），本 hub 的记录没有改；请联系 {peer} 的运营者核对两边的记录。",
+		En: "{peer} did not accept the discharge ({value}), so this hub's record is unchanged; contact the operator of {peer} to compare the two hubs' records."},
+	{Key: "clear.unconfirmed", Class: classC, Exit: 1, NextKind: nextContact,
+		Zh: "没有收到 {peer} 的确认，不知道它是否记下了这次结清，本 hub 的记录没有改；请先联系 {peer} 的运营者核对，再决定是否重新结清。",
+		En: "No answer came from {peer}, so whether it recorded the discharge is unknown and this hub's record is unchanged; contact the operator of {peer} before clearing again."},
 
 	// A flag that was an action is a subcommand now (core G12, ux §1.4 L).
 	{Key: "hub_flag_removed", Class: classC, Exit: 2, NextKind: nextCommand, Next: "anet-hub {subcommand}",

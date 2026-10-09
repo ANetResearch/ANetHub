@@ -72,7 +72,7 @@ func TestAChargedAuthorizationGetsItsReceiptAfterItsWindow(t *testing.T) {
 	// Settled while it was valid. settleAuth is what SettleWithRequirements
 	// calls after the window check, so calling it directly stands in for
 	// the settlement made when the authorization was current.
-	first := s.settleAuth(hub.AID(), late, id)
+	first := s.settleAuth(hub.AID(), late, id, "")
 	if !first.Success {
 		t.Fatalf("settling: %+v", first)
 	}
@@ -116,14 +116,14 @@ func TestARepeatOfALegacyRowIsStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, _ := a.ID()
-	if out := s.settleAuth(hub.AID(), a, id); !out.Success {
+	if out := s.settleAuth(hub.AID(), a, id, ""); !out.Success {
 		t.Fatalf("settle: %+v", out)
 	}
 	if _, err := s.db.Exec(`UPDATE credit_settled SET receipt = NULL WHERE auth_id = ?`, id); err != nil {
 		t.Fatal(err)
 	}
-	r1, ok1, err1 := s.settledBefore(hub.AID(), id)
-	r2, ok2, err2 := s.settledBefore(hub.AID(), id)
+	r1, _, ok1, err1 := s.settledBefore(hub.AID(), id)
+	r2, _, ok2, err2 := s.settledBefore(hub.AID(), id)
 	if !ok1 || !ok2 || err1 != nil || err2 != nil {
 		t.Fatalf("lookup: %v %v %v %v", ok1, ok2, err1, err2)
 	}
@@ -144,30 +144,47 @@ func TestARepeatOfALegacyRowIsStable(t *testing.T) {
 	}
 }
 
-// The binding index is part of the schema a hub is created with: one bound
-// settlement per (payer, interaction_id), any number without an
-// interaction id.
-func TestTheBindingIndexHoldsOneSettlementPerBinding(t *testing.T) {
+// The binding guard is part of the schema a hub is created with: one live
+// guard per key, and a guard whose time is over is taken over by the next
+// settlement of that binding (settleAuth's upsert), not refused.
+func TestTheBindingGuardHoldsOneSettlementPerBinding(t *testing.T) {
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	ins := func(id, ix string) error {
-		_, err := s.db.Exec(`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at, bound)
-			VALUES(?,'P','Q',5,?,'x',1)`, id, ix)
-		return err
-	}
-	for _, r := range []struct{ id, ix string }{{"a1", "ix-1"}, {"a3", ""}, {"a4", ""}} {
-		if err := ins(r.id, r.ix); err != nil {
-			t.Fatalf("%s: %v", r.id, err)
+	take := func(h []byte, until, now int64) int64 {
+		t.Helper()
+		res, err := s.db.Exec(`INSERT INTO settle_guard(h, until) VALUES(?,?)
+			ON CONFLICT(h) DO UPDATE SET until = excluded.until WHERE settle_guard.until <= ?`, h, until, now)
+		if err != nil {
+			t.Fatal(err)
 		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
 	}
-	if err := ins("a2", "ix-1"); err == nil {
-		t.Error("a second bound settlement for one binding was accepted")
+	h1, h2 := make([]byte, 32), make([]byte, 32)
+	h2[0] = 1
+	if n := take(h1, 2000, 1000); n != 1 {
+		t.Fatalf("a new guard: %d rows", n)
 	}
-	if holder, err := s.bindingHolder("P", "ix-1"); err != nil || holder != "a1" {
-		t.Errorf("holder = %q (%v), want a1", holder, err)
+	if n := take(h1, 3000, 1500); n != 0 {
+		t.Error("a second settlement took a live guard")
+	}
+	if n := take(h2, 3000, 1500); n != 1 {
+		t.Error("another binding's guard was refused")
+	}
+	if n := take(h1, 5000, 2000); n != 1 {
+		t.Error("a guard whose time is over was not taken over")
+	}
+	if held, _, err := s.guardHeld(h1, 4999); err != nil || !held {
+		t.Errorf("the taken-over guard is not held: %v %v", held, err)
+	}
+	if held, _, err := s.guardHeld(h1, 5000); err != nil || held {
+		t.Errorf("a guard is held at its until: %v %v", held, err)
 	}
 }
 
@@ -242,7 +259,7 @@ func TestARedemptionRepeatAfterItsWindowReturnsTheRecord(t *testing.T) {
 	}
 	id, _ := late.ID()
 	// Redeemed while it was valid: the settlement and its note.
-	if out := s.settleAuth(hub.AID(), late, id); !out.Success {
+	if out := s.settleAuth(hub.AID(), late, id, ""); !out.Success {
 		t.Fatalf("settle: %+v", out)
 	}
 	if _, err := s.db.Exec(`INSERT INTO credit_redemption(auth_id, aid, amount, reference, at) VALUES(?,?,?,?,?)`,
@@ -274,12 +291,12 @@ func TestASettlementThatLosesTheInsertIsAnsweredAsARepeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	id, _ := a.ID()
-	first := s.settleAuth(hub.AID(), a, id)
+	first := s.settleAuth(hub.AID(), a, id, "")
 	if !first.Success {
 		t.Fatalf("first: %+v", first)
 	}
 	bal, _ := s.Balance(payer.AID())
-	second := s.settleAuth(hub.AID(), a, id)
+	second := s.settleAuth(hub.AID(), a, id, "")
 	if !second.Success || second.Extensions[payment.ExtReplayed] != true ||
 		second.Extensions[payment.ExtReceipt] != first.Extensions[payment.ExtReceipt] {
 		t.Errorf("second settleAuth of one authorization = %+v, want the first success replayed", second)

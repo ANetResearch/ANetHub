@@ -468,10 +468,7 @@ var printers = map[string]bool{
 // their own sentences, each with the work item that moves them into
 // text.go. A function listed here that no longer prints one fails the test.
 var sentencesOwedElsewhere = map[string]string{
-	"clearOwed":            "v030-todo(PAY-4)",
-	"repairLedger":         "v030-todo(PAY-4)",
-	"refuseEmptyModeFlags": "v030-todo(PAY-4)",
-	"versionLine":          "", // the -version line is a version, not a sentence
+	"versionLine": "", // the -version line is a version, not a sentence
 }
 
 // G-PAY-HUBTEXT-1: text.go is the only file of cmd/anet-hub with product

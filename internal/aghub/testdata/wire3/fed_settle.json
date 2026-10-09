@@ -1,0 +1,120 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "Cross-hub settlement (hub-payment-privacy §2.4, PAY-L4, PAY-U2; core §2.12.2, G3). POST /fed/v3/settle, signed by a peer hub for fed_settle, takes the x402 FacilitatorRequest its merchant asked it to settle on this hub's ledger, for a payee that banks on that peer, and answers the x402 SettlementResponse, always 200 (a refusal is success false with its errorReason; a payee of this hub is payee_mismatch); a repeat is answered with the original receipt. /x402/settle refuses the same payment, unsigned, with payee_not_local. POST /fed/v3/clear, signed for fed_clear, takes {peer_aid, receipt}, the peer's discharge statement in base64url, and answers {peer, owed}; a statement this hub does not apply is 400 bad_request. A hub that is not a peer is 403 not_peer; no signature, or one for another action, 401 unauthorized. The setup is wire3FedSettleSetup: the peer owes this hub 40.",
+  "setup": "fed_settle",
+  "cases": [
+    {
+      "name": "a peer's payee, unsigned at /x402/settle",
+      "cite": "PAY-L4; red team N9",
+      "request": {"method": "POST", "path": "/x402/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${settle_away}"},
+      "response": {"status": 200, "body_has": {"success": false, "errorReason": "payee_not_local"}}
+    },
+    {
+      "name": "the same payment, forwarded by the payee's hub",
+      "cite": "PAY-L4",
+      "request": {"method": "POST", "path": "/fed/v3/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${settle_away}", "sign": {"action": "fed_settle", "as": "peer"}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"},
+        "body_has": {"success": true, "payer": "${payer}", "network": "${own}", "amount": "30"}}
+    },
+    {
+      "name": "forwarded again",
+      "cite": "PAY-L3",
+      "request": {"method": "POST", "path": "/fed/v3/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${settle_away}", "sign": {"action": "fed_settle", "as": "peer"}},
+      "response": {"status": 200, "body_has": {"success": true, "extensions": {"anet.replayed": true}}}
+    },
+    {
+      "name": "a payee who banks here",
+      "cite": "core §2.12.2 (payee_mismatch, REG-5)",
+      "request": {"method": "POST", "path": "/fed/v3/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${settle_here}", "sign": {"action": "fed_settle", "as": "peer"}},
+      "response": {"status": 200, "body_has": {"success": false, "errorReason": "payee_mismatch"}}
+    },
+    {
+      "name": "not a facilitator request",
+      "cite": "G3",
+      "request": {"method": "POST", "path": "/fed/v3/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "{", "sign": {"action": "fed_settle", "as": "peer"}},
+      "response": {"status": 200, "body_has": {"success": false, "errorReason": "malformed_payment"}}
+    },
+    {
+      "name": "settle from a hub that is not a peer",
+      "cite": "G3",
+      "request": {"method": "POST", "path": "/fed/v3/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${settle_away}", "sign": {"action": "fed_settle", "as": "stranger"}},
+      "response": {"status": 403, "body_has": {"reason": "not_peer"}}
+    },
+    {
+      "name": "settle not signed",
+      "cite": "SSR-H16",
+      "request": {"method": "POST", "path": "/fed/v3/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${settle_away}"},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "settle signed for fed_clear",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/fed/v3/settle", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${settle_away}", "sign": {"action": "fed_clear", "as": "peer"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "a discharge with padding after its base64url",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/fed/v3/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${clear_padded}", "sign": {"action": "fed_clear", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a discharge naming another hub",
+      "cite": "PAY-U2",
+      "request": {"method": "POST", "path": "/fed/v3/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${clear_other}", "sign": {"action": "fed_clear", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a discharge of more than is owed",
+      "cite": "PAY-U2",
+      "request": {"method": "POST", "path": "/fed/v3/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${clear_over}", "sign": {"action": "fed_clear", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a discharge with a member this route does not take",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/fed/v3/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"peer_aid": "${peer}", "receipt": "AA", "payee": "x"}, "sign": {"action": "fed_clear", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a discharge from a hub that is not a peer",
+      "cite": "G3",
+      "request": {"method": "POST", "path": "/fed/v3/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${clear_ok}", "sign": {"action": "fed_clear", "as": "stranger"}},
+      "response": {"status": 403, "body_has": {"reason": "not_peer"}}
+    },
+    {
+      "name": "the peer's discharge",
+      "cite": "PAY-U2",
+      "request": {"method": "POST", "path": "/fed/v3/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${clear_ok}", "sign": {"action": "fed_clear", "as": "peer"}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body": {"peer": "${peer}", "owed": 35}}
+    },
+    {
+      "name": "the same discharge again",
+      "cite": "PAY-U2",
+      "request": {"method": "POST", "path": "/fed/v3/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${clear_ok}", "sign": {"action": "fed_clear", "as": "peer"}},
+      "response": {"status": 200, "body": {"peer": "${peer}", "owed": 35}}
+    },
+    {
+      "name": "the old route",
+      "cite": "core §2.12.2 removed",
+      "request": {"method": "POST", "path": "/federation/clear", "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "text": "${clear_ok}"},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    }
+  ]
+}

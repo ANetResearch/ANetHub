@@ -58,7 +58,7 @@ FROM hub h LEFT JOIN credit_balance b ON b.aid = h.aid;
 
 -- ---------------------------------------------------------------------
 SELECT '== 1. credit_settled: settlements with an amount outside 1..9223372036854775807 ==' AS section;
-SELECT auth_id, payer, pay_to, amount, typeof(amount) AS stored_as, interaction_id, at
+SELECT auth_id, payer, pay_to, amount, typeof(amount) AS stored_as, at
 FROM credit_settled
 WHERE typeof(amount) <> 'integer' OR amount <= 0 OR amount > 9223372036854775807
 ORDER BY at;
@@ -93,12 +93,14 @@ ORDER BY at;
 
 -- ---------------------------------------------------------------------
 SELECT '== 5. hub_owed / hub_due: inter-hub positions that are negative or not integers ==' AS section;
--- Zero is legitimate (a debt fully discharged); below zero is not.
-SELECT 'hub_owed' AS tbl, peer_aid AS counterparty, amount, typeof(amount) AS stored_as
+-- Zero is legitimate (a debt fully discharged); below zero is not. The
+-- counterparty is the table's key column, whatever the release named it
+-- (hub_due is keyed by payee before 0.3.0 and by peer hub since).
+SELECT 'hub_owed' AS tbl, *, typeof(amount) AS stored_as
 FROM hub_owed
 WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 9223372036854775807
 UNION ALL
-SELECT 'hub_due', payee_aid, amount, typeof(amount)
+SELECT 'hub_due', *, typeof(amount)
 FROM hub_due
 WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 9223372036854775807;
 
@@ -187,7 +189,7 @@ SELECT '== 11. self-payments (informational): settlements whose payer is also th
 -- authorization, and "pay 1 credit to myself" was the cheapest one to sign. Vouchers are not stored
 -- on the hub, so this is the only trace such a purchase can leave here,
 -- and a self-payment is not proof of one.
-SELECT auth_id, payer, amount, interaction_id, at
+SELECT auth_id, payer, amount, at
 FROM credit_settled
 WHERE payer = pay_to
 ORDER BY at;

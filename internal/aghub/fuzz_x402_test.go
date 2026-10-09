@@ -211,9 +211,10 @@ func (w *x402World) movedAsSettled(t *testing.T, x x402Terms, before, after snap
 //   - both answer 200 (400 only for a body that does not decode);
 //   - verify says valid exactly when settle then succeeds;
 //   - a settlement succeeds only for a payment on this hub's ledger, to
-//     the required payee, of at least the required amount, within the
-//     payer's balance and the ledger's range, and moves exactly that
-//     amount; a refusal moves nothing;
+//     the required payee, who is an account of this hub (payee_not_local
+//     otherwise, hub-payment-privacy PAY-L4), of at least the required
+//     amount, within the payer's balance and the ledger's range, and moves
+//     exactly that amount; a refusal moves nothing;
 //   - settling the same authorization again answers the original
 //     settlement, flagged replayed, and moves nothing;
 //   - the ledger invariants hold.
@@ -295,6 +296,8 @@ func FuzzHubX402Facilitator(f *testing.F) {
 				t.Fatalf("settled a payment on %s (stated %s)", x.network, x.accNet)
 			case x.payTo != x.reqPayTo || x.accPayTo != x.payTo:
 				t.Fatalf("settled a payment to %s; required %s, stated %s", x.payTo, x.reqPayTo, x.accPayTo)
+			case x.payTo != w.payee.AID() && x.payTo != w.payer.AID():
+				t.Fatalf("settled a payment to %s, not an account of this hub", x.payTo)
 			case err != nil || x.amount < want || x.amount == 0 || x.amount > math.MaxInt64:
 				t.Fatalf("settled %d against a requirement of %q", x.amount, x.reqAmount)
 			case x.accepted != payment.Amount(x.amount):
@@ -565,9 +568,14 @@ func FuzzHubClearFromPeer(f *testing.F) {
 			t.Fatal(err)
 		}
 		owedBefore, _ = h.store.Owed(peer.AID())
-		code, b := h.post("/federation/clear", fzJSON(t, map[string]string{
-			"peer_aid": peerAID, "receipt": base64.StdEncoding.EncodeToString(raw)}))
-		if !allowed(code, 200, 400, 403) {
+		// POST /fed/v3/clear as the kernel answers it, the request signed by
+		// the peer (federation's authPeer has checked that); the body names
+		// peerAID.
+		rr := httptest.NewRecorder()
+		h.srv.ServeFedClear(rr, peer.AID(), fzJSON(t, map[string]string{
+			"peer_aid": peerAID, "receipt": base64.RawURLEncoding.EncodeToString(raw)}))
+		code, b := rr.Code, rr.Body.Bytes()
+		if !allowed(code, 200, 400) {
 			t.Fatalf("clear: unexpected %d %s", code, b)
 		}
 		owedAfter, _ = h.store.Owed(peer.AID())

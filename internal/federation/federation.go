@@ -114,7 +114,7 @@ type Service struct {
 	db      *sql.DB
 	witness Witness
 	// http carries the requests to peers that are not signed (a peer's
-	// /hub/identity, its issuance head, a settlement), each bounded by its
+	// /hub/identity, its issuance head), each bounded by its
 	// Timeout; the signed ones go through signer, bounded by their
 	// contexts. Both check the wire every answer states (wire).
 	http *http.Client
@@ -134,6 +134,9 @@ type Service struct {
 	// peer AID, under kelFetchesMu.
 	kelFetchesMu sync.Mutex
 	kelFetches   map[string]*peerKELFetch
+
+	// clearing answers the settlement routes (settle.go).
+	clearing Clearing
 }
 
 // peerKELFetch serializes the fetches of one peer's KEL and remembers how
@@ -480,6 +483,8 @@ func dropUnprovenPeerKELs(db *sql.DB) error {
 //	POST /fed/v3/directory:bucket   a bucket of this hub's directory (bucket.go)
 //	GET  /fed/v3/cards              the A2A card stream (a2acards.go)
 //	GET  /fed/v3/reviews            the review stream (below)
+//	POST /fed/v3/settle             a payment on this hub's ledger for a peer's payee (settle.go)
+//	POST /fed/v3/clear              a peer's discharge of what it owed (settle.go)
 //
 // The v0.2 routes (/fed/v1/forward, /fed/v1/reviews, /fed/v2/keys/{aid},
 // /fed/v2/cards) are gone and answer 404 with the rest of what no route
@@ -490,6 +495,8 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("POST /fed/v3/directory:bucket", s.hBucket)
 	mux.HandleFunc("GET /fed/v3/cards", s.hA2ACards)
 	mux.HandleFunc("GET /fed/v3/reviews", s.hFedReviewStream)
+	mux.HandleFunc("POST /fed/v3/settle", s.hSettle)
+	mux.HandleFunc("POST /fed/v3/clear", s.hClear)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { wire3.Refuse(w, wire3.ReasonNotFound) })
 	return mux
 }
@@ -700,46 +707,7 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 	return admitted + ra, refused + rr
 }
 
-// ---- cross-hub settlement (the clearing half of discovery federation) ----
-
-// SettleAtPeer asks the hub that owns a ledger to settle a payment on it.
-//
-// The provider's hub cannot settle a balance it does not keep, and
-// refusing would make a paid capability unusable across a federation. So
-// it forwards, and the answer comes back with the settling hub's signed
-// receipt — which is what lets the asking hub credit its own payee on
-// another hub's word and still be able to show what that word was.
-//
-// Only allowlisted peers, and only the peer whose AID the network names.
-// A settlement request routed by the caller would be a request to credit
-// whoever the caller chose.
-func (s *Service) SettleAtPeer(ctx context.Context, network string, body []byte) ([]byte, string, error) {
-	if !s.DiscoveryEnabled() && !s.Enabled() {
-		return nil, "", fmt.Errorf("federation disabled")
-	}
-	const prefix = "hub:"
-	if !strings.HasPrefix(network, prefix) {
-		return nil, "", fmt.Errorf("not a hub ledger: %q", network)
-	}
-	peerAID := strings.TrimPrefix(network, prefix)
-	p := s.peer(peerAID)
-	if p == nil {
-		return nil, "", fmt.Errorf("hub %s is not a peer of this one", peerAID)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimSuffix(p.Endpoint, "/")+"/x402/settle", bytes.NewReader(body))
-	if err != nil {
-		return nil, "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return nil, "", err
-	}
-	defer resp.Body.Close()
-	out, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return out, peerAID, err
-}
+// ---- cross-hub settlement: settle.go ----
 
 // PeerKEL exposes a peer's verified key history, so the kernel can check
 // a settlement receipt the peer signed.

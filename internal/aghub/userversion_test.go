@@ -88,7 +88,7 @@ func TestANewHubDBIsVersion3WithItsWholeSchema(t *testing.T) {
 		t.Errorf("a new hub.db has user_version %d, want 3", v)
 	}
 	for _, table := range []string{"agent", "agent_cap", "credit_balance", "credit_entry", "credit_settled",
-		"credit_cleared", "credit_redemption", "hub_due", "hub_owed", "hub_cleared", "hub_meta", "departed_kel",
+		"settle_guard", "credit_cleared", "credit_redemption", "hub_due", "hub_owed", "hub_cleared", "hub_meta", "departed_kel",
 		"agent_keys", "agent_a2a_card", "agent_skill", "agent_tag", "a2a_card_withdrawal", "fed_a2a_card",
 		"a2a_fed_seq", "admitted", "admission_window", "dereg_event", "relay_message", "relay_redelivery",
 		"cap_revocation", "quota_override", "review", "review_blob", "fed_review", "head_attestation",

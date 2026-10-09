@@ -9,7 +9,7 @@ package main
 //	outstanding           what the hub owes its users now: issued − redeemed
 //	issued, redeemed      the running totals
 //	events_since_publish  supply events since the latest epoch
-//	due <payee> <n>       one line per obligation to a peer's agent
+//	due <peer> <n>        one line per peer hub this one owes (anet-hub due)
 //	owed <peer> <n>       one line per peer hub that owes this one
 
 import (

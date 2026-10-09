@@ -225,20 +225,27 @@ func TestAnUnholdableAmountDoesNotVerify(t *testing.T) {
 	})
 }
 
-// The attack itself: the attacker signs, the victim is the payee.
+// The attack itself: the attacker signs, the victim is the payee. A payee
+// that banks elsewhere takes the hub_due branch, which only a peer's
+// forwarded settlement reaches (/fed/v3/settle, SettleForPeer).
 func TestAnUnholdableAmountCannotBeSettled(t *testing.T) {
 	for _, payee := range []string{"local", "foreign"} {
 		t.Run(payee, func(t *testing.T) {
 			eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
 				payTo := w.victim.AID()
 				if payee == "foreign" {
-					// A payee that banks elsewhere takes the hub_due branch.
 					payTo = "did:anet:banks-elsewhere"
 				}
 				own := payment.CreditNetwork(w.hubAID)
 				before := moneyState(t, w.dir)
 				auth := signedAuth(t, w.attacker, payTo, amt, w.hubAID, "ov-settle")
-				_, sr := settleCall(t, w.srv, creditPayload(t, auth, payTo, own), requirementsFor(payTo, 1, own))
+				p, req := creditPayload(t, auth, payTo, own), requirementsFor(payTo, 1, own)
+				var sr payment.SettlementResponse
+				if payee == "foreign" {
+					sr = w.store.SettleForPeer(w.hubAID, "did:anet:peer-hub", p, req)
+				} else {
+					_, sr = settleCall(t, w.srv, p, req)
+				}
 				if sr.Success {
 					t.Errorf("amount %d settled", amt)
 				}
@@ -298,8 +305,8 @@ func TestAnUnholdableAmountCannotBeRedeemed(t *testing.T) {
 			t.Errorf("error = %q, want %s", out.Error, payment.ReasonInvalidAmount)
 		}
 		w.untouched(t, before)
-		if n, sum, err := w.store.RedemptionTotals(w.attacker.AID()); err != nil || n != 0 || sum != 0 {
-			t.Errorf("redemptions recorded: n=%d sum=%d err=%v", n, sum, err)
+		if win, err := w.store.Redemptions(w.attacker.AID(), 10); err != nil || win.Total != 0 || win.Sum != 0 {
+			t.Errorf("redemptions recorded: n=%d sum=%d err=%v", win.Total, win.Sum, err)
 		}
 	})
 }
@@ -488,24 +495,26 @@ func TestAnOperatorCannotDischargeAnUnholdableAmount(t *testing.T) {
 			t.Errorf("signed a discharge statement for %d", amt)
 		}
 	}
-	// A real obligation, so there is a due row to aim at.
+	// A real obligation, so there is a due row to aim at: the peer
+	// forwarded a payment of 50 for its own agent.
 	const payee = "did:anet:banks-elsewhere"
 	own := payment.CreditNetwork(w.hubAID)
 	auth := signedAuth(t, w.attacker, payee, 50, w.hubAID, "ov-due")
-	if _, sr := settleCall(t, w.srv, creditPayload(t, auth, payee, own), requirementsFor(payee, 50, own)); !sr.Success {
-		t.Fatalf("settling 50 to a foreign payee: %+v", sr)
+	if sr := w.store.SettleForPeer(w.hubAID, peer.AID(), creditPayload(t, auth, payee, own),
+		requirementsFor(payee, 50, own)); !sr.Success {
+		t.Fatalf("settling 50 for a peer's payee: %+v", sr)
 	}
 	before := moneyState(t, w.dir)
-	for _, n := range []int64{0, -1, -1000, math.MinInt64} {
-		if err := w.store.DischargeDue(payee, n); err == nil {
+	for _, n := range []int64{0, -1, -1000, math.MinInt64, 51} {
+		if err := w.store.DischargeDue(peer.AID(), n); err == nil {
 			t.Errorf("discharged %d", n)
 		}
 	}
 	if after := moneyState(t, w.dir); after != before {
 		t.Errorf("a refused discharge changed the money tables.\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-	if due, _ := w.store.Due(); due[payee] != 50 {
-		t.Errorf("due = %d, want 50", due[payee])
+	if due, _ := w.store.Due(); due[peer.AID()] != 50 || len(due) != 1 {
+		t.Errorf("due = %v, want 50 to the peer", due)
 	}
 }
 
@@ -547,11 +556,12 @@ func TestALegacyNegativeSettlementRowIsNotRepeatedAsASuccess(t *testing.T) {
 func TestALegacyNegativeRedemptionRowIsNotListedAsAnAmount(t *testing.T) {
 	w := newOverflowWorld(t)
 	execHubDB(t, w.dir, `INSERT INTO credit_redemption(auth_id, aid, amount, reference, at) VALUES(?,?,?,?,?)`,
-		"bafy-legacy", w.attacker.AID(), -1000, "legacy", time.Now().UTC().Format(time.RFC3339Nano))
-	list, err := w.store.Redemptions(w.attacker.AID(), 10)
+		"bafy-legacy", w.attacker.AID(), -1000, "legacy", time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	win, err := w.store.Redemptions(w.attacker.AID(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
+	list := win.Redemptions
 	if len(list) != 1 {
 		t.Fatalf("listed %d redemptions, want 1", len(list))
 	}
@@ -559,8 +569,8 @@ func TestALegacyNegativeRedemptionRowIsNotListedAsAnAmount(t *testing.T) {
 		t.Errorf("legacy row listed as amount %d (stored %d), want 0 and stored -1000",
 			list[0].Amount, list[0].StoredAmount)
 	}
-	if _, sum, err := w.store.RedemptionTotals(w.attacker.AID()); err != nil || sum != 0 {
-		t.Errorf("sum = %d (%v), want 0", sum, err)
+	if win.Sum != 0 {
+		t.Errorf("sum = %d, want 0", win.Sum)
 	}
 }
 

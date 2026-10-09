@@ -39,6 +39,12 @@ func (s *Store) PowBitsForTest() int {
 // replayed in this process.
 func RegisterKELReplaysForTest() int64 { return registerKELReplays.Load() }
 
+// SettleGuardKeyForTest is the key the hub keeps a settlement's binding
+// under (core L33).
+func SettleGuardKeyForTest(payer, payBind string) ([]byte, error) {
+	return settleGuardKey(payer, payBind)
+}
+
 // DBForTest is the store's database handle.
 func (s *Store) DBForTest() *sql.DB { return s.db }
 

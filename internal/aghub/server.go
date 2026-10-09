@@ -295,7 +295,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /x402/witnesses", s.hWitnesses)
 	mux.HandleFunc("GET /agents/{aid}/liability-proof", s.hLiabilityProof)
 	mux.HandleFunc("GET /agents/{aid}/redemptions", s.hRedemptions)
-	mux.HandleFunc("POST /federation/clear", s.hClear)
 	// Reputation across hub boundaries — the signed evidence, never an
 	// aggregate somebody else computed.
 	//
@@ -2164,7 +2163,26 @@ func (s *Server) federatedAgents(capFilter string) []AgentView {
 	return out
 }
 
-// hLedger serves an account's entries, newest first, with the totals.
+// LedgerResponse is GET /agents/{aid}/ledger: the account's entries of the
+// ledger window, oldest first (core §2.12.2; hub-payment-privacy PAY-L6).
+type LedgerResponse struct {
+	AID     string        `json:"aid"`
+	Entries []LedgerEntry `json:"entries"`
+	// Total and Sum cover every entry of the window, whatever the page;
+	// Returned is how many this page lists.
+	Total     int    `json:"total"`
+	Sum       int64  `json:"sum"`
+	Returned  int    `json:"returned"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Note      string `json:"note,omitempty"`
+	// WindowDays is always LedgerWindowDays; OldestSeq is the seq of the
+	// earliest entry in the window, 0 when there is none.
+	WindowDays uint   `json:"window_days"`
+	OldestSeq  uint64 `json:"oldest_seq"`
+}
+
+// hLedger serves an account's entries of the ledger window: the newest page
+// of them, oldest first, with the window's totals.
 //
 // The page was capped at 100 with nothing saying so, and an account with
 // more than that had no way to know its own history was truncated.
@@ -2173,8 +2191,11 @@ func (s *Server) federatedAgents(capFilter string) []AgentView {
 // than the ledger — host-d showed a balance of 866 against entries summing
 // to -109.
 //
-// Total and sum cover the whole account regardless of the page, so a
-// caller can reconcile without paging and can see when there is more.
+// Total and sum cover the whole window regardless of the page. The window
+// is 14 days (window_days) and the entries before it are deleted
+// (janitor.go), so the sum is how the balance moved within the window, not
+// the balance: oldest_seq says where the window starts, and a supply
+// epoch's liability proof (ledger_hw) vouches for the balance at its close.
 //
 // Served to the account holder only: the request must be signed by the
 // AID in the path (relayauth v2, action "ledger"), and the signature
@@ -2186,29 +2207,21 @@ func (s *Server) hLedger(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	aid := a.AID
 	limit := 100
 	if v := r.URL.Query().Get("limit"); v != "" {
 		_, _ = fmt.Sscanf(v, "%d", &limit)
 	}
-	entries, err := s.store.LedgerEntries(aid, limit)
+	win, err := s.store.LedgerEntries(a.AID, limit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
-	total, sum, err := s.store.LedgerTotals(aid)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	out := map[string]any{
-		"aid": aid, "entries": entries,
-		"total": total, "sum": sum, "returned": len(entries),
-	}
-	if total > len(entries) {
-		out["truncated"] = true
-		out["note"] = "entries is the newest page; total and sum cover the whole account. " +
-			"Reconcile against sum, not against the page."
+	out := LedgerResponse{AID: a.AID, Entries: win.Entries, Total: win.Total, Sum: win.Sum,
+		Returned: len(win.Entries), WindowDays: LedgerWindowDays, OldestSeq: win.OldestSeq}
+	if win.Total > len(win.Entries) {
+		out.Truncated = true
+		out.Note = "entries is the newest page; total and sum cover every entry of the last window_days days. " +
+			"Older entries are deleted, so sum is how the balance moved within the window, not the balance."
 	}
 	writeJSON(w, http.StatusOK, out)
 }

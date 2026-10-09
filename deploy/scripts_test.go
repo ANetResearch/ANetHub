@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -537,11 +538,12 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 	// The temporary copy of a run killed before its EXIT trap: every relay
 	// row, under a name no backup rotation looks at.
 	writeFile(t, filepath.Join(dir, ".hub-backup-20200112.tmp.db"), "relay "+payload, 0o600)
-	// Two old backups; with today's the oldest must go.
-	for i, name := range []string{"hub-backup-20200105.db", "hub-backup-20200112.db"} {
-		p := filepath.Join(dir, name)
+	// Two earlier backups, both younger than 14 days; with today's the
+	// oldest must go (the newest 2 are kept).
+	for _, days := range []int{10, 7} {
+		p := filepath.Join(dir, "hub-backup-"+time.Now().AddDate(0, 0, -days).Format("20060102")+".db")
 		writeFile(t, p, "old backup", 0o600)
-		old := time.Now().Add(-time.Duration(30-i) * 24 * time.Hour)
+		old := time.Now().AddDate(0, 0, -days)
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
@@ -565,7 +567,8 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 		t.Errorf("hub.db-wal holds %d bytes after the run's checkpoint", st.Size())
 	}
 	left, _ := filepath.Glob(filepath.Join(dir, "hub-backup-*.db"))
-	if len(left) != 2 || !containsPath(left, backup) || !containsPath(left, filepath.Join(dir, "hub-backup-20200112.db")) {
+	newestOld := filepath.Join(dir, "hub-backup-"+time.Now().AddDate(0, 0, -7).Format("20060102")+".db")
+	if len(left) != 2 || !containsPath(left, backup) || !containsPath(left, newestOld) {
 		t.Errorf("backups after the run: %v, want today's and the newest old one", left)
 	}
 	if tmp, _ := filepath.Glob(filepath.Join(dir, ".hub-backup-*")); len(tmp) != 0 {
@@ -632,10 +635,122 @@ func TestTheWeeklyBackupKeepsRevocationsAndQuotas(t *testing.T) {
 		}
 	}
 	logb, _ := os.ReadFile(filepath.Join(dir, "roll.log"))
-	for _, want := range []string{"rows of relay_message relay_redelivery excluded", "kept 2 revocations, 1 raised quotas"} {
+	for _, want := range []string{"rows of relay_message relay_redelivery dereg_event notice_cache excluded", "kept 2 revocations, 1 raised quotas"} {
 		if !bytes.Contains(logb, []byte(want)) {
 			t.Errorf("roll.log lacks %q:\n%s", want, logb)
 		}
+	}
+}
+
+// hub-db-roll.sh's backup leaves out the tables that matter only to the
+// running hub — dereg_event (PAY-O2), relay_dack (delivery confirmations
+// waiting at the hub, once RC-3 has the table) and notice_cache (KEL) — and
+// keeps the balance proofs of the last 14 days, liab_leaf and liab_meta
+// (hub-payment-privacy §3.4: a restored hub still gives an account the
+// proof of an epoch it was on). The backup is hub.db alone: the review tag
+// key (keys/review_tag.key) is in no backup file (PAY-L1).
+func TestTheBackupKeepsTheProofsAndLeavesOutTheRunningHubsTables(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	dereg, notice, dack := canary(t, "DEREG"), canary(t, "NOTICE"), canary(t, "DACK")
+	leaf, tagKey := canary(t, "LEAF"), canary(t, "TAGKEY")
+	execAll(t, filepath.Join(dir, "hub.db"), []string{
+		`INSERT INTO dereg_event(aid, at) VALUES(?, 1)`,
+		`INSERT INTO notice_cache(aid, seq, head, observed_at, blob) VALUES(?, 1, 'h', 1, x'00')`,
+		// relay_dack is RC-3's; the backup leaves it out once a hub has it.
+		`CREATE TABLE relay_dack (rid BLOB PRIMARY KEY, token BLOB NOT NULL)`,
+		`INSERT INTO relay_dack(rid, token) VALUES(x'01', ?)`,
+		`INSERT INTO liab_leaf(to_day, pos, aid, balance, salt) VALUES(20454, 0, ?, 7919, x'00')`,
+		`INSERT INTO liab_meta(to_day, ledger_hw, leaves) VALUES(20454, 3, 16)`,
+	}, []any{dereg}, []any{notice}, nil, []any{[]byte(dack)}, []any{leaf}, nil)
+	writeFile(t, filepath.Join(dir, "keys", "review_tag.key"), tagKey, 0o600)
+
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	backup := filepath.Join(dir, "hub-backup-"+time.Now().Format("20060102")+".db")
+	for q, want := range map[string]int{
+		`SELECT COUNT(*) FROM dereg_event`:                                       0,
+		`SELECT COUNT(*) FROM notice_cache`:                                      0,
+		`SELECT COUNT(*) FROM relay_dack`:                                        0,
+		`SELECT COUNT(*) FROM liab_leaf WHERE to_day = 20454 AND balance = 7919`: 1,
+		`SELECT COUNT(*) FROM liab_meta WHERE to_day = 20454 AND leaves = 16`:    1,
+	} {
+		if n := queryInt(t, backup, q); n != want {
+			t.Errorf("the backup: %s = %d, want %d", q, n, want)
+		}
+	}
+	for _, c := range []string{dereg, notice, dack} {
+		if hits := filesHolding(t, c, backup); len(hits) != 0 {
+			t.Errorf("the backup holds an excluded row's bytes (%s)", c[:6])
+		}
+	}
+	if hits := filesHolding(t, leaf, backup); len(hits) != 1 {
+		t.Errorf("the backup does not hold the balance leaf")
+	}
+	// The tag key is in the data directory and in nothing the script wrote.
+	if hits := filesHolding(t, tagKey, dir); len(hits) != 1 || !strings.HasSuffix(hits[0], filepath.Join("keys", "review_tag.key")) {
+		t.Errorf("the review tag key's bytes are in %v; want them only in keys/review_tag.key", hits)
+	}
+	backups, _ := filepath.Glob(filepath.Join(dir, "*backup*"))
+	if len(backups) != 1 || backups[0] != backup {
+		t.Errorf("the run left %v; want only %s", backups, backup)
+	}
+}
+
+// hub-db-roll.sh keeps a backup at most 14 days (hub-payment-privacy
+// PAY-L1): every run, whatever the day, deletes the backups whose date is
+// 14 days ago or earlier, and leaves younger ones and files whose name
+// carries no date.
+func TestABackupIsKeptAtMost14Days(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	name := func(days int) string {
+		return filepath.Join(dir, "hub-backup-"+time.Now().AddDate(0, 0, -days).Format("20060102")+".db")
+	}
+	// The ones that must stay are the newest by time, so a Sunday's
+	// rotation (keep the newest 2) does not take them either.
+	for i, f := range []struct {
+		path  string
+		mtime time.Duration
+	}{
+		{name(30), -30 * 24 * time.Hour}, {name(14), -14 * 24 * time.Hour},
+		{name(13), 2 * time.Hour}, {filepath.Join(dir, "hub-backup-manual.db"), 3 * time.Hour},
+	} {
+		writeFile(t, f.path, "backup "+strconv.Itoa(i), 0o600)
+		at := time.Now().Add(f.mtime)
+		if err := os.Chtimes(f.path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	for _, gone := range []string{name(30), name(14)} {
+		if _, err := os.Stat(gone); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s is still there", filepath.Base(gone))
+		}
+	}
+	for _, kept := range []string{name(13), filepath.Join(dir, "hub-backup-manual.db")} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s: %v", filepath.Base(kept), err)
+		}
+	}
+	logb, _ := os.ReadFile(filepath.Join(dir, "roll.log"))
+	if n := bytes.Count(logb, []byte("pruned a backup 14 days old or older")); n != 2 {
+		t.Errorf("roll.log names %d backups pruned for their age, want 2:\n%s", n, logb)
 	}
 }
 
