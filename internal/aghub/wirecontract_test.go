@@ -2,6 +2,7 @@ package aghub_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 
@@ -190,15 +191,11 @@ func TestHealthzReportsTheBuild(t *testing.T) {
 	}
 }
 
-// Every AID an edge names must have a node.
-//
-// nodes came from the browsable listing and edges from every stored
-// review, and the two disagree by construction: an agent that left, or
-// went quiet for a month, drops out of the listing while its reviews
-// stay — because leaving removes routing and keeps evidence. Production
-// served one node and fifteen edges, and a renderer given that either
-// drops the edges silently or fails.
-func TestTheGraphHasANodeForEveryEdge(t *testing.T) {
+// GET /graph is {nodes: [{aid, name, reviewCount}]} and has no edges
+// (hub-payment-privacy PAY-V5): an edge was a reviewer, and the hub keeps
+// none. A reviewed agent that left still has its node and its count —
+// leaving removes routing, not evidence — and the reviewer is nowhere in it.
+func TestTheGraphHasNoEdgesAndKeepsWhatWasReviewed(t *testing.T) {
 	srv, _ := newHubWithStore(t)
 	provider, requester := twoAgents(t)
 	register(t, srv, provider, "Provider", []string{"work.do"})
@@ -210,52 +207,55 @@ func TestTheGraphHasANodeForEveryEdge(t *testing.T) {
 		t.Fatalf("deregister: %d %s", code, b)
 	}
 
-	g := graphOf(t, srv)
-	if len(g.Edges) == 0 {
-		t.Fatal("the review edge vanished with the agent — evidence was deleted, not just routing")
+	raw, g := graphOf(t, srv)
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
 	}
-	nodes := map[string]aghub.AgentView{}
-	for _, n := range g.Nodes {
-		nodes[n.AID] = n
+	if _, ok := top["edges"]; ok || len(top) != 1 {
+		t.Errorf("/graph has members other than nodes: %s", raw)
 	}
-	for _, e := range g.Edges {
-		for _, aid := range []string{e.Source, e.Target} {
-			if _, ok := nodes[aid]; !ok {
-				t.Errorf("edge names %s, which has no node", aid[:12])
-			}
+	var nodes []map[string]any
+	if err := json.Unmarshal(top["nodes"], &nodes); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		if len(n) != 3 || n["aid"] == nil || n["name"] == nil || n["reviewCount"] == nil {
+			t.Errorf("a node is not {aid, name, reviewCount}: %v", n)
 		}
 	}
-	// And the one that left is marked, so a reader can tell it apart from
-	// an agent still being routed to.
-	if n, ok := nodes[provider.AID()]; !ok {
-		t.Error("the departed provider has no node at all")
-	} else if n.Registered {
-		t.Error("a departed agent is marked as still registered")
+	byAID := map[string]aghub.GraphNode{}
+	for _, n := range g.Nodes {
+		byAID[n.AID] = n
 	}
-	// The requester never left and must still read as registered.
-	if n, ok := nodes[requester.AID()]; ok && !n.Registered {
-		t.Error("an agent that is still here is marked as gone")
+	if n, ok := byAID[provider.AID()]; !ok || n.ReviewCount != 1 {
+		t.Errorf("the departed provider's node: %+v (present %v), want its one review", n, ok)
+	}
+	if strings.Contains(string(raw), requester.AID()) {
+		t.Error("/graph names the reviewer")
 	}
 }
 
-func graphOf(t *testing.T, srv *httptest.Server) struct {
-	Nodes []aghub.AgentView `json:"nodes"`
-	Edges []aghub.Edge      `json:"edges"`
-} {
+func graphOf(t *testing.T, srv *httptest.Server) ([]byte, struct {
+	Nodes []aghub.GraphNode `json:"nodes"`
+}) {
 	t.Helper()
 	var out struct {
-		Nodes []aghub.AgentView `json:"nodes"`
-		Edges []aghub.Edge      `json:"edges"`
+		Nodes []aghub.GraphNode `json:"nodes"`
 	}
 	resp, err := http.Get(srv.URL + "/graph")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return out
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return raw, out
 }
 
 // The ledger endpoint must say how much it did not return.
@@ -558,26 +558,26 @@ func TestTheFacilitatorContractIsPinned(t *testing.T) {
 }
 
 // Review and stats field names, pinned (A2A-DESIGN §9 rows 评价 and
-// completed_task, §17 contract row "评价无内容字段").
+// completed_task, §17 contract row "评价无内容字段"; hub-payment-privacy §2.5,
+// SI-48 for evidence v2).
 //
-// The daemon in ANet declares ReviewView and the upload body in
-// internal/hubapi and pins them in hubapi_test.go; that list has to change
-// with this one (ANet task C2): goal and deliverable removed,
-// content_binding added, and guest_quota removed from AgentView. No
-// content field may appear in any of these: the hub does not receive
-// interaction content, so a field that could carry it is a field some
-// client would fill.
+// The daemon in ANet declares the upload body and the review view in
+// internal/hubapi and pins them in hubapi_test.go; that list changes with
+// this one (PAY-14). No content field may appear in any of these: the hub
+// does not receive interaction content, so a field that could carry it is a
+// field some client would fill. Nor may a reviewer, an interaction id or a
+// time finer than a day.
 func TestTheReviewFieldNamesArePinned(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		value any
 		want  []string
 	}{
-		{"UploadReviewRequest", aghub.UploadReviewRequest{}, []string{"receipt", "review"}},
+		{"UploadReviewRequest", aghub.UploadReviewRequest{}, []string{"receipt", "review", "rsalt"}},
+		{"UploadReviewResponse", aghub.UploadReviewResponse{}, []string{"attestation", "status"}},
 		{"ReviewView", aghub.ReviewView{}, []string{
-			"comment", "completed_at", "content_binding", "created_at", "interaction_id", "rating",
-			"receipt_cid", "request_cid", "result_cid", "reviewer_aid", "subject_aid"}},
-		{"FedReview", aghub.FedReview{}, []string{"fed_seq", "provider_kel", "receipt", "review", "reviewer_kel"}},
+			"comment", "completed_day", "created_day", "rating", "receipt_cid", "subject_aid"}},
+		{"FedReviewEntry", aghub.FedReviewEntry{}, []string{"attestation", "fed_seq", "format", "provider_kel", "receipt", "review"}},
 		{"HubStats", aghub.HubStats{}, []string{
 			"agents", "avg_rating", "federated_agents", "modules", "reviews", "tasks_completed"}},
 	} {
@@ -589,6 +589,8 @@ func TestTheReviewFieldNamesArePinned(t *testing.T) {
 			switch f {
 			case "goal", "deliverable", "request_doc", "transcript", "body":
 				t.Errorf("%s carries %q, a content field", tc.name, f)
+			case "reviewer_aid", "reviewer_kel", "interaction_id", "created_at", "completed_at":
+				t.Errorf("%s carries %q, which names the reviewer or the interaction or is a time", tc.name, f)
 			}
 		}
 	}
@@ -596,11 +598,5 @@ func TestTheReviewFieldNamesArePinned(t *testing.T) {
 		if f == "guest_quota" {
 			t.Error("AgentView still carries guest_quota; guest mode is removed")
 		}
-	}
-	if aghub.ContentBindingUnverified != "UNVERIFIED" {
-		t.Errorf("content binding state %q, want %q", aghub.ContentBindingUnverified, "UNVERIFIED")
-	}
-	if aghub.MaxReviewCommentRunes != 280 {
-		t.Errorf("review comment bound %d, want 280", aghub.MaxReviewCommentRunes)
 	}
 }

@@ -26,9 +26,8 @@ import (
 // admission list and the quota the operator raised for it unless the
 // admission was revoked.
 //
-// review and review_blob also name a reviewer while reviews are v1; v2
-// keeps no reviewer (PAY-6, SI-48), after which an AID is there only as the
-// subject. v030-todo(PAY-6)
+// A review names no reviewer (evidence v2, SI-48), so an AID is in review,
+// review_blob and fed_review only as the subject.
 var deregAllowed = map[string]bool{
 	"departed_kel":        true,
 	"credit_balance":      true,
@@ -249,18 +248,19 @@ func TestReviewsWaitForProbation(t *testing.T) {
 		until, req.AID()); err != nil {
 		t.Fatal(err)
 	}
-	code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_probation", 5, ""))
+	k := makeEvidence(t, prov, req, "ix_probation", 5, "")
+	code, b := uploadReview(t, srv, k)
 	if code != http.StatusForbidden || !strings.Contains(string(b), `"probation"`) {
 		t.Fatalf("a review from an account on probation: %d %s", code, b)
 	}
-	if store.HasInteraction("ix_probation") {
+	if reviewStored(t, store, k) {
 		t.Fatal("the refused review was stored")
 	}
 	// The operator admits it: probation over, the review goes in.
 	if _, err := store.Admit(req.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_probation", 5, "")); code != http.StatusOK {
+	if code, b := uploadReview(t, srv, k); code != http.StatusOK {
 		t.Fatalf("the same review after admission: %d %s", code, b)
 	}
 }

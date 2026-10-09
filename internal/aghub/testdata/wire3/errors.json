@@ -226,7 +226,7 @@
       "status": 400,
       "body": {
         "reason": "receipt_not_reviewable",
-        "error": "This receipt carries no review commitment; only tasks started with anet 0.3.0 can be reviewed."
+        "error": "This receipt cannot be used for a review: it carries no review commitment, or its signatures do not match the review; only tasks started with anet 0.3.0 can be reviewed."
       }
     },
     {

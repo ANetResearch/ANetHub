@@ -248,6 +248,15 @@ func main() {
 	}
 	log.Printf("anet-hub identity: %s", hubID.AID)
 
+	// The review tag key (hub-payment-privacy §3.3): made on the first
+	// start, and a key file this hub cannot use stops the start here
+	// rather than at the first review.
+	if id, err := store.LoadReviewTagKey(); err != nil {
+		log.Fatalf("anet-hub: %v", err)
+	} else {
+		log.Printf("anet-hub review tag key: tag_key_id %d", id)
+	}
+
 	srv0 := aghub.NewServer(store)
 	if err := srv0.SetLimits(f.limits()); err != nil {
 		log.Fatalf("anet-hub: relay limits: %v", err)

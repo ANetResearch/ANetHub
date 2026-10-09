@@ -548,7 +548,7 @@ func TestAFederatedA2ACardOfALocalAgentIsRefusedForNow(t *testing.T) {
 }
 
 // An agent this hub knows only by the A2A card a peer publishes can be
-// reviewed by a user here, the review goes out on /fed/v1/reviews, and
+// reviewed by a user here, the review goes out on /fed/v3/reviews, and
 // the agent is named from the card. Once the peer withdraws the card, the consent it stood for is
 // gone and the review is no longer served.
 func TestReviewsOfAnAgentKnownByItsA2ACardTravel(t *testing.T) {
@@ -625,8 +625,7 @@ func TestAPeerLearnedKELFollowsTheAgentsRotation(t *testing.T) {
 	if got, err := store.AnyKEL(provider.AID()); err != nil || !bytes.Equal(got, after) {
 		t.Fatalf("AnyKEL served the KEL before the rotation (%v)", err)
 	}
-	body := makeEvidence(t, provider, requester, "ix-rotated", 5, "")
-	if code, b := post(t, hub.URL+"/reviews", body); code != http.StatusOK {
+	if code, b := uploadReview(t, hub, makeEvidence(t, provider, requester, "ix-rotated", 5, "")); code != http.StatusOK {
 		t.Fatalf("a receipt signed under the rotated key: %d %s", code, b)
 	}
 }

@@ -78,11 +78,13 @@ type AdminAgentView struct {
 // AllAgents returns EVERY registered agent (listed or not) with activity aggregates, most recently
 // registered first. q filters like the public search.
 func (h *HubDB) AllAgents(q string) ([]AdminAgentView, error) {
+	// v030-todo(PAY-16): a v2 review names no reviewer, so reviews_written
+	// is 0 until this view is rewritten without it.
 	query := `
 	SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at,
 	       COALESCE((SELECT AVG(rating) FROM review r WHERE r.subject_aid=a.aid), 0),
 	       COALESCE((SELECT COUNT(*) FROM review r WHERE r.subject_aid=a.aid), 0),
-	       COALESCE((SELECT COUNT(*) FROM review r WHERE r.reviewer_aid=a.aid), 0),
+	       0,
 	       COALESCE((SELECT COUNT(*) FROM relay_message m WHERE m.to_aid=a.aid), 0)
 	FROM agent a`
 	var args []any
@@ -144,9 +146,12 @@ func (h *HubDB) RecentReviews(limit int) ([]HubReview, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
+	// v030-todo(PAY-16): the v2 review table has no interaction id, no
+	// reviewer and only days; this reads ix_commit (hex), an empty
+	// reviewer and created_day into the v0.2 view until it is rewritten.
 	rows, err := h.db.Query(
-		`SELECT interaction_id,subject_aid,reviewer_aid,rating,comment,receipt_cid,created_at
-		 FROM review ORDER BY created_at DESC LIMIT ?`, limit)
+		`SELECT lower(hex(ix_commit)),subject_aid,'',rating,comment,receipt_cid,created_day
+		 FROM review ORDER BY created_day DESC, rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

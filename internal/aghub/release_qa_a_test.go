@@ -341,7 +341,7 @@ func TestTheKernelDoesNotServeTheFederationReviewStream(t *testing.T) {
 	// was handing out. Without this the endpoint would have been empty
 	// for a reason that has nothing to do with the fix.
 	setVisibility(t, srv, prov, "federated")
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_fed1", 5, "")); code != http.StatusOK {
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_fed1", 5, "")); code != http.StatusOK {
 		t.Fatalf("upload: %d %s", code, b)
 	}
 

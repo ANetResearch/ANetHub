@@ -1,6 +1,6 @@
 {
   "format": "wire3-fixture/1",
-  "about": "Federation v3 (core §2.12.2, G3, G21; sealed-sender §2.8, §4.2.7, SSR-H15, SSR-H16): every /fed/v3 route is open to the hubs of the peer table only, signed by the asking hub with relayauth v2 for the route's action (fed_forward, fed_bucket, fed_cards, fed_reviews); no signature, or a signature for another action or over another request, is 401 unauthorized, a hub that is not a peer 403 not_peer. POST /fed/v3/forward carries the envelope itself (application/vnd.anet.envelope+cbor) and its outer key 7 as X-ANet-Access, and no session; it is answered {status: queued | duplicate, rid, recipient_quiet}, always 200, or refused: a recipient not registered here 404 unknown_destination, a credential refused 403 access_invalid. POST /fed/v3/directory:bucket takes the /directory:bucket request and answers this hub's own entries without partial. GET /fed/v3/cards serves the A2A card stream, base64url. The v0.2 routes /fed/v1/* and /fed/v2/* answer 404 not_found.",
+  "about": "Federation v3 (core §2.12.2, G3, G21; sealed-sender §2.8, §4.2.7, SSR-H15, SSR-H16): every /fed/v3 route is open to the hubs of the peer table only, signed by the asking hub with relayauth v2 for the route's action (fed_forward, fed_bucket, fed_cards, fed_reviews); no signature, or a signature for another action or over another request, is 401 unauthorized, a hub that is not a peer 403 not_peer. POST /fed/v3/forward carries the envelope itself (application/vnd.anet.envelope+cbor) and its outer key 7 as X-ANet-Access, and no session; it is answered {status: queued | duplicate, rid, recipient_quiet}, always 200, or refused: a recipient not registered here 404 unknown_destination, a credential refused 403 access_invalid. POST /fed/v3/directory:bucket takes the /directory:bucket request and answers this hub's own entries without partial. GET /fed/v3/cards serves the A2A card stream, base64url; GET /fed/v3/reviews the review stream (hub-payment-privacy §2.5), {cursor, reviews}, each entry review/2: the receipt, the review, this hub's attestation and the provider's key history, base64url, and fed_seq, and nothing that names the reviewer. The v0.2 routes /fed/v1/* and /fed/v2/* answer 404 not_found.",
   "setup": "fed",
   "cases": [
     {
@@ -124,10 +124,19 @@
     },
     {
       "name": "the review stream for a peer",
-      "cite": "core §2.12.2",
+      "cite": "core §2.12.2; hub-payment-privacy §2.5",
       "request": {"method": "GET", "path": "/fed/v3/reviews",
         "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "fed_reviews", "as": "peer"}},
-      "response": {"status": 200, "body_has": {"cursor": 0}}
+      "response": {"status": 200, "body": {"cursor": 1, "reviews": [{"format": "review/2",
+        "receipt": "${rv_receipt}", "review": "${rv_review}", "attestation": "${rv_att}",
+        "provider_kel": "${rv_kel}", "fed_seq": 1}]}}
+    },
+    {
+      "name": "the review stream after its last entry",
+      "cite": "core §2.12.2",
+      "request": {"method": "GET", "path": "/fed/v3/reviews?cursor=1",
+        "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "fed_reviews", "as": "peer"}},
+      "response": {"status": 200, "body": {"cursor": 1, "reviews": []}}
     },
     {
       "name": "the v0.2 forward",

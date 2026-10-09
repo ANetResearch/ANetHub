@@ -70,7 +70,7 @@ func TestReviewsStayReadableAfterTheAgentLeaves(t *testing.T) {
 	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "Provider", []string{"bakery"})
 	register(t, srv, req, "Requester", nil)
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_leave", 5, "")); code != 200 {
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_leave", 5, "")); code != 200 {
 		t.Fatalf("setup: review upload %d %s", code, b)
 	}
 	// What the reviews look like while it is still registered. The
@@ -119,15 +119,14 @@ func TestReviewsStayReadableAfterTheAgentLeaves(t *testing.T) {
 	if got.Agent.ReviewCount != 1 || got.Agent.AvgRating != 5 {
 		t.Errorf("aggregate lost: count=%d avg=%v", got.Agent.ReviewCount, got.Agent.AvgRating)
 	}
-	// The detail, not just the aggregate number: the interaction content
-	// and its content anchors are what let a third party re-derive the
-	// hashes in the receipt, which is the whole point of keeping it.
+	// The detail, not just the aggregate number: the review and the receipt
+	// it is anchored on, which a third party checks the evidence by.
 	if string(got.Reviews) != string(before.Reviews) {
 		t.Errorf("review payload changed when the agent left\n before: %s\n  after: %s",
 			before.Reviews, got.Reviews)
 	}
-	if !strings.Contains(string(got.Reviews), "ix_leave") ||
-		!strings.Contains(string(got.Reviews), "receipt_cid") {
+	if !strings.Contains(string(got.Reviews), `"receipt_cid":"bafy`) ||
+		!strings.Contains(string(got.Reviews), `"rating":5`) {
 		t.Errorf("review detail missing after departure: %s", got.Reviews)
 	}
 }

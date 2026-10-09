@@ -12,8 +12,9 @@ import (
 // verification per event, up to seal.MaxKELEvents. This hub checks the
 // KELs it holds on behalf of whoever asks: every signed request against
 // its signer's stored KEL, and on unauthenticated routes a payment
-// authorization against its payer's, a review against its two parties', a
-// synced key set against its owner's, a card against its agent's. Capping
+// authorization against its payer's, a synced key set against its owner's, a
+// card against its agent's; and a review's receipt against its provider's,
+// a KEL the uploader names. Capping
 // the stored KEL at /register [redteam:F36] left each of those at the
 // replay of up to the cap, per request: a request that named an agent with
 // a long KEL and carried a signature of zeros cost the hub the whole replay

@@ -208,7 +208,7 @@ var reasons = map[Reason]reasonInfo{
 	ReasonRequesterCommitMismatch: {http.StatusBadRequest, nil,
 		"Only the requester of this interaction can review it; retrying will not help."},
 	ReasonReceiptNotReviewable: {http.StatusBadRequest, nil,
-		"This receipt carries no review commitment; only tasks started with anet 0.3.0 can be reviewed."},
+		"This receipt cannot be used for a review: it carries no review commitment, or its signatures do not match the review; only tasks started with anet 0.3.0 can be reviewed."},
 	ReasonReviewWindowClosed: {http.StatusBadRequest, nil,
 		"Reviews are accepted up to 30 days after the interaction ends; this one can no longer be reviewed."},
 }

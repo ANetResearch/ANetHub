@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +27,6 @@ import (
 	"github.com/ANetResearch/ANetCore/regpow"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
-	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 
 	"github.com/ANetResearch/ANetHub/internal/version"
 	"github.com/ANetResearch/ANetHub/internal/wire3"
@@ -427,8 +425,6 @@ func requestOrigin(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-// hGraph returns the whole registry as a starfield: nodes (agents + aggregate rating) and edges (one
-// per verified review, reviewer → subject). It is a single round-trip for the web UI.
 // hStats returns the headline landing metrics (agents / published receipts / reviews / avg rating)
 // and the optional modules this build wired in.
 func (s *Server) hStats(w http.ResponseWriter, _ *http.Request) {
@@ -458,61 +454,6 @@ func (s *Server) hStats(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, st)
-}
-
-func (s *Server) hGraph(w http.ResponseWriter, _ *http.Request) {
-	agents, err := s.store.ListAgents("")
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	edges, err := s.store.ReviewEdges()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if agents == nil {
-		agents = []AgentView{}
-	}
-	if edges == nil {
-		edges = []Edge{}
-	}
-	// Every AID an edge names must have a node.
-	//
-	// nodes came from the browsable listing and edges from every stored
-	// review, and the two disagree by construction: an agent that left,
-	// or went quiet for a month, drops out of the listing while its
-	// reviews stay — because leaving removes routing and keeps evidence.
-	// Production had one node and fifteen edges.
-	//
-	// The missing ones are added rather than the edges dropped. Dropping
-	// them would make the graph consistent by hiding interactions that
-	// really happened, which is the opposite of what this endpoint is
-	// for: the directory answers "who can I reach now", the graph answers
-	// "what has happened here".
-	known := make(map[string]bool, len(agents))
-	for _, a := range agents {
-		known[a.AID] = true
-	}
-	for _, e := range edges {
-		for _, aid := range []string{e.Source, e.Target} {
-			if aid == "" || known[aid] {
-				continue
-			}
-			known[aid] = true
-			agents = append(agents, s.store.GraphNodeFor(aid))
-		}
-	}
-	// The graph draws who reviewed whom. The key material a listing
-	// carries for writing to an agent (kel, keys) is not part of that.
-	for i := range agents {
-		agents[i].KEL, agents[i].Keys, agents[i].KeyStateNotice = "", "", ""
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes": agents, "edges": edges,
-		"note": "nodes with registered=false are agents this hub no longer routes for — " +
-			"they left, or have not collected mail in a long time. Their reviews stay " +
-			"because those record things that happened."})
 }
 
 // RegisterRequest is an agent's self-registration: its profile, its KEL
@@ -1094,167 +1035,6 @@ func (s *Server) hProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"aid": a.AID, "status": "profile_updated"})
-}
-
-// UploadReviewRequest carries the provider-signed receipt and the requester-signed review, both base64
-// CoreDet-CBOR, and nothing else.
-//
-// Earlier versions also required request_doc and deliverable, the raw interaction content, so the hub
-// could re-hash it against the receipt and publish the goal and the deliverable with the review. The
-// hub no longer receives content (A2A-DESIGN §0 decision 2, §9 row 评价): it verifies the interlock
-// without it and reports the content binding as UNVERIFIED.
-type UploadReviewRequest struct {
-	Receipt string `json:"receipt"` // base64(evidence.Receipt.Marshal)
-	Review  string `json:"review"`  // base64(evidence.Review.Marshal)
-}
-
-// maxReviewUploadBody bounds a review upload: two signed objects, each well under 16 KiB.
-const maxReviewUploadBody = 64 << 10
-
-func (s *Server) hUploadReview(w http.ResponseWriter, r *http.Request) {
-	// The body is decoded with the two retired content fields in view so
-	// that a client still sending them is told so, rather than having the
-	// fields dropped silently and its review stored as if it had not tried
-	// to hand the hub content.
-	var req struct {
-		UploadReviewRequest
-		RequestDoc  string `json:"request_doc"`
-		Deliverable string `json:"deliverable"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxReviewUploadBody)).Decode(&req); err != nil ||
-		req.Receipt == "" || req.Review == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "receipt + review required"})
-		return
-	}
-	if req.RequestDoc != "" || req.Deliverable != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this hub does not accept " +
-			"interaction content with a review: send receipt and review only (request_doc and " +
-			"deliverable were removed; upgrade anet to >= " + RequiredAnet + ")"})
-		return
-	}
-	rcBytes, err1 := base64.StdEncoding.DecodeString(req.Receipt)
-	rvBytes, err2 := base64.StdEncoding.DecodeString(req.Review)
-	if err1 != nil || err2 != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "receipt/review not base64"})
-		return
-	}
-	rc, err := evidence.UnmarshalReceipt(rcBytes)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "receipt undecodable"})
-		return
-	}
-	rv, err := evidence.UnmarshalReview(rvBytes)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "review undecodable"})
-		return
-	}
-	if err := checkReviewComment(rv.Comment); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	detail, err := s.verify(rc, rv)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	// A new account on probation does not review yet (hub-payment-privacy
-	// PAY-A4): a reviewer is a counterparty that registered more than
-	// three days ago, or one an operator admitted. Checked after the
-	// review verified, so the answer says nothing about an account to a
-	// caller who does not hold one of its signed reviews.
-	if _, on := s.store.ProbationUntil(rv.ReviewerAID); on {
-		wire3.Refuse(w, wire3.ReasonProbation)
-		return
-	}
-	if err := s.store.PutReview(rv, detail); err != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "store: " + err.Error()})
-		return
-	}
-	// Keep the signed objects that were verified, not only what they
-	// meant. A peer asking for this review later needs the objects to
-	// check for itself; handing it our conclusion would make federated
-	// reputation a chain of hubs trusting hubs.
-	if err := s.store.PutReviewBlob(rv.InteractionID, rcBytes, rvBytes); err != nil {
-		log.Printf("hub: review evidence not kept for %s: %v", rv.InteractionID, err)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"interaction_id": rv.InteractionID, "status": "accepted",
-		"content_binding": ContentBindingUnverified})
-}
-
-// verify is the heart of the trust model. Two halves, deliberately split:
-// what only this Hub can know (has this interaction been rated, are these
-// agents registered here) stays here; the interlock itself — same
-// interaction, right parties, review anchored to this receipt, both
-// signatures live — is evidence.VerifyInterlock, so a third party holding
-// the same files reaches the same verdict without trusting this Hub.
-//
-// Content binding (does request_cid / result_cid hash to particular bytes)
-// is not checked: the hub does not receive content, and VerifyInterlock is
-// called with nil for both content arguments. Reviews are served with
-// content_binding "UNVERIFIED" to say so.
-//
-// Any failure ⇒ the review is rejected and never displayed. On success it
-// returns the receipt anchors to store beside the review.
-func (s *Server) verify(rc *evidence.Receipt, rv *evidence.Review) (ReviewDetail, error) {
-	var zero ReviewDetail
-
-	// Uniqueness first: it is the cheapest check and the only one that is
-	// this Hub's business rather than a fact about the objects.
-	if s.store.HasInteraction(rv.InteractionID) {
-		return zero, fmt.Errorf("interaction already reviewed")
-	}
-
-	// Registration is likewise policy, not arithmetic — this Hub rates
-	// agents it knows. The KELs it holds are what the interlock is checked
-	// against, so a stranger re-checking later uses the published KELs and
-	// reaches the same verdict.
-	// The reviewer must have an account here — this hub rates on behalf
-	// of its own users and not on behalf of strangers.
-	reqKELBytes, err := s.store.AgentKEL(rv.ReviewerAID)
-	if err != nil {
-		return zero, fmt.Errorf("reviewer not registered")
-	}
-	// The provider need only be SOMEBODY this hub can identify, here or
-	// at a peer. Requiring it to be local meant a cross-hub interaction
-	// could not be reviewed by either side: the reviewer banks here, the
-	// provider banks there, and neither hub knew both. Federation was
-	// producing work that nothing could rate.
-	provKELBytes, err := s.store.AnyKEL(rc.ProviderAID)
-	if err != nil {
-		return zero, fmt.Errorf("provider unknown to this hub: %w", err)
-	}
-	provKEL, err := identity.UnmarshalKEL(provKELBytes)
-	if err != nil {
-		return zero, fmt.Errorf("provider kel corrupt")
-	}
-	reqKEL, err := identity.UnmarshalKEL(reqKELBytes)
-	if err != nil {
-		return zero, fmt.Errorf("reviewer kel corrupt")
-	}
-
-	// /reviews needs no authentication, so a bad signature on either
-	// object is refused on the key its signer's KEL names, before the
-	// interlock replays the two KELs (kelreplay.go) [redteam:F36].
-	if verr := plausibleEnvelope(rc.Envelope, rc.ProviderAID, provKEL, rc.CanonicalPreimage); verr != nil {
-		return zero, fmt.Errorf("evidence: receipt signature invalid: %w", verr)
-	}
-	if verr := plausibleEnvelope(rv.Envelope, rv.ReviewerAID, reqKEL, rv.CanonicalPreimage); verr != nil {
-		return zero, fmt.Errorf("evidence: review signature invalid: %w", verr)
-	}
-
-	// Everything else is arithmetic over the objects, and it lives in
-	// ANetCore so that anyone holding these files reaches this same
-	// verdict without trusting this Hub — which is the whole content of
-	// "the Hub cannot fake a rating".
-	if err := evidence.VerifyInterlock(rc, rv, nil, nil, provKEL, reqKEL); err != nil {
-		return zero, err
-	}
-	return ReviewDetail{
-		RequestCID:  rc.RequestCID,
-		ResultCID:   rc.ResultCID,
-		CompletedAt: rc.CompletedAt,
-	}, nil
 }
 
 func (s *Server) hAgents(w http.ResponseWriter, r *http.Request) {

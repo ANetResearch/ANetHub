@@ -117,14 +117,14 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("GET", "/agents/{aid}/ledger", reflect.TypeFor[LedgerResponse](), ""),
 		resp("GET", "/agents/{aid}/redemptions", reflect.TypeFor[RedemptionsResponse](), ""),
 		resp("GET", "/agents/{aid}/liability-proof", reflect.TypeFor[LiabilityProof](), ""),
-		req("POST", "/reviews", reflect.TypeFor[UploadReviewRequest](), "v030-todo(PAY-6)"),
-		resp("POST", "/reviews", nil, "v030-todo(PAY-6)"),
+		req("POST", "/reviews", reflect.TypeFor[UploadReviewRequest](), ""),
+		resp("POST", "/reviews", reflect.TypeFor[UploadReviewResponse](), ""),
 		resp("POST", "/fed/v3/forward", reflect.TypeFor[FedForwardResponse](), ""),
 		req("POST", "/fed/v3/directory:bucket", reflect.TypeFor[DirBucketRequest](), ""),
 		resp("POST", "/fed/v3/directory:bucket", reflect.TypeFor[FedBucketResponse](), ""),
 		req("POST", "/fed/v3/relay-status", nil, "v030-todo(RC-3)"),
 		resp("POST", "/fed/v3/relay-status", nil, "v030-todo(RC-3)"),
-		resp("GET", "/fed/v3/reviews", nil, "v030-todo(PAY-6)"),
+		resp("GET", "/fed/v3/reviews", reflect.TypeFor[FedReviewEntry](), ""),           // per entry
 		resp("GET", "/fed/v3/cards", reflect.TypeFor[federation.FedA2ACardEntry](), ""), // per entry
 	}
 	covered := map[string]bool{}
@@ -208,6 +208,60 @@ var wire3Setups = map[string]wire3test.Setup{
 	"revoke":          wire3RevokeSetup,
 	"relay":           wire3RelaySetup,
 	"supply":          wire3SupplySetup,
+	"reviews":         wire3ReviewsSetup,
+}
+
+// wire3ReviewsSetup is the hub of wire3HubSetup for the POST /reviews
+// fixtures (hub-payment-privacy PAY-V1). prov is registered (the provider),
+// alice is the requester of every review below, carol is registered and is
+// nobody's requester, probie is registered and on probation, and stranger is
+// not registered. Each upload is three variables, ${<name>_receipt},
+// ${<name>_review} and ${<name>_rsalt}:
+//
+//	ok      a review alice wrote today of a task prov did today
+//	ok2     another one, of another task
+//	late    one created 31 days after its task
+//	forged  one signed by a key other than the receipt's review_key
+//	rated6  one rated 6 (encoded without the checks a writer makes)
+//	probie  one probie wrote
+func wire3ReviewsSetup(t *testing.T) *wire3test.Env {
+	t.Helper()
+	env, store, signers := wire3Hub(t)
+	prov, carol, probie, stranger := wire3Incept(t), wire3Incept(t), wire3Incept(t), wire3Incept(t)
+	signers["prov"], signers["carol"], signers["probie"], signers["stranger"] = prov, carol, probie, stranger
+	for name, c := range map[string]*identity.Controller{"prov": prov, "carol": carol, "probie": probie} {
+		kel, err := identity.MarshalKEL(c.KEL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PutAgent(c.AID(), name, nil, kel); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`UPDATE agent SET admitted_via='open', probation_until=?, trial='pending' WHERE aid=?`,
+		time.Now().Add(time.Hour).UnixMilli(), probie.AID()); err != nil {
+		t.Fatal(err)
+	}
+	alice := signers["alice"]
+	put := func(name string, k *ReviewKit) {
+		for m, v := range k.Body(t) {
+			env.Vars[name+"_"+m] = v
+		}
+	}
+	put("ok", NewReviewKitForTest(t, prov, alice, "ix-wire3-ok", 5))
+	put("ok2", NewReviewKitForTest(t, prov, alice, "ix-wire3-ok2", 4))
+	late := NewReviewKitForTest(t, prov, alice, "ix-wire3-late", 3)
+	late.Receipt.CompletedDay -= ReviewWindowDays + 1
+	put("late", late)
+	forged := NewReviewKitForTest(t, prov, alice, "ix-wire3-forged", 5)
+	_, forged.ReviewSignedBy, _ = ed25519.GenerateKey(nil)
+	put("forged", forged)
+	rated6 := NewReviewKitForTest(t, prov, alice, "ix-wire3-rated6", 6)
+	rated6.Unchecked = true
+	put("rated6", rated6)
+	put("probie", NewReviewKitForTest(t, prov, probie, "ix-wire3-probie", 5))
+	env.Vars["prov"], env.Vars["carol"] = prov.AID(), carol.AID()
+	return env
 }
 
 // wire3SupplySetup is the hub of wire3HubSetup with two published supply
