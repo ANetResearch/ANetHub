@@ -1,56 +1,109 @@
 package admin
 
 import (
-	"encoding/base64"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
 
-// recovery —— 注册表删除的安全网。2026-07-20 一次针对公网 /admin 删除接口的脚本化批量删除（弱
-// token）抹掉了约 67 个 agent。此文件提供：
-//   1. 删除前归档整行（含 kel）到 admin.db deleted_agent —— 任何删除都可回滚，无需外部备份；
-//   2. RestoreAgentsFromBackup —— 从一个 hub.db 备份 INSERT OR IGNORE 回 agent 表（一次性恢复）；
-//   3. 破坏性操作限速（server.go 用）—— 单个循环无法再瞬间清空注册表。
+// What stands between an operator and a mistaken delete (hub-payment-privacy PAY-O3, PAY-O4).
+//
+// A delete revokes the AID's admission and deregisters it (HubDB.DeleteAgent). Undoing one is
+// admitting the AID again, with anet-hub admit <AID>: the agent's own anet registers again with its
+// current key history, and nothing else is needed. For a batch, GET /admin/api/deleted?format=admit
+// lists the deleted AIDs one per line, which anet-hub admit --file takes as it is.
+//
+// There is no "restore the old row": the earlier restore and prune paths (RestoreDeletedAgent,
+// RestoreAgentsFromBackup, PruneAgentsExcept) wrote a stored key history straight back into the
+// registry, past the rule that a key history may only grow. Whoever holds a copy of the agent's data
+// directory can sign a fork from an earlier event, and only the tombstone the delete leaves stops it
+// from registering as the agent. A whole hub is restored with anet-hub restore.
+//
+// So the record kept here is only who was deleted, when and by whom: deleted_agent(aid, deleted_at,
+// actor). No row, no key history, no profile text (PAY-O4). And destructive operations are rate
+// limited, so a scripted loop cannot empty the registry.
 
-// migrateRecovery adds the deleted-agent archive table (idempotent).
+// ErrAdminDBTooOld is an admin.db an earlier release wrote: its deleted_agent table still has the
+// row column of the removed restore path. It is refused, not converted (§3.4a); anet-hub-admin says
+// admin.db_too_old.
+var ErrAdminDBTooOld = errors.New("admin: admin.db was written by a version before 0.3.0")
+
+// checkAdminDB refuses the admin.db at path when an earlier release wrote it, and writes nothing: the
+// file is read immutable (no lock, no -wal or -shm file). No file yet is fine.
+func checkAdminDB(path string) error {
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("admin: %w", err)
+	}
+	db, err := sql.Open("sqlite", immutableURI(path))
+	if err != nil {
+		return fmt.Errorf("admin: open %s: %w", path, err)
+	}
+	defer db.Close()
+	return checkDeletedAgentTable(db)
+}
+
+// checkDeletedAgentTable is ErrAdminDBTooOld when q's deleted_agent table has a row column.
+func checkDeletedAgentTable(q interface {
+	QueryRow(query string, args ...any) *sql.Row
+}) error {
+	var n int
+	if err := q.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('deleted_agent') WHERE name = 'row'`).
+		Scan(&n); err != nil {
+		return fmt.Errorf("admin: read admin.db: %w", err)
+	}
+	if n > 0 {
+		return ErrAdminDBTooOld
+	}
+	return nil
+}
+
+// immutableURI is the SQLite URI that opens the file at path read-only and immutable.
+func immutableURI(path string) string {
+	p := filepath.ToSlash(path)
+	if filepath.IsAbs(path) && !strings.HasPrefix(p, "/") {
+		p = "/" + p // a drive letter: file:/C:/…
+	}
+	return "file:" + (&url.URL{Path: p}).EscapedPath() + "?mode=ro&immutable=1"
+}
+
+// migrateRecovery creates the deletion record (an earlier release's, with a row column, is refused
+// before this runs: checkDeletedAgentTable).
 func (s *Store) migrateRecovery() error {
 	_, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS deleted_agent (
 	   aid TEXT NOT NULL,
-	   row TEXT NOT NULL,          -- full agent row as JSON (incl. base64 kel) for restore
 	   deleted_at TEXT NOT NULL,
 	   actor TEXT NOT NULL DEFAULT 'admin'
 	 )`)
 	return err
 }
 
-// ArchiveDeletedAgent stores a full agent row (JSON) before it is deleted, so the delete is reversible.
-func (s *Store) ArchiveDeletedAgent(aid, rowJSON, actor string) error {
+// RecordDeletedAgent notes that actor deleted aid, now.
+func (s *Store) RecordDeletedAgent(aid, actor string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`INSERT INTO deleted_agent(aid,row,deleted_at,actor) VALUES(?,?,?,?)`,
-		aid, rowJSON, nowRFC3339(), actor)
+	_, err := s.db.Exec(`INSERT INTO deleted_agent(aid,deleted_at,actor) VALUES(?,?,?)`,
+		aid, nowRFC3339(), actor)
 	return err
 }
 
-// DeletedAgent is one archived row.
+// DeletedAgent is one operator delete: whom, when, by whom.
 type DeletedAgent struct {
 	AID       string `json:"aid"`
-	RowJSON   string `json:"row"`
 	DeletedAt string `json:"deleted_at"`
 	Actor     string `json:"actor"`
 }
 
-// DeletedAgents lists what has been archived, newest first.
-//
-// The archive had a writer and no reader. "Any delete is reversible" was
-// true of the bytes and false of the operator: nothing could list what
-// had been archived or put one back, so reversing a delete meant opening
-// the SQLite file by hand. A recovery path only an author can walk is not
-// a recovery path.
+// DeletedAgents lists the newest limit deletes, newest first.
 func (s *Store) DeletedAgents(limit int) ([]DeletedAgent, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -58,174 +111,20 @@ func (s *Store) DeletedAgents(limit int) ([]DeletedAgent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(
-		`SELECT aid,row,deleted_at,actor FROM deleted_agent ORDER BY rowid DESC LIMIT ?`, limit)
+		`SELECT aid,deleted_at,actor FROM deleted_agent ORDER BY rowid DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []DeletedAgent
+	out := []DeletedAgent{}
 	for rows.Next() {
 		var d DeletedAgent
-		if err := rows.Scan(&d.AID, &d.RowJSON, &d.DeletedAt, &d.Actor); err != nil {
+		if err := rows.Scan(&d.AID, &d.DeletedAt, &d.Actor); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
 	}
 	return out, rows.Err()
-}
-
-// RestoreDeletedAgent puts one archived agent back into the hub registry.
-//
-// INSERT OR IGNORE, so restoring an agent that has since re-registered
-// leaves the live row alone: the agent's own registration is newer and
-// more authoritative than an operator's archive of an older one.
-//
-// The key history goes back with it. An agent restored without one is a
-// row rather than an identity, and every receipt it ever signed stays
-// uncheckable — which is the half of a delete that actually needs undoing.
-//
-// Archives written before guest mode was removed carry guest_quota. The
-// column no longer exists (A2A-DESIGN §9 row 访客模式), so the field is not
-// decoded and the rest of the row is restored.
-func (h *HubDB) RestoreDeletedAgent(rowJSON string) error {
-	var row struct {
-		AID          string `json:"aid"`
-		Name         string `json:"name"`
-		Caps         string `json:"caps"`
-		Summary      string `json:"summary"`
-		Readme       string `json:"readme"`
-		KELB64       string `json:"kel_b64"`
-		RegisteredAt string `json:"registered_at"`
-	}
-	if err := json.Unmarshal([]byte(rowJSON), &row); err != nil {
-		return fmt.Errorf("restore: malformed archive: %w", err)
-	}
-	if row.AID == "" || row.KELB64 == "" {
-		return fmt.Errorf("restore: archive carries no %s",
-			map[bool]string{true: "aid", false: "key history"}[row.AID == ""])
-	}
-	kel, err := base64.StdEncoding.DecodeString(row.KELB64)
-	if err != nil {
-		return fmt.Errorf("restore: key history is not base64: %w", err)
-	}
-	_, err = h.db.Exec(
-		`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,kel,registered_at)
-		 VALUES(?,?,?,?,?,?,?)`,
-		row.AID, row.Name, row.Caps, row.Summary, row.Readme,
-		kel, row.RegisteredAt)
-	return err
-}
-
-// FullAgentRow reads every column of one agent (incl. the kel blob) as a JSON string for archiving.
-func (h *HubDB) FullAgentRow(aid string) (string, error) {
-	var name, caps, summary, readme, registeredAt string
-	var kel []byte
-	err := h.db.QueryRow(
-		`SELECT name,caps,summary,readme,kel,registered_at FROM agent WHERE aid=?`, aid).
-		Scan(&name, &caps, &summary, &readme, &kel, &registeredAt)
-	if err != nil {
-		return "", err
-	}
-	row := map[string]any{
-		"aid": aid, "name": name, "caps": caps, "summary": summary, "readme": readme,
-		"kel_b64": encB64(kel), "registered_at": registeredAt,
-	}
-	b, _ := json.Marshal(row)
-	return string(b), nil
-}
-
-// RestoreAgentsFromBackup INSERT-OR-IGNOREs agents from a backup hub.db into the live hub store, run as
-// a one-shot CLI recovery (anet-hub-admin --restore-agents-from <backup.db>). It only ADDS rows whose
-// AID is absent — it can never delete or overwrite a live agent. Returns (before, after, restored).
-//
-// The column list names only columns present in both the current schema and every earlier one, so a
-// backup written before guest mode was removed (which still has agent.guest_quota) restores into the
-// current schema: the extra column is not selected.
-func RestoreAgentsFromBackup(hubDataDir, backupPath string) (before, after int, err error) {
-	hub, err := OpenHubDB(hubDataDir)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer hub.Close()
-	if err = hub.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&before); err != nil {
-		return 0, 0, err
-	}
-	// Attach the backup and copy any missing agents (full row incl. kel).
-	if _, err = hub.db.Exec(`ATTACH DATABASE ? AS bak`, backupPath); err != nil {
-		return before, before, fmt.Errorf("attach backup: %w", err)
-	}
-	defer hub.db.Exec(`DETACH DATABASE bak`)
-	if _, err = hub.db.Exec(`INSERT OR IGNORE INTO agent(aid,name,caps,summary,readme,kel,registered_at)
-	   SELECT aid,name,caps,summary,readme,kel,registered_at FROM bak.agent`); err != nil {
-		return before, before, fmt.Errorf("restore insert: %w", err)
-	}
-	if err = hub.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&after); err != nil {
-		return before, after, err
-	}
-	return before, after, nil
-}
-
-// PruneAgentsExcept deletes every agent whose AID is NOT in keep, run as a one-shot CLI
-// (anet-hub-admin --keep-only-agents "aid1,aid2,..."). Used to undo an over-broad restore. Refuses to
-// run with an empty keep list (which would wipe the registry). The 07-19 backup remains, so this is
-// reversible via --restore-agents-from. Returns (before, after, removed).
-func PruneAgentsExcept(hubDataDir string, keep []string) (before, after, removed int, err error) {
-	if len(keep) == 0 {
-		return 0, 0, 0, fmt.Errorf("prune: empty keep list refused (would wipe the registry)")
-	}
-	hub, err := OpenHubDB(hubDataDir)
-	if err != nil {
-		return 0, 0, 0, err
-	}
-	defer hub.Close()
-	if err = hub.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&before); err != nil {
-		return 0, 0, 0, err
-	}
-	ph := make([]string, len(keep))
-	args := make([]any, len(keep))
-	for i, k := range keep {
-		ph[i] = "?"
-		args[i] = k
-	}
-	tx, err := hub.db.Begin()
-	if err != nil {
-		return before, before, 0, err
-	}
-	defer tx.Rollback()
-	// Peers that learned a pruned agent's A2A card are told, as for
-	// DeleteAgent.
-	if err := withdrawA2ACards(tx, `a.aid NOT IN (`+joinComma(ph)+`)`, args...); err != nil {
-		return before, before, 0, err
-	}
-	q := `DELETE FROM agent WHERE aid NOT IN (` + joinComma(ph) + `)`
-	res, err := tx.Exec(q, args...)
-	if err != nil {
-		return before, before, 0, err
-	}
-	n, _ := res.RowsAffected()
-	// The A2A card and its index rows go with the agent, as in DeleteAgent.
-	if err := deleteA2AOrphans(tx); err != nil {
-		return before, before, 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return before, before, 0, err
-	}
-	removed = int(n)
-	if err = hub.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&after); err != nil {
-		return before, after, removed, err
-	}
-	return before, after, removed, nil
-}
-
-func joinComma(ss []string) string {
-	out := ""
-	for i, s := range ss {
-		if i > 0 {
-			out += ","
-		}
-		out += s
-	}
-	return out
 }
 
 // destructiveLimiter bounds how many destructive registry ops (deletes) may run in a rolling window, so
@@ -258,11 +157,4 @@ func (d *destructiveLimiter) allow() bool {
 	}
 	d.times = append(d.times, now)
 	return true
-}
-
-func encB64(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	return base64.StdEncoding.EncodeToString(b)
 }

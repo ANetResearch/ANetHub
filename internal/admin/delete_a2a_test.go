@@ -2,6 +2,7 @@ package admin
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,7 +15,8 @@ import (
 
 // An operator delete takes the agent's A2A card and its skill and tag
 // index rows with the agent row, and leaves every other agent's alone
-// (hub brief 05 H2: DeleteAgent used to leave orphan rows behind).
+// (hub brief 05 H2: DeleteAgent used to leave orphan rows behind); it is
+// aghub.DeregisterTx's deregSteps that removes them now.
 func TestDeleteAgentRemovesTheA2ACardAndItsIndexes(t *testing.T) {
 	dir, provAID, reqAID := buildHubDB(t)
 	db := a2aRowsFor(t, dir, provAID, reqAID)
@@ -23,26 +25,15 @@ func TestDeleteAgentRemovesTheA2ACardAndItsIndexes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer hub.Close()
-	if err := hub.DeleteAgent(provAID); err != nil {
+	if _, err := hub.DeleteAgent(provAID); err != nil {
 		t.Fatal(err)
 	}
 	checkA2ARows(t, db, map[string]int{provAID: 0, reqAID: 1})
 	// A delete of an AID that is not registered still says so and removes
 	// nothing.
-	if err := hub.DeleteAgent("bafyunknown"); err == nil {
-		t.Error("deleting an unknown AID reported success")
+	if _, err := hub.DeleteAgent("bafyunknown"); !errors.Is(err, aghub.ErrNotRegistered) {
+		t.Errorf("deleting an unknown AID: %v, want aghub.ErrNotRegistered", err)
 	}
-}
-
-// The keep-list prune removes agent rows in bulk; the A2A rows of every
-// pruned agent go with them.
-func TestPruneRemovesTheA2ACardsOfPrunedAgents(t *testing.T) {
-	dir, provAID, reqAID := buildHubDB(t)
-	db := a2aRowsFor(t, dir, provAID, reqAID)
-	if _, _, removed, err := PruneAgentsExcept(dir, []string{reqAID}); err != nil || removed != 1 {
-		t.Fatalf("prune: removed %d, %v", removed, err)
-	}
-	checkA2ARows(t, db, map[string]int{provAID: 0, reqAID: 1})
 }
 
 // a2aRowsFor writes, for each aid, rows as admission writes them (the card
@@ -85,11 +76,11 @@ func checkA2ARows(t *testing.T, db *sql.DB, want map[string]int) {
 }
 
 // An operator delete of an agent whose A2A card federates puts a
-// withdrawal on the hub's /fed/v2/cards stream, after every entry already
-// there, so a peer that learned the card delists it; a hub-local agent's
-// delete names nothing on the stream. The same for the keep-list prune.
+// withdrawal on the hub's card stream, after every entry already there, so
+// a peer that learned the card delists it; a hub-local agent's delete names
+// nothing on the stream.
 func TestAnOperatorDeleteWithdrawsAFederatedA2ACard(t *testing.T) {
-	for _, prune := range []bool{false, true} {
+	{
 		dir, provAID, reqAID := buildHubDB(t)
 		db := a2aRowsFor(t, dir, provAID, reqAID)
 		for _, q := range []struct {
@@ -104,22 +95,16 @@ func TestAnOperatorDeleteWithdrawsAFederatedA2ACard(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if prune {
-			if _, _, _, err := PruneAgentsExcept(dir, []string{"bafykeep"}); err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			hub, err := OpenHubDB(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, aid := range []string{provAID, reqAID} {
-				if err := hub.DeleteAgent(aid); err != nil {
-					t.Fatal(err)
-				}
-			}
-			hub.Close()
+		hub, err := OpenHubDB(dir)
+		if err != nil {
+			t.Fatal(err)
 		}
+		for _, aid := range []string{provAID, reqAID} {
+			if _, err := hub.DeleteAgent(aid); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hub.Close()
 		hs, err := aghub.Open(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -131,7 +116,7 @@ func TestAnOperatorDeleteWithdrawsAFederatedA2ACard(t *testing.T) {
 		}
 		if len(entries) != 1 || entries[0].Format != federation.FormatWithdrawal || entries[0].FedSeq != 7 ||
 			!strings.Contains(string(entries[0].Card), provAID) {
-			t.Fatalf("prune=%v: the stream after the delete: %+v", prune, entries)
+			t.Fatalf("the stream after the delete: %+v", entries)
 		}
 	}
 }

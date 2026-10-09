@@ -336,7 +336,7 @@ const WS = [
     {label:'安全治理', items:[
       {id:'risk', name:'风险处置', icon:'shield'},
       {id:'enforcement', name:'违规下架', icon:'trash'},
-      {id:'recycle', name:'回收站', icon:'inbox'}]},
+      {id:'recycle', name:'已删除', icon:'inbox'}]},
   ]},
   {id:'data', name:'数据智能', icon:'db', def:'overview', sections:[
     {items:[{id:'overview', name:'数据总览', icon:'db'}]},
@@ -451,7 +451,6 @@ async function vOpsOverview(){
   const prodLines = st? Object.keys(st.product_lines||{}).filter(k=>(st.product_lines[k]||[]).length) : [];
   const flagged = ags? ags.filter(a=>a.moderation==='flagged') : [];
   const delisted = ags? ags.filter(a=>a.moderation==='delisted') : [];
-  const backlog = ags? ags.filter(a=>a.mailbox_backlog>0) : [];
   const capCount = st? Object.keys(st.capabilities||{}).length : 0;
 
   // flywheel
@@ -468,7 +467,6 @@ async function vOpsOverview(){
   const items=[];
   flagged.forEach(a=>items.push({sev:1,label:'高', txt:`${esc(a.name||shortAid(a.aid))} 已标记关注`, aid:a.aid}));
   if(sessTotal>0) items.push({sev:2,label:'中', txt:`admin 数据目录仍有 ${num(sessTotal)} 条历史采收会话，待生产清理（deploy/cleanup-content-v0.2.sh）`, act:'data/sessions'});
-  backlog.slice(0,5).forEach(a=>items.push({sev:2,label:'中', txt:`${esc(a.name||shortAid(a.aid))} 信箱积压 ${a.mailbox_backlog}`, aid:a.aid}));
   items.sort((a,b)=>a.sev-b.sev);
   const sevBadge = s => s===0?'<span class="badge err">严重</span>':s===1?'<span class="badge warn">高</span>':'<span class="badge cap">中</span>';
   const actionRows = items.length? items.slice(0,10).map(it=>`
@@ -548,8 +546,7 @@ async function vAgents(){
       <td>${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</td>
       <td><div class="wrap">${caps||'<span class="faint">-</span>'}</div></td>
       <td>${a.review_count?`${a.avg_rating.toFixed(1)} <span class="faint">(${a.review_count})</span>`:'<span class="faint">-</span>'}</td>
-      <td>${a.review_count||0}<span class="faint"> / ${a.reviews_written||0}</span></td>
-      <td>${a.mailbox_backlog>0?`<span class="badge warn">${a.mailbox_backlog}</span>`:'<span class="faint">0</span>'}</td>
+      <td>${a.review_count||0}</td>
       <td class="muted" style="white-space:nowrap">${fmtTime(a.registered_at)}</td></tr>`;
   }).join('');
   $('#main').innerHTML = shell({
@@ -564,8 +561,8 @@ async function vAgents(){
       </div>
       <span class="sp"></span><span class="muted" style="font-size:12.5px">${list.length} 个</span></div>
     <div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>Agent</th><th>所有权</th><th>能力</th><th>评分</th><th>评价 收/写</th><th>积压</th><th>注册时间</th></tr>
-      ${rows||'<tr><td colspan="7" class="faint" style="padding:24px;text-align:center">无结果</td></tr>'}</table></div></div>`,
+      <tr><th>Agent</th><th>所有权</th><th>能力</th><th>评分</th><th>收到的评价</th><th>注册日</th></tr>
+      ${rows||'<tr><td colspan="6" class="faint" style="padding:24px;text-align:center">无结果</td></tr>'}</table></div></div>`,
   });
   const inp=$('#agq'); inp.addEventListener('keydown',e=>{if(e.key==='Enter'){agentsQ=inp.value;vAgents()}});
 }
@@ -598,22 +595,21 @@ async function delOfficial(id){
 /* ---- 风险处置 (moderation queue) ---- */
 async function vRisk(){
   const d = await api('/agents');
-  const list = (d.agents||[]).filter(a=>a.moderation==='flagged' || a.mailbox_backlog>0);
+  const list = (d.agents||[]).filter(a=>a.moderation==='flagged');
   const rows = list.map(a=>`<tr>
     <td><div style="font-weight:550">${esc(a.name||shortAid(a.aid))}</div><div class="mono faint">${shortAid(a.aid)}</div></td>
     <td>${a.moderation?`<span class="badge err">${esc(a.moderation)}</span>`:'<span class="badge cap">-</span>'}</td>
-    <td>${a.mailbox_backlog>0?`<span class="badge warn">积压 ${a.mailbox_backlog}</span>`:'<span class="faint">0</span>'}</td>
     <td>${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</td>
     <td><div class="row">
       <button class="btn sm" onclick="moderate('${esc(a.aid)}','ok')">恢复正常</button>
       <button class="btn sm" onclick="goAgent('${esc(a.aid)}','gov')">${ic('shield')} 治理</button>
     </div></td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'风险处置', sub:'统一风险队列：标记关注、信箱异常积压 — 处置动作全部落审计',
+    title:'风险处置', sub:'统一风险队列：被标记关注的 Agent — 处置动作全部落审计',
     body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>Agent</th><th>监管状态</th><th>信箱</th><th>所有权</th><th>操作</th></tr>${rows}</table></div></div>
-      <div class="note">内容违规/权限过大/异常调用等风险类型需要更细的信号接入，当前以监管标记与信箱积压近似。</div>`
-      : empty('当前无风险项','没有被标记关注或信箱异常积压的 Agent。', `<button class="btn" onclick="location.hash='#/operations/agents'">查看全部 Agent</button>`),
+      <tr><th>Agent</th><th>监管状态</th><th>所有权</th><th>操作</th></tr>${rows}</table></div></div>
+      <div class="note">内容违规/权限过大/异常调用等风险类型需要更细的信号接入，当前以监管标记近似。运营面不给出单个 Agent 的信箱积压，全 hub 的积压见总览。</div>`
+      : empty('当前无风险项','没有被标记关注的 Agent。', `<button class="btn" onclick="location.hash='#/operations/agents'">查看全部 Agent</button>`),
   });
 }
 
@@ -626,12 +622,12 @@ async function vEnforcement(){
     <td>${a.moderation==='delisted'?'<span class="badge err">已下架</span>':'<span class="badge warn">关注</span>'}</td>
     <td class="muted">${esc(a.moderation_note||'-')}</td>
     <td><div class="row">
-      <button class="btn sm" onclick="moderate('${esc(a.aid)}','ok')">恢复</button>
+      <button class="btn sm" onclick="moderate('${esc(a.aid)}','ok')">恢复正常</button>
       <button class="btn sm danger" onclick="delAgent('${esc(a.aid)}')">${ic('trash')} 移除注册</button>
     </div></td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'违规与下架', sub:'监管闭环：标记 → 下架 → 从注册表移除（需二次确认 + 审计）。移除前整行归档，可在回收站恢复；移除后身份可重新注册，黑名单强制阻断为路线图项。',
-    actions:`<button class="btn" onclick="location.hash='#/operations/recycle'">${ic('inbox')} 回收站</button>`,
+    title:'违规与下架', sub:'监管闭环：标记 → 下架 → 移除注册（需二次确认 + 审计）。移除即撤销准入并注销，与 anet-hub admissions revoke 相同；撤销误删运行 anet-hub admit &lt;AID&gt;。',
+    actions:`<button class="btn" onclick="location.hash='#/operations/recycle'">${ic('inbox')} 已删除</button>`,
     body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
       <tr><th>Agent</th><th>状态</th><th>原因</th><th>操作</th></tr>${rows}</table></div></div>`
       : empty('暂无处置对象','没有处于关注或下架状态的 Agent。'),
@@ -641,37 +637,41 @@ async function moderate(aid,status){
   try{ await api('/agents/'+encodeURIComponent(aid)+'/moderate',{method:'POST',body:JSON.stringify({status,note:$('#mNote')?.value||''})}); toast('已更新监管状态'); refreshCurrent() }catch(e){toast(e.message)}
 }
 async function delAgent(aid){
-  if(!confirm('确认将该 agent 从公共注册表移除？\n\n移除前整行（含 KEL）会归档，可在「安全治理 › 回收站」恢复。其评价会保留，身份也可重新注册。')) return;
-  try{ await api('/agents/'+encodeURIComponent(aid),{method:'DELETE'}); toast('已移除，可在回收站恢复'); location.hash='#/operations/recycle'; }catch(e){toast(e.message)}
+  if(!confirm('确认移除该 agent？\n\n移除即撤销它的准入并注销：它的余额仍记在账上，它收到的评价保留。\n要撤销，运行 anet-hub admit '+aid+'，对方的 anet 下次重新注册时就会回来。')) return;
+  try{ const r = await api('/agents/'+encodeURIComponent(aid),{method:'DELETE'}); toast(r.message||'已移除'); location.hash='#/operations/recycle'; }catch(e){toast(e.message)}
 }
 
-/* ---- 回收站 (deleted agents) ----
-   删除前归档的整行一直有写入方而没有读取方：GET /api/deleted 与
-   POST /api/deleted/{aid}/restore 早已可用，界面上却没有入口，误删只能用 curl 撤销。 */
+/* ---- 已删除 (deleted agents) ----
+   运营面删除即撤销准入并注销（与 anet-hub admissions revoke 相同）。这里只记谁、何时、由谁删除；
+   没有“恢复旧记录”：撤销误删是运行 anet-hub admit <AID>，对方的 anet 下次重新注册时以自己当前的
+   密钥历史回来。批量误删：导出 admit 文件，交给 anet-hub admit --file。 */
 async function vRecycle(){
   const d = await api('/deleted');
   const list = d.deleted||[];
-  const rows = list.map(x=>{
-    let r={}; try{ r=JSON.parse(x.row||'{}') }catch(e){}
-    let caps=[]; try{ caps=JSON.parse(r.caps||'[]')||[] }catch(e){}
-    return `<tr>
-      <td><div style="font-weight:550">${esc(r.name||shortAid(x.aid))}</div><div class="mono faint">${shortAid(x.aid)}</div></td>
-      <td class="wrap">${caps.slice(0,5).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">-</span>'}</td>
+  const rows = list.map(x=>`<tr>
+      <td class="mono" style="word-break:break-all">${esc(x.aid)}</td>
       <td class="muted" style="white-space:nowrap">${fmtTime(x.deleted_at)}</td>
       <td class="muted">${esc(x.actor||'-')}</td>
-      <td><button class="btn sm" onclick="restoreAgent('${esc(x.aid)}')">${ic('refresh')} 恢复</button></td></tr>`;
-  }).join('');
+      <td class="mono faint" style="word-break:break-all">anet-hub admit ${esc(x.aid)}</td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'回收站', sub:'被运营者移除的 Agent 归档（含 KEL 密钥历史）。恢复后重新进入公共注册表，监管状态复位为正常。',
+    title:'已删除', sub:'被运营者删除（撤销准入并注销）的 Agent。要撤销一次误删，在 hub 主机上运行 anet-hub admit &lt;AID&gt;，对方的 anet 下次重新注册时就会回来。',
+    actions: list.length? `<button class="btn" onclick="exportAdmitFile()">${ic('file')} 导出 admit 文件</button>`:'',
     body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>Agent</th><th>能力</th><th>移除时间</th><th>操作者</th><th>操作</th></tr>${rows}</table></div></div>
-      <div class="note">同一 AID 多次删除会有多条归档，恢复取最新一条。若该身份在删除后已重新注册，现有记录更新更权威，恢复不会覆盖它。</div>`
-      : empty('回收站为空','没有被移除的 Agent。删除操作会在此归档，可随时恢复。'),
+      <tr><th>AID</th><th>删除时间</th><th>操作者</th><th>撤销命令</th></tr>${rows}</table></div></div>
+      <div class="note">批量误删：导出的文件（GET /admin/api/deleted?format=admit，每行一个 AID）可直接作为 anet-hub admit --file 的输入。本 hub 开放注册时，被删除的身份仍可重新注册：删除不等于封禁。</div>`
+      : empty('没有已删除的 Agent','运营面删除的 Agent 会列在这里，并给出撤销命令。'),
   });
 }
-async function restoreAgent(aid){
-  if(!confirm('确认将该 agent 恢复到公共注册表？')) return;
-  try{ await api('/deleted/'+encodeURIComponent(aid)+'/restore',{method:'POST'}); toast('已恢复'); refreshCurrent() }catch(e){toast(e.message)}
+async function exportAdmitFile(){
+  try{
+    const r = await fetch(BASE+'/api/deleted?format=admit&limit=500', {headers:{'Authorization':'Bearer '+TOKEN}});
+    if(r.status===401){logout();throw new Error('登录已失效')}
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const blob = new Blob([await r.text()], {type:'text/plain'});
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'deleted-aids.txt';
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+    toast('已导出：在 hub 主机上运行 anet-hub admit --file deleted-aids.txt');
+  }catch(e){toast(e.message)}
 }
 
 /* ---- 商店目录 ---- */
@@ -908,7 +908,7 @@ async function vCollab(){
     <td>${'★'.repeat(Math.max(0,Math.min(5,r.rating)))}<span class="faint">${'☆'.repeat(5-Math.max(0,Math.min(5,r.rating)))}</span></td>
     <td class="mono">${r.subject_aid?`<a href="javascript:goAgent('${esc(r.subject_aid)}')">${shortAid(r.subject_aid)}</a>`:'-'}</td>
     <td class="muted" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.comment||'-')}</td>
-    <td class="muted">${fmtTime(new Date((r.created_at||0)*1000).toISOString())}</td></tr>`).join('');
+    <td class="muted">${new Date((r.created_day||0)*86400000).toISOString().slice(0,10)}</td></tr>`).join('');
   $('#main').innerHTML = shell({
     title:'共脑协同', sub:'多 Agent 协同的公开信号 —— 已公开回执、可信评价与在途积压（不含交互内容）',
     body:`
@@ -983,14 +983,14 @@ async function vMatrix(){
 /* ---- Agent 网络 ---- */
 async function vNetwork(){
   const d = await api('/agents');
-  const agents = (d.agents||[]).slice().sort((a,b)=>(((b.review_count||0)+(b.reviews_written||0))-((a.review_count||0)+(a.reviews_written||0)))).slice(0,40);
+  const agents = (d.agents||[]).slice().sort((a,b)=>((b.review_count||0)-(a.review_count||0))).slice(0,40);
   $('#main').innerHTML = shell({
-    title:'Agent 网络', sub:'注册在册 Agent 与 Hub 的连接关系 —— 节点大小按评价量（收到+写出），颜色区分官方/社区/风险；点击进入详情',
+    title:'Agent 网络', sub:'注册在册 Agent 与 Hub 的连接关系 —— 节点大小按收到的评价数，颜色区分官方/社区/风险；点击进入详情',
     body:`
     <div class="card"><div class="bd">${networkSVG(agents)}</div></div>
     <div class="wrap" style="margin-top:10px;font-size:12px">
       <span class="badge official">官方</span><span class="badge community">社区</span><span class="badge err">风险</span>
-      <span class="muted">节点大小 = 评价量（收到+写出）</span></div>
+      <span class="muted">节点大小 = 收到的评价数</span></div>
     <div class="note">当前边表示与 Hub 的注册/中继关系；Agent↔Agent 协同边需要 OKF collaboration.* 数据，为后续阶段。</div>`,
   });
 }
@@ -1001,7 +1001,7 @@ function networkSVG(agents){
   agents.forEach((a,i)=>{
     const ang=(i/n)*Math.PI*2 - Math.PI/2;
     const x=cx+R*Math.cos(ang), y=cy+R*Math.sin(ang);
-    const tk=(a.review_count||0)+(a.reviews_written||0);
+    const tk=a.review_count||0;
     const r=Math.max(5,Math.min(16,5+Math.sqrt(tk)*1.6));
     const col=a.moderation?'var(--err)':a.tier==='official'?'var(--primary)':'var(--fg-faint)';
     edges+=`<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`;
@@ -1067,7 +1067,7 @@ async function vAudit(){
     <td class="mono">${esc(a.action)}</td><td class="mono">${a.target?`<a href="javascript:goAgent('${esc(a.target)}')">${shortAid(a.target)}</a>`:'-'}</td>
     <td class="muted" style="max-width:420px;word-break:break-all">${esc((a.detail||'').slice(0,300))}</td></tr>`).join('');
   $('#main').innerHTML = shell({
-    title:'审计日志', sub:'全部管理操作留痕（监管动作 / 注册表删除与恢复 / 官方登记）— 亦嵌入各 Agent 详情的「审计」页',
+    title:'审计日志', sub:'全部管理操作留痕（监管动作 / 注册表删除 / 官方登记）— 亦嵌入各 Agent 详情的「审计」页',
     body:`<div class="card"><div class="tbwrap"><table class="tb"><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr>
     ${rows||'<tr><td colspan="5" class="faint" style="padding:24px;text-align:center">暂无</td></tr>'}</table></div></div>`,
   });
@@ -1120,8 +1120,8 @@ function renderAgentTab(tab, ctx){
     el.innerHTML = `
       <div class="grid g4 mb16">
         ${kpi('评分', a.review_count?a.avg_rating.toFixed(2):'-', a.review_count?`${a.review_count} 条评价`:'暂无评价', 'star')}
-        ${kpi('评价 收/写', `${a.review_count||0}/${a.reviews_written||0}`, '作为提供方 / 作为请求方', 'activity')}
-        ${kpi('信箱积压', a.mailbox_backlog||0, '未投递', 'inbox')}
+        ${kpi('收到的评价', a.review_count||0, '评价不记评价人', 'activity')}
+        ${kpi('上架', a.listed?'是':'否', '有能力或简介，且已发布密钥', 'inbox')}
         ${kpi('所有权', isOff?'官方':'社区', isOff?'运营面登记':'注册表', 'users')}
       </div>
       <div class="card"><div class="hd">${ic('bot')} 基本信息</div><div class="bd"><div class="kv">
@@ -1160,7 +1160,7 @@ function renderAgentTab(tab, ctx){
           <button class="btn sm" onclick="moderate('${esc(aid)}','ok')">恢复正常</button>
           <button class="btn sm danger" onclick="delAgent('${esc(aid)}')">${ic('trash')} 移除注册</button>
         </div>
-        <div class="faint" style="font-size:12px;margin-top:8px">移除后该身份可重新注册（黑名单强制阻断为 hub 侧路线图项）。运营面不管理任何 agent 的授权名单：谁可以委派给一个 agent 由该 agent 自己的 daemon 决定。</div>
+        <div class="faint" style="font-size:12px;margin-top:8px">移除即撤销准入并注销，余额仍记在账上；撤销误删运行 anet-hub admit ${esc(aid)}。本 hub 开放注册时它仍可重新注册：删除不等于封禁。运营面不管理任何 agent 的授权名单：谁可以委派给一个 agent 由该 agent 自己的 daemon 决定。</div>
       </div></div>`;
   }
   else if(tab==='audit'){

@@ -233,6 +233,45 @@ func (s *Store) Redemptions(aid string, limit int) (RedemptionWindow, error) {
 	return w, rows.Err()
 }
 
+// WindowRedemptions is what anet-hub redemptions lists (hub-payment-privacy
+// PAY-U2): every redemption of the ledger window (PAY-L6), of every account,
+// oldest first, with the window's count (Total) and sum. Rows older than the
+// window that the janitor has not deleted yet are not part of it. It only
+// reads, so it runs beside a running hub.
+func (s *Store) WindowRedemptions() (RedemptionWindow, error) {
+	w := RedemptionWindow{Redemptions: []Redemption{}}
+	rows, err := s.db.Query(
+		`SELECT seq, auth_id, aid, amount, reference, at FROM credit_redemption
+		 WHERE at >= ? ORDER BY at, seq`, windowStart(s.now()))
+	if err != nil {
+		return w, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r Redemption
+		var amt int64
+		if err := rows.Scan(&r.Seq, &r.AuthID, &r.AID, &amt, &r.Reference, &r.At); err != nil {
+			return w, err
+		}
+		// A row from before the amount range check is listed with its
+		// stored figure and not counted in the sum (see Redemptions).
+		if n, ok := storedAmount(amt); ok {
+			r.Amount = n
+			if w.Sum += n; w.Sum < n {
+				w.Sum = math.MaxUint64 // past what a sum can state
+			}
+		} else {
+			r.StoredAmount = amt
+		}
+		if w.OldestSeq == 0 || r.Seq < w.OldestSeq {
+			w.OldestSeq = r.Seq
+		}
+		w.Redemptions = append(w.Redemptions, r)
+	}
+	w.Total = len(w.Redemptions)
+	return w, rows.Err()
+}
+
 // redemptionOf is the redemption recorded for an authorization, with the
 // settlement's receipt, if there is one.
 func (s *Store) redemptionOf(hubAID, authID string) (Redemption, bool, error) {

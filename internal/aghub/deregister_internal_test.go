@@ -36,6 +36,10 @@ var writeTombstoneRe = regexp.MustCompile(`(?i)\b(INSERT\s+(OR\s+\w+\s+)?INTO|RE
 // writeAdmittedRe matches SQL that writes the admission list.
 var writeAdmittedRe = regexp.MustCompile(`(?i)\b(INSERT\s+(OR\s+\w+\s+)?INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+"?admitted"?\b`)
 
+// writeAgentRe matches SQL that writes rows of the agent table (and not of
+// agent_cap or another agent_… table).
+var writeAgentRe = regexp.MustCompile(`(?i)\b(INSERT\s+(OR\s+\w+\s+)?INTO|REPLACE\s+INTO|UPDATE|DELETE\s+FROM)\s+"?agent"?(\s|\(|;|$)`)
+
 // sqlLiterals is every string literal of the non-test Go files of dir, by
 // file.
 func sqlLiterals(t *testing.T, dir string) map[string][]string {
@@ -66,10 +70,14 @@ func sqlLiterals(t *testing.T, dir string) map[string][]string {
 	return out
 }
 
-// TestSingleDeregisterPath (PAY-O1; this package's half — PAY-16 extends
-// it to internal/admin and cmd/anet-hub-admin): in internal/aghub only
-// deregister.go deletes agent rows and writes tombstones, and only
-// admission.go and deregister.go write the admission list.
+// TestSingleDeregisterPath (PAY-O1): in internal/aghub only deregister.go
+// deletes agent rows and writes tombstones, and only admission.go and
+// deregister.go write the admission list; nothing else in the module
+// deletes agent rows; and the operator plane (internal/admin,
+// cmd/anet-hub-admin) writes no agent row, no tombstone and no admission
+// list at all, since its delete is DeregisterTx and nothing of it puts a
+// stored key history back into the registry (PAY-O3, PAY-O4; M-PAY-43,
+// M-PAY-45).
 func TestSingleDeregisterPath(t *testing.T) {
 	lits := sqlLiterals(t, ".")
 	if len(lits) == 0 {
@@ -102,6 +110,51 @@ func TestSingleDeregisterPath(t *testing.T) {
 	// nothing.
 	if found["agent"] != 1 || found["departed_kel"] == 0 || found["admitted"] == 0 {
 		t.Errorf("the scan found %v; deregister.go deletes the agent row exactly once", found)
+	}
+
+	// The operator plane writes none of the three.
+	for _, dir := range []string{filepath.Join("..", "admin"), filepath.Join("..", "..", "cmd", "anet-hub-admin")} {
+		lits := sqlLiterals(t, dir)
+		if len(lits) == 0 {
+			t.Fatalf("no Go files scanned in %s", dir)
+		}
+		for file, ss := range lits {
+			for _, s := range ss {
+				if writeAgentRe.MatchString(s) || writeTombstoneRe.MatchString(s) || writeAdmittedRe.MatchString(s) {
+					t.Errorf("%s writes the registry, a tombstone or the admission list: %q", filepath.Join(dir, file), s)
+				}
+			}
+		}
+	}
+
+	// No other package of the module deletes agent rows.
+	root := filepath.Join("..", "..")
+	dirs := 0
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return err
+		}
+		if n := d.Name(); p != root && (strings.HasPrefix(n, ".") || n == "testdata" || n == "node_modules") {
+			return filepath.SkipDir
+		}
+		if filepath.Clean(p) == filepath.Clean(filepath.Join(root, "internal", "aghub")) {
+			return nil // scanned above
+		}
+		dirs++
+		for file, ss := range sqlLiterals(t, p) {
+			for _, s := range ss {
+				if deleteAgentRe.MatchString(s) {
+					t.Errorf("%s deletes agent rows outside DeregisterTx: %q", filepath.Join(p, file), s)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirs < 5 {
+		t.Errorf("the module walk saw %d directories; it does not see the module", dirs)
 	}
 }
 

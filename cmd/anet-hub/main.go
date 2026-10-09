@@ -71,13 +71,24 @@ func defineFlags(fs *flag.FlagSet) *hubFlags {
 	f.mailboxBytes = fs.Int64("relay-mailbox-bytes", def.MailboxBytes,
 		"undelivered envelope bytes one recipient may have queued (507 above it)")
 	f.undeliveredTTL = fs.Duration("relay-ttl", def.UndeliveredTTL,
-		"how long an undelivered envelope is kept before it is deleted")
+		"how long an undelivered envelope is kept before it is deleted: at most "+
+			aghub.MaxUndeliveredTTL.String()+" ("+daysText(aghub.MaxUndeliveredTTL)+", the message lifetime "+
+			"minus the delivery deadline minus the allowed clock skew), since an envelope kept longer could "+
+			"outlive the only key that opens it; a longer value stops the start")
 	f.pollBudget = fs.Int64("relay-poll-budget", def.PollBudget,
 		"cumulative envelope bytes one /relay/poll response returns (the first message always)")
 	f.registerPerMinute = fs.Float64("register-rate", def.RegisterPerMinute,
 		"per-client-IP /register token refill, per minute (429 when empty)")
 	f.registerBurst = fs.Int("register-burst", def.RegisterBurst, "per-client-IP /register token bucket size")
 	return f
+}
+
+// daysText writes d as days, hours and minutes ("14 days 22 h 55 min"), for
+// a help text whose value is in hours.
+func daysText(d time.Duration) string {
+	days := d / (24 * time.Hour)
+	d -= days * 24 * time.Hour
+	return fmt.Sprintf("%d days %d h %d min", days, d/time.Hour, (d%time.Hour)/time.Minute)
 }
 
 // limits collects the relay limit flags. The relay's send buckets
