@@ -149,3 +149,35 @@ func restoreCopy(t *testing.T, c *identity.Controller) *identity.Controller {
 	}
 	return cp
 }
+
+// KEL H-36: the store signs through an identity.Signer. Handed a snapshot of
+// the hub identity, it signs the notices it states under the key state the
+// snapshot names, and they verify against the hub's key history.
+func TestStoreSignsThroughASigner(t *testing.T) {
+	id := aghub.HubIdentityForTest(t)
+	store, err := aghub.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.SetHubKey(identity.SnapshotOf(id.Ctrl))
+	agent, err := aghub.NewAgentForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kel, err := identity.MarshalKEL(agent.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgent(agent.AID(), "agent", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	n, why, err := store.NoticeFor(agent.AID())
+	if err != nil || why != "" {
+		t.Fatalf("notice: %q %v", why, err)
+	}
+	hubKELs := func(aid string) ([]identity.SignedEvent, bool) { return id.Ctrl.KEL(), aid == id.AID }
+	if err := identity.VerifyNotice(n, agent.KEL(), hubKELs, uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatalf("the notice the snapshot signed: %v", err)
+	}
+}

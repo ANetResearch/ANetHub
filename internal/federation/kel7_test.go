@@ -357,6 +357,14 @@ func TestFedBodyBudget(t *testing.T) {
 	reading := make(chan struct{}, 8)
 	testHookPeerBodyRead = func() { reading <- struct{}{} }
 	t.Cleanup(func() { testHookPeerBodyRead = nil })
+	waitRead := func(what string) {
+		t.Helper()
+		select {
+		case <-reading:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: its body was not read", what)
+		}
+	}
 	body := func(n int, b byte) []byte { return bytes.Repeat([]byte{b}, n) }
 	send := func(r *http.Request) (int, string, http.Header) {
 		resp, err := http.DefaultClient.Do(r)
@@ -370,11 +378,14 @@ func TestFedBodyBudget(t *testing.T) {
 	// 1: 3 KiB, its upload held open.
 	b1 := body(3<<10, 1)
 	pr, pw := io.Pipe()
+	// A failure below must not leave the upload open: the test server
+	// would wait for it to end.
+	t.Cleanup(func() { pw.CloseWithError(io.ErrUnexpectedEOF) })
 	req1 := a.signedReq(b.id, relayauth.ActionFedForward, http.MethodPost, "/fed/v3/forward", b1, 0, nil)
 	req1.Body, req1.ContentLength, req1.GetBody = pr, int64(len(b1)), nil
 	done1 := make(chan int, 1)
 	go func() { code, _, _ := send(req1); done1 <- code }()
-	<-reading
+	waitRead("the held request")
 	if held := a.svc.bodies.held(); held != int64(len(b1)) {
 		t.Fatalf("a reading request holds %d", held)
 	}
@@ -393,7 +404,7 @@ func TestFedBodyBudget(t *testing.T) {
 	if code, reason, _ := send(req3); code != 429 || reason != "source_rate" {
 		t.Fatalf("a chunked body over the bound: %d %s", code, reason)
 	}
-	<-reading
+	waitRead("the chunked request")
 	// 1 completes and gives back what it held.
 	go func() { pw.Write(b1); pw.Close() }()
 	if code := <-done1; code != 200 {
