@@ -246,3 +246,31 @@ func TestEmergencySecrets(t *testing.T) {
 	}()
 	RegisterEmergencySecret(EmergencySecret{Name: "hubid-test-key"})
 }
+
+// KEL H-30: the hub identity is a hub's (toad 0). An agent's identity file
+// in its place is refused by Load and LoadOrIncept alike, and left as it
+// is: the hub neither runs as an agent nor incepts over the file.
+func TestAnAgentIdentityFileIsNotAHubs(t *testing.T) {
+	agent, err := identitytest.Agent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := agent.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(dir); err == nil {
+		t.Error("Load took an agent's identity as the hub's")
+	}
+	if _, err := LoadOrIncept(dir); err == nil {
+		t.Error("LoadOrIncept took an agent's identity as the hub's")
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(b) {
+		t.Error("the agent's identity file was replaced")
+	}
+}

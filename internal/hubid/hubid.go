@@ -100,18 +100,24 @@ func LoadOrIncept(dir string) (*Identity, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return id, err
 	}
-	ctrl, err := identity.InceptHub(uint64(time.Now().UnixMilli()))
-	if err != nil {
-		return nil, err
-	}
-	id, err = newIdentity(ctrl)
-	if err != nil {
+	if id, err = Incept(); err != nil {
 		return nil, err
 	}
 	if err := id.Save(dir); err != nil {
 		return nil, err
 	}
 	return id, nil
+}
+
+// Incept makes a new hub identity (KEL H-30: toad 0, its icp committing a
+// hot key) without writing it anywhere; the caller saves it (Save) once it
+// is to be kept.
+func Incept() (*Identity, error) {
+	ctrl, err := identity.InceptHub(uint64(time.Now().UnixMilli()))
+	if err != nil {
+		return nil, err
+	}
+	return newIdentity(ctrl)
 }
 
 func newIdentity(ctrl *identity.Controller) (*Identity, error) {

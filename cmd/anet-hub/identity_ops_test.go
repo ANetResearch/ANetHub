@@ -348,6 +348,14 @@ func sha256Of(b []byte) []byte {
 // Two entries that differ are asked again.
 func TestHubPassphraseRefusals(t *testing.T) {
 	rd := recDir(t)
+	// A new hub's data directory: its identity is made by setup-recovery,
+	// and a refused passphrase leaves none behind.
+	fresh := filepath.Join(t.TempDir(), "new-hub")
+	expectErr(t, idCLI(t, "en", typing(passShort), "-data", fresh, "identity", "setup-recovery", "--recovery-file",
+		filepath.Join(rd, "fresh.anetrec")), 1, sentenceOf("en", "hub_passphrase_too_short", nil))
+	if hubid.Exists(fresh) || fileOf(filepath.Join(rd, "fresh.anetrec")) != nil {
+		t.Error("a refused passphrase left a new hub's identity or recovery file behind")
+	}
 	for _, lang := range []string{"en", "zh"} {
 		dir := hubDir(t)
 		path := filepath.Join(rd, lang+".anetrec")
@@ -693,5 +701,103 @@ func TestLeftoverNewRecoveryFile(t *testing.T) {
 	}
 	if !bytes.Equal(fileOf(path), good) || fileOf(path+".new") != nil {
 		t.Error("a .new recovery file the identity does not commit to was not removed")
+	}
+	// The first rotation of rotate --new-recovery stopped before the
+	// identity file was written: a .new of this hub, sealed under the new
+	// passphrase, committing the new seed's key. It is removed, and the
+	// recovery file in place still opens with the passphrase in use.
+	id := loadHub(t, dir)
+	var rs [32]byte
+	if _, err := rand.Read(rs[:]); err != nil {
+		t.Fatal(err)
+	}
+	d, err := identity.NextDigest(rs, id.AID, id.Seq()+2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := identity.SealRecoveryFile(rs, id.AID, "", identity.Commit{Seq: id.Seq() + 2, Digest: d}, passB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".new", stopped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := idCLI(t, "en", typing(passA), "-data", dir, "identity", "rotate", "--recovery-file", path); r.code != 0 {
+		t.Fatalf("rotate after a stopped --new-recovery: %q", r.stderr)
+	}
+	if !bytes.Equal(fileOf(path), good) || fileOf(path+".new") != nil {
+		t.Error("a .new of this hub whose seed the identity does not commit to was not removed")
+	}
+}
+
+// KEL L-3: a new recovery file replaces the old one only after the identity
+// file that commits to its seed is written. When the identity file cannot
+// be written, the old recovery file stays in place and still rotates the
+// hub; the .new left beside it is removed by the next command.
+func TestNewRecoveryFileReplacesTheOldOnlyAfterTheIdentity(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("needs a user that a read-only directory refuses (not root)")
+	}
+	rd := recDir(t)
+	dir := hubDir(t)
+	path := filepath.Join(rd, "hub.anetrec")
+	setUp(t, dir, path, passA)
+	good := fileOf(path)
+	seq := loadHub(t, dir).Seq()
+	// The identity file cannot be written: the data directory is read-only.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	r := idCLI(t, "en", typing(passA, passB, passB), "-data", dir, "identity", "rotate", "--new-recovery", "--recovery-file", path)
+	if r.code != 1 {
+		t.Fatalf("rotate --new-recovery with the identity file unwritable: exit %d %q", r.code, r.stdout)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(fileOf(path), good) || loadHub(t, dir).Seq() != seq {
+		t.Fatal("the recovery file was replaced though the identity file was not written")
+	}
+	if r := idCLI(t, "en", typing(passA), "-data", dir, "identity", "rotate", "--recovery-file", path); r.code != 0 {
+		t.Fatalf("the old recovery file no longer rotates the hub: %q", r.stderr)
+	}
+	if fileOf(path+".new") != nil {
+		t.Error("the .new recovery file was left")
+	}
+}
+
+// The recovery file rotate is given is checked before the passphrase is
+// asked: missing, not a recovery file, or another hub's is refused with its
+// sentence, exit 1, and nothing is changed.
+func TestHubRecoveryFileRefusals(t *testing.T) {
+	rd := recDir(t)
+	dir := hubDir(t)
+	path := filepath.Join(rd, "hub.anetrec")
+	setUp(t, dir, path, passA)
+	other := filepath.Join(rd, "other.anetrec")
+	setUp(t, hubDir(t), other, passA)
+	garbage := filepath.Join(rd, "garbage.anetrec")
+	if err := os.WriteFile(garbage, []byte("anet-recovery v1\nnot a recovery file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(rd, "missing.anetrec")
+	snap := snapshotDir(t, dir)
+	for _, lang := range []string{"en", "zh"} {
+		for _, tc := range []struct{ file, key string }{
+			{missing, "hub_identity.recovery_file_missing"},
+			{garbage, "hub_identity.recovery_file_invalid"},
+			{other, "hub_identity.recovery_wrong_identity"},
+		} {
+			term := typing(passA)
+			expectErr(t, idCLI(t, lang, term, "-data", dir, "identity", "rotate", "--recovery-file", tc.file), 1,
+				sentenceOf(lang, tc.key, map[string]string{"path": tc.file}))
+			if len(term.prompts) != 0 {
+				t.Errorf("%s %s: the passphrase was asked", lang, tc.key)
+			}
+		}
+	}
+	if snapshotDir(t, dir) != snap || fileOf(missing) != nil {
+		t.Error("a refused recovery file changed something")
 	}
 }

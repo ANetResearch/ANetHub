@@ -332,7 +332,8 @@ func runIdentityStatus(c *console, data string, args []string) int {
 // new recovery seed, sealed under it in a new recovery file, and the hub
 // identity's first rotation, which reveals the icp's hot key and commits
 // the seed's key for seq 2. A data directory without a hub identity gets
-// one first (a new hub sets this up before its first start).
+// one first (a new hub sets this up before its first start); it is written
+// only once the passphrase is accepted, so a refusal leaves none behind.
 func runSetupRecovery(c *console, data string, args []string) int {
 	const action = "setup-recovery"
 	fs, dataDir := newSubFlags("identity "+action, data)
@@ -349,23 +350,25 @@ func runSetupRecovery(c *console, data string, args []string) int {
 	if err := hubid.CheckFile(dir); err != nil {
 		return c.refuseIdentity(err)
 	}
+	var id *hubid.Identity
 	if hubid.Exists(dir) {
-		id, err := hubid.Load(dir)
+		loaded, err := hubid.Load(dir)
 		if err != nil {
 			return c.refuseIdentity(err)
 		}
-		if id.RecoverySet() {
+		if loaded.RecoverySet() {
 			// A setup that stopped after the identity file was written
 			// leaves its recovery file as .new; finish it.
-			path, err := recoveryPath(*file, id.AID)
+			path, err := recoveryPath(*file, loaded.AID)
 			if err != nil {
 				return c.fail(err)
 			}
-			if err := finishNewRecovery(path, id); err != nil {
+			if err := finishNewRecovery(path, loaded); err != nil {
 				return c.fail(err)
 			}
 			return c.say("hub_identity.recovery_already", nil)
 		}
+		id = loaded
 	}
 	if *file != "" {
 		p, err := filepath.Abs(*file)
@@ -381,9 +384,12 @@ func runSetupRecovery(c *console, data string, args []string) int {
 		return code
 	}
 	defer t.Close()
-	id, err := hubid.LoadOrIncept(dir)
-	if err != nil {
-		return c.refuseIdentity(err)
+	newHub := id == nil
+	if newHub {
+		var err error
+		if id, err = hubid.Incept(); err != nil {
+			return c.fail(err)
+		}
 	}
 	path, err := recoveryPath(*file, id.AID)
 	if err != nil {
@@ -400,6 +406,14 @@ func runSetupRecovery(c *console, data string, args []string) int {
 		return code
 	}
 	defer clear(pass)
+	if newHub {
+		// The new hub's identity is kept from here on: written before the
+		// recovery file, so that a .new a crash leaves below is one the
+		// next run can judge against it (finishNewRecovery).
+		if err := id.Save(dir); err != nil {
+			return c.fail(err)
+		}
+	}
 	rs, err := newSeed()
 	if err != nil {
 		return c.fail(err)
