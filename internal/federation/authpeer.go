@@ -1,9 +1,9 @@
 package federation
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -31,6 +31,10 @@ type Kernel interface {
 	// after writing the refusal, the same bodies an agent gets: ts_stale
 	// with the floor, replayed, unauthorized.
 	PeerRC1(w http.ResponseWriter, aid string, ts uint64) bool
+	// PeerFloor is RC1's floor for the peer hub aid now, without taking
+	// anything: a signing time at or below it is refused whatever its
+	// signature, so authPeer refuses it before it reads the body (SSR-H16).
+	PeerFloor(aid string) uint64
 	// ForwardSourceEmpty reports, without taking a token, whether the
 	// source-hub bucket of the peer aid is empty, and how long until it is
 	// not (/fed/v3/forward step 2).
@@ -103,14 +107,24 @@ type peerGate func(w http.ResponseWriter, peerAID string) bool
 //     else of the request is looked at; a request that names no signer is
 //     not signed: 401 unauthorized;
 //  2. the other three relayauth headers: 401 unauthorized;
-//  3. gate, when the route has one (the source-hub bucket of a forward);
-//  4. the body, at most limit bytes: 413 too_large;
-//  5. the signing time within MaxSkew of this hub's clock, then the
-//     signature over the L22 preimage (action, the peer, this hub, the time,
-//     method, request target and body) under the peer's pinned KEL:
-//     401 unauthorized, or key_retired for a key the peer has rotated away
-//     from;
-//  6. RC1 for the peer (K = 4096, Kernel.PeerRC1): 401 ts_stale, replayed.
+//  3. what the headers alone settle, before a byte of the body is read
+//     (SSR-H16, 2026-10-09): the signing time within MaxSkew of this
+//     hub's clock, above the peer's RC1 floor (Kernel.PeerFloor), and a key
+//     state the pinned key history of the peer reaches (one past it has the
+//     pin refreshed once, at most once a minute per peer; KEL H-15): 401
+//     unauthorized. A signing time at or below the floor is refused as a
+//     bad signature is, without the floor: a caller whose signature has not
+//     been checked learns no floor (hub-payment-privacy PAY-R8);
+//  4. gate, when the route has one (the source-hub bucket of a forward);
+//  5. the body, at most limit bytes (a declared length over it is 413
+//     too_large before any is read), within the bytes every /fed/v3
+//     request holds at once (fedBodyBudget): 429 source_rate, Retry-After
+//     1, past them;
+//  6. the signature over the L22 preimage (action, the peer, this hub, the
+//     time, method, request target and body), under the tip of the peer's
+//     pinned key history only (core CORE-K16): 401 unauthorized, or
+//     key_retired for a key the peer has rotated away from;
+//  7. RC1 for the peer (K = 4096, Kernel.PeerRC1): 401 ts_stale, replayed.
 //
 // It returns the peer and the body, or false once it has answered.
 func (s *Service) authPeer(w http.ResponseWriter, r *http.Request, action string, open bool, limit int64, gate peerGate) (*Peer, []byte, bool) {
@@ -132,42 +146,24 @@ func (s *Service) authPeer(w http.ResponseWriter, r *http.Request, action string
 		wire3.Refuse(w, wire3.ReasonNotPeer)
 		return nil, nil, false
 	}
+	kel, ok := s.peerHeaders(w, peer, a, action)
+	if !ok {
+		return nil, nil, false
+	}
 	if gate != nil && !gate(w, peer.AID) {
 		return nil, nil, false
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonTooLarge,
-				Error: fmt.Sprintf("A request of this route is at most %d bytes; send a smaller one.", limit)})
-			return nil, nil, false
-		}
-		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: "The request body could not be read; send it again."})
-		return nil, nil, false
-	}
-	if !withinMaxSkew(a.ts, s.now()) {
-		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
-			Error: fmt.Sprintf("%s is more than %d minutes from this hub's clock; correct the clock and sign again.",
-				relayauth.HeaderTS, relayauth.MaxSkewMillis/60_000)})
-		return nil, nil, false
-	}
-	kel, err := s.peerKEL(peer)
-	if err != nil {
-		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
-			Error: "This hub could not obtain your hub's key history from your /hub/identity; make it reachable and send again."})
+	body, ok := s.readPeerBody(w, r, limit)
+	if !ok {
 		return nil, nil, false
 	}
 	pre := relayauth.PreimageV2(action, a.aid, s.id.AID, a.ts, r.Method, r.URL.RequestURI(), body)
-	if err := verifyPeerSignature(kel, a, pre); err != nil {
-		var ve *identity.VErr
-		if errors.As(err, &ve) && ve.Reason == "REVOKED_KEY" {
+	if retired, err := peerSignatureFailure(kel, a, pre); err != nil {
+		if retired {
 			wire3.Refuse(w, wire3.ReasonKeyRetired)
 			return nil, nil, false
 		}
-		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
-			Error: "The signature does not verify against the key history this hub holds for your hub, for action " +
-				strconv.Quote(action) + "; sign it again with your hub's current key."})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: peerSignatureRefusal(action)})
 		return nil, nil, false
 	}
 	if !s.kernel.PeerRC1(w, a.aid, a.ts) {
@@ -176,10 +172,77 @@ func (s *Service) authPeer(w http.ResponseWriter, r *http.Request, action string
 	return peer, body, true
 }
 
-// verifyPeerSignature is identity.VerifyObject for a peer's request
-// signature; a test counts the verifications through it.
+// peerSignatureRefusal is the error of a request whose signature, or whose
+// signing time, this hub does not take; the two are told alike (step 3).
+func peerSignatureRefusal(action string) string {
+	return "The signature does not verify for action " + strconv.Quote(action) +
+		" against the key history this hub holds for your hub, or its time is not later than the times this hub " +
+		"already took from your hub; sign the request again with your hub's current key at the current time."
+}
+
+// peerHeaders is step 3 of authPeer: what the relayauth headers of a settle
+// before the body is read. It returns the peer's pinned key history, which
+// reaches the key state a names, or false once it has answered.
+func (s *Service) peerHeaders(w http.ResponseWriter, peer *Peer, a hubAuth, action string) ([]identity.SignedEvent, bool) {
+	if !withinMaxSkew(a.ts, s.now()) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
+			Error: fmt.Sprintf("%s is more than %d minutes from this hub's clock; correct the clock and sign again.",
+				relayauth.HeaderTS, relayauth.MaxSkewMillis/60_000)})
+		return nil, false
+	}
+	if a.ts <= s.kernel.PeerFloor(peer.AID) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: peerSignatureRefusal(action)})
+		return nil, false
+	}
+	kel, err := s.peerKEL(peer)
+	if err != nil {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized,
+			Error: "This hub could not obtain your hub's key history from your /hub/identity; make it reachable and send again."})
+		return nil, false
+	}
+	if a.seq >= uint64(len(kel)) {
+		// Signed under a key state past the pin: the peer rotated since.
+		if kel, err = s.RefreshPeerKEL(peer.AID); err != nil || a.seq >= uint64(len(kel)) {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: peerSignatureRefusal(action)})
+			return nil, false
+		}
+	}
+	return kel, true
+}
+
+// peerSignatureFailure checks a's signature over pre under kel, the peer's
+// pinned key history, which reaches a.seq (core CORE-K16, KEL H-3 for
+// hubs): a request speaks for the peer now only under the tip of its key
+// history, while that tip is active. A signature that verifies under an
+// earlier key state, one the peer has retired, is retired; anything else
+// is an error.
+func peerSignatureFailure(kel []identity.SignedEvent, a hubAuth, pre []byte) (retired bool, err error) {
+	if err := verifyPeerSignature(kel, a, pre); err != nil {
+		return false, err
+	}
+	states, err := identity.Replay(kel)
+	if err != nil || states[len(states)-1].AID != a.aid {
+		return false, errors.New("the pinned key history does not replay to the peer")
+	}
+	if tip := states[len(states)-1]; a.seq != tip.KeyStateSeq || tip.Status != identity.StatusActive {
+		return true, fmt.Errorf("signed at key state %d; the peer's key history is at %d", a.seq, tip.KeyStateSeq)
+	}
+	return false, nil
+}
+
+// verifyPeerSignature checks a peer's request signature under the key the
+// key state a.seq of kel names; a test counts the verifications through it.
+// Whether that key state may still sign requests is peerSignatureFailure's
+// rule, not a time's: a key the peer retired is told apart (key_retired).
 var verifyPeerSignature = func(kel []identity.SignedEvent, a hubAuth, pre []byte) error {
-	return identity.VerifyObject(kel, a.aid, a.seq, a.ts, pre, a.sig)
+	if a.seq >= uint64(len(kel)) || len(kel[a.seq].Event.Keys) != 1 ||
+		len(kel[a.seq].Event.Keys[0]) != ed25519.PublicKeySize || len(a.sig) != ed25519.SignatureSize {
+		return errors.New("no key of the peer at that key state")
+	}
+	if !ed25519.Verify(kel[a.seq].Event.Keys[0], pre, a.sig) {
+		return errors.New("the signature does not verify")
+	}
+	return nil
 }
 
 // withinMaxSkew reports whether the unix-ms time ts is within

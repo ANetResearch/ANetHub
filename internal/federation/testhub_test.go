@@ -178,6 +178,8 @@ type fakeKernel struct {
 	maxEnvelope int64
 	forwards    []forwardCall
 	buckets     [][]byte
+	// floors are the RC1 floors a test sets, by peer AID.
+	floors map[string]uint64
 }
 
 // forwardCall is one forward the kernel was handed.
@@ -187,7 +189,9 @@ type forwardCall struct {
 	access string
 }
 
-func newFakeKernel() *fakeKernel { return &fakeKernel{taken: map[string]bool{}, maxEnvelope: 1 << 20} }
+func newFakeKernel() *fakeKernel {
+	return &fakeKernel{taken: map[string]bool{}, maxEnvelope: 1 << 20, floors: map[string]uint64{}}
+}
 
 func (k *fakeKernel) PeerRC1(w http.ResponseWriter, aid string, ts uint64) bool {
 	k.mu.Lock()
@@ -199,6 +203,13 @@ func (k *fakeKernel) PeerRC1(w http.ResponseWriter, aid string, ts uint64) bool 
 	}
 	k.taken[key] = true
 	return true
+}
+
+// PeerFloor is the floor a test set for aid (0: none).
+func (k *fakeKernel) PeerFloor(aid string) uint64 {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.floors[aid]
 }
 
 func (k *fakeKernel) ForwardSourceEmpty(string) (bool, time.Duration) {

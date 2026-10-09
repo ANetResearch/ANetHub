@@ -242,10 +242,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	hubID, err := hubid.LoadOrIncept(*f.data)
-	if err != nil {
-		log.Fatalf("anet-hub: hub identity: %v", err)
+	// The hub identity, under the data directory's lock for as long as the
+	// hub runs: an identity rotation waits for the hub to stop (KEL H-32).
+	hubID, lock, code := startIdentity(c, *f.data, store, log.Printf)
+	if hubID == nil {
+		os.Exit(code)
 	}
+	defer lock.Release()
 	log.Printf("anet-hub identity: %s", hubID.AID)
 
 	// The review tag key (hub-payment-privacy §3.3): made on the first
@@ -269,9 +272,9 @@ func main() {
 	// into every relayauth v2 signature, so a signature made for this hub
 	// is refused by any other.
 	srv0.SetHubAID(hubID.AID)
-	// The identity settlements and supply epochs are signed with, so a
-	// payer holds a receipt it can show without asking this hub to agree.
-	store.SetHubKey(hubID.Ctrl)
+	// startIdentity handed the store the identity settlements and supply
+	// epochs are signed with, so a payer holds a receipt it can show
+	// without asking this hub to agree.
 	// A supply epoch is published when one is due: now, for a hub that was
 	// down over a midnight, and after every UTC midnight (PAY-S2).
 	go store.RunSupplyEpochs(ctx)
@@ -337,8 +340,12 @@ func main() {
 // release does not open (core CORE-V4) is refused with its sentence, exit 1:
 // one of 0.2 or earlier (hub_identity_v02), or one a newer anet-hub wrote
 // (hub_data_too_new; it is valid data, so the next step is to upgrade, not
-// to move it away).
+// to move it away). A hub identity file of 0.2 is refused the same way
+// (hub_identity_v02, KEL S-2), before anything in dir is opened.
 func openStore(c *console, dir string) (*aghub.Store, int) {
+	if err := hubid.CheckFile(dir); err != nil {
+		return nil, c.refuseIdentity(err)
+	}
 	store, err := aghub.Open(dir)
 	if err != nil {
 		return nil, c.refuseData(err)

@@ -126,10 +126,7 @@ func TestHubTextJSON(t *testing.T) {
 // pendingOperatorCodes are registered operator codes whose rows the areas
 // that own them add, in the order those work items land. Each goes when its
 // row lands; a row present while still listed here fails.
-var pendingOperatorCodes = map[string]string{
-	"hub_recovery_setup_required": "v030-todo(KEL-7)",
-	"hub_running":                 "v030-todo(KEL-7)",
-}
+var pendingOperatorCodes = map[string]string{}
 
 // UX-T2 for the L group: every registered operator code has a row, every
 // key is unique, and every key without a dot is a registered code.
@@ -172,7 +169,7 @@ func TestHubTextCoversTheRegistry(t *testing.T) {
 // subcommands' result and refusal sentences (core CORE-K25).
 var sentenceKeyGroups = map[string]bool{
 	"admit": true, "admissions": true, "admission": true, "grant": true, "clear": true,
-	"redemptions": true, "data": true, "restore": true,
+	"redemptions": true, "data": true, "hub_identity": true, "restore": true,
 }
 
 func sortedSet(m map[string]bool) []string {
@@ -188,11 +185,13 @@ func sortedSet(m map[string]bool) []string {
 var placeholderRe = regexp.MustCompile(`\{[a-z_]+\}`)
 
 // hubPlaceholders are the placeholders the hub fills (ux UX-G8 and the
-// operator rows' own: {flag}, {subcommand}, and {key}, the option of anet-hub
-// quota a value belongs to).
+// operator rows' own: {flag}, {subcommand}, {key}, the option of anet-hub
+// quota a value belongs to, and anet-hub identity's {action}, the
+// subcommand, {from} and {to}, key numbers, and {list}, names of secrets).
 var hubPlaceholders = map[string]bool{
 	"{aid}": true, "{peer}": true, "{n}": true, "{m}": true, "{time}": true, "{path}": true,
 	"{value}": true, "{name}": true, "{flag}": true, "{subcommand}": true, "{key}": true,
+	"{action}": true, "{from}": true, "{to}": true, "{list}": true,
 }
 
 // placeholderValues are sample values of each placeholder, for the checks
@@ -209,6 +208,10 @@ var placeholderValues = map[string][]string{
 	"{flag}":       {"-grant", "-relay-send-rate"},
 	"{subcommand}": subcommandValues(),
 	"{key}":        {"--first-contacts-per-min", "--non-contact-mib"},
+	"{action}":     {"setup-recovery", "rotate"},
+	"{from}":       {"1"},
+	"{to}":         {"3"},
+	"{list}":       {"ADMIN_TOKEN (anet-hub-admin)", "hub_tag_key, ADMIN_TOKEN (anet-hub-admin)"},
 }
 
 // subcommandValues are the subcommands a removed flag can name.
@@ -286,6 +289,14 @@ func TestHubTextPunctuation(t *testing.T) {
 		if i := strings.IndexAny(zh, ",;:()"); i >= 0 {
 			t.Errorf("%s: half-width %q in Chinese: %s", r.Key, zh[i:i+1], r.Zh)
 		}
+		if r.Class == classT {
+			// A prompt ends where the typing starts.
+			if !strings.HasSuffix(r.Zh, "：") && !strings.HasSuffix(r.Zh, "。") ||
+				!strings.HasSuffix(r.En, ":") && !strings.HasSuffix(r.En, ".") {
+				t.Errorf("%s: a prompt ends with ：/: or 。/.: %q %q", r.Key, r.Zh, r.En)
+			}
+			continue
+		}
 		if !strings.HasSuffix(r.Zh, "。") {
 			t.Errorf("%s: a Chinese sentence ends with 。: %s", r.Key, r.Zh)
 		}
@@ -350,19 +361,20 @@ func expandings(t string) []string {
 // UX-G2, UX-T3: a refusal (class C) declares a kind of next step and its
 // sentence carries that kind's phrase in both languages; for kind command
 // the sentence carries the command (with its placeholders filled the same
-// way), and only kind command has one. A result (class I) declares none.
-// Exit codes: a result 0, a refusal 1, a usage error 2.
+// way), and only kind command has one. A result (class I) and a prompt
+// (class T) declare none. Exit codes: a result 0, a refusal 1, a usage
+// error 2.
 func TestHubTextNextStep(t *testing.T) {
 	for _, r := range hubText {
 		switch r.Class {
-		case classI:
+		case classI, classT:
 			if r.NextKind != "" || r.Next != "" || r.Exit != 0 {
 				t.Errorf("%s: a result has no next step and exits 0 (%q %q %d)", r.Key, r.NextKind, r.Next, r.Exit)
 			}
 			continue
 		case classC:
 		default:
-			t.Errorf("%s: class %q is neither C nor I", r.Key, r.Class)
+			t.Errorf("%s: class %q is not C, I or T", r.Key, r.Class)
 			continue
 		}
 		if r.Exit != 1 && r.Exit != 2 {

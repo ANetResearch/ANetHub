@@ -301,7 +301,8 @@ func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEven
 	if rec.PayTo != hubAID {
 		return &StatementError{"The statement discharges what is owed to another hub, not to this one; address it to this hub and send it again."}
 	}
-	if err := rec.Verify(peerKEL, peerAID, s.now().UnixMilli()); err != nil {
+	// At the time the peer signed it (KEL H-34).
+	if err := rec.Verify(peerKEL, peerAID, rec.SettleAt); err != nil {
 		return &StatementError{"The statement's signature does not verify against your hub's key history; sign it again with your hub's current key."}
 	}
 	tx, err := s.db.Begin()
@@ -538,7 +539,7 @@ func (s *Server) ServeFedClear(w http.ResponseWriter, peerAID string, body []byt
 			Error: "The member \"receipt\" is not a signed discharge statement; send the statement your hub signed."})
 		return
 	}
-	kel, err := s.peerKEL(peerAID)
+	kel, err := s.store.peerKELFor(s.peerKEL, peerAID, receiptSeq(rec))
 	if err != nil {
 		wire3.Internal(w, err)
 		return

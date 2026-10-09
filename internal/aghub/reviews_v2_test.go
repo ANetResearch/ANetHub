@@ -760,12 +760,19 @@ func TestAPeerReviewIsCheckedLikeALocalOne(t *testing.T) {
 		// history as it stood on the attestation's day. The peer signed
 		// today under the key it then retired today: that key still spoke
 		// for today, not for tomorrow.
+		//
+		// The rotation is dated the last millisecond of today, so the clock
+		// stays before it for the whole subtest: a check made at the
+		// arrival time instead of at the attestation's day admits
+		// tomorrow's attestation on every run, not only when the clock does
+		// not cross the rotation between the two admissions.
+		dayEnd, _ := evidence.DayStart(today + 1)
 		p := otherHub(t)
 		snap, err := p.Ctrl.Export()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := identitytest.Rotate(p.Ctrl, uint64(time.Now().UnixMilli())+5); err != nil {
+		if err := identitytest.Rotate(p.Ctrl, dayEnd-1); err != nil {
 			t.Fatal(err)
 		}
 		old, err := identity.Restore(snap)
