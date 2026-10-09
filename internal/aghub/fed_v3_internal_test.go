@@ -305,6 +305,8 @@ func TestFedForwardOrder(t *testing.T) {
 		{name: "7 header and body differ", as: a, env: good("7"), edit: func(r *http.Request) {
 			r.Header.Set(HeaderAccess, base64.RawURLEncoding.EncodeToString(accessRaw(t, good("7b"))))
 		}, status: 400, reason: "bad_envelope"},
+		{name: "7 a recipient AID holding U+0000", as: a, env: envelope(t, other.aid+"\x00x", []byte("7n")),
+			status: 400, reason: "bad_request"},
 		// 8. The credential, completed: a proof for another envelope.
 		{name: "8 proof", as: a, env: func() []byte {
 			e, g := capEnv(t, b, owner, seal.CapClassContact, time.Hour, "8")

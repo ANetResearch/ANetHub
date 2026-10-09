@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -434,5 +435,135 @@ func TestFedBucketPagesMergeWithoutLossOrRepeat(t *testing.T) {
 	}
 	if len(seen) != len(want) {
 		t.Errorf("%d entries answered, want %d", len(seen), len(want))
+	}
+}
+
+// TestAPeersBucketPageKeepsOnlyItsBucket (SSR-W19, §2.9 item 1): of a page
+// a peer answers for a bucket, an entry is taken only when its h is a
+// directory hash of that bucket and its box no larger than a directory
+// carries; a next that is outside the bucket, or before the page's last
+// entry, makes the page no answer.
+func TestAPeersBucketPageKeepsOnlyItsBucket(t *testing.T) {
+	prefix := []byte{0x80} // the bucket 1/1: hashes whose first bit is set
+	in := func(b byte) []byte { h := make([]byte, dirbox.HashLen); h[0], h[31] = 0x80, b; return h }
+	out := make([]byte, dirbox.HashLen) // first bit clear
+	b64 := base64.RawURLEncoding.EncodeToString
+	small := b64([]byte("a box"))
+	page := func(next []byte, es ...map[string]string) []byte {
+		m := map[string]any{"max_bits": 1, "entries": es}
+		if next != nil {
+			m["next"] = b64(next)
+		}
+		b, _ := json.Marshal(m)
+		return b
+	}
+	p, err := decodeFedBucketPage(page(in(9),
+		map[string]string{"h": b64(in(1)), "box": small},
+		map[string]string{"h": b64(out), "box": small},                                   // another bucket
+		map[string]string{"h": b64(in(2)[:31]), "box": small},                            // not a hash
+		map[string]string{"h": b64(in(3)), "box": b64(make([]byte, dirbox.MaxBoxLen+1))}, // too large
+		map[string]string{"h": b64(in(4)), "box": "not base64url!"},
+		map[string]string{"h": b64(in(5)), "box": b64(make([]byte, dirbox.MaxBoxLen))},
+	), prefix, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.entries) != 2 || !bytes.Equal(p.entries[0].h, in(1)) || !bytes.Equal(p.entries[1].h, in(5)) {
+		t.Fatalf("taken %d entries, want the two of the bucket within the size", len(p.entries))
+	}
+	if !bytes.Equal(p.next, in(9)) {
+		t.Fatalf("next %x", p.next)
+	}
+	for name, next := range map[string][]byte{"outside the bucket": out, "before the last entry": in(0)} {
+		if _, err := decodeFedBucketPage(page(next, map[string]string{"h": b64(in(1)), "box": small}), prefix, 1); err == nil {
+			t.Errorf("a page whose next is %s was taken", name)
+		}
+	}
+	if _, err := decodeFedBucketPage(page(in(9)), prefix, 1); err == nil {
+		t.Error("a page with a next and no entry was taken")
+	}
+}
+
+// TestAPeersOversizedBucketIsNoAnswer (SSR-W21; PeerBucketMaxBytes): a peer
+// whose answer for one bucket runs past PeerBucketMaxBytes over its pages is
+// taken as not answering: none of its entries is merged, the bucket is
+// partial, and no page past the one that crossed the bound is asked for.
+func TestAPeersOversizedBucketIsNoAnswer(t *testing.T) {
+	net := newFedNet(t, 2)
+	a, c := net.nodes[0], net.nodes[1]
+	a.agent()
+	const perPage, pages = 24, 4 // about 6 MiB a page, 24 MiB in all
+	box := base64.RawURLEncoding.EncodeToString(make([]byte, 190<<10))
+	var asked atomic.Int64
+	c.mu.Lock()
+	c.bucket = func(w http.ResponseWriter, _ *http.Request) {
+		i := asked.Add(1)
+		var es []map[string]string
+		var last []byte
+		for j := 0; j < perPage; j++ {
+			h := make([]byte, dirbox.HashLen)
+			h[29], h[30] = byte(i), byte(j+1)
+			es = append(es, map[string]string{"h": base64.RawURLEncoding.EncodeToString(h), "box": box})
+			last = h
+		}
+		m := map[string]any{"max_bits": 0, "entries": es}
+		if i < pages {
+			m["next"] = base64.RawURLEncoding.EncodeToString(last)
+		}
+		w.Header().Set(wire3.Header, "3")
+		writeJSON(w, http.StatusOK, m)
+	}
+	c.mu.Unlock()
+	req := httptest.NewRequest(http.MethodPost, "http://hub.test/directory:bucket", strings.NewReader(`{"prefix":"","bits":0}`))
+	req.Header.Set(wire3.Header, "3")
+	req.Header.Set("Content-Type", "application/json")
+	rec := a.serve(req, "192.0.2.80")
+	var got DirBucketResponse
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &got) != nil || !got.Partial || len(got.Entries) != 1 {
+		t.Fatalf("%d, %d entries, partial %v; want A's own entry and partial", rec.Code, len(got.Entries), got.Partial)
+	}
+	if n := asked.Load(); n != 3 {
+		t.Fatalf("the peer was asked %d pages, want 3 (the third crosses %d bytes)", n, PeerBucketMaxBytes)
+	}
+}
+
+// TestFedCachesAreBounded (sealed-sender §2.12, §3.1): what the kernel keeps
+// in memory of its peers is bounded — the resolved homes and the refused
+// credentials by their number, the least recently used leaving first, the
+// peers' bucket answers by their bytes, the oldest leaving first.
+func TestFedCachesAreBounded(t *testing.T) {
+	c := newLRU[string, int](2)
+	c.put("a", 1)
+	c.put("b", 2)
+	if _, ok := c.get("a"); !ok {
+		t.Fatal("a is not kept")
+	}
+	if ev := c.put("c", 3); len(ev) != 1 || ev[0] != 2 {
+		t.Fatalf("putting a third evicted %v, want b (the least recently used)", ev)
+	}
+	if _, ok := c.get("b"); ok || c.len() != 2 {
+		t.Fatalf("b kept, or %d entries kept, want 2", c.len())
+	}
+	f := newFedState()
+	if f.homes.max != HomeCacheMax || f.refreshed.max != HomeCacheMax || f.neg.max != NegCacheMax {
+		t.Fatalf("bounds: homes %d, refreshed %d, refused %d", f.homes.max, f.refreshed.max, f.neg.max)
+	}
+	now := time.Unix(1_700_000_000, 0)
+	third := BucketCacheBytes/3 + 1
+	key := func(p string) bucketKey { return bucketKey{peer: "p", prefix: p, bits: 8} }
+	for _, p := range []string{"a", "b", "c", "d"} {
+		f.putBucket(&bucketAnswer{key: key(p), size: third, at: now})
+		if f.bucketBytes > BucketCacheBytes {
+			t.Fatalf("after %s the answers kept hold %d bytes, more than %d", p, f.bucketBytes, BucketCacheBytes)
+		}
+	}
+	for p, want := range map[string]bool{"a": false, "b": false, "c": true, "d": true} {
+		if _, ok := f.bucket(key(p), now); ok != want {
+			t.Errorf("answer %s kept %v, want %v", p, ok, want)
+		}
+	}
+	f.putBucket(&bucketAnswer{key: key("d"), size: 10, at: now})
+	if f.bucketBytes != third+10 {
+		t.Fatalf("a replaced answer: %d bytes counted, want %d", f.bucketBytes, third+10)
 	}
 }
