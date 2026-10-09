@@ -97,9 +97,10 @@ func keysInvalid(why, next string) error { return &KeysInvalidError{Why: why, Ne
 // seq does not rise above the stored one (the high-water rule) is refused
 // the same way: it is not newer than what the hub holds either.
 //
-// The stored set sent again is not refused: the same seq with the same set
-// bytes is unchanged, whatever prev_seq says, so a daemon that lost the
-// answer to a publication can send it again.
+// The stored set sent again is not refused, whatever prev_seq says: the
+// same seq with the same set is unchanged (stored again only when its
+// signature bytes differ), so a daemon that lost the answer to a publication
+// can send it again.
 type KeysRollbackError struct {
 	StoredSeq uint64 // the seq of the set this hub holds
 	PrevSeq   uint64 // the publisher's prev_seq
@@ -118,7 +119,7 @@ func (e *KeysRollbackError) Error() string {
 // 409 keys_rollback (KeysRollbackError).
 const (
 	KeysStatusOK        = "ok"        // stored; it replaced an older set or was the first
-	KeysStatusUnchanged = "unchanged" // same seq and set bytes as the stored set
+	KeysStatusUnchanged = "unchanged" // the stored set sent again, byte for byte
 	KeysStatusAbsent    = "absent"    // the request carried no key set (/register only)
 	KeysStatusInvalid   = "invalid"   // did not decode or did not verify; not stored
 )
@@ -273,28 +274,14 @@ func (s *Store) PublishKeys(aid string, raw []byte, prevSeq uint64, kel []identi
 		return "", err
 	}
 	defer tx.Rollback()
-	if decision == seal.Same {
-		// The same set in other bytes. A rotation never leads here: taking a
-		// key history with a rot deletes the stored set unless it is signed
-		// under the new tip (KEL H-2, kelChangedTx), and a set must be signed
-		// under the tip (VerifyEncKeySet), so after a rotation there is no
-		// stored set to be the same as. What does lead here is the current
-		// key signing the same set again into other bytes, which a signer
-		// whose Ed25519 signatures are not deterministic does. Both
-		// signatures verify under the current key; the newer one replaces
-		// the stored one, and the set is reported unchanged.
-		if _, err := tx.Exec(`UPDATE agent_keys SET keyset=?, stored_at=? WHERE aid=?`,
-			canon, nowStamp(), aid); err != nil {
-			return "", err
-		}
-		if err := s.refreshDirTx(tx, aid); err != nil {
-			return "", err
-		}
-		if err := tx.Commit(); err != nil {
-			return "", err
-		}
-		return KeysStatusUnchanged, nil
-	}
+	// The same set in other bytes is stored like a new one. A rotation never
+	// leads here: taking a key history with a rot deletes the stored set
+	// unless it is signed under the new tip (KEL H-2, kelChangedTx), and a set
+	// must be signed under the tip (VerifyEncKeySet), so after a rotation
+	// there is no stored set to be the same as. Only the current key signing
+	// the same set again into other bytes does, which a signer whose Ed25519
+	// signatures are not deterministic would; both verify, and the newer bytes
+	// are kept.
 	if _, err := tx.Exec(
 		`INSERT INTO agent_keys(aid, seq, keyset, stored_at) VALUES(?,?,?,?)
 		 ON CONFLICT(aid) DO UPDATE SET seq=excluded.seq, keyset=excluded.keyset, stored_at=excluded.stored_at`,
