@@ -36,9 +36,18 @@
 # liab_leaf and liab_meta (the balance leaves of the supply epochs of the last
 # 14 days, so a restored hub can still give an account the proof of an epoch
 # it was on; their balances are in the backup's ledger anyway).
+# Backups keep the restore quarantine's own tables (restore_state,
+# restore_released, kel_hwm) and the first verifications of payments
+# (x402_first_verify), like the ledger window's tables.
 # A backup is hub.db alone: nothing else of the data directory is copied, in
 # particular not keys/review_tag.key, the hub's review tag key, which a backup
-# must never hold (hub-payment-privacy PAY-L1).
+# must never hold (hub-payment-privacy PAY-L1), nor the kel_hwm file beside
+# hub.db, which is how a start tells an older copy of hub.db.
+# Restoring: only with `anet-hub restore <backup>`, the hub stopped. It puts
+# the backup in place as hub.db and holds every agent's key confirmation
+# until its node sends a newer key history, or for 30 minutes after the hub
+# is back (KEL H-20, H-23). A hub.db copied back by hand is found at the next
+# start (kel_hwm) and held the same way.
 # Method: VACUUM INTO a temporary copy in the data directory, delete every
 # row of the excluded tables in that copy with secure_delete=ON (the copy's
 # pages holding them are overwritten), then VACUUM INTO the final backup from

@@ -28,6 +28,8 @@ import (
 //	settle_guard       30 days after the settlement
 //	credit_cleared     until 8 days after the receipt's SettleAt, a day longer
 //	                   than ClearFromPeer accepts a receipt at all
+//	x402_first_verify  until 7 days after the authorization's NotAfter, as
+//	                   credit_settled
 //	liab_leaf, liab_meta  14 days after the epoch was published (supply.go)
 //
 // The janitor runs hourly, so a row outlives its time by at most an hour. The
@@ -78,8 +80,8 @@ type retentionStep struct {
 }
 
 // ledgerRetention is what the janitor deletes, table by table (PAY-L2). An
-// area whose table is deleted on the same clock adds its step here (KEL's
-// x402_first_verify, with its delete_after).
+// area whose table is deleted on the same clock adds its step here, as KEL's
+// x402_first_verify is.
 //
 // None of them rebuilds a table or touches sqlite_sequence: a supply epoch's
 // ledger_hw is the largest credit_entry seq ever written, which AUTOINCREMENT
@@ -95,6 +97,11 @@ var ledgerRetention = []retentionStep{
 		func(now time.Time) any { return now.UnixMilli() }},
 	{"credit_cleared", `DELETE FROM credit_cleared WHERE settle_at <= ?`,
 		func(now time.Time) any { return now.Add(-clearedKeptAfter).UnixMilli() }},
+	// The first verification of an authorization (facilitator.go,
+	// KEL H-40), kept as long as its settlement: delete_after is NotAfter
+	// + 7 days.
+	{"x402_first_verify", `DELETE FROM x402_first_verify WHERE delete_after <= ?`,
+		func(now time.Time) any { return now.UnixMilli() }},
 }
 
 // PruneLedger deletes every row past its time (ledgerRetention) and the

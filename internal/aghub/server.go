@@ -832,6 +832,10 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		committed = true
 		s.store.gate().committed(hold)
 	}
+	// The request was signed under the tip of the key history now stored:
+	// after a restore, once the wait is over, that releases the AID (KEL
+	// H-20 b), before the answer below carries its notice.
+	s.store.releaseOnCurrentKey(req.AID)
 	// Optional profile carried on the registration (usually set later via /profile).
 	if req.Summary != "" || req.Readme != "" {
 		if err := s.store.PutProfile(req.AID, req.Summary, req.Readme); err != nil {

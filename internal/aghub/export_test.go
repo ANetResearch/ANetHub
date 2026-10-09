@@ -2,6 +2,7 @@ package aghub
 
 import (
 	"database/sql"
+	"testing"
 	"time"
 )
 
@@ -154,4 +155,24 @@ func (s *Store) NoticeRowForTest(aid string) (seq uint64, head string, observedA
 	err := s.db.QueryRow(`SELECT seq, head, observed_at, blob FROM notice_cache WHERE aid=?`, aid).
 		Scan(&sq, &head, &observedAt, &notice)
 	return uint64(sq), head, observedAt, notice, err == nil
+}
+
+// HoldDataDirForTest takes the data directory's lock as the hub process
+// does while it serves; the returned function gives it up (also at the end
+// of the test).
+func HoldDataDirForTest(t *testing.T, dir string) func() {
+	t.Helper()
+	release, err := lockDataDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once bool
+	done := func() {
+		if !once {
+			once = true
+			release()
+		}
+	}
+	t.Cleanup(done)
+	return done
 }

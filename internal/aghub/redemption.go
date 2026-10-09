@@ -123,7 +123,7 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	} else if found {
 		return prior, nil
 	}
-	if rf := currentAuth(auth, kel, s.now().UnixMilli()); rf != nil {
+	if rf := s.keyAtFirstVerify(auth, id, kel, s.now().UnixMilli()); rf != nil {
 		return Redemption{}, rf
 	}
 	settled := s.settleAuth(hubAID, auth, id, "")

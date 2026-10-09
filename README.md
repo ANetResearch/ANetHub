@@ -291,6 +291,41 @@ in `deploy/` as they are (a second host changes only `--public-url`):
 
 </details>
 
+<details>
+<summary><b>Restoring from a backup</b></summary>
+
+<br/>
+
+`hub-db-roll.sh` writes a backup on Sundays as `hub-backup-YYYYMMDD.db` in the data directory and keeps it
+14 days. A backup is `hub.db` alone. Keep the hub identity (`hub_identity.kel`) and its recovery file
+yourself: a database restored beside no identity is refused, because the hub would start under a new one and
+its ledger would no longer be this hub's.
+
+Restore only with `anet-hub restore`, with the hub stopped:
+
+```sh
+systemctl stop anet-hub
+anet-hub restore --data <data-dir> <data-dir>   # the newest hub-backup-*.db there; or name a backup file
+systemctl start anet-hub
+```
+
+- The backup becomes `hub.db`; the database it replaces goes, with its write-ahead log. What no backup holds
+  is left out whatever copy you give it: undelivered envelopes, delivery confirmations waiting at the hub,
+  and the key confirmations the hub signed.
+- A backup holds each agent's key history as it was when the backup was made. If an agent rotated its key
+  since, because the old one leaked, the restored hub holds the old key as current. So after a restore the
+  hub confirms no agent's key until that agent's node sends a newer key history (an online node does so
+  within seconds of the hub coming back), or signs a request with the key the hub holds at least 30 minutes
+  after the hub came back. Each agent is released on its own, and the hub log names each one and how.
+- For those 30 minutes, the hub's users may see "your hub was just restored from a backup" and their first
+  contacts wait; nothing needs doing. An agent that rotated after the backup and whose node does not connect
+  within them has its older key confirmed again until its node does: the log line of its release says so.
+- `hub.db` put back any other way (copied by hand, a disk snapshot) is found at the next start, because its
+  count of key-history changes is below the `kel_hwm` file beside it, and the hub holds its agents the same
+  way. Keep `kel_hwm` where it is.
+
+</details>
+
 ## Layout
 
 ```

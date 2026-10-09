@@ -174,7 +174,7 @@ func (s *Store) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACar
 		if out[i].Format != federation.FormatA2ACard {
 			continue
 		}
-		n, err := s.dirNoticeOf(s.db, aids[j], out[i].KEL)
+		n, err := s.dirNoticeOf(s.db, aids[j])
 		if err != nil {
 			return nil, cursor, err
 		}
@@ -383,7 +383,7 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 		   kel=excluded.kel, keys=excluded.keys, notice=excluded.notice, home=excluded.home, peer_aid=excluded.peer_aid,
 		   name=excluded.name, caps=excluded.caps, search=excluded.search, verified_at=excluded.verified_at,
 		   stored_at=excluded.stored_at`,
-		aid, v.Seq, v.PayloadHash[:], []byte(card), e.KEL, keys, fedNoticeToStore(aid, e.Notice), home, peerAID, v.Name, string(caps),
+		aid, v.Seq, v.PayloadHash[:], []byte(card), e.KEL, keys, fedNoticeToStore(states[len(states)-1], e.Notice), home, peerAID, v.Name, string(caps),
 		cardSearchText(card, v), verifiedStamp(now), nowStamp()); err != nil {
 		return err
 	}
@@ -515,16 +515,19 @@ func hubKey(s string) string {
 }
 
 // fedNoticeToStore is the witness notice a peer-learned card's row keeps:
-// the entry's, when it decodes as a notice about aid (identity.DecodeNotice)
+// the entry's, when it decodes as a notice about the tip of the key history
+// the entry carries (tip, the last state it replays to; identity.DecodeNotice)
 // and is no larger than a notice is; else none. It is advisory, like the key
 // set: a reader verifies it against the KEL itself (sealed-sender SSR-W22),
-// so this hub only keeps out what cannot be one.
-func fedNoticeToStore(aid string, notice []byte) any {
+// so this hub only keeps out what cannot be one. The row's key history and
+// notice are written together, so the notice a row keeps states its tip and
+// the listings serve it without decoding the history again.
+func fedNoticeToStore(tip identity.KeyState, notice []byte) any {
 	if len(notice) == 0 || len(notice) > maxFedNotice {
 		return nil
 	}
 	body, _, err := identity.DecodeNotice(notice)
-	if err != nil || body.AID != aid {
+	if err != nil || body.AID != tip.AID || body.Seq != tip.KeyStateSeq || body.Head != tip.LastEventID {
 		return nil
 	}
 	return notice
@@ -584,7 +587,7 @@ func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
 			continue
 		}
 		out = append(out, AgentView{AID: aid, Name: name, Caps: caps, Listed: len(caps) > 0, HomeHub: home,
-			KEL: b64url(kel), Keys: b64url(keys), KeyStateNotice: b64url(noticeOfTip(kel, notice))})
+			KEL: b64url(kel), Keys: b64url(keys), KeyStateNotice: b64url(notice)})
 	}
 	return out, rows.Err()
 }

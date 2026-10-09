@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -165,6 +166,11 @@ type Store struct {
 	// kelHooks are run when a registered agent's key history grows
 	// (OnKELExtended).
 	kelHooks kelHooks
+	// quarantine is the restore quarantine as this process knows it, and
+	// hwm the count of key-history changes it last wrote to kel_hwm
+	// (restore.go).
+	quarantine quarantineState
+	hwm        hwmState
 }
 
 // kelHooks are the callbacks a Store runs after it stored new key events of
@@ -249,6 +255,12 @@ func Open(dir string) (*Store, error) {
 	if err := s.createSchema(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// A database older than the last key-history change this hub made
+	// begins a quarantine here, whoever opens it first (KEL H-21).
+	if err := s.checkKELHighWater(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("hub: checking the database against %s: %w", kelHWMFile, err)
 	}
 	// A deregistration deletes the AID's revocations (deregSteps) and, when
 	// the operator removed it, its raised quota; what this process holds
@@ -357,6 +369,8 @@ var schema = [][]string{
 	admissionSchema(),
 	supplySchema(),
 	noticeSchema(),
+	restoreSchema(),
+	firstVerifySchema(),
 }
 
 // createSchema gives a file with no schema the whole of schema and
@@ -410,6 +424,12 @@ func coreSchema() []string {
 		   summary TEXT NOT NULL DEFAULT '',
 		   readme TEXT NOT NULL DEFAULT '',
 		   kel BLOB NOT NULL,
+		   -- The tip of kel: the seq and event id of its last event,
+		   -- written with kel in the same statement (putAgent, PushKEL),
+		   -- so a listing can tell whether the cached witness notice
+		   -- states the tip without decoding the history.
+		   tip_seq INTEGER NOT NULL DEFAULT 0,
+		   tip_head TEXT NOT NULL DEFAULT '',
 		   registered_at TEXT NOT NULL,
 		   -- Visibility is the agent's answer to "may this hub tell other
 		   -- hubs about me". Three tiers, hub-local by default — the
@@ -689,6 +709,10 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 		return false, err
 	}
 	defer tx.Rollback()
+	// longer: kel strictly extends a key history this hub held for aid (its
+	// row, or the tombstone it left), which ends a restore quarantine for it
+	// (KEL H-20 a).
+	longer := false
 	if extend != nil {
 		held, err := knownKEL(tx, aid)
 		if err != nil {
@@ -698,6 +722,7 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 			if err := identity.ExtendsKEL(held, extend); err != nil {
 				return false, fmt.Errorf("%w: %w", ErrKELNotExtended, err)
 			}
+			longer = len(extend) > len(held)
 		}
 	}
 	existed := false
@@ -708,10 +733,12 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 	case !errors.Is(err, sql.ErrNoRows):
 		return false, err
 	}
+	tipSeq, tipHead := storedTip(kel)
 	if _, err := tx.Exec(
-		`INSERT INTO agent(aid,name,caps,kel,registered_at) VALUES(?,?,?,?,?)
-		 ON CONFLICT(aid) DO UPDATE SET name=excluded.name, caps=excluded.caps, kel=excluded.kel`,
-		aid, name, string(capsJSON), kel, now); err != nil {
+		`INSERT INTO agent(aid,name,caps,kel,tip_seq,tip_head,registered_at) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(aid) DO UPDATE SET name=excluded.name, caps=excluded.caps, kel=excluded.kel,
+		   tip_seq=excluded.tip_seq, tip_head=excluded.tip_head`,
+		aid, name, string(capsJSON), kel, tipSeq, tipHead, now); err != nil {
 		return false, err
 	}
 	// Re-registering replaces the capability set rather than adding to it:
@@ -751,6 +778,18 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 			return false, err
 		}
 	}
+	// A first registration stores a key history too: both are counted
+	// against a restore from an older copy of this database (KEL H-21).
+	if changed || !existed {
+		if err := countKELChangeTx(tx); err != nil {
+			return false, err
+		}
+	}
+	if longer || changed {
+		if err := releaseTx(tx, aid, releasedLongerKEL, s.now()); err != nil {
+			return false, err
+		}
+	}
 	// The key history may have grown (sealed-sender SSR-H17).
 	if err := s.refreshDirTx(tx, aid); err != nil {
 		return false, err
@@ -758,10 +797,22 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	s.syncKELHighWater()
 	if changed {
 		s.runKELHooks(aid)
 	}
 	return admitted, nil
+}
+
+// storedTip is the tip_seq and tip_head an agent row keeps for the key
+// history kel: the seq and event id of its last event, or 0 and "" for one
+// that does not decode (no notice states that, so a listing carries none).
+func storedTip(kel []byte) (int64, string) {
+	seq, head, ok := kelTip(kel)
+	if !ok || seq > math.MaxInt64 {
+		return 0, ""
+	}
+	return int64(seq), head
 }
 
 // kelChangedTx is what a registered agent's new key history ends, in the
@@ -1244,9 +1295,16 @@ func (s *Store) Stats() (HubStats, error) {
 type scanner interface{ Scan(dest ...any) error }
 
 // agentKeyColumns are the key history, the key set and the cached witness
-// notice scanAgent reads after a.last_seen_at.
+// notice scanAgent reads after a.last_seen_at. The notice is the cached one
+// only while it states the tip the row holds (tip_seq, tip_head, written
+// with the key history), so no listing decodes a key history to tell.
 const agentKeyColumns = `a.kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid),
-	(SELECT n.blob FROM notice_cache n WHERE n.aid = a.aid)`
+	` + tipNoticeColumn
+
+// tipNoticeColumn is the cached witness notice of the agent row a when it
+// states the tip of the key history the row holds, else NULL.
+const tipNoticeColumn = `(SELECT n.blob FROM notice_cache n
+	   WHERE n.aid = a.aid AND n.seq = a.tip_seq AND n.head = a.tip_head)`
 
 func scanAgent(sc scanner) (AgentView, error) {
 	var av AgentView
@@ -1265,7 +1323,7 @@ func scanAgent(sc scanner) (AgentView, error) {
 	live := livenessFrom(lastSeen.String, time.Now())
 	av.LastSeen, av.Quiet = live.LastSeen, live.Quiet
 	av.RegisteredAt = toTheDay(av.RegisteredAt)
-	av.KEL, av.Keys, av.KeyStateNotice = b64url(kel), b64url(keys), b64url(noticeOfTip(kel, notice))
+	av.KEL, av.Keys, av.KeyStateNotice = b64url(kel), b64url(keys), b64url(notice)
 	_ = json.Unmarshal([]byte(capsJSON), &av.Caps)
 	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
 	// profile text. A pure requester has none of these and stays out of the public listing.

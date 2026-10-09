@@ -172,7 +172,7 @@ func TestHubTextCoversTheRegistry(t *testing.T) {
 // subcommands' result and refusal sentences (core CORE-K25).
 var sentenceKeyGroups = map[string]bool{
 	"admit": true, "admissions": true, "admission": true, "grant": true, "clear": true,
-	"redemptions": true, "data": true,
+	"redemptions": true, "data": true, "restore": true,
 }
 
 func sortedSet(m map[string]bool) []string {

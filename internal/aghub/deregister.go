@@ -125,6 +125,10 @@ var deregSteps = []deregStep{
 	// The witness notice this hub kept for it (KEL H-4, H-12): a hub
 	// states nothing about an AID it no longer registers (notice.go).
 	{"witness notice", execAID(`DELETE FROM notice_cache WHERE aid = ?`)},
+	// Its release from a restore quarantine (KEL H-20, restore.go): one
+	// registration's; if it registers again while the quarantine stands, it
+	// is released again the same way.
+	{"restore quarantine release", execAID(`DELETE FROM restore_released WHERE aid = ?`)},
 	// The registry row last: the steps above may read it. The directory
 	// entry (dir_hash, dir_box; directory.go) goes with it.
 	{"registry row", execAID(`DELETE FROM agent WHERE aid = ?`)},
@@ -217,10 +221,14 @@ func writeTombstone(tx *sql.Tx, aid string, kel []byte, now time.Time) error {
 			return fmt.Errorf("%w: %w", ErrTombstoneShrinks, xerr)
 		}
 	}
-	_, err = tx.Exec(`INSERT INTO departed_kel(aid, kel, at) VALUES(?,?,?)
+	if _, err = tx.Exec(`INSERT INTO departed_kel(aid, kel, at) VALUES(?,?,?)
 	    ON CONFLICT(aid) DO UPDATE SET kel=excluded.kel, at=excluded.at`,
-		aid, kel, now.UTC().Format(time.RFC3339Nano))
-	return err
+		aid, kel, now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	// A tombstone written is a key-history change: a database restored from
+	// before it would hold the agent registered again (KEL H-21).
+	return countKELChangeTx(tx)
 }
 
 // Deregister removes an agent from this hub, for the reason why, in its own
@@ -282,6 +290,9 @@ func (s *Store) runDeregHooks(aid string) {
 // other process (anet-hub admissions revoke, the admin tool) nothing: the
 // row is the hub process's to read.
 func (s *Store) afterDereg(aid string) {
+	// The deregistration counted a key-history change (writeTombstone):
+	// kel_hwm follows, in whichever process made it (KEL H-21).
+	s.syncKELHighWater()
 	s.dereg.mu.Lock()
 	in := s.dereg.inProcess
 	s.dereg.mu.Unlock()
@@ -373,6 +384,11 @@ func (s *Store) drainDeregEvents(ctx context.Context, conn *sql.Conn) {
 		if _, err := conn.ExecContext(ctx, `DELETE FROM dereg_event WHERE aid=? AND at=?`, e.aid, e.at); err != nil {
 			log.Printf("hub: clearing the deregistration of %s: %v", e.aid, err)
 		}
+	}
+	if len(evs) > 0 {
+		// Another process's deregistration counted a key-history change
+		// (writeTombstone): kel_hwm follows (KEL H-21).
+		s.syncKELHighWater()
 	}
 }
 

@@ -704,6 +704,75 @@ func TestTheBackupKeepsTheProofsAndLeavesOutTheRunningHubsTables(t *testing.T) {
 	}
 }
 
+// TestBackupExcludesNoticeCache (KEL S-3, core §2.16): the weekly backup
+// holds no witness notice this hub signed (notice_cache) — a hub restored
+// from it signs afresh, once each agent is out of quarantine — and keeps the
+// tables a restored hub needs: the quarantine's (restore_state,
+// restore_released, kel_hwm) and the first verifications of payments
+// (x402_first_verify). The kel_hwm file beside hub.db is in no backup. And
+// the backup the script writes is one anet-hub restore takes: the hub opens
+// on it in quarantine, holding its agents.
+func TestBackupExcludesNoticeCache(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	notice := canary(t, "NOTICE")
+	execAll(t, filepath.Join(dir, "hub.db"), []string{
+		`INSERT INTO agent(aid, kel, registered_at) VALUES('bafyagent', x'00', '2026-09-01')`,
+		`INSERT INTO notice_cache(aid, seq, head, observed_at, blob) VALUES('bafyagent', 1, 'h', 1, ?)`,
+		`INSERT INTO x402_first_verify(auth_id, payer, key_state_seq, tip_at_first, first_verified_at, delete_after)
+		   VALUES('bafyauth', 'bafyagent', 1, 1, 1, 2)`,
+		`INSERT INTO restore_state(id, began_at, why, serving_since) VALUES(1, 1, 'restore', 2)`,
+		`INSERT INTO restore_released(aid, released_at, how) VALUES('bafyagent', 3, 'current_key')`,
+		`INSERT INTO kel_hwm(id, n) VALUES(1, 41) ON CONFLICT(id) DO UPDATE SET n = 41`,
+	}, nil, []any{[]byte(notice)}, nil, nil, nil, nil)
+	hwm, err := os.ReadFile(filepath.Join(dir, "kel_hwm"))
+	if err != nil {
+		t.Fatalf("no kel_hwm beside hub.db: %v", err)
+	}
+
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	backup := filepath.Join(dir, "hub-backup-"+time.Now().Format("20060102")+".db")
+	for q, want := range map[string]int{
+		`SELECT COUNT(*) FROM notice_cache`:                                 0,
+		`SELECT COUNT(*) FROM x402_first_verify WHERE auth_id = 'bafyauth'`: 1,
+		`SELECT COUNT(*) FROM restore_state`:                                1,
+		`SELECT COUNT(*) FROM restore_released`:                             1,
+		`SELECT n FROM kel_hwm WHERE id = 1`:                                41,
+	} {
+		if n := queryInt(t, backup, q); n != want {
+			t.Errorf("the backup: %s = %d, want %d", q, n, want)
+		}
+	}
+	if hits := filesHolding(t, notice, backup); len(hits) != 0 {
+		t.Error("the backup holds the bytes of a witness notice")
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "kel_hwm")); !bytes.Equal(got, hwm) {
+		t.Errorf("the run changed kel_hwm: %q, then %q", hwm, got)
+	}
+
+	// The backup restores, in quarantine, with its agent.
+	restored := t.TempDir()
+	if _, err := aghub.Restore(restored, backup, time.Now()); err != nil {
+		t.Fatalf("anet-hub restore of the script's backup: %v", err)
+	}
+	st, err := aghub.Open(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if q, err := st.Quarantine(); err != nil || !q.Active || q.Held != 1 {
+		t.Errorf("the restored hub: %+v (%v), want a quarantine holding its agent", q, err)
+	}
+}
+
 // hub-db-roll.sh keeps a backup at most 14 days (hub-payment-privacy
 // PAY-L1): every run, whatever the day, deletes the backups whose date is
 // 14 days ago or earlier, and leaves younger ones and files whose name
