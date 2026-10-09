@@ -153,10 +153,17 @@ func (h *federatedHub) peerWith(t *testing.T, peer *federatedHub) {
 	}
 }
 
-func newCrossHubRig(t *testing.T) *crossHubRig {
+// newCrossHubRig starts hub B, the ledger hub, and hub A, the entry hub,
+// each a peer of the other. Each of with sets B's hooks before A is wired:
+// A reads its peers' key histories as it starts (KEL H-15), so a B that is
+// to be unreadable on A's first use of it is so from the start.
+func newCrossHubRig(t *testing.T, with ...func(b *ledgerHub)) *crossHubRig {
 	t.Helper()
 	// Hub B, the ledger hub, with its hooks in front.
 	b := &ledgerHub{}
+	for _, f := range with {
+		f(b)
+	}
 	hubB := newFederatedHub(t, func(root http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -403,7 +410,9 @@ func TestACrossHubPaymentIsCheckedAtBothHubsAndCreditedOnce(t *testing.T) {
 // cannot be reached, when it settled and the reply was lost, and when it
 // settled and the entry hub could not yet verify its receipt (C25).
 func TestACrossHubSettlementWithAnUnknownOutcomeIsPendingAndCompletesOnRetry(t *testing.T) {
-	r := newCrossHubRig(t)
+	// The ledger hub's key history cannot be read from the start, so the
+	// entry hub holds none of it when it first needs it.
+	r := newCrossHubRig(t, func(b *ledgerHub) { b.identityDown = true })
 	req := r.requires(r.payee.AID(), 100)
 	payee := func() int64 { return mustBalance(t, r.a, r.payee.AID()) }
 	payer := func() int64 { return mustBalance(t, r.b.store, r.payer.AID()) }
@@ -411,9 +420,6 @@ func TestACrossHubSettlementWithAnUnknownOutcomeIsPendingAndCompletesOnRetry(t *
 	// 1. The ledger hub's key history cannot be fetched on first use, so its
 	// receipt cannot be verified. It has settled; the payee is not credited
 	// yet; the receipt is kept in the answer.
-	r.b.mu.Lock()
-	r.b.identityDown = true
-	r.b.mu.Unlock()
 	p1 := r.pay(t, r.payee.AID(), 100, "bind-1", "kel-down")
 	out := settleAt(t, r.aURL, p1, req)
 	if out.Success || out.ErrorReason != payment.ReasonSettlementPending {
