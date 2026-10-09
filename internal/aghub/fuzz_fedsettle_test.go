@@ -37,8 +37,9 @@ var fedPeers = []string{"bafy-peer-hub-a", "bafy-peer-hub-b"}
 //     amount off the payer onto the hub's row and makes this hub owe that
 //     peer exactly as much more (hub_due by peer), and no other peer;
 //   - the same authorization again: for the same peer the original
-//     success, flagged replayed; for the other, duplicate_nonce; neither
-//     moves anything;
+//     success, flagged replayed; for the other, a refusal (duplicate_nonce,
+//     or payee_mismatch when the payee is that peer itself); neither moves
+//     anything;
 //   - the ledger invariants hold.
 func FuzzHubFedSettle(f *testing.F) {
 	w := newX402World(f)
@@ -142,8 +143,12 @@ func FuzzHubFedSettle(f *testing.F) {
 		switch {
 		case next == peer && (!rep.Success || rep.Extensions[payment.ExtReplayed] != true || rep.Transaction != out.Transaction):
 			t.Fatalf("the same peer again: %+v", rep)
-		case next != peer && (rep.Success || rep.ErrorReason != payment.ReasonDuplicateNonce):
+		case next != peer && rep.Success:
 			t.Fatalf("another peer with the same authorization: %+v", rep)
+		case next != peer && x.payTo != next && rep.ErrorReason != payment.ReasonDuplicateNonce:
+			// (A payee that is the other peer itself is refused as such,
+			// payee_mismatch, before the repeat is looked up.)
+			t.Fatalf("another peer with the same authorization: %+v, want %s", rep, payment.ReasonDuplicateNonce)
 		}
 		if again2, due2 := w.snap(t), dueOf(); again2 != after || due2[peer] != dueAfter[peer] || due2[next] != dueAfter[next] {
 			t.Fatalf("a repeat moved balances: %+v -> %+v", after, again2)
