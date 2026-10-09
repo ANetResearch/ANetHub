@@ -301,7 +301,9 @@ in `deploy/` as they are (a second host changes only `--public-url`):
 yourself: a database restored beside no identity is refused, because the hub would start under a new one and
 its ledger would no longer be this hub's.
 
-Restore only with `anet-hub restore`, with the hub stopped:
+Restore only with `anet-hub restore`, with the hub stopped and no other `anet-hub` command or
+`hub-db-roll.sh` running on the same data directory (the restore refuses while the hub runs; the other commands
+do not hold the directory's lock, since they are made to run beside a running hub):
 
 ```sh
 systemctl stop anet-hub

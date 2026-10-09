@@ -225,13 +225,14 @@ func TestRestoreQuarantinesPerAID(t *testing.T) {
 	if st, _ := store.Quarantine(); st.Held != 2 {
 		t.Errorf("held %d, want B and C", st.Held)
 	}
+	clock = clock.Add(time.Millisecond)
+	// The wait is over, and B and C are still held: the record stays.
 	if err := store.EndQuarantineWhenNoneHeld(); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := store.Quarantine(); !st.Active {
-		t.Fatal("the quarantine record closed while agents are held")
+	if st, _ := store.Quarantine(); !st.Active || st.Held != 2 {
+		t.Fatalf("the quarantine record once the wait is over, B and C held: %+v", st)
 	}
-	clock = clock.Add(time.Millisecond)
 	if n, why := noticeAnswerOf(t, srv, b); n == nil {
 		t.Fatalf("B once the wait is over: no notice (%s)", why)
 	} else {

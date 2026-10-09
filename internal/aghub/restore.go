@@ -136,8 +136,8 @@ func kelChanges(q rowQuerier) (uint64, error) {
 
 // releaseTx releases aid from the quarantine, if one stands and aid is not
 // released yet, for the reason how, in tx; its cached notice goes with it
-// (KEL S-3), so the next request signs one for the tip now held. released
-// reports a release.
+// (KEL S-3), so the next request signs one for the tip now held. Without a
+// quarantine it writes nothing.
 func releaseTx(tx *sql.Tx, aid, how string, now time.Time) error {
 	res, err := tx.Exec(`INSERT INTO restore_released(aid, released_at, how)
 	    SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM restore_state)
