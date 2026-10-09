@@ -131,8 +131,8 @@ func TestTheAmountAuditListsWhatTheOverflowWroteAndNothingOnACleanHub(t *testing
 		`INSERT INTO credit_balance(aid, credits) VALUES('` + hub + `', -5100)`,
 		`INSERT INTO credit_balance(aid, credits) VALUES('` + victim + `', 5090)`,
 		`INSERT INTO credit_balance(aid, credits) VALUES('` + attacker + `', 10)`,
-		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at) VALUES('ok-1', '` +
-			victim + `', '` + attacker + `', 10, '', '` + at + `')`,
+		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, at, not_after) VALUES('ok-1', '` +
+			victim + `', '` + attacker + `', 10, '` + at + `', 0)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
@@ -158,14 +158,14 @@ func TestTheAmountAuditListsWhatTheOverflowWroteAndNothingOnACleanHub(t *testing
 	// redeemer credited), a peer receipt of 0, a negative discharge, a
 	// negative debt, and supply totals that went negative.
 	for _, q := range []string{
-		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, interaction_id, at) VALUES('ov-settle', '` +
-			attacker + `', '` + victim + `', -1000, '', '` + at + `')`,
+		`INSERT INTO credit_settled(auth_id, payer, pay_to, amount, at, not_after) VALUES('ov-settle', '` +
+			attacker + `', '` + victim + `', -1000, '` + at + `', 0)`,
 		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES('` + attacker + `', 1000, 'ov-settle', '` + at + `')`,
 		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES('` + victim + `', -1000, 'ov-settle', '` + at + `')`,
 		`INSERT INTO credit_redemption(auth_id, aid, amount, reference, at) VALUES('ov-redeem', '` +
 			attacker + `', -1000, 'x', '` + at + `')`,
-		`INSERT INTO credit_cleared(auth_id, peer_aid, pay_to, amount, at) VALUES('ov-clear', '` +
-			peer + `', '` + victim + `', 0, '` + at + `')`,
+		`INSERT INTO credit_cleared(auth_id, peer_aid, pay_to, amount, at, settle_at) VALUES('ov-clear', '` +
+			peer + `', '` + victim + `', 0, '` + at + `', 0)`,
 		`INSERT INTO hub_cleared(auth_id, peer_aid, amount, at) VALUES('ov-discharge', '` + peer + `', -5, '` + at + `')`,
 		`INSERT INTO hub_owed(peer_aid, amount) VALUES('` + peer + `', -1000)`,
 		`UPDATE credit_balance SET credits = -910 WHERE aid = '` + victim + `'`,

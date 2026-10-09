@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hub-db-roll.sh — maintenance for the hub's hub.db (hub wire 2)
+# hub-db-roll.sh — maintenance for the hub's hub.db (hub wire 3)
 #
 # Policy:
 #   - Relay retention is not done here. Since wire 2 a relay_message row
@@ -13,6 +13,11 @@
 #   - On Sundays: a rotating backup (keep newest 2) WITHOUT the rows of the
 #     tables in EXCLUDED_TABLES, and VACUUM of the main db if the freelist
 #     exceeds 20% of pages.
+#   - On every run: a backup 14 days old or older is deleted (the date in its
+#     name), whatever day it is. The ledger window (hub-payment-privacy
+#     PAY-L1, PAY-L2) keeps who paid whom on the hub for 14 days, so it is
+#     on disk at most 14 days on the hub plus 14 days in a backup. A run
+#     that was missed on a Sunday does not leave an old backup longer.
 #
 # Backups exclude relay content (A2A-DESIGN §9 row "relay 存储", [C38]) and
 # what only matters while the hub runs: EXCLUDED_TABLES below. relay_message
@@ -20,9 +25,20 @@
 # queued in the last 24 hours, by its digest (sealed-sender SSR-H1). A hub
 # restored from a backup has an empty mailbox; senders learn it and send
 # again (/relay/status answers unknown).
+# The other excluded tables matter only to the hub process that holds them:
+# dereg_event (a deregistration another process made, for the hub to drop the
+# AID's sessions; emptied at start, PAY-O2), relay_dack (delivery confirmations
+# waiting to be collected, hub-side, kept 7 days) and notice_cache (the witness
+# notices this hub signed, refreshed from the KELs every 10 minutes).
 # Backups keep everything else, in particular cap_revocation (the delivery
-# credentials owners revoked, so a restored hub still refuses them) and
-# quota_override (the quotas the operator raised with anet-hub quota).
+# credentials owners revoked, so a restored hub still refuses them),
+# quota_override (the quotas the operator raised with anet-hub quota), and
+# liab_leaf and liab_meta (the balance leaves of the supply epochs of the last
+# 14 days, so a restored hub can still give an account the proof of an epoch
+# it was on; their balances are in the backup's ledger anyway).
+# A backup is hub.db alone: nothing else of the data directory is copied, in
+# particular not keys/review_tag.key, the hub's review tag key, which a backup
+# must never hold (hub-payment-privacy PAY-L1).
 # Method: VACUUM INTO a temporary copy in the data directory, delete every
 # row of the excluded tables in that copy with secure_delete=ON (the copy's
 # pages holding them are overwritten), then VACUUM INTO the final backup from
@@ -57,7 +73,10 @@ command -v sqlite3 >/dev/null || { echo "hub-db-roll: sqlite3 is required" >&2; 
 
 # The tables whose rows no backup holds. A table that this hub's version
 # does not have yet is skipped.
-EXCLUDED_TABLES="relay_message relay_redelivery"
+EXCLUDED_TABLES="relay_message relay_redelivery dereg_event relay_dack notice_cache"
+
+# How long a backup is kept, in days (hub-payment-privacy PAY-L1).
+KEEP_DAYS=14
 
 SQL() { sqlite3 "$DB" ".timeout 5000" "$@"; }
 log() { echo "[$(date -Is)] $*" >>"$LOG"; }
@@ -78,6 +97,22 @@ for stale in "$DATA_DIR"/.hub-backup-*.tmp.db; do
     [ -e "$stale" ] || continue
     rm -f -- "$stale" "$stale-journal" "$stale-wal" "$stale-shm"
     log "removed a temporary copy left by an interrupted run: $stale"
+done
+
+# Every run: a backup KEEP_DAYS days old or older goes, by the date in its name.
+oldest=$(date -d "-$KEEP_DAYS days" +%Y%m%d)
+for old in "$DATA_DIR"/hub-backup-*.db; do
+    [ -e "$old" ] || continue
+    day=${old##*/hub-backup-}
+    day=${day%.db}
+    case "$day" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+        *) continue ;;
+    esac
+    if [ "$day" -le "$oldest" ]; then
+        rm -f -- "$old" "$old-wal" "$old-shm" "$old-journal"
+        log "pruned a backup $KEEP_DAYS days old or older: $old"
+    fi
 done
 
 # Sunday: rotating backup without relay rows (keep 2) + conditional VACUUM
