@@ -11,10 +11,12 @@ package main
 //	anet-hub admission [open|closed]
 //	anet-hub grant <AID> --amount N [--reason R]
 //	anet-hub supply                       (supply.go)
+//	anet-hub identity status|setup-recovery|rotate   (identity_ops.go)
 //
 // Each opens the hub's database beside a running hub (WAL, a busy timeout,
-// IMMEDIATE transactions), so none needs the hub stopped. What they print
-// comes from text.go.
+// IMMEDIATE transactions), so none needs the hub stopped, but for the
+// identity's setup-recovery and rotate, which run while it is stopped. What
+// they print comes from text.go.
 
 import (
 	"encoding/json"
@@ -37,8 +39,9 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 	"admissions": runAdmissions,
 	"admission":  runAdmission,
 	"grant":      runGrant,
-	"quota":      runQuota,  // quota.go
-	"supply":     runSupply, // supply.go
+	"quota":      runQuota,    // quota.go
+	"supply":     runSupply,   // supply.go
+	"identity":   runIdentity, // identity_ops.go
 }
 
 // runSubcommand runs the subcommand name with args; data is the --data the
@@ -46,7 +49,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 func runSubcommand(c *console, name, data string, args []string) int {
 	f, ok := subcommands[name]
 	if !ok {
-		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply …")
+		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply|identity …")
 	}
 	return f(c, data, args)
 }
@@ -84,6 +87,9 @@ func openHub(c *console, dir string) (*aghub.Store, int) {
 	if _, err := os.Stat(filepath.Join(dir, "hub.db")); err != nil {
 		return nil, c.say("data.missing", map[string]string{"path": dir})
 	}
+	if err := hubid.CheckFile(dir); err != nil {
+		return nil, c.refuseIdentity(err)
+	}
 	store, err := aghub.Open(dir)
 	if err != nil {
 		return nil, c.refuseData(err)
@@ -91,7 +97,7 @@ func openHub(c *console, dir string) (*aghub.Store, int) {
 	id, err := hubid.LoadOrIncept(dir)
 	if err != nil {
 		store.Close()
-		return nil, c.fail(err)
+		return nil, c.refuseIdentity(err)
 	}
 	store.SetHubKey(id.Ctrl)
 	return store, 0

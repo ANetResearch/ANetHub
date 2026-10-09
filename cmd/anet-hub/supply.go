@@ -34,7 +34,7 @@ func runSupply(c *console, data string, args []string) int {
 	defer store.Close()
 	id, err := hubid.LoadOrIncept(*dataDir)
 	if err != nil {
-		return c.fail(err)
+		return c.refuseIdentity(err)
 	}
 	sup, err := store.Supply(id.AID)
 	if err != nil {

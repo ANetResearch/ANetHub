@@ -6,13 +6,15 @@ package main
 // checks the rows against the rules of ux §0 (UX-T3) and against
 // testdata/text.json, their machine-readable copy.
 //
-// A row is a sentence of one of two kinds:
+// A row is a sentence of one of three kinds:
 //
 //   - class I, a result: written to stdout, exit 0;
 //   - class C, a refusal: written to stderr, exit 1, or 2 for a usage error
 //     (a flag that no longer exists). A refusal says why and what to do
 //     next: its next_kind names the kind of next step, and its sentence
-//     carries that kind's fixed phrase (or the command, for kind command).
+//     carries that kind's fixed phrase (or the command, for kind command);
+//   - class T, a terminal prompt: written to the terminal the passphrase is
+//     typed in, never to stdout (anet-hub identity, identity_ops.go).
 //
 // The language follows core G13: LC_ALL, then LC_MESSAGES, then LANG, the
 // first one set; Chinese when it starts with "zh", English otherwise.
@@ -32,7 +34,7 @@ type textRow struct {
 	// (registry reasons.hub_operator); a dotted key is a sentence key and
 	// exists only here (core CORE-K25).
 	Key string
-	// Class is "C" (a refusal) or "I" (a result).
+	// Class is "C" (a refusal), "I" (a result) or "T" (a terminal prompt).
 	Class string
 	// Exit is the exit code that goes with the sentence.
 	Exit int
@@ -51,6 +53,7 @@ type textRow struct {
 const (
 	classC = "C"
 	classI = "I"
+	classT = "T"
 
 	nextCommand     = "command"
 	nextChangeInput = "change_input"
@@ -170,6 +173,78 @@ var hubText = []textRow{
 	{Key: "hub_data_too_new", Class: classC, Exit: 1, NextKind: nextChangeInput,
 		Zh: "这个 hub 数据目录由更新版本的 anet-hub 写入，本版本打不开；请升级 anet-hub 后重试（不要删除这个目录）。",
 		En: "This hub data directory was written by a newer anet-hub, which this version cannot open; upgrade anet-hub and try again (do not delete the directory)."},
+	// The hub and anet-hub identity: another anet-hub process holds the
+	// data directory (KEL H-32).
+	{Key: "data.in_use", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 正被另一个 anet-hub 进程使用；请等它结束或先停止它后重试。",
+		En: "{path} is in use by another anet-hub process; wait for it to finish or stop it, then try again."},
+
+	// The hub identity (KEL §5.2, H-30 to H-33; identity_ops.go). The
+	// hub says hub_recovery_setup_required at every start until the
+	// recovery passphrase is set, and anet-hub identity status says it too.
+	{Key: "hub_recovery_setup_required", Class: classC, Exit: 1, NextKind: nextCommand, Next: "anet-hub identity setup-recovery",
+		Zh: "hub 的恢复口令还没设置：数据目录泄露时无法收回 hub 身份；请在 hub 停止时运行 anet-hub identity setup-recovery。",
+		En: "The hub's recovery passphrase is not set: if the data directory leaks, the hub identity cannot be taken back; run anet-hub identity setup-recovery while the hub is stopped."},
+	{Key: "hub_running", Class: classC, Exit: 1, NextKind: nextCommand, Next: "anet-hub identity {action}",
+		Zh: "hub 正在运行；请先停止它，再运行 anet-hub identity {action}。",
+		En: "The hub is running; stop it first, then run anet-hub identity {action}."},
+	{Key: "hub_passphrase_too_short", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "口令至少要 12 个字符；请换一个更长的口令，例如 4 个以上的随机词。",
+		En: "The passphrase needs at least 12 characters; use a longer one, such as four or more random words."},
+	{Key: "hub_passphrase_not_utf8", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "口令里有无法识别的字符（终端不是 UTF-8 编码）；请把终端切换为 UTF-8（例如 LANG=C.UTF-8）后重试。",
+		En: "The passphrase has characters that cannot be read (the terminal is not using UTF-8); switch the terminal to UTF-8 (for example LANG=C.UTF-8) and try again."},
+	{Key: "hub_identity.rotated", Class: classI,
+		Zh: "hub 身份已轮换：密钥序号 {from} → {to}；下次启动生效，对等 hub 与节点在 10 分钟内同步。",
+		En: "The hub identity was rotated: key number {from} → {to}; it takes effect at the next start, and peers and nodes pick it up within 10 minutes."},
+	{Key: "hub_identity.secrets_regenerated", Class: classI,
+		Zh: "已重新生成：{list}。",
+		En: "Regenerated: {list}."},
+	{Key: "hub_identity.secrets_by_operator", Class: classI,
+		Zh: "这些不在 hub 数据目录里，anet-hub 换不了，请自己更换：{list}。",
+		En: "These are not in the hub data directory, so anet-hub cannot replace them; replace them yourself: {list}."},
+	{Key: "hub_identity.recovery_written", Class: classI,
+		Zh: "已写入恢复文件 {path}（口令加密）。请另存一份到别处。",
+		En: "Recovery file written to {path} (passphrase-encrypted). Keep a copy somewhere else."},
+	{Key: "hub_identity.recovery_file_note", Class: classI,
+		Zh: "这份文件加上口令可以轮换这个 hub 的身份；单独这份文件无法使用。请另存一份到别处。",
+		En: "With the passphrase, this file can rotate this hub's identity; on its own it is useless. Keep a copy somewhere else."},
+	{Key: "hub_identity.recovery_already", Class: classI,
+		Zh: "hub 的恢复口令已经设置过，不需要操作；要更换口令请运行 anet-hub identity rotate --new-recovery。",
+		En: "The hub's recovery passphrase is already set, nothing to do; to change it, run anet-hub identity rotate --new-recovery."},
+	{Key: "hub_identity.tty_required", Class: classC, Exit: 1, NextKind: nextCommand, Next: "anet-hub identity {action}",
+		Zh: "这一步要在终端里输入恢复口令，什么都没有改；请在终端里运行 anet-hub identity {action}。",
+		En: "This step reads the recovery passphrase from a terminal, so nothing was changed; run anet-hub identity {action} in a terminal."},
+	{Key: "hub_identity.recovery_file_missing", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "找不到恢复文件 {path}，什么都没有改；请用 --recovery-file 指向 setup-recovery 写下的那份后重试。",
+		En: "There is no recovery file at {path}, so nothing was changed; point --recovery-file at the one setup-recovery wrote and try again."},
+	{Key: "hub_identity.recovery_file_invalid", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 不是一份完整的恢复文件，什么都没有改；请改用另存的那份副本后重试。",
+		En: "{path} is not a whole recovery file, so nothing was changed; use the copy you kept elsewhere and try again."},
+	{Key: "hub_identity.recovery_wrong_identity", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 不是这个 hub 身份的恢复文件（或者被改过），什么都没有改；请用 --recovery-file 指向本 hub 的恢复文件后重试。",
+		En: "{path} is not the recovery file of this hub identity (or it was altered), so nothing was changed; point --recovery-file at this hub's recovery file and try again."},
+	{Key: "hub_identity.recovery_stale", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 已经作废（之后又换过恢复口令），什么都没有改；请改用最近一次写下的恢复文件后重试。",
+		En: "{path} no longer works (the recovery passphrase was changed after it was written), so nothing was changed; use the recovery file written last and try again."},
+	{Key: "hub_identity.recovery_file_exists", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 已经有一份恢复文件，没有覆盖，什么都没有改；请用 --recovery-file 指定另一个位置后重试。",
+		En: "There is already a recovery file at {path}; it was not overwritten and nothing was changed; choose another place with --recovery-file and try again."},
+	{Key: "hub_identity.passphrase_wrong", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "恢复口令不对，什么都没有改；请输入设置这份恢复文件时用的口令后重试。",
+		En: "The recovery passphrase is wrong, so nothing was changed; enter the passphrase this recovery file was set with and try again."},
+	{Key: "hub_identity.prompt.passphrase", Class: classT,
+		Zh: "恢复口令：",
+		En: "Recovery passphrase:"},
+	{Key: "hub_identity.prompt.new_passphrase", Class: classT,
+		Zh: "新的恢复口令：",
+		En: "New recovery passphrase:"},
+	{Key: "hub_identity.prompt.again", Class: classT,
+		Zh: "再输一次：",
+		En: "Type it again:"},
+	{Key: "hub_identity.prompt.mismatch", Class: classT,
+		Zh: "两次输入不一致，请重新输入。",
+		En: "The two entries differ; enter it again."},
 }
 
 // textLang is the language of the sentences.
@@ -244,14 +319,17 @@ func fill(t string, args map[string]string) string {
 }
 
 // console is where a subcommand writes: results to out, refusals to errw.
+// The passphrase of anet-hub identity is read from the terminal
+// openTerminal opens, never from out's or errw's streams (identity_ops.go).
 type console struct {
-	out, errw io.Writer
-	lang      textLang
-	now       func() time.Time
+	out, errw    io.Writer
+	lang         textLang
+	now          func() time.Time
+	openTerminal func() (terminal, error)
 }
 
 func newConsole(out, errw io.Writer) *console {
-	return &console{out: out, errw: errw, lang: hubLanguage(), now: time.Now}
+	return &console{out: out, errw: errw, lang: hubLanguage(), now: time.Now, openTerminal: openTTY}
 }
 
 // say writes the sentence of key, on stdout for a result and on stderr for
