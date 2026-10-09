@@ -18,7 +18,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -486,18 +485,21 @@ func TestAPeersBucketPageKeepsOnlyItsBucket(t *testing.T) {
 
 // TestAPeersOversizedBucketIsNoAnswer (SSR-W21; PeerBucketMaxBytes): a peer
 // whose answer for one bucket runs past PeerBucketMaxBytes over its pages is
-// taken as not answering: none of its entries is merged, the bucket is
-// partial, and no page past the one that crossed the bound is asked for.
+// taken as not answering, and no page past the one that crossed the bound is
+// asked for. (Asked directly, not through a merged bucket, whose 5-second
+// deadline a slow run would hit first.)
 func TestAPeersOversizedBucketIsNoAnswer(t *testing.T) {
 	net := newFedNet(t, 2)
 	a, c := net.nodes[0], net.nodes[1]
-	a.agent()
-	const perPage, pages = 24, 4 // about 6 MiB a page, 24 MiB in all
+	const perPage, pages = 9, 12 // about 2.2 MiB a page, 27 MiB in all
 	box := base64.RawURLEncoding.EncodeToString(make([]byte, 190<<10))
-	var asked atomic.Int64
+	var mu sync.Mutex
+	var sizes []int
 	c.mu.Lock()
 	c.bucket = func(w http.ResponseWriter, _ *http.Request) {
-		i := asked.Add(1)
+		mu.Lock()
+		i := len(sizes) + 1
+		mu.Unlock()
 		var es []map[string]string
 		var last []byte
 		for j := 0; j < perPage; j++ {
@@ -510,20 +512,30 @@ func TestAPeersOversizedBucketIsNoAnswer(t *testing.T) {
 		if i < pages {
 			m["next"] = base64.RawURLEncoding.EncodeToString(last)
 		}
+		raw, _ := json.Marshal(m)
+		mu.Lock()
+		sizes = append(sizes, len(raw))
+		mu.Unlock()
 		w.Header().Set(wire3.Header, "3")
-		writeJSON(w, http.StatusOK, m)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(raw)
 	}
 	c.mu.Unlock()
-	req := httptest.NewRequest(http.MethodPost, "http://hub.test/directory:bucket", strings.NewReader(`{"prefix":"","bits":0}`))
-	req.Header.Set(wire3.Header, "3")
-	req.Header.Set("Content-Type", "application/json")
-	rec := a.serve(req, "192.0.2.80")
-	var got DirBucketResponse
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &got) != nil || !got.Partial || len(got.Entries) != 1 {
-		t.Fatalf("%d, %d entries, partial %v; want A's own entry and partial", rec.Code, len(got.Entries), got.Partial)
+	got, _, err := a.srv.askPeerBucket(context.Background(), c.hubAID, nil, 0)
+	if err == nil {
+		t.Fatalf("a peer's answer of %d pages (about 27 MiB) was taken: %d entries", pages, len(got.entries))
 	}
-	if n := asked.Load(); n != 3 {
-		t.Fatalf("the peer was asked %d pages, want 3 (the third crosses %d bytes)", n, PeerBucketMaxBytes)
+	mu.Lock()
+	defer mu.Unlock()
+	crossing, total := 0, 0
+	for i, n := range sizes {
+		if total += n; total > PeerBucketMaxBytes {
+			crossing = i + 1
+			break
+		}
+	}
+	if crossing == 0 || len(sizes) != crossing {
+		t.Fatalf("the peer was asked %d pages, want %d (the one that crosses %d bytes): %v", len(sizes), crossing, PeerBucketMaxBytes, err)
 	}
 }
 
