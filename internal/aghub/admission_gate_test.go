@@ -36,8 +36,6 @@ import (
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/regpow"
 	"github.com/ANetResearch/ANetCore/relayauth"
-
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // gateBits is the proof of work the gate tests ask for, so a test solves
@@ -63,10 +61,7 @@ func newGateHub(t testing.TB) *gateHub {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := NewServer(store)
 	s.SetHubAID(id.AID)
@@ -302,7 +297,7 @@ func TestAdmissionGateMatrix(t *testing.T) {
 					name := fmt.Sprintf("%s/pow_%s/quota_%s/check_only_%v", state, pow, quota, checkOnly)
 					t.Run(name, func(t *testing.T) {
 						g := newGateHub(t)
-						c, err := identitytest.Hub()
+						c, err := NewAgentForTest()
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -422,8 +417,8 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 		t.Run(mode+"/signature", func(t *testing.T) {
 			g := newGateHub(t)
 			g.gateState(mode, nil)
-			c, _ := identitytest.Hub()
-			other, _ := identitytest.Hub()
+			c, _ := NewAgentForTest()
+			other, _ := NewAgentForTest()
 			before := g.dump()
 			code, out := g.register(c, other, g.pow(c.AID(), "good"))
 			if code != http.StatusUnauthorized || out["reason"] != "unauthorized" {
@@ -439,7 +434,7 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 		t.Run(mode+"/fork", func(t *testing.T) {
 			g := newGateHub(t)
 			g.gateState(mode, nil)
-			c, _ := identitytest.Hub()
+			c, _ := NewAgentForTest()
 			if err := identitytest.Rotate(c, kelTime()); err != nil {
 				t.Fatal(err)
 			}
@@ -469,7 +464,7 @@ func TestALaterRefusalGivesTheGatesPlaceBack(t *testing.T) {
 	t.Run("window_filled_meanwhile", func(t *testing.T) {
 		g := newGateHub(t)
 		g.gateState("window_open", nil)
-		c, _ := identitytest.Hub()
+		c, _ := NewAgentForTest()
 		// The window fills between the gate and the write: the place the
 		// gate held was taken from the window's count; the write finds no
 		// room and the registration is refused like any other at a full
@@ -539,7 +534,7 @@ func TestARegistrationRacingARevocationIsRefused(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newGateHub(t)
-			c, _ := identitytest.Hub()
+			c, _ := NewAgentForTest()
 			tc.setup(g, c)
 			calls := 0
 			g.store.clock = func() time.Time {
@@ -580,7 +575,7 @@ func TestARegistrationsAIDIsCheckedBeforeItIsUsed(t *testing.T) {
 	log.SetOutput(&logged)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	g := newGateHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := NewAgentForTest()
 	kel, _ := identity.MarshalKEL(c.KEL())
 	for _, aid := range []string{
 		"x; echo admitted",
@@ -590,7 +585,16 @@ func TestARegistrationsAIDIsCheckedBeforeItIsUsed(t *testing.T) {
 	} {
 		raw, _ := json.Marshal(map[string]any{"aid": aid, "kel": base64.RawURLEncoding.EncodeToString(kel)})
 		replays := registerKELReplays.Load()
+		// As the signer (X-ANet-AID), it is refused as an authentication
+		// failure, before anything else of the request is looked at
+		// (KEL-5; hub-payment-privacy PAY-R3).
 		code, out := g.post(aid, c, raw)
+		if code != http.StatusUnauthorized || out["reason"] != "unauthorized" {
+			t.Errorf("X-ANet-AID %q: %d %s, want 401 unauthorized", aid, code, out["_raw"])
+		}
+		// As the AID registered, signed by a real one, it is a malformed
+		// request.
+		code, out = g.post(c.AID(), c, raw)
 		if code != http.StatusBadRequest || out["reason"] != "bad_request" {
 			t.Errorf("aid %q: %d %s, want 400 bad_request", aid, code, out["_raw"])
 		}

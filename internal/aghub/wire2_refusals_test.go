@@ -140,13 +140,14 @@ func storedKeys(t *testing.T, srvURL, aid string) []byte {
 
 // "Same seq and same set bytes" is a no-op only for a set that verifies:
 // the same set under a broken signature is refused and does not replace
-// the stored signature, while the same set re-signed after a rotation is
-// accepted as unchanged and its new signature is what the hub serves from
-// then on. The pre-rotation signature is then refused, because a key set
-// is verified against the key in force (§3.1 step 2).
+// the stored signature. A rotation takes the set its retired key signed
+// away (KEL H-2), the same set re-signed after it is accepted, and its new
+// signature is what the hub serves from then on. The pre-rotation
+// signature is then refused, because a key set is verified against the key
+// in force (§3.1 step 2).
 func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	srv := newHub(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,6 +186,9 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
 		t.Fatalf("register after rotation: %d %s", code, b)
 	}
+	if code, b := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys"); code != http.StatusNotFound {
+		t.Fatalf("the set the rotation retired is still served: %d %s", code, b)
+	}
 	after := signSet(t, c, set)
 	if bytes.Equal(after, before) {
 		t.Fatal("setup: the re-signed set has the same signature")
@@ -192,8 +196,8 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	code, b = publishKeys(t, srv, c, after)
 	var out aghub.KeysPublishResponse
 	_ = json.Unmarshal(b, &out)
-	if code != 200 || out.KeysStatus != aghub.KeysStatusUnchanged {
-		t.Fatalf("the same set re-signed after rotation: %d %s, want 200 unchanged", code, b)
+	if code != 200 || out.KeysStatus != aghub.KeysStatusOK {
+		t.Fatalf("the same set re-signed after rotation: %d %s, want 200 ok", code, b)
 	}
 	if got := storedKeys(t, srv.URL, c.AID()); !bytes.Equal(got, after) {
 		t.Fatal("the hub still serves the pre-rotation signature")
@@ -283,7 +287,7 @@ func TestLeavingRemovesTheA2ACard(t *testing.T) {
 // wrote cannot then replace the KEL with a fork or a shorter copy.
 func TestRegisterAgentChecksTheKELInTheWriteTransaction(t *testing.T) {
 	store := openPeerStore(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +339,7 @@ func TestRegistrationIsRateLimitedPerIPv6Prefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := func(ip string) int {
-		c, _ := identitytest.Hub()
+		c, _ := aghub.NewAgentForTest()
 		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))

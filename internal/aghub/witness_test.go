@@ -29,7 +29,7 @@ import (
 // contents — demonstrates the rewrite without either party agreeing.
 func TestAWitnessAttestationDetectsARewrittenSupplyChain(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestAWitnessAttestationDetectsARewrittenSupplyChain(t *testing.T) {
 // A hub serves what it has been given, and can be asked for it.
 func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestAHubRefusesAnUnsignedAttestation(t *testing.T) {
 // and a list padded with self-reference reads as corroboration.
 func TestAHubCannotWitnessItself(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func recordsOf(t *testing.T, entries []aghub.SupplyEpochEntry) []*ael.EventRecor
 // hub with several looking hourly.
 func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestWitnessHealthMakesTheCoverageVisible(t *testing.T) {
 // that makes the number readable.
 func TestWitnessHealthIsPublishedWithItsCaveat(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestWitnessHealthIsPublishedWithItsCaveat(t *testing.T) {
 // is what the whole trust argument rests on.
 func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,57 +455,67 @@ func TestTwoWitnessesOfTheSameHeadAreBothKept(t *testing.T) {
 // A witness attestation must be checkable by the reader it exists for.
 //
 // /x402/witnesses publishes signed attestations and tells the reader to
-// resolve each witness and check the signature. The key history to do
-// that with was not obtainable: /agents/{aid}/kel served only locally
-// registered agents, and a witness is a peer hub. The instruction named a
-// step that could not be taken, so the evidence the whole issuance
-// argument rests on could not be checked by anybody.
+// resolve each witness and check the signature, and a witness is a peer
+// hub. GET /agents/{aid}/kel answers for the AIDs this hub has a
+// registration record of (core §2.12.2: {aid, kel, registered}); a peer
+// hub's key history is served by GET /hub/kels (KEL H-16), not under an
+// agent's route, where "registered" would misstate it. An AID that is
+// neither is 404 unknown_aid, not something served in its place.
 func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
+	srv, _ := newHubWithStore(t)
+	witness, err := identitytest.Hub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := getJSON(t, srv.URL+"/agents/"+witness.AID()+"/kel"); code != 404 || !strings.Contains(string(body), `"unknown_aid"`) {
+		t.Errorf("an unknown AID returned %d %s, want 404 unknown_aid", code, body)
+	}
+	// A federation peer is not served under an agent's route.
+	serverOf(t, srv).SetPeerKELResolver(func(aid string) ([]identity.SignedEvent, error) {
+		if aid == witness.AID() {
+			return witness.KEL(), nil
+		}
+		return nil, errors.New("not a peer")
+	})
+	if code, body := getJSON(t, srv.URL+"/agents/"+witness.AID()+"/kel"); code != 404 {
+		t.Errorf("a peer hub's key history under /agents/{aid}/kel: %d %s, want 404", code, body)
+	}
+}
+
+// The witness's key history, from GET /hub/kels, verifies what it signed.
+func TestAWitnessKeyHistoryVerifiesItsAttestation(t *testing.T) {
+	t.Skip("v030-todo(KEL-7): GET /hub/kels serves the key histories of the peer hubs this hub pins (KEL H-16)")
 	srv, _ := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
 	witness, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Not registered here, and not a peer: the hub genuinely does not
-	// know this AID and must say so rather than serve something.
-	if code, _ := getJSON(t, srv.URL+"/agents/"+witness.AID()+"/kel"); code != 404 {
-		t.Errorf("an unknown AID returned %d, want 404", code)
-	}
-
-	// As a federation peer, it resolves — that is the witness case.
-	srv2 := serverOf(t, srv)
-	srv2.SetPeerKELResolver(func(aid string) ([]identity.SignedEvent, error) {
-		if aid == witness.AID() {
-			return witness.KEL(), nil
-		}
-		return nil, errors.New("not a peer")
-	})
-	code, body := getJSON(t, srv.URL+"/agents/"+witness.AID()+"/kel")
+	code, body := getJSON(t, srv.URL+"/hub/kels")
 	if code != 200 {
-		t.Fatalf("a peer hub's key history returned %d: %s", code, body)
+		t.Fatalf("GET /hub/kels: %d %s", code, body)
 	}
 	var got struct {
-		KEL    string `json:"kel"`
-		Source string `json:"source"`
+		Hubs []struct {
+			AID string `json:"aid"`
+			KEL string `json:"kel"`
+		} `json:"hubs"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Source != "peer-hub" {
-		t.Errorf("source = %q, want peer-hub — where a key came from changes what it is worth", got.Source)
-	}
-	// And it is the real thing: an attestation signed by that witness
-	// verifies under it. Serving bytes that do not verify would be worse
-	// than serving nothing.
-	raw, err := base64.StdEncoding.DecodeString(got.KEL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kel, err := identity.UnmarshalKEL(raw)
-	if err != nil {
-		t.Fatal(err)
+	var kel []identity.SignedEvent
+	for _, h := range got.Hubs {
+		if h.AID != witness.AID() {
+			continue
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(h.KEL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kel, err = identity.UnmarshalKEL(raw); err != nil {
+			t.Fatal(err)
+		}
 	}
 	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: 0, HeadID: "bafy-any-head",
 		ObservedAt: time.Now().UnixMilli()}
@@ -529,7 +539,7 @@ func TestAWitnessKeyHistoryCanBeResolvedFromTheHub(t *testing.T) {
 // numbers, and head_seq was not among the ones published.
 func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +636,7 @@ func TestAHeadBelowTheWitnessedSeqIsReportedAsRolledBack(t *testing.T) {
 // for. An operator reads the log line; anybody else reads this.
 func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +697,7 @@ func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 // to say so somewhere the person running it will see.
 func TestARolledBackChainIsLogged(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,7 +25,6 @@ import (
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // newHubAt is newHubWithStore with a data directory the test can inspect.
@@ -35,10 +34,7 @@ func newHubAt(t *testing.T, dir string) (*httptest.Server, *aghub.Store, *aghub.
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := aghub.HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
@@ -117,7 +113,7 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	recip, sender := twoAgents(t)
 	register(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
-	stranger, _ := identitytest.Hub() // never registered
+	stranger, _ := aghub.NewAgentForTest() // never registered
 	hubAID := hubAIDOf(t, srv)
 	// The signed relay request is the opening of a first-contact session.
 	epkBody := func() []byte {
@@ -589,7 +585,7 @@ func TestAnEarlierRelayTableIsRefused(t *testing.T) {
 // accepted.
 func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 	srv := newHub(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,10 +644,10 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 		KEL string `json:"kel"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&out)
-	raw, _ := base64.StdEncoding.DecodeString(out.KEL)
+	raw, _ := base64.RawURLEncoding.DecodeString(out.KEL)
 	events, _ := identity.UnmarshalKEL(raw)
-	if len(events) != 2 {
-		t.Errorf("stored KEL has %d events, want the rotated 2", len(events))
+	if len(events) != len(c.KEL()) {
+		t.Errorf("stored KEL has %d events, want the rotated %d", len(events), len(c.KEL()))
 	}
 }
 
@@ -879,7 +875,7 @@ func TestRegistrationIsRateLimitedPerClientIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := func(ip string) (int, http.Header) {
-		c, _ := identitytest.Hub()
+		c, _ := aghub.NewAgentForTest()
 		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))

@@ -127,3 +127,25 @@ func (s *Store) PruneLiabilityProofsAtForTest(at time.Time) error {
 
 // DepthForTest is the tree depth an epoch states.
 func (e SupplyEpochEntry) DepthForTest() int { return e.depth }
+
+// SetKELPushLimiterClockForTest makes the /agents/kel:push limiter read
+// time from f.
+func (s *Server) SetKELPushLimiterClockForTest(f func() time.Time) {
+	s.kelPushLimiter.mu.Lock()
+	s.kelPushLimiter.now = f
+	s.kelPushLimiter.mu.Unlock()
+}
+
+// SetKELPushRateForTest replaces the /agents/kel:push limiter's rate.
+func (s *Server) SetKELPushRateForTest(perMinute float64, burst int) {
+	s.kelPushLimiter = newRateLimiter(perMinute/60, burst)
+}
+
+// NoticeRowForTest is the notice_cache row of aid: the seq, head and
+// observed_at it states and the notice; ok is false when there is none.
+func (s *Store) NoticeRowForTest(aid string) (seq uint64, head string, observedAt int64, notice []byte, ok bool) {
+	var sq int64
+	err := s.db.QueryRow(`SELECT seq, head, observed_at, blob FROM notice_cache WHERE aid=?`, aid).
+		Scan(&sq, &head, &observedAt, &notice)
+	return uint64(sq), head, observedAt, notice, err == nil
+}

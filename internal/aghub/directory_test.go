@@ -33,7 +33,7 @@ import (
 // and POST /agents/{aid}/keys leave it, and returns it.
 func dirAgent(t *testing.T, store *aghub.Store) *identity.Controller {
 	t.Helper()
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,9 +612,14 @@ func TestDirBoxRecomputedOnChange(t *testing.T) {
 	}
 	e, box1 := storedEntry(t, store, c.AID())
 	kel1, _ := identity.MarshalKEL(c.KEL())
+	// The notice this hub signed as the agent's witness, which the
+	// registration's answer carried too (KEL H-11).
 	if e == nil || e.AID != c.AID() || e.Home != hubAID || !bytes.Equal(e.KEL, kel1) || !bytes.Equal(e.Keys, k1) ||
-		e.Card != nil || e.Notice != nil {
+		e.Card != nil || e.Notice == nil {
 		t.Fatalf("after registering: %+v", e)
+	}
+	if err := identity.VerifyNotice(e.Notice, c.KEL(), hubKELsOf(t, srv), uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatalf("the entry's notice: %v", err)
 	}
 	// The same registration again changes nothing, the box included.
 	if code, b := registerFunded(t, srv, c, body); code != 200 {
@@ -653,27 +658,42 @@ func TestDirBoxRecomputedOnChange(t *testing.T) {
 		t.Fatal("the entry does not carry the new card")
 	}
 	// 4. the key history extended: the card signed by the key the
-	// rotation retired is delisted, and leaves the entry with it.
+	// rotation retired is delisted, and leaves the entry with it; so does
+	// the key set it signed (KEL H-2), and with no key set there is no
+	// entry until the agent publishes one signed with its new key.
 	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	kel2, _ := identity.MarshalKEL(c.KEL())
 	register(t, srv, c, "Agent", nil)
-	if e, _ = storedEntry(t, store, c.AID()); !bytes.Equal(e.KEL, kel2) {
-		t.Fatal("the entry does not carry the extended key history")
+	if e, _ = storedEntry(t, store, c.AID()); e != nil {
+		t.Fatalf("the entry outlived the key set the rotation retired: %+v", e)
+	}
+	k3, _ := mintKeySet(t, c, 3)
+	if code, b := publishKeys(t, srv, c, k3); code != 200 {
+		t.Fatalf("publish after the rotation: %d %s", code, b)
+	}
+	if e, _ = storedEntry(t, store, c.AID()); e == nil || !bytes.Equal(e.KEL, kel2) || !bytes.Equal(e.Keys, k3) {
+		t.Fatalf("the entry does not carry the extended key history and the new set: %+v", e)
 	}
 	if e.Card != nil {
 		t.Fatal("the entry still carries a card that no longer verifies")
 	}
-	// Extended again, with nothing else changing: no card to delist and
-	// no key set, only the registration.
+	// Extended again, with the set re-signed in the registration, as a
+	// daemon registers a planned rotation (KEL D-30): one registration, and
+	// the entry follows it.
 	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())+1); err != nil {
 		t.Fatal(err)
 	}
 	kel3, _ := identity.MarshalKEL(c.KEL())
-	register(t, srv, c, "Agent", nil)
-	if e, _ = storedEntry(t, store, c.AID()); !bytes.Equal(e.KEL, kel3) {
-		t.Fatal("the entry does not carry the key history a registration extended")
+	k3again := resignKeySet(t, c, k3)
+	body = registerBody(t, c, "Agent", nil)
+	withEncKeys(t, srv, body, c.AID(), k3again)
+	if code, b := registerFunded(t, srv, c, body); code != 200 || !strings.Contains(string(b), `"keys_status":"ok"`) {
+		t.Fatalf("register the rotation with the re-signed set: %d %s", code, b)
+	}
+	if e, _ = storedEntry(t, store, c.AID()); e == nil || !bytes.Equal(e.KEL, kel3) || !bytes.Equal(e.Keys, k3again) {
+		t.Fatalf("the entry does not carry the key history a registration extended: %+v", e)
 	}
 	kel2 = kel3
 	// 5. a new witness notice.
@@ -903,18 +923,28 @@ func indexOf(cs []*identity.Controller, c *identity.Controller) int {
 
 // SSR-W18, SSR-W19: the agents a peer's card stream taught this hub count
 // towards dir_max_bits (the merged directory), but a bucket here answers
-// this hub's own entries only (the peer answers for its own).
+// this hub's own entries only (the peer answers for its own). A card that
+// came without a key set does not count: its agent is in no bucket
+// (SSR-H18), and counting it would make the buckets narrower than they are.
 func TestMaxBitsCountsPeerCardsButBucketsDoNot(t *testing.T) {
 	srv, store, agents := dirHubWith(t, 2)
 	db := store.DBForTest()
-	for i := 0; i < 300; i++ {
-		c, _ := twoAgents(t)
-		if _, err := db.Exec(`INSERT INTO fed_a2a_card(aid, seq, payload_hash, card, kel, home, peer_aid, verified_at, stored_at)
-		    VALUES(?, 1, x'00', '{}', x'00', 'https://peer.example', 'peer', ?, ?)`,
-			c.AID(), time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
-			t.Fatal(err)
+	insert := func(n int, keys []byte) {
+		for i := 0; i < n; i++ {
+			c, _ := twoAgents(t)
+			if _, err := db.Exec(`INSERT INTO fed_a2a_card(aid, seq, payload_hash, card, kel, keys, home, peer_aid, verified_at, stored_at)
+			    VALUES(?, 1, x'00', '{}', x'00', ?, 'https://peer.example', 'peer', ?, ?)`,
+				c.AID(), keys, time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339)); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
+	insert(300, nil)
+	store.ForgetDirMaxBitsForTest()
+	if max, err := store.DirMaxBits(); err != nil || max != 0 {
+		t.Fatalf("2 entries and 300 peer cards without a key set: max_bits %d (%v), want 0", max, err)
+	}
+	insert(300, []byte{0})
 	store.ForgetDirMaxBitsForTest()
 	max, err := store.DirMaxBits()
 	if err != nil {
@@ -938,10 +968,12 @@ func TestMaxBitsCountsPeerCardsButBucketsDoNot(t *testing.T) {
 	}
 }
 
-// SSR-H17, the key set: the same set re-signed after a rotation is stored
-// as unchanged, and the entry carries the new signature, the one that
-// verifies against the extended KEL. An entry left with the old signature
-// would hand every reader a key set it refuses.
+// SSR-H17, the key set: a rotation takes the key set its retired key signed
+// out of the entry with it (KEL H-2: no entry until a set signed with the
+// new key), and the same set re-signed after it is stored, and the entry
+// carries the new signature, the one that verifies against the extended KEL.
+// An entry left with the old signature would hand every reader a key set it
+// refuses.
 func TestDirEntryCarriesTheResignedKeySet(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	c, _ := twoAgents(t)
@@ -966,14 +998,17 @@ func TestDirEntryCarriesTheResignedKeySet(t *testing.T) {
 	if code, b := registerCode(t, srv, c, "Agent", nil); code != http.StatusOK {
 		t.Fatalf("register after the rotation: %d %s", code, b)
 	}
+	if e, _ := storedEntry(t, store, c.AID()); e != nil {
+		t.Fatal("the entry still carries the key set the rotation retired")
+	}
 	after := signSet(t, c, set)
 	if bytes.Equal(after, before) {
 		t.Fatal("setup: the re-signed set has the same bytes")
 	}
 	code, b := publishKeys(t, srv, c, after)
 	var out aghub.KeysPublishResponse
-	if code != http.StatusOK || json.Unmarshal(b, &out) != nil || out.KeysStatus != aghub.KeysStatusUnchanged {
-		t.Fatalf("the same set re-signed: %d %s, want 200 unchanged", code, b)
+	if code != http.StatusOK || json.Unmarshal(b, &out) != nil || out.KeysStatus != aghub.KeysStatusOK {
+		t.Fatalf("the same set re-signed: %d %s, want 200 ok", code, b)
 	}
 	kel, _ := identity.MarshalKEL(c.KEL())
 	if e, _ := storedEntry(t, store, c.AID()); e == nil || !bytes.Equal(e.Keys, after) || !bytes.Equal(e.KEL, kel) {
@@ -1082,4 +1117,13 @@ func TestMaxBitsCountsAnAgentOnce(t *testing.T) {
 	if max, err := store.DirMaxBits(); err != nil || max != 0 {
 		t.Fatalf("60 agents, each also known from a peer: max_bits %d (%v), want 0", max, err)
 	}
+}
+
+// resignKeySet is the key set raw carries signed again under c's current
+// key state, as a daemon re-signs its set for a planned rotation
+// (forward-secrecy FS-K17): the same set, a new signature.
+func resignKeySet(t *testing.T, c *identity.Controller, raw []byte) []byte {
+	t.Helper()
+	es := keySetOf(t, raw)
+	return signSet(t, c, &es)
 }

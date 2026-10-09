@@ -16,6 +16,7 @@ package aghub
 
 import (
 	"bytes"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -169,11 +170,15 @@ func FuzzValidAID(f *testing.F) {
 		if !ok {
 			return
 		}
-		raw, err := aidEncoding.DecodeString(s[1:])
-		if err != nil || len(raw) != 36 || !bytes.Equal(raw[:4], aidPrefix) {
+		// An oracle of its own, not the implementation's tables: CIDv1
+		// (0x01), dag-cbor (0x71), sha2-256 (0x12) of 32 bytes (0x20), in
+		// lower-case unpadded base32 after the multibase "b".
+		enc := base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+		raw, err := enc.DecodeString(s[1:])
+		if err != nil || len(raw) != 36 || !bytes.Equal(raw[:4], []byte{0x01, 0x71, 0x12, 0x20}) {
 			t.Fatalf("%q accepted: %x %v", s, raw, err)
 		}
-		if "b"+aidEncoding.EncodeToString(raw) != s {
+		if "b"+enc.EncodeToString(raw) != s {
 			t.Fatalf("%q accepted but is not the canonical spelling", s)
 		}
 	})

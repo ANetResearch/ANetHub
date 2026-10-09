@@ -21,6 +21,7 @@ import (
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // A2A card admission and the A2A registry (A2A-DESIGN §3.7, §10.3, §10.5).
@@ -115,7 +116,8 @@ func editSigned(t *testing.T, signed json.RawMessage, edit func(map[string]any))
 }
 
 // registerA2A registers c with card in a2a_card (nil: no field) and
-// returns the answer; the registration itself must succeed.
+// returns the answer; the registration itself must succeed. c then has a
+// key set (ensureKeys), as an agent whose daemon runs has.
 func registerA2A(t *testing.T, srv *httptest.Server, c *identity.Controller, name string, caps []string, card json.RawMessage) aghub.RegisterResponse {
 	t.Helper()
 	body := registerBody(t, c, name, caps)
@@ -130,6 +132,9 @@ func registerA2A(t *testing.T, srv *httptest.Server, c *identity.Controller, nam
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
+	// Listed only with a key set (SSR-H18), which a daemon publishes as
+	// soon as it registers.
+	ensureKeys(t, srv, c)
 	return out
 }
 
@@ -337,7 +342,7 @@ func TestTheRegistryFiltersAndPages(t *testing.T) {
 			withSkills([]string{"summarize", "Summarize", "ml"})(m)
 		},
 	} {
-		c, err := identitytest.Hub()
+		c, err := aghub.NewAgentForTest()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -475,10 +480,24 @@ func TestTheHubAgreesWithTheA2ACardGoldenVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newHub(t)
+	// The suite identity is a hub's (toad 0), which no hub registers as an
+	// agent (KEL H-1), and the test hubs sign as it: its card goes into the
+	// store of a hub of another identity, as the registration would put it.
+	id, err := hubid.LoadOrIncept(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, store := newHubSigningAs(t, id)
 	suite := identity.SuiteController()
-	if out := registerA2A(t, srv, suite, "Suite", nil, bytes.TrimSpace(card)); out.CardStatus != aghub.CardStatusOK {
-		t.Fatalf("golden card: %+v", out)
+	kel, err := identity.MarshalKEL(suite.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgent(suite.AID(), "Suite", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	if status, detail := store.AdmitA2ACard(suite.AID(), bytes.TrimSpace(card), suite.KEL(), time.Now()); status != aghub.CardStatusOK {
+		t.Fatalf("golden card: %s %s", status, detail)
 	}
 	code, got, hdr := send(t, newGet(t, srv.URL+"/agents/"+suite.AID()+"/jwks.json", ""))
 	if code != http.StatusOK || !bytes.Equal(got, bytes.TrimSpace(want)) || hdr.Get("ETag") == "" {
@@ -524,15 +543,17 @@ func TestTheJWKSListsOnlyTheActiveKeyStates(t *testing.T) {
 		}
 		return out
 	}
-	if got := kids(); strings.Join(got, ",") != a2acard.KID(c.AID(), 0) {
-		t.Fatalf("before rotation: %v", got)
+	// An agent's key states: the icp's, retired by the rot that named its
+	// witness, and that rot's, the one in force.
+	if got, want := kids(), a2acard.KID(c.AID(), c.CurrentSeq()); strings.Join(got, ",") != want {
+		t.Fatalf("before rotation: %v, want only %s", got, want)
 	}
 	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	registerA2A(t, srv, c, "Agent", nil, nil)
-	if got := kids(); strings.Join(got, ",") != a2acard.KID(c.AID(), 1) {
-		t.Errorf("after rotation: %v, want only %s", got, a2acard.KID(c.AID(), 1))
+	if got, want := kids(), a2acard.KID(c.AID(), c.CurrentSeq()); strings.Join(got, ",") != want {
+		t.Errorf("after rotation: %v, want only %s", got, want)
 	}
 	if code, _, _ := send(t, newGet(t, srv.URL+"/agents/bafyunknown/jwks.json", "")); code != http.StatusNotFound {
 		t.Errorf("jwks of an unknown AID: %d, want 404", code)

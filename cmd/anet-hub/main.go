@@ -335,6 +335,10 @@ func main() {
 	// Revocations of delivery credentials are kept 31 days (sealed-sender
 	// SSR-H10).
 	go store.RunRevocationJanitor(ctx, time.Hour)
+	// The witness notice of every agent a sender can find here is kept at
+	// most 10 minutes old, whether or not the agent polled lately (KEL
+	// H-11, D-26).
+	go store.RunNoticeRefresher(ctx)
 
 	root := newRoot(hubID, srv0)
 	deps := &hubDeps{data: *f.data, store: store, hubID: hubID, srv0: srv0, root: root}

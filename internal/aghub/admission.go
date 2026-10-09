@@ -35,7 +35,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base32"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -46,6 +45,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/regpow"
 )
 
@@ -156,31 +156,16 @@ func (e *BadLineError) Error() string {
 	return fmt.Sprintf("hub: line %d of the admission file is not a valid AID", e.Line)
 }
 
-// aidPrefix is the first bytes of every AID once decoded: CIDv1, dag-cbor,
-// sha2-256, 32 bytes (ANetCore anetcid).
-var aidPrefix = []byte{0x01, 0x71, 0x12, 0x20}
-
-var aidEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
-
 // ValidAID reports whether s is a complete AID: "b" and the canonical
 // lower-case base32 of a CIDv1 dag-cbor sha2-256 identifier. A prefix, a
 // short form or a name is not one, so an operator who pasted half an AID is
 // told so instead of admitting nobody in particular.
-func ValidAID(s string) bool {
-	if len(s) != 59 || s[0] != 'b' {
-		return false
-	}
-	raw, err := aidEncoding.DecodeString(s[1:])
-	if err != nil || len(raw) != len(aidPrefix)+32 {
-		return false
-	}
-	for i, b := range aidPrefix {
-		if raw[i] != b {
-			return false
-		}
-	}
-	return aidEncoding.EncodeToString(raw) == s[1:]
-}
+//
+// It is ANetCore's identity.ValidAID, the one test of an AID every party
+// applies (KEL R-3): the admission list, the body of a registration, the
+// X-ANet-AID of a signed request (parseV2Headers) and a rot's witness all
+// take the same strings.
+func ValidAID(s string) bool { return identity.ValidAID(s) }
 
 // now is the store's clock: time.Now, or a test's.
 func (s *Store) now() time.Time {

@@ -390,9 +390,9 @@ func (s *Service) fetchPeerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	if out.AID != p.AID {
 		return nil, fmt.Errorf("peer identity mismatch: served %s, configured %s", out.AID, p.AID)
 	}
-	blob, err := base64.StdEncoding.DecodeString(out.KEL)
+	blob, err := wire3.DecodeB64URL("kel", out.KEL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("peer %s served a key history that is not base64url (hub wire 3): %w", p.AID, err)
 	}
 	kel, err := provenPeerKEL(blob, p.AID)
 	if err != nil {

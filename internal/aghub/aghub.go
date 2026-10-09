@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/seal"
 	evidence "github.com/ANetResearch/ANetHub/internal/evidencev1" // v030-todo(PAY-6): evidence v2
 	_ "modernc.org/sqlite"                                         // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
@@ -85,15 +86,17 @@ type AgentView struct {
 	// KEL and Keys are the agent's key history and encryption key set
 	// (seal.SignedEncKeySet), base64url (core G2), so that a reader of the
 	// listing can write to the agent without looking it up again by AID
-	// (sealed-sender SSR-H18). Keys is absent for an agent that has
-	// published none. Both are absent where the view is not a listing
-	// entry (/graph, a departed agent).
+	// (sealed-sender SSR-H18). Every listing entry has both: an agent that
+	// has published no key set yet is not listed, since nobody could write
+	// to it. Both are absent where the view is not a listing entry (/graph,
+	// a departed agent; /agents/{aid} of an agent without a key set has
+	// no keys).
 	KEL  string `json:"kel,omitempty"`
 	Keys string `json:"keys,omitempty"`
 	// KeyStateNotice is the witness notice of the KEL's tip (NoticeWire,
-	// base64url), when there is one.
-	// v030-todo(KEL-5): the notice this hub issued as the agent's witness,
-	// or the one a peer's card stream carried.
+	// base64url), when there is one: the notice this hub signed as the
+	// agent's witness (notice.go), or for an agent learned from a peer the
+	// one its card stream carried.
 	KeyStateNotice string `json:"key_state_notice,omitempty"`
 }
 
@@ -179,8 +182,8 @@ type Store struct {
 	// kids is the decoded key sets of recent recipients, for the kid
 	// check of every queued envelope (relay.go kidAcceptable).
 	kids kidCache
-	// dirNotice, when set, gives the witness notice a directory entry
-	// carries (directory.go dirNoticeOf).
+	// dirNotice, when a test sets it, gives the witness notice a directory
+	// entry carries instead of the notice cache (directory.go dirNoticeOf).
 	dirNotice func(q rowQuerier, aid string) ([]byte, error)
 	// kelHooks are run when a registered agent's key history grows
 	// (OnKELExtended).
@@ -375,6 +378,7 @@ var schema = [][]string{
 	a2aFedSeqSchema(),
 	admissionSchema(),
 	supplySchema(),
+	noticeSchema(),
 }
 
 // createSchema gives a file with no schema the whole of schema and
@@ -755,6 +759,15 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 		}
 		admitted = true
 	}
+	// The registration took new key events (an agent re-registers with
+	// the same key history on every start, which changes nothing): what
+	// was stated under the old tip goes in this transaction (KEL H-2).
+	changed := existed && !bytes.Equal(heldKEL, kel)
+	if changed {
+		if err := kelChangedTx(tx, aid, kel); err != nil {
+			return false, err
+		}
+	}
 	// The key history may have grown (sealed-sender SSR-H17).
 	if err := s.refreshDirTx(tx, aid); err != nil {
 		return false, err
@@ -762,12 +775,45 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
-	// The registration took new key events (an agent re-registers with
-	// the same key history on every start, which changes nothing).
-	if existed && !bytes.Equal(heldKEL, kel) {
+	if changed {
 		s.runKELHooks(aid)
 	}
 	return admitted, nil
+}
+
+// kelChangedTx is what a registered agent's new key history ends, in the
+// transaction that stores it (KEL H-2), kel being the history now stored:
+//
+//   - the key set, unless it is signed under the tip of kel: a key set is a
+//     statement of the current key only (KEL C-11, core CORE-K8), and one
+//     signed by a key the agent rotated away from may be a thief's. The
+//     agent publishes its set again, signed with its new key (with the
+//     rotation's registration, or after it); until then it has no
+//     directory entry and nothing is queued for it (relay.go kidAcceptable);
+//   - the witness notice this hub keeps for it, which stated the old tip.
+//
+// The A2A card is re-verified against the new history by the caller once
+// this commits (RegisterA2ACard, recheckA2ACard): one signed by a retired
+// key is delisted.
+func kelChangedTx(tx *sql.Tx, aid string, kel []byte) error {
+	tipSeq, _, ok := kelTip(kel)
+	if !ok {
+		return fmt.Errorf("hub: the key history stored for %s does not decode", aid)
+	}
+	var raw []byte
+	err := tx.QueryRow(`SELECT keyset FROM agent_keys WHERE aid=?`, aid).Scan(&raw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		if signed, derr := seal.UnmarshalSignedEncKeySet(raw); derr != nil || signed.KeyStateSeq != tipSeq {
+			if _, err := tx.Exec(`DELETE FROM agent_keys WHERE aid=?`, aid); err != nil {
+				return err
+			}
+		}
+	}
+	return forgetNoticeTx(tx, aid)
 }
 
 // Bounds on what one registration may put into the capability index.
@@ -823,7 +869,8 @@ func excerpt(s string) string {
 	return string(r[:runes]) + "\u2026"
 }
 
-// FindByCapability returns agents offering a capability id.
+// FindByCapability returns agents offering a capability id, those with a
+// key set only (SSR-H18, as ListAgents).
 //
 // Exact by default, prefix when the query ends in "*". A capability id is
 // structured — family, action, and often a device or vendor after "@" —
@@ -886,7 +933,9 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !av.Browsable() {
+		// Listed only with a key set (SSR-H18): an agent nobody can
+		// write to yet is not offered to anyone.
+		if !av.Browsable() || av.Keys == "" {
 			continue
 		}
 		out = append(out, av)
@@ -1014,7 +1063,8 @@ func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
 // ListAgents returns LISTED agents (those advertising a service — caps or a profile) with their
 // aggregate rating, best-rated first. A non-empty query filters to agents whose AID, name, caps or
 // profile contain it (case-insensitive) — the `find` backend. Pure requesters (registered but with no
-// caps/profile) are intentionally omitted so they do not clutter the starfield.
+// caps/profile) are intentionally omitted so they do not clutter the starfield, and so is an agent
+// that has published no key set yet (sealed-sender SSR-H18): nobody could write to it.
 func (s *Store) ListAgents(query string) ([]AgentView, error) {
 	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, ` + agentKeyColumns + `,
 	             COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
@@ -1037,7 +1087,7 @@ func (s *Store) ListAgents(query string) ([]AgentView, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !av.Listed || !av.Browsable() {
+		if !av.Listed || !av.Browsable() || av.Keys == "" {
 			continue
 		}
 		out = append(out, av)
@@ -1264,17 +1314,18 @@ func (s *Store) ReviewEdges() ([]Edge, error) {
 
 type scanner interface{ Scan(dest ...any) error }
 
-// agentKeyColumns are the key history and the key set scanAgent reads
-// after a.last_seen_at.
-const agentKeyColumns = `a.kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid)`
+// agentKeyColumns are the key history, the key set and the cached witness
+// notice scanAgent reads after a.last_seen_at.
+const agentKeyColumns = `a.kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid),
+	(SELECT n.blob FROM notice_cache n WHERE n.aid = a.aid)`
 
 func scanAgent(sc scanner) (AgentView, error) {
 	var av AgentView
 	var capsJSON string
 	var lastSeen sql.NullString
-	var kel, keys []byte
+	var kel, keys, notice []byte
 	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme,
-		&av.RegisteredAt, &lastSeen, &kel, &keys, &av.AvgRating, &av.ReviewCount); err != nil {
+		&av.RegisteredAt, &lastSeen, &kel, &keys, &notice, &av.AvgRating, &av.ReviewCount); err != nil {
 		return av, err
 	}
 	// Every listing surface runs through this one function, so all of
@@ -1285,7 +1336,7 @@ func scanAgent(sc scanner) (AgentView, error) {
 	live := livenessFrom(lastSeen.String, time.Now())
 	av.LastSeen, av.Quiet = live.LastSeen, live.Quiet
 	av.RegisteredAt = toTheDay(av.RegisteredAt)
-	av.KEL, av.Keys = b64url(kel), b64url(keys)
+	av.KEL, av.Keys, av.KeyStateNotice = b64url(kel), b64url(keys), b64url(noticeOfTip(kel, notice))
 	_ = json.Unmarshal([]byte(capsJSON), &av.Caps)
 	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
 	// profile text. A pure requester has none of these and stays out of the public listing.

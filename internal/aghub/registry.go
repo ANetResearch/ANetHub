@@ -30,8 +30,10 @@ import (
 // agent's own signed statement, as the bytes it sent; the wrapper is the
 // hub's, and a consumer that needs more than the hub's word verifies the
 // card against the agent's KEL itself, which the entry carries with the
-// agent's key set (sealed-sender SSR-H18): a daemon that found an agent here
-// has what it needs to write to it, without looking it up again by AID.
+// agent's key set and the witness notice of the KEL's tip (sealed-sender
+// SSR-H18): a daemon that found an agent here has what it needs to write
+// to it, without looking it up again by AID. An agent that has published no
+// key set yet is not listed: nobody could write to it.
 //
 // Times are stated no more precisely than a reader needs (SSR-H18): when
 // the agent last collected its mail and when its card last verified (which
@@ -73,14 +75,15 @@ type A2AAgentEntry struct {
 	ReviewCount int     `json:"reviewCount"`
 	AvgRating   float64 `json:"avgRating"`
 	// KEL is the agent's key history and Keys its encryption key set
-	// (seal.SignedEncKeySet), base64url (core G2). Keys is absent for an
-	// agent that has published none: nothing can be sealed to it yet.
+	// (seal.SignedEncKeySet), base64url (core G2). Every entry has both:
+	// an agent that has published no key set is not listed, since nothing
+	// can be sealed to it yet (SSR-H18).
 	KEL  string `json:"kel"`
-	Keys string `json:"keys,omitempty"`
+	Keys string `json:"keys"`
 	// KeyStateNotice is the witness notice of the KEL's tip (NoticeWire,
-	// base64url), when there is one.
-	// v030-todo(KEL-5): the notice this hub issued as the agent's witness,
-	// or the one a peer's card stream carried.
+	// base64url), when there is one: the notice this hub signed as the
+	// agent's witness (notice.go), or for a card learned from a peer the
+	// one the peer's card stream carried.
 	KeyStateNotice string `json:"key_state_notice,omitempty"`
 }
 
@@ -153,19 +156,21 @@ func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 	}
 	union := arm(`SELECT a.aid AS aid, c.card AS card, c.verified_at AS verified_at,
 	                     a.registered_at AS registered_at, a.last_seen_at AS last_seen_at, '' AS home,
-	                     a.kel AS kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid) AS keys`,
+	                     a.kel AS kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid) AS keys,
+	                     (SELECT n.blob FROM notice_cache n WHERE n.aid = a.aid) AS notice`,
 		`agent_a2a_card c JOIN agent a ON a.aid = c.aid WHERE c.verified_at IS NOT NULL`,
 		"a.aid", "agent_skill", "agent_tag", "c.search")
 	if q.Federated {
-		union += ` UNION ALL ` + arm(`SELECT f.aid, f.card, f.verified_at, '', NULL, f.home, f.kel, f.keys`,
+		union += ` UNION ALL ` + arm(`SELECT f.aid, f.card, f.verified_at, '', NULL, f.home, f.kel, f.keys, f.notice`,
 			`fed_a2a_card f WHERE f.verified_at IS NOT NULL
 			   AND NOT EXISTS (SELECT 1 FROM agent a WHERE a.aid = f.aid)`,
 			"f.aid", "fed_a2a_skill", "fed_a2a_tag", "f.search")
 	}
-	query := `SELECT u.aid, u.card, u.verified_at, u.registered_at, u.last_seen_at, u.home, u.kel, u.keys,
+	// An agent without a key set is not listed (SSR-H18).
+	query := `SELECT u.aid, u.card, u.verified_at, u.registered_at, u.last_seen_at, u.home, u.kel, u.keys, u.notice,
 	                 (SELECT COUNT(*) FROM review r WHERE r.subject_aid = u.aid),
 	                 (SELECT COALESCE(AVG(r.rating),0) FROM review r WHERE r.subject_aid = u.aid)
-	            FROM (` + union + `) u ORDER BY u.aid`
+	            FROM (` + union + `) u WHERE u.keys IS NOT NULL AND length(u.keys) > 0 ORDER BY u.aid`
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, false, err
@@ -175,11 +180,11 @@ func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 	out := []A2AAgentEntry{}
 	for rows.Next() {
 		var e A2AAgentEntry
-		var card, kel, keys []byte
+		var card, kel, keys, notice []byte
 		var registeredAt string
 		var lastSeen sql.NullString
 		if err := rows.Scan(&e.AID, &card, &e.VerifiedAt, &registeredAt, &lastSeen, &e.HomeHub,
-			&kel, &keys, &e.ReviewCount, &e.AvgRating); err != nil {
+			&kel, &keys, &notice, &e.ReviewCount, &e.AvgRating); err != nil {
 			return nil, false, err
 		}
 		live := livenessFrom(lastSeen.String, now)
@@ -197,7 +202,7 @@ func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 		e.CardVerification = CardVerificationOK
 		e.VerifiedAt = toTheHour(e.VerifiedAt)
 		e.LastSeen, e.Quiet = live.LastSeen, live.Quiet
-		e.KEL, e.Keys = b64url(kel), b64url(keys)
+		e.KEL, e.Keys, e.KeyStateNotice = b64url(kel), b64url(keys), b64url(noticeOfTip(kel, notice))
 		out = append(out, e)
 	}
 	return out, false, rows.Err()

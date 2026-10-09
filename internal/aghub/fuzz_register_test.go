@@ -102,17 +102,17 @@ func indexInvariants(t *testing.T, h *fz, aid string) {
 func FuzzHubRegister(f *testing.F) {
 	h := newFZ(f)
 	regular, _ := h.agent(f, "fuzz-regular", []string{"fuzz.reg"}, true)
-	stranger, err := identitytest.Hub()
+	stranger, err := aghub.NewAgentForTest()
 	if err != nil {
 		f.Fatal(err)
 	}
 	// A KEL past seal.MaxKELEvents, built once: no sender accepts it, and
 	// neither may /register [redteam:F36].
-	big, err := identitytest.Hub()
+	big, err := aghub.NewAgentForTest()
 	if err != nil {
 		f.Fatal(err)
 	}
-	start := uint64(time.Now().UnixMilli()) - 2*uint64(seal.MaxKELEvents)
+	start := big.KEL()[len(big.KEL())-1].Event.Timestamp + 1
 	for i := 0; i <= seal.MaxKELEvents; i++ {
 		// Each event's ts is after the previous one's (KEL v2).
 		if err := identitytest.Rotate(big, start+uint64(i)); err != nil {
@@ -144,13 +144,13 @@ func FuzzHubRegister(f *testing.F) {
 		// (re-registration), or a new identity rotated a few times.
 		c := regular
 		if who%4 != 1 {
-			if c, err = identitytest.Hub(); err != nil {
+			if c, err = aghub.NewAgentForTest(); err != nil {
 				t.Fatal(err)
 			}
 			if who%4 == 2 {
-				now := uint64(time.Now().UnixMilli())
+				last := c.KEL()[len(c.KEL())-1].Event.Timestamp
 				for i := 0; i < int(seq%3)+1; i++ {
-					if err := identitytest.Rotate(c, now-2+uint64(i)); err != nil {
+					if err := identitytest.Rotate(c, last+1+uint64(i)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -389,7 +389,7 @@ func FuzzHubKeys(f *testing.F) {
 	}())); rec.Code != http.StatusOK {
 		f.Fatalf("register with card: %d %s", rec.Code, rec.Body.Bytes())
 	}
-	stranger, _ := identitytest.Hub()
+	stranger, _ := aghub.NewAgentForTest()
 
 	f.Add(uint8(0), uint64(2), int64(0), []byte(nil), []byte(`{"aid":"`+k.AID()+`"}`), k.AID())
 	f.Add(uint8(0), uint64(1), int64(0), []byte(nil), []byte(`{"aid":"`+other.AID()+`"}`), other.AID())
@@ -590,7 +590,7 @@ func checkLookup(t *testing.T, h *fz, kind, aid string, body []byte) {
 		if err := json.Unmarshal(body, &v); err != nil || v.AID != aid {
 			t.Fatalf("kel lookup for %s answered %s", aid, body)
 		}
-		kl, _ := base64.StdEncoding.DecodeString(v.KEL)
+		kl, _ := base64.RawURLEncoding.DecodeString(v.KEL)
 		kel, err := identity.UnmarshalKEL(kl)
 		if err != nil {
 			t.Fatal(err)

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -114,7 +113,7 @@ func TestAPeerCannotInventARating(t *testing.T) {
 		// A peer that could hand us its own KEL for both parties could
 		// sign an entire interaction into existence. The AIDs the objects
 		// name are checked against the histories supplied.
-		impostor, err := identitytest.Hub()
+		impostor, err := aghub.NewAgentForTest()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -222,13 +221,13 @@ func TestTheHubPublishesItsOwnKeyHistory(t *testing.T) {
 		t.Fatalf("the hub will not publish its own key: %d", resp.StatusCode)
 	}
 	var out struct {
-		KEL  string `json:"kel"`
-		Role string `json:"role"`
+		KEL        string `json:"kel"`
+		Registered bool   `json:"registered"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := base64.StdEncoding.DecodeString(out.KEL)
+	raw, err := base64.RawURLEncoding.DecodeString(out.KEL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,8 +242,8 @@ func TestTheHubPublishesItsOwnKeyHistory(t *testing.T) {
 	if got := states[len(states)-1].AID; got != hubAID {
 		t.Errorf("the hub published somebody else's key history: %s", got)
 	}
-	if out.Role != "hub" {
-		t.Errorf("role = %q — a reader should be able to tell this is the custodian", out.Role)
+	if !out.Registered {
+		t.Error("registered = false: the hub's own history is not a departed agent's")
 	}
 }
 
@@ -289,7 +288,7 @@ func TestAnInteractionThatCrossedAHubCanStillBeReviewed(t *testing.T) {
 
 	// And a stranger who never registered anywhere still cannot be
 	// reviewed — the widening is "known to this hub", not "anyone".
-	stranger, err := identitytest.Hub()
+	stranger, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

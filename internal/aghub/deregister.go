@@ -122,6 +122,9 @@ var deregSteps = []deregStep{
 	// registers again, its daemon pushes them again when the registration
 	// answer counts none (sealed-sender SSR-D21).
 	{"revoked delivery credentials", execAID(`DELETE FROM cap_revocation WHERE owner = ?`)},
+	// The witness notice this hub kept for it (KEL H-4, H-12): a hub
+	// states nothing about an AID it no longer registers (notice.go).
+	{"witness notice", execAID(`DELETE FROM notice_cache WHERE aid = ?`)},
 	// The registry row last: the steps above may read it. The directory
 	// entry (dir_hash, dir_box; directory.go) goes with it.
 	{"registry row", execAID(`DELETE FROM agent WHERE aid = ?`)},

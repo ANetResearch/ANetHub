@@ -13,8 +13,9 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // Two payers settle 100 each, at once, to a payee 150 short of what a
@@ -24,7 +25,7 @@ import (
 // signed, and the payee's balance still reads as an integer.
 func TestSpotConcurrentSettlementsCannotTogetherPassWhatALedgerHolds(t *testing.T) {
 	w := newOverflowWorld(t)
-	third, err := identitytest.Hub()
+	third, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

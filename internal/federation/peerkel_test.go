@@ -32,7 +32,7 @@ func peerIdentityServer(t *testing.T, aid string, kel *atomic.Pointer[[]byte]) *
 	t.Helper()
 	srv := httptest.NewServer(stampWire(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"aid":"` + aid + `","kel":"` + base64.StdEncoding.EncodeToString(*kel.Load()) + `"}`))
+		_, _ = w.Write([]byte(`{"aid":"` + aid + `","kel":"` + base64.RawURLEncoding.EncodeToString(*kel.Load()) + `"}`))
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -171,7 +171,7 @@ func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 	var fetches atomic.Int32
 	fake := httptest.NewServer(stampWire(func(w http.ResponseWriter, r *http.Request) {
 		fetches.Add(1)
-		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.StdEncoding.EncodeToString(*served.Load()) + `"}`))
+		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.RawURLEncoding.EncodeToString(*served.Load()) + `"}`))
 	}))
 	defer fake.Close()
 	svc, err := New(t.TempDir(),
@@ -289,7 +289,7 @@ func TestUsesWaitingOnAFailingPeerKELFetchShareItsFailure(t *testing.T) {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
 		}
-		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.StdEncoding.EncodeToString(idPeer.KEL) + `"}`))
+		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.RawURLEncoding.EncodeToString(idPeer.KEL) + `"}`))
 	}))
 	defer fake.Close()
 	svc, err := New(t.TempDir(),

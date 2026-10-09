@@ -93,7 +93,7 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("POST", "/relay/session", reflect.TypeFor[SessionResponse](), ""),
 		resp("POST", "/relay/send", reflect.TypeFor[RelaySendResponse](), ""),
 		req("POST", "/relay/poll", reflect.TypeFor[RelayPollRequest](), ""),
-		resp("POST", "/relay/poll", reflect.TypeFor[RelayPollResponse](), "v030-todo(KEL-5)"),
+		resp("POST", "/relay/poll", reflect.TypeFor[RelayPollResponse](), ""),
 		req("POST", "/relay/ack", reflect.TypeFor[RelayAckRequest](), "v030-todo(RC-3)"),
 		resp("POST", "/relay/ack", reflect.TypeFor[RelayAckResponse](), "v030-todo(RC-3)"),
 		req("POST", "/relay/status", nil, "v030-todo(RC-3)"),
@@ -103,14 +103,14 @@ func TestWire3JSONFields(t *testing.T) {
 		req("POST", "/directory:bucket", reflect.TypeFor[DirBucketRequest](), ""),
 		resp("POST", "/directory:bucket", reflect.TypeFor[DirBucketResponse](), ""),
 		req("POST", "/register", reflect.TypeFor[RegisterRequest](), ""),
-		{"POST", "/register", true, "registration", reflect.TypeFor[RegisterResponse](), "v030-todo(KEL-5)"},
+		{"POST", "/register", true, "registration", reflect.TypeFor[RegisterResponse](), ""},
 		{"POST", "/register", true, "check_only", reflect.TypeFor[CheckOnlyResponse](), ""},
 		req("POST", "/agents/{aid}/keys", reflect.TypeFor[KeysPublishRequest](), ""),
-		req("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
-		resp("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
+		req("POST", "/agents/kel:push", reflect.TypeFor[KELPushRequest](), ""),
+		resp("POST", "/agents/kel:push", reflect.TypeFor[KELPushResponse](), ""),
 		resp("GET", "/hub/identity", reflect.TypeFor[hubid.IdentityResponse](), ""),
 		resp("GET", "/hub/kels", nil, "v030-todo(KEL-7)"),
-		resp("GET", "/agents/{aid}/kel", nil, "v030-todo(KEL-5)"),
+		resp("GET", "/agents/{aid}/kel", reflect.TypeFor[AgentKELView](), ""),
 		resp("GET", "/a2a/v1/agents", reflect.TypeFor[A2AAgentEntry](), ""), // per entry
 		resp("GET", "/agents", reflect.TypeFor[AgentView](), ""),            // per entry
 		resp("GET", "/agents/{aid}/balance", reflect.TypeFor[Balance](), ""),
@@ -351,17 +351,14 @@ func wire3RC1Setup(t *testing.T) *wire3test.Env {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := NewServer(store)
 	s.SetHubAID(id.AID)
 	root := http.NewServeMux()
 	root.Handle("/hub/identity", id.Handler())
 	root.Handle("/", s.Handler())
-	alice, err := identitytest.Hub()
+	alice, err := NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,10 +427,7 @@ func wire3RegisterSetup(mode, variant string) wire3test.Setup {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { store.Close() })
-		id, err := hubid.LoadOrIncept(t.TempDir())
-		if err != nil {
-			t.Fatal(err)
-		}
+		id := HubIdentityForTest(t)
 		store.SetHubKey(id.Ctrl)
 		s := NewServer(store)
 		s.SetHubAID(id.AID)
@@ -445,7 +439,7 @@ func wire3RegisterSetup(mode, variant string) wire3test.Setup {
 		root.Handle("/", s.Handler())
 
 		incept := func() *identity.Controller {
-			c, err := identitytest.Hub()
+			c, err := NewAgentForTest()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -463,7 +457,9 @@ func wire3RegisterSetup(mode, variant string) wire3test.Setup {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := identitytest.Rotate(rotor, uint64(time.Now().UnixMilli())); err != nil {
+		// After the rot that named the witness (a key event's time only
+		// rises).
+		if err := identitytest.Rotate(rotor, uint64(time.Now().UnixMilli())+1); err != nil {
 			t.Fatal(err)
 		}
 		rotorOld, _ := identity.Restore(snap)
@@ -556,10 +552,7 @@ func wire3Hub(t *testing.T) (*wire3test.Env, *Store, map[string]*identity.Contro
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := NewServer(store)
 	s.SetHubAID(id.AID)
@@ -569,7 +562,7 @@ func wire3Hub(t *testing.T) (*wire3test.Env, *Store, map[string]*identity.Contro
 	root.Handle("/hub/identity", id.Handler())
 	root.Handle("/", s.Handler())
 
-	alice, err := identitytest.Hub()
+	alice, err := NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +636,7 @@ func wire3RevokeSetup(t *testing.T) *wire3test.Env {
 // wire3Incept is one more identity for a fixture to sign as, incepted like alice.
 func wire3Incept(t *testing.T) *identity.Controller {
 	t.Helper()
-	c, err := identitytest.Hub()
+	c, err := NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

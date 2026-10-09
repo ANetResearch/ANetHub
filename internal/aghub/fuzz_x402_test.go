@@ -62,7 +62,7 @@ func newX402World(f *testing.F) *x402World {
 	h := newFZ(f)
 	payer, _ := h.agent(f, "fuzz-payer", nil, false)
 	payee, _ := h.agent(f, "fuzz-payee", nil, false)
-	foreign, err := identitytest.Hub()
+	foreign, err := aghub.NewAgentForTest()
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func FuzzHubX402Redeem(f *testing.F) {
 func FuzzHubGatewayTombstone(f *testing.F) {
 	w := newX402World(f)
 	h := w.h
-	seller, err := identitytest.Hub()
+	seller, err := aghub.NewAgentForTest()
 	if err != nil {
 		f.Fatal(err)
 	}

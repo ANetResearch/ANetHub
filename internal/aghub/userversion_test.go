@@ -16,8 +16,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
-
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
@@ -116,7 +114,7 @@ func TestANewHubDBIsVersion3WithItsWholeSchema(t *testing.T) {
 		t.Errorf("a2a_fed_seq: %d (%v)", seq, err)
 	}
 	// It reopens as it is, with what was written.
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

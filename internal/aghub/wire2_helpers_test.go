@@ -15,7 +15,6 @@ import (
 
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -346,11 +345,25 @@ func registerWithKeys(t *testing.T, srv *httptest.Server, c *identity.Controller
 	}
 }
 
+// ensureKeys publishes a key set for c when srv holds none for it, as a
+// daemon does right after it registers: an agent is listed, and has a
+// directory entry, only once it has one (sealed-sender SSR-H18).
+func ensureKeys(t *testing.T, srv *httptest.Server, c *identity.Controller) {
+	t.Helper()
+	if storedKeySeq(t, srv, c.AID()) != 0 {
+		return
+	}
+	raw, _ := mintKeySet(t, c, uint64(time.Now().UnixMilli()))
+	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
+		t.Fatalf("publish the key set of %s: %d %s", c.AID(), code, b)
+	}
+}
+
 // storeAgentWithKeys puts a new agent with a key set straight into store,
 // for a test of the store itself.
 func storeAgentWithKeys(t *testing.T, store *aghub.Store, name string) *identity.Controller {
 	t.Helper()
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

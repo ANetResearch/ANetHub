@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/federation"
@@ -39,7 +38,7 @@ func newRegistryWorld(f *testing.F) *registryWorld {
 		{"Many", [][]string{{"a.1", "One", "t1"}, {"a.2", "Two", "t2"}, {"a.3", "Three", "t3"}}},
 	}
 	for i, c := range cards {
-		ctrl, err := identitytest.Hub()
+		ctrl, err := aghub.NewAgentForTest()
 		if err != nil {
 			f.Fatal(err)
 		}
@@ -276,7 +275,7 @@ func (w *registryWorld) walk(t *testing.T, q url.Values, n int) []string {
 func FuzzHubFedAdmission(f *testing.F) {
 	h := newFZ(f)
 	local, _ := h.agent(f, "fuzz-local", nil, true)
-	remote, err := identitytest.Hub()
+	remote, err := aghub.NewAgentForTest()
 	if err != nil {
 		f.Fatal(err)
 	}

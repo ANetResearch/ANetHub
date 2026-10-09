@@ -164,7 +164,7 @@ func dereg(s *Store, aid, why string) (DeregResult, error) {
 // (PAY-O1 step 2; M-PAY-44).
 func TestDeregTombstoneNeverShrinks(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := NewAgentForTest()
 	rotated(t, c, 1)
 	mid, _ := c.Export()
 	rotated(t, c, 1)
@@ -212,7 +212,7 @@ func TestDeregTombstoneNeverShrinks(t *testing.T) {
 // reason is refused.
 func TestDeregisterTxOfAnUnknownAID(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := NewAgentForTest()
 	before := g.dump()
 	if _, err := dereg(g.store, c.AID(), DeregOperator); !errors.Is(err, ErrNotRegistered) {
 		t.Fatalf("deregistering an unknown AID: %v", err)
@@ -233,7 +233,7 @@ func TestDeregisterTxOfAnUnknownAID(t *testing.T) {
 func TestDeregisterTxKeepsTheAdmissionUnlessRevoked(t *testing.T) {
 	for _, why := range []string{DeregSelf, DeregDip, DeregRevoked, DeregInactive, DeregOperator} {
 		g := newGateHub(t)
-		c, _ := identitytest.Hub()
+		c, _ := NewAgentForTest()
 		if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
 			t.Fatal(err)
 		}
@@ -258,7 +258,7 @@ func TestDeregisterTxKeepsTheAdmissionUnlessRevoked(t *testing.T) {
 // its dereg_event row; the hub process starts with an empty dereg_event.
 func TestInProcessDeregRunsTheCallbacks(t *testing.T) {
 	g := newGateHub(t)
-	stale, _ := identitytest.Hub()
+	stale, _ := NewAgentForTest()
 	if _, err := g.store.db.Exec(`INSERT INTO dereg_event(aid, at) VALUES(?, 1)`, stale.AID()); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestInProcessDeregRunsTheCallbacks(t *testing.T) {
 	if err := g.store.db.QueryRow(`SELECT COUNT(*) FROM dereg_event`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("dereg_event after the hub process started: %d rows (%v)", n, err)
 	}
-	c, _ := identitytest.Hub()
+	c, _ := NewAgentForTest()
 	if err := g.store.PutAgent(c.AID(), "n", nil, kelOf(t, c)); err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestMain(m *testing.M) {
 // NewServer).
 func TestOutOfProcessDeregDropsSessions(t *testing.T) {
 	g := newGateHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := NewAgentForTest()
 	if _, err := g.store.Admit(c.AID(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}

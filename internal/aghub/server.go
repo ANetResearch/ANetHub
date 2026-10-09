@@ -47,8 +47,10 @@ type Server struct {
 	registerLimiter *rateLimiter
 	replay          *rc1State
 	// dirLimiter bounds /directory:bucket per client address
-	// (directory.go; a constant, not one of the limits).
-	dirLimiter *rateLimiter
+	// (directory.go; a constant, not one of the limits), kelPushLimiter
+	// /agents/kel:push (kelpush.go; KEL §2.12 KELPushRate).
+	dirLimiter     *rateLimiter
+	kelPushLimiter *rateLimiter
 	// relay is what /relay/session and /relay/send keep in memory: the
 	// sessions and the send buckets (session.go, hRelaySend).
 	relay *relayState
@@ -148,9 +150,10 @@ func (s *Server) SetModules(names []string) {
 // it registers that with the store here.
 func NewServer(store *Store) *Server {
 	s := &Server{store: store, replay: newRC1(time.Now().UnixMilli(), rc1Shards, rc1MemHigh, rc1MemLow),
-		jwks:       newJWKSCache(jwksCacheBytes, a2acard.JWKS),
-		dirLimiter: newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst),
-		relay:      newRelayState(store.now), fedState: newFedState()}
+		jwks:           newJWKSCache(jwksCacheBytes, a2acard.JWKS),
+		dirLimiter:     newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst),
+		kelPushLimiter: newRateLimiter(KELPushPerMinute/60.0, KELPushBurst),
+		relay:          newRelayState(store.now), fedState: newFedState()}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
@@ -255,6 +258,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /agents", s.hAgents)
 	mux.HandleFunc("GET /agents/{aid}", s.hAgent)
 	mux.HandleFunc("GET /agents/{aid}/kel", s.hAgentKEL)
+	// A key history this hub knows, extended by anyone who holds the
+	// extension: how an agent tells a hub it no longer uses as its witness
+	// that it rotated or deactivated (KEL H-4). See kelpush.go.
+	mux.HandleFunc("POST "+KELPushPath, s.hKELPush)
 	// The JWKS named by the jku of an agent's A2A card, derived from its
 	// KEL (A2A-DESIGN §10.3, §10.5). See registry.go.
 	mux.HandleFunc("GET /agents/{aid}/jwks.json", s.hJWKS)
@@ -570,17 +577,22 @@ type RegisterPoW struct {
 // came in through a sign-up window or open registration. revocations is
 // how many unexpired revocations of the agent's delivery credentials this
 // hub holds (the total of /mailbox/revoke): a daemon that revoked more
-// pushes them again (sealed-sender SSR-D21).
+// pushes them again (sealed-sender SSR-D21). key_state_notice is the
+// witness notice this hub states about the agent's key history (NoticeWire,
+// base64url; notice.go), or key_state_notice_error why there is none
+// (quarantine, not_admitted or not_witness; KEL H-13).
 type RegisterResponse struct {
-	AID            string  `json:"aid"`
-	Status         string  `json:"status"`
-	KeysStatus     string  `json:"keys_status"`
-	KeysError      string  `json:"keys_error,omitempty"`
-	CardStatus     string  `json:"card_status"`
-	CardError      string  `json:"card_error,omitempty"`
-	ProbationUntil *uint64 `json:"probation_until,omitempty"`
-	Trial          string  `json:"trial,omitempty"`
-	Revocations    uint64  `json:"revocations"`
+	AID                 string  `json:"aid"`
+	Status              string  `json:"status"`
+	KeysStatus          string  `json:"keys_status"`
+	KeysError           string  `json:"keys_error,omitempty"`
+	CardStatus          string  `json:"card_status"`
+	CardError           string  `json:"card_error,omitempty"`
+	ProbationUntil      *uint64 `json:"probation_until,omitempty"`
+	Trial               string  `json:"trial,omitempty"`
+	Revocations         uint64  `json:"revocations"`
+	KeyStateNotice      string  `json:"key_state_notice,omitempty"`
+	KeyStateNoticeError string  `json:"key_state_notice_error,omitempty"`
 }
 
 // CheckOnlyResponse is the /register answer to check_only: admitted (the
@@ -626,9 +638,11 @@ var registerKELReplays atomic.Int64
 //	3  aid and kel present; X-ANet-AID == aid; caps; the pow's shape;
 //	   enc_keys base64url, with prev_seq
 //	4  the admission gate, for an AID not registered here
-//	5  the KEL: decode, replay, derive the AID; the relayauth signature
+//	5  the KEL: decode, replay, derive the AID; a deactivated one is
+//	   refused; the relayauth signature, under the tip of the submitted
+//	   KEL (KEL H-3)
 //	6  the KEL only extends what this hub holds (registered or departed);
-//	   a deactivated one is refused
+//	   the times of its new events (KEL R-9, R-10)
 //	7  the witness is this hub (KEL H-1; not for check_only)
 //	8  check_only answers here
 //	9  the key set follows the stored one (prev_seq, 409 keys_rollback);
@@ -773,20 +787,29 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid, Error: msg})
 		return
 	}
-	derived, err := aidFromKEL(kel)
+	states, err := identity.Replay(kel)
 	if err != nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
 			Error: "The key history does not replay; send the agent's own key history."})
 		return
 	}
+	tip := states[len(states)-1]
 	// The KEL must derive the claimed AID — a registration cannot claim an AID it does not control.
-	if derived != req.AID {
+	if tip.AID != req.AID {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonKELInvalid,
 			Error: "The key history does not derive the aid being registered; send that agent's own key history."})
 		return
 	}
+	// A key history that ends in a dip says so itself, and the dip is
+	// signed with the identity's recovery material: whoever sends it, the
+	// identity is deactivated (KEL H-1 2). Said before the signature, which
+	// no key can make for it any more (a dip's state holds none, KEL H-3).
+	if tip.Status == identity.StatusDeactivated {
+		wire3.Refuse(w, wire3.ReasonAIDDeactivated)
+		return
+	}
 	// Proof of key possession, against the SUBMITTED KEL (the agent may
-	// not be stored yet).
+	// not be stored yet), under its tip (KEL H-3).
 	if f := s.verifyV2(r, relayauth.ActionRegister, body, auth, kel); f != nil {
 		writeAuthFailure(w, f)
 		return
@@ -798,24 +821,33 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	// event is a fork. Accepting either would let whoever holds a
 	// superseded key take the registration back to the state that key
 	// controls.
-	if held, err := s.store.KnownKEL(req.AID); err != nil {
+	held, err := s.store.KnownKEL(req.AID)
+	if err != nil {
 		wire3.Internal(w, err)
 		return
-	} else if held != nil {
+	}
+	if held != nil {
 		if err := identity.ExtendsKEL(held, kel); err != nil {
 			refuseKELExtension(w, err)
 			return
 		}
 	}
-	if kel[len(kel)-1].Event.Type == identity.Deactivation {
-		wire3.Refuse(w, wire3.ReasonAIDDeactivated)
+	// The events this hub has not held are checked against its clock (KEL
+	// H-1 3, R-9, R-10): none later than now + 5 minutes; and one this hub
+	// is the first to accept as its witness, no earlier than now − 5
+	// minutes, so a key event cannot be dated back past a rotation.
+	if err := s.checkNewEvents(held, kel, now); err != nil {
+		refuseEventTime(w, err)
 		return
 	}
-	// v030-todo(KEL-5): R-9 and R-10 on the new events (kel_ts_out_of_window).
-	//
-	// 7. v030-todo(KEL-5): unless check_only, the tip names this hub as its
-	// only witness (toad = 1), or witness_not_this_hub.
-	//
+	// 7. Unless check_only, the tip names this hub as its witness (KEL H-1
+	// 1): a hub registers only the agents it witnesses, and so it signs
+	// notices for them. check_only comes before the agent designates its
+	// witness, which it does only once a hub has said it would take it.
+	if !req.CheckOnly && (tip.Toad != identity.ToadAgent || tip.Witness != s.hubAID) {
+		wire3.Refuse(w, wire3.ReasonWitnessNotThisHub)
+		return
+	}
 	// 8. check_only answers here: nothing is written and nothing reserved
 	// (none was: the gate reserves only for a real registration).
 	if req.CheckOnly {
@@ -904,6 +936,7 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	} else {
 		out.Revocations = uint64(n)
 	}
+	out.KeyStateNotice, out.KeyStateNoticeError = s.noticeAnswer(req.AID)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1392,9 +1425,15 @@ type RelayEnvelopeView struct {
 
 // RelayPollResponse is the /relay/poll answer. More says whether envelopes
 // the page could not hold remain past it (Store.RelayPoll, FS-H5).
+// key_state_notice is the caller's witness notice from this hub, or
+// key_state_notice_error why there is none (KEL H-5, H-13), as on
+// /register: an agent that polls holds a fresh notice to carry in what it
+// sends.
 type RelayPollResponse struct {
-	Messages []RelayEnvelopeView `json:"messages"`
-	More     bool                `json:"more"`
+	Messages            []RelayEnvelopeView `json:"messages"`
+	More                bool                `json:"more"`
+	KeyStateNotice      string              `json:"key_state_notice,omitempty"`
+	KeyStateNoticeError string              `json:"key_state_notice_error,omitempty"`
 }
 
 // RelayAckRequest is the /relay/ack body (relayauth v2, action "ack").
@@ -1978,6 +2017,7 @@ func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 		out.Messages = append(out.Messages, RelayEnvelopeView{
 			ID: m.ID, Envelope: wire3.EncodeB64URL(m.Payload), AcceptedAt: uint64(m.CreatedAt)})
 	}
+	out.KeyStateNotice, out.KeyStateNoticeError = s.noticeAnswer(a.AID)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -2054,83 +2094,59 @@ func cors(next http.Handler) http.Handler {
 	})
 }
 
-// hAgentKEL publishes an agent's key event log.
+// AgentKELView is the GET /agents/{aid}/kel answer (core §2.12.2): the key
+// history this hub holds for aid, base64url (CORE-E5), and whether aid is
+// registered here. registered false means the history is the tombstone the
+// agent left in departed_kel: it left, its admission was revoked, an
+// operator removed it, or it was swept for never collecting its mail; its
+// daemon goes back to joining (KEL D-27 row d, hub-payment-privacy §9.1).
+type AgentKELView struct {
+	AID        string `json:"aid"`
+	KEL        string `json:"kel"`
+	Registered bool   `json:"registered"`
+}
+
+// hAgentKEL publishes the key event log this hub holds for an AID.
 //
 // A KEL is public by construction — it is a log of key events, each one
 // signed by the key it supersedes, and its whole design assumes anyone can
-// replay it. This Hub has stored them since v0.1 and published none, which
-// quietly made "anyone can verify a receipt" false: a receipt names the
-// AID that signed it, and verifying that signature needs that AID's key
-// history. Without this endpoint the only way to obtain one was to ask the
-// requester nicely, so the audit worked exactly when a participant chose
-// to cooperate — which is the property the whole scheme exists to remove.
+// replay it. Publishing it is not an authorization: holding the KEL lets
+// you CHECK signatures, never make them. An agent's own daemon reads its
+// record here (KEL D-27) and so does anet identity recover (D-45); a
+// receipt or review an agent signed is checked against it.
 //
-// Publishing costs nothing and is not an authorization: holding the KEL
-// lets you CHECK signatures, never make them.
+// It answers for the AIDs this hub has a registration record of: an agent
+// registered here, one that left (its tombstone, registered false), and
+// this hub itself, whose history signs its receipts and notices (the same
+// as GET /hub/identity). Anything else is 404 unknown_aid: an agent of
+// another hub is read from that hub, or from its directory entry, which
+// carries its KEL (sealed-sender §2.9); the key histories of the peer hubs
+// this hub pins are GET /hub/kels (KEL H-16).
 func (s *Server) hAgentKEL(w http.ResponseWriter, r *http.Request) {
 	s.serveAgentKEL(w, r.PathValue("aid"))
 }
 
 // serveAgentKEL answers a KEL lookup for aid (hAgentKEL).
 func (s *Server) serveAgentKEL(w http.ResponseWriter, aid string) {
-	// The hub's own history is served here too.
-	//
-	// It signs settlements and redemption receipts, and every
-	// one of those is worthless to a holder who cannot check the
-	// signature. Until this line the hub was the one signer on the
-	// network whose key nobody could look up — it published everyone
-	// else's and not its own, so "you can verify what the custodian did"
-	// was true of the objects and false of the system.
-	//
-	// Served from the same path as everyone else's rather than a special
-	// one, because a verifier holding a receipt should not need to know
-	// whether the signer happened to be a hub.
-	if aid == s.hubAID {
-		if kel, err := s.ownKEL(); err == nil {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"aid": aid, "kel": base64.StdEncoding.EncodeToString(kel), "role": "hub"})
+	if aid != "" && aid == s.hubAID {
+		kel, err := s.ownKEL()
+		if err != nil {
+			wire3.Internal(w, err)
 			return
 		}
-	}
-	// Local first, then a peer's agent, then a peer hub itself.
-	//
-	// It served only locally registered agents, which broke the two cases
-	// where a stranger most needs it. A receipt signed by an agent that
-	// banks on a peer could not be checked at the hub the reader was
-	// holding. And a witness attestation could not be checked at all: the
-	// witness is a peer hub, /x402/witnesses tells the reader to verify
-	// each signature, and the key to do it with was not obtainable from
-	// this hub or named anywhere in the attestation. Evidence published
-	// with no way to check it is not evidence.
-	//
-	// Where it came from is reported, because it changes what the answer
-	// is worth: a local KEL is one this hub verified at registration, a
-	// federated one is what a peer told it. Both are checkable against
-	// the signature; only the reader can decide how much the difference
-	// matters.
-	if kel, err := s.store.AgentKEL(aid); err == nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"aid": aid, "kel": base64.StdEncoding.EncodeToString(kel), "source": "local"})
+		writeJSON(w, http.StatusOK, AgentKELView{AID: aid, KEL: wire3.EncodeB64URL(kel), Registered: true})
 		return
 	}
-	if kel, err := s.store.AnyKEL(aid); err == nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"aid": aid, "kel": base64.StdEncoding.EncodeToString(kel), "source": "federated",
-			"note": "this key history came from a peer, not from a registration here"})
-		return
+	kel, registered, err := s.store.registrationKEL(aid)
+	switch {
+	case err != nil:
+		wire3.Internal(w, err)
+	case kel == nil:
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnknownAID,
+			Error: "This hub has no registration of this AID, past or present; ask the hub the agent registers at."})
+	default:
+		writeJSON(w, http.StatusOK, AgentKELView{AID: aid, KEL: wire3.EncodeB64URL(kel), Registered: registered})
 	}
-	if events, err := s.peerKEL(aid); err == nil && len(events) > 0 {
-		raw, merr := identity.MarshalKEL(events)
-		if merr == nil {
-			writeJSON(w, http.StatusOK, map[string]any{
-				"aid": aid, "kel": base64.StdEncoding.EncodeToString(raw), "source": "peer-hub",
-				"role": "hub",
-				"note": "this is a federation peer of this hub. Ask it directly for its own copy"})
-			return
-		}
-	}
-	writeJSON(w, http.StatusNotFound, map[string]string{
-		"error": "hub: " + aid + " is neither registered here, known from a peer, nor a peer hub"})
 }
 
 // federatedAgents returns peer-learned agents, or nothing when discovery

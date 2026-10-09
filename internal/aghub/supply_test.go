@@ -236,7 +236,7 @@ func TestASupplyTotalThatCannotTakeTheEventRefusesIt(t *testing.T) {
 // and with nothing written when it is not due.
 func TestTheEpochRule(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identitytest.Hub()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestALiabilityProofReachesTheSignedRoot(t *testing.T) {
 	hubKEL := hubKELOf(t, srv.URL)
 	var agents []*identity.Controller
 	for i := 0; i < 5; i++ {
-		c, err := identitytest.Hub()
+		c, err := aghub.NewAgentForTest()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -566,7 +566,7 @@ func TestTheLiabilityProofRefusals(t *testing.T) {
 		expect("to_day "+q, code, body, 400, "bad_request")
 	}
 	// Registered after the close: not on the books of that period.
-	late, err := identitytest.Hub()
+	late, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +617,7 @@ func TestTheLiabilityProofRefusals(t *testing.T) {
 func TestTheStoredLeavesRebuildTheSignedRoot(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	for i := 0; i < 3; i++ {
-		c, err := identitytest.Hub()
+		c, err := aghub.NewAgentForTest()
 		if err != nil {
 			t.Fatal(err)
 		}

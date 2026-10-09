@@ -19,6 +19,8 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
 // bigKELController builds a valid KEL (icp + rot events; the attacker holds
@@ -28,11 +30,13 @@ import (
 // rather than re-marshalling the whole KEL each step.
 func bigKELController(t *testing.T, targetBytes int) *identity.Controller {
 	t.Helper()
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := uint64(1)
+	// One millisecond apart, from the rot that named its witness: a hub
+	// takes a new key event within 5 minutes of its clock (KEL R-9, R-10).
+	ts := c.KEL()[len(c.KEL())-1].Event.Timestamp
 	for {
 		for i := 0; i < 16; i++ {
 			ts++

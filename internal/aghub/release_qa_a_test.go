@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -21,7 +20,7 @@ import (
 
 func mustIncept(t *testing.T) *identity.Controller {
 	t.Helper()
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,11 +101,11 @@ func agentNames(agents []aghub.AgentView) []string {
 // ?cap=text.*.
 func TestCapabilityMatchingIsCaseSensitiveWithAndWithoutTheStar(t *testing.T) {
 	srv := newHub(t)
-	c, err := identitytest.Hub()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	register(t, srv, c, "DigestNode", []string{"Text.Digest"})
+	registerWithKeys(t, srv, c, "DigestNode", []string{"Text.Digest"})
 
 	found := func(q string) bool {
 		code, agents := getAgents(t, srv, "?cap="+url.QueryEscape(q))
@@ -139,7 +138,7 @@ func TestCapabilityMatchingIsCaseSensitiveWithAndWithoutTheStar(t *testing.T) {
 
 	// Dropping LIKE also drops its pattern language. Nothing in a
 	// capability id may act as a wildcard in either form.
-	register(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
+	registerWithKeys(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
 	for _, q := range []string{"cas.%", "cas.%*", "cas._", "cas._*", "cas.pu_", "cas.pu_*"} {
 		if code, agents := getAgents(t, srv, "?cap="+url.QueryEscape(q)); code != http.StatusOK {
 			t.Fatalf("cap=%q: %d", q, code)
@@ -254,6 +253,7 @@ func TestACapabilitySetExactlyAtTheBoundIsAccepted(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("a registration exactly at the bound must be accepted, got %d %s", code, body)
 	}
+	ensureKeys(t, srv, c) // listed once it has a key set (SSR-H18)
 	code, agents := getAgents(t, srv, "?cap="+url.QueryEscape(caps[0]))
 	if code != http.StatusOK || len(agents) != 1 || agents[0].Name != "AtTheLimit" {
 		t.Fatalf("an accepted capability is not findable: %d %v", code, agentNames(agents))
@@ -278,8 +278,8 @@ func TestAnOversizedRegistrationBodyIsRefused(t *testing.T) {
 // question nobody asked, with nothing in the response to say so.
 func TestABlankCapFilterIsRefusedRatherThanIgnored(t *testing.T) {
 	srv := newHub(t)
-	register(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
-	register(t, srv, mustIncept(t), "CameraNode", []string{"ptz.home"})
+	registerWithKeys(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
+	registerWithKeys(t, srv, mustIncept(t), "CameraNode", []string{"ptz.home"})
 
 	for _, blank := range []string{"", "%20", "+", "%09", "%20%20"} {
 		code, agents := getAgents(t, srv, "?cap="+blank)
@@ -416,7 +416,7 @@ func capsServe(caps []string, filter string) bool {
 func TestPeerLearnedAgentsAppearInEveryDirectoryQuery(t *testing.T) {
 	srv := newHub(t)
 	local := mustIncept(t)
-	register(t, srv, local, "LocalBakery", []string{"cas.put"})
+	registerWithKeys(t, srv, local, "LocalBakery", []string{"cas.put"})
 	remote := aghub.AgentView{
 		AID: "bafyremote", Name: "RemoteCamera", Caps: []string{"ptz.absolute"},
 		Listed: true, HomeHub: "hub:peer",

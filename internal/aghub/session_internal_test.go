@@ -84,7 +84,7 @@ func TestSessionLimits(t *testing.T) {
 // told 403 admission_required with its AID. Bad signatures are 401.
 func TestSessionRequiresAdmission(t *testing.T) {
 	h := newRelayHub(t)
-	c, _ := identitytest.Hub()
+	c, _ := NewAgentForTest()
 	_, rec := h.tryOpenSession(c)
 	expectRefusal(t, rec, http.StatusForbidden, "admission_required")
 	var body map[string]any
@@ -99,7 +99,7 @@ func TestSessionRequiresAdmission(t *testing.T) {
 		t.Fatalf("a registered AID: %d %s", rec.Code, rec.Body)
 	}
 	// A signature by another key over the request.
-	other, _ := identitytest.Hub()
+	other, _ := NewAgentForTest()
 	_, epk, _ := relayauth.NewSessionKey()
 	raw, _ := json.Marshal(SessionRequest{EPK: base64.RawURLEncoding.EncodeToString(epk)})
 	req := h.signed(other, relayauth.ActionSession, http.MethodPost, "/relay/session", raw)
