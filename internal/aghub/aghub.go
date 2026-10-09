@@ -791,7 +791,10 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 			return false, err
 		}
 	}
-	if longer || changed {
+	// Only more events end a quarantine, never other bytes: whoever holds
+	// the key the restored tip names could otherwise send the history held
+	// here again, encoded differently, and be released at once.
+	if longer {
 		if err := releaseTx(tx, aid, releasedLongerKEL, s.now()); err != nil {
 			return false, err
 		}

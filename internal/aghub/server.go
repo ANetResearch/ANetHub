@@ -820,6 +820,16 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	if adm != nil {
 		adm.now = now
 	}
+	// Stored in its CoreDet encoding, as kel:push stores one: each event's
+	// bytes were checked to be CoreDet when it decoded, but the array and
+	// the signed events around them may come in other encodings, and the
+	// same history must be the same bytes here (a re-registration that
+	// brings no new event changes nothing, KEL H-2, H-20 a).
+	kelBytes, err = identity.MarshalKEL(kel)
+	if err != nil {
+		wire3.Internal(w, err)
+		return
+	}
 	admitted, err := s.store.registerAgent(req.AID, req.Name, req.Caps, kelBytes, kel, adm)
 	if err != nil {
 		switch {

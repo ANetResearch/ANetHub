@@ -271,6 +271,60 @@ func TestRestoreQuarantinesPerAID(t *testing.T) {
 	}
 }
 
+// KEL H-20 a, M15: only more events release an AID. Whoever holds the key
+// the restored tip names (A's leaked one) registers the history the hub
+// holds again, in other CBOR bytes (an array of indefinite length, which
+// decodes to the same events): the registration is taken, but the AID stays
+// in quarantine and no notice is signed; and the hub keeps the history in
+// its CoreDet encoding, so the same history is the same bytes.
+func TestRestoreReleaseNeedsMoreEventsNotOtherBytes(t *testing.T) {
+	dir := t.TempDir()
+	srv, store := serveAt(t, dir)
+	a, _ := twoAgents(t)
+	joinWithKeys(t, srv, a, "A")
+	backup := filepath.Join(t.TempDir(), "b.db")
+	backupOf(t, store, backup)
+	thief := snapshotOf(t, a)
+	if err := identitytest.Rotate(a, tsAfter(a)); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := pushKEL(t, srv, a.AID(), kelURL(t, a)); code != http.StatusOK {
+		t.Fatalf("push: %d %s", code, body)
+	}
+	stop(srv, store)
+	if _, err := aghub.Restore(dir, backup, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	srv, store = serveAt(t, dir)
+	if err := store.BeginServing(); err != nil {
+		t.Fatal(err)
+	}
+	canon := kelBytes(t, thief)
+	if canon[0] < 0x80 || canon[0] > 0x97 {
+		t.Fatalf("setup: the history's array head is %#x, want one byte", canon[0])
+	}
+	other := append(append([]byte{0x9f}, canon[1:]...), 0xff)
+	body := map[string]any{"aid": thief.AID(), "name": "A", "caps": []string{"work.do"},
+		"kel": base64.RawURLEncoding.EncodeToString(other)}
+	code, out := registerAsIs(t, srv, thief, body)
+	if code != http.StatusOK || !strings.Contains(string(out), `"key_state_notice_error":"quarantine"`) {
+		t.Fatalf("the held history in other bytes: %d %s, want registered and still in quarantine", code, out)
+	}
+	if n, why := noticeAnswerOf(t, srv, thief); n != nil || why != aghub.NoticeErrQuarantine {
+		t.Fatalf("the thief's poll after it: notice %x, %q; want none, quarantine", n, why)
+	}
+	if st, _ := store.Quarantine(); st.Held != 1 {
+		t.Errorf("held %d, want A", st.Held)
+	}
+	var stored []byte
+	if err := store.DBForTest().QueryRow(`SELECT kel FROM agent WHERE aid = ?`, a.AID()).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, canon) {
+		t.Error("the hub kept the history in the bytes it was sent, not its CoreDet encoding")
+	}
+}
+
 // KEL H-20: the hub that comes back starts the clock of the quarantine, not
 // the restore: an operator who restores and starts the hub an hour later
 // still gives the nodes RestoreQuarantine to send their newer histories.
