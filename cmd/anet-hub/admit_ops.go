@@ -11,6 +11,7 @@ package main
 //	anet-hub admission [open|closed]
 //	anet-hub grant <AID> --amount N [--reason R]
 //	anet-hub supply                       (supply.go)
+//	anet-hub due, anet-hub clear          (clear.go, clear_fed.go)
 //
 // Each opens the hub's database beside a running hub (WAL, a busy timeout,
 // IMMEDIATE transactions), so none needs the hub stopped. What they print
@@ -39,6 +40,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 	"grant":      runGrant,
 	"quota":      runQuota,  // quota.go
 	"supply":     runSupply, // supply.go
+	"due":        runDue,    // clear.go; clear is clear_fed.go's
 }
 
 // runSubcommand runs the subcommand name with args; data is the --data the
@@ -46,7 +48,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 func runSubcommand(c *console, name, data string, args []string) int {
 	f, ok := subcommands[name]
 	if !ok {
-		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply …")
+		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply|due|clear …")
 	}
 	return f(c, data, args)
 }

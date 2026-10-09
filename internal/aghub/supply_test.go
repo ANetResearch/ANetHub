@@ -106,6 +106,21 @@ func payVia(t *testing.T, store *aghub.Store, hubAID string, payer *identity.Con
 	}
 }
 
+// payForPeer settles amount from payer to payTo, an agent of the peer hub
+// peerAID, as that hub's forwarded settlement (/fed/v3/settle).
+func payForPeer(t *testing.T, store *aghub.Store, hubAID, peerAID string, payer *identity.Controller, payTo string, amount uint64, ix string) {
+	t.Helper()
+	opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
+		Amount: payment.Amount(amount), Asset: payment.AssetCredit, PayTo: payTo}
+	var pp payment.PaymentPayload
+	if err := json.Unmarshal(mustPayload(t, payer, opt, ix), &pp); err != nil {
+		t.Fatal(err)
+	}
+	if out := store.SettleForPeer(hubAID, peerAID, &pp, &opt); !out.Success {
+		t.Fatalf("pay %d to %s for %s: %s %v", amount, payTo, peerAID, out.ErrorReason, out.Extensions)
+	}
+}
+
 // clearVia credits payTo with a peer's signed settlement of amount.
 func clearVia(t *testing.T, store *aghub.Store, peer *identity.Controller, payTo string, amount uint64, id string) {
 	t.Helper()
@@ -159,7 +174,7 @@ func TestEverySupplyEventCountsAndATransferDoesNot(t *testing.T) {
 	check("a grant", want{2*f + 50, 20, 4})
 	clearVia(t, store, peer, payee.AID(), 7, "peer-auth-1")
 	check("a peer's settlement", want{2*f + 57, 20, 5})
-	payVia(t, store, hubAID, payer, "did:anet:their-provider", 5, "out-1")
+	payForPeer(t, store, hubAID, peer.AID(), payer, "did:anet:their-provider", 5, "out-1")
 	check("a payment to a peer's agent", want{2*f + 57, 25, 6})
 	// A refused payment moves nothing and counts nothing.
 	opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),

@@ -33,6 +33,8 @@ var publicRoutes = []publicRoute{
 	{http.MethodPost, "/x402/witness"},
 	{http.MethodGet, "/x402/witnesses"},
 	{http.MethodGet, "/x402/resource/{aid}/work.do"},
+	// /federation/clear moved to /fed/v3/clear, a peer's signed route
+	// (internal/federation); the kernel answers it 404 like any other.
 	{http.MethodPost, "/federation/clear"},
 	{http.MethodGet, "/graph"},
 	{http.MethodGet, "/stats"},

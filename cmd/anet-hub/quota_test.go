@@ -141,9 +141,9 @@ func TestRemovedRelayFlagsRefuse(t *testing.T) {
 // to this list is a change to what an operator can tune; make it here on
 // purpose, and only with a sentence for each removed flag.
 var liveFlags = []string{
-	"addr", "amount", "clear", "data", "due", "payee", "peer-endpoint", "public-url", "reason",
+	"addr", "data", "public-url",
 	"register-burst", "register-rate", "relay-mailbox-bytes", "relay-mailbox-messages",
-	"relay-max-envelope", "relay-poll-budget", "relay-ttl", "repair-ledger", "version",
+	"relay-max-envelope", "relay-poll-budget", "relay-ttl", "version",
 }
 
 // TestNoSealedSenderGlobalFlags (sealed-sender SSR-H21): the flag set of

@@ -160,6 +160,22 @@
       "en": "This hub owes {peer} only {m} credits, so {n} cannot be cleared; see anet-hub due."
     },
     {
+      "key": "clear.refused",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "contact",
+      "zh": "{peer} 没有接受这次结清（{value}），本 hub 的记录没有改；请联系 {peer} 的运营者核对两边的记录。",
+      "en": "{peer} did not accept the discharge ({value}), so this hub's record is unchanged; contact the operator of {peer} to compare the two hubs' records."
+    },
+    {
+      "key": "clear.unconfirmed",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "contact",
+      "zh": "没有收到 {peer} 的确认，不知道它是否记下了这次结清，本 hub 的记录没有改；请先联系 {peer} 的运营者核对，再决定是否重新结清。",
+      "en": "No answer came from {peer}, so whether it recorded the discharge is unknown and this hub's record is unchanged; contact the operator of {peer} before clearing again."
+    },
+    {
       "key": "hub_flag_removed",
       "class": "C",
       "exit": 2,

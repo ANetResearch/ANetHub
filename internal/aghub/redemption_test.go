@@ -405,10 +405,11 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 		who   *identity.Controller
 		delta int64
 	}{{payer, -120}, {payee, 120}} {
-		entries, err := store.LedgerEntries(tc.who.AID(), 50)
+		win, err := store.LedgerEntries(tc.who.AID(), 50)
 		if err != nil {
 			t.Fatal(err)
 		}
+		entries := win.Entries
 		found := false
 		for _, e := range entries {
 			if e.Reason == settled.Transaction && e.Delta == tc.delta {
@@ -420,23 +421,24 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 		}
 	}
 
-	// And the balance now agrees with the entries behind it, which is
-	// what reconcile checks.
+	// And the balance agrees with the entries behind it while they are all
+	// in the window (an account younger than 14 days), which is what
+	// reconcile checks; the window's sum and the page agree.
 	for _, c := range []*identity.Controller{payer, payee} {
 		bal, err := store.Balance(c.AID())
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries, err := store.LedgerEntries(c.AID(), 200)
+		win, err := store.LedgerEntries(c.AID(), 200)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var sum int64
-		for _, e := range entries {
+		for _, e := range win.Entries {
 			sum += e.Delta
 		}
-		if sum != bal {
-			t.Errorf("%s: balance %d but entries sum to %d", c.AID()[:12], bal, sum)
+		if sum != bal || win.Sum != bal || win.Total != len(win.Entries) {
+			t.Errorf("%s: balance %d but entries sum to %d (window sum %d)", c.AID()[:12], bal, sum, win.Sum)
 		}
 	}
 }
@@ -564,8 +566,13 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 //
 // What must happen instead: the payer's hub destroys the credit and
 // records the obligation; the payee's hub creates it against the receipt.
-// Both write the change to their signed chains, so the chain equals the
+// Both record the change in their supply totals, so the totals equal the
 // balances on both sides afterwards.
+//
+// The payer's hub does this only for a payment the payee's hub forwarded,
+// signed (/fed/v3/settle, SettleForPeer), and owes that hub. At its own
+// /x402/settle a payee that does not bank there is payee_not_local and
+// nothing moves (hub-payment-privacy PAY-L4).
 func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
@@ -593,9 +600,17 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	if err := json.Unmarshal(mustPayload(t, payer, opt, "cross-1"), &pp); err != nil {
 		t.Fatal(err)
 	}
-	out := store.SettleWithRequirements(hubAID, &pp, &opt)
+	if out := store.SettleWithRequirements(hubAID, &pp, &opt); out.Success ||
+		out.ErrorReason != payment.ReasonPayeeNotLocal {
+		t.Fatalf("settling to a foreign payee at /x402/settle: %+v, want %s", out, payment.ReasonPayeeNotLocal)
+	}
+	if got := supplyOf(t, srv); got != before {
+		t.Fatalf("a refused settlement moved the supply: %+v -> %+v", before, got)
+	}
+	const peerHub = "did:anet:their-hub"
+	out := store.SettleForPeer(hubAID, peerHub, &pp, &opt)
 	if !out.Success {
-		t.Fatalf("settling to a foreign payee: %s", out.ErrorReason)
+		t.Fatalf("settling to a foreign payee forwarded by its hub: %s", out.ErrorReason)
 	}
 
 	// The payer paid.
@@ -607,13 +622,13 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	if got, _ := store.Balance(foreignPayee); got != 0 {
 		t.Errorf("a payee that banks elsewhere was credited %d here", got)
 	}
-	// The obligation is recorded instead.
+	// The obligation is recorded instead, owed to the hub that forwarded it.
 	due, err := store.Due()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if due[foreignPayee] != 250 {
-		t.Errorf("due to %s = %d, want 250", foreignPayee, due[foreignPayee])
+	if due[peerHub] != 250 || len(due) != 1 {
+		t.Errorf("due = %v, want 250 to %s only", due, peerHub)
 	}
 
 	// The supply fell by what left, and the totals agree with the

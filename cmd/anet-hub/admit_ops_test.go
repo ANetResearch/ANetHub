@@ -316,10 +316,30 @@ func TestARemovedFlagNamesItsSubcommand(t *testing.T) {
 		{[]string{"-invite-list"}, "-invite-list", "admissions"},
 		{[]string{"-invite-revoke", "abc"}, "-invite-revoke", "admissions revoke"},
 		{[]string{"-label", "x"}, "-label", "admit"},
+		// The ledger window's action flags (hub-payment-privacy PAY-U3): a
+		// flag that only qualified an action names that action's subcommand,
+		// and the action's own flag is answered when it is given too.
+		{[]string{"-clear", "bafypeer", "-amount", "5", "-peer-endpoint", "https://peer.example"}, "-clear", "clear"},
+		{[]string{"-amount", "5", "-clear", "bafypeer"}, "-clear", "clear"},
+		{[]string{"-amount", "5"}, "-amount", "clear"},
+		{[]string{"-payee", "bafypayee"}, "-payee", "clear"},
+		{[]string{"-peer-endpoint", "https://peer.example"}, "-peer-endpoint", "clear"},
+		{[]string{"-reason", "x", "-grant", "bafy"}, "-grant", "grant"},
+		{[]string{"-reason", "x"}, "-reason", "grant"},
+		{[]string{"-due"}, "-due", "due"},
+		{[]string{"-due=true"}, "-due", "due"},
 	} {
 		for _, lang := range []string{"en", "zh"} {
 			r := cli(t, lang, append([]string{"-data", dir}, c.args...)...)
 			expectErr(t, r, 2, sentenceOf(lang, "hub_flag_removed", map[string]string{"flag": c.flag, "subcommand": c.sub}))
+		}
+	}
+	// -repair-ledger has no replacement: the ledger keeps 14 days, so there
+	// is no gap left to repair (hub_flag_removed.none).
+	for _, args := range [][]string{{"-repair-ledger", "bafy"}, {"-repair-ledger", ""}, {"-amount", "1", "-repair-ledger", "bafy"}} {
+		for _, lang := range []string{"en", "zh"} {
+			expectErr(t, cli(t, lang, append([]string{"-data", dir}, args...)...), 2,
+				sentenceOf(lang, "hub_flag_removed.none", map[string]string{"flag": "-repair-ledger"}))
 		}
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {

@@ -114,8 +114,8 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("GET", "/a2a/v1/agents", reflect.TypeFor[A2AAgentEntry](), ""), // per entry
 		resp("GET", "/agents", reflect.TypeFor[AgentView](), ""),            // per entry
 		resp("GET", "/agents/{aid}/balance", reflect.TypeFor[Balance](), ""),
-		resp("GET", "/agents/{aid}/ledger", nil, "v030-todo(PAY-4)"),
-		resp("GET", "/agents/{aid}/redemptions", nil, "v030-todo(PAY-4)"),
+		resp("GET", "/agents/{aid}/ledger", reflect.TypeFor[LedgerResponse](), ""),
+		resp("GET", "/agents/{aid}/redemptions", reflect.TypeFor[RedemptionsResponse](), ""),
 		resp("GET", "/agents/{aid}/liability-proof", reflect.TypeFor[LiabilityProof](), ""),
 		req("POST", "/reviews", reflect.TypeFor[UploadReviewRequest](), "v030-todo(PAY-6)"),
 		resp("POST", "/reviews", nil, "v030-todo(PAY-6)"),

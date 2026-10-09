@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -36,6 +37,9 @@ func init() {
 		// peers' answers (SSR-W19).
 		d.root.Handle("/fed/v3/", fed.Handler())
 		fed.SetKernel(d.srv0)
+		// The settlement routes (/fed/v3/settle, /fed/v3/clear) are the
+		// kernel's ledger, asked by a peer that signed for it.
+		fed.SetClearing(d.srv0)
 		d.srv0.SetFederation(fed)
 		if fed.Enabled() {
 			log.Printf("anet-hub federation: delivery=%s peers=%d", cfg.Delivery, len(cfg.Peers))
@@ -131,21 +135,26 @@ func syncLoop(ctx context.Context, fed *federation.Service) {
 const peerSettleTimeout = 20 * time.Second
 
 // peerSettler is the entry hub's half of a cross-hub settlement
-// (A2A-DESIGN §8.5).
+// (A2A-DESIGN §8.5; hub-payment-privacy PAY-L5).
 //
 // The kernel has already compared the payment with the requirements
-// (aghub.CheckRequirements); a payment that fails that is not forwarded.
-// This forwards the x402 v2 body {x402Version, paymentPayload,
-// paymentRequirements} to the hub whose ledger the network names, which
-// verifies the signature and compares the terms again. On success the
-// kernel checks that the peer's receipt states the required payee and
-// amount and credits the local payee against it.
+// (aghub.CheckRequirements) and checked that the payee is an account here;
+// a payment that fails either is not forwarded. This forwards the x402 v2
+// body {x402Version, paymentPayload, paymentRequirements} to the hub whose
+// ledger the network names, signed by this hub (POST /fed/v3/settle,
+// fed_settle), and that hub verifies the signature and compares the terms
+// again. On success the kernel checks that the peer's receipt states the
+// required payee and amount and credits the local payee against it.
 //
 // A transport error, a timeout or an unreadable reply leaves the outcome
 // unknown: the peer may have settled. That is settlement_pending, not a
 // failure, and the merchant retries with the same payload; the peer
 // answers a settled authorization with its original receipt, so the retry
-// completes the clearing and credits the payee once.
+// completes the clearing and credits the payee once. A refusal the ledger
+// hub's federation layer gave before its ledger saw the request (it does
+// not count this hub as a peer, or did not take the signature) is known
+// not to have settled: settlement_failed, with what the peer said. A busy
+// or failing peer (429, 5xx) is pending: a retry can complete it.
 //
 // A network that is not an allowlisted peer's ledger is not handled here,
 // and the kernel refuses the payment with network_mismatch.
@@ -167,10 +176,20 @@ func peerSettler(store *aghub.Store, fed *federation.Service) aghub.PeerSettler 
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), peerSettleTimeout)
 		defer cancel()
-		raw, from, err := fed.SettleAtPeer(ctx, network, body)
+		status, raw, from, err := fed.SettleAtPeer(ctx, network, body)
 		if err != nil {
 			return aghub.SettlementPending(auth, network,
 				"no answer from the ledger hub "+peerAID+": "+err.Error(), nil), true
+		}
+		if status != http.StatusOK {
+			// /fed/v3/settle answers every settlement with 200 (core G3);
+			// anything else came from before the ledger, or from in front
+			// of the hub.
+			if reason := refusalReason(raw); notSettledReasons[reason] {
+				return aghub.SettlementRefusedByPeer(auth, network, peerAID, reason), true
+			}
+			return aghub.SettlementPending(auth, network,
+				"the ledger hub "+peerAID+" answered "+http.StatusText(status)+": "+truncate(string(raw), 200), nil), true
 		}
 		var out payment.SettlementResponse
 		if err := json.Unmarshal(raw, &out); err != nil {
@@ -179,12 +198,10 @@ func peerSettler(store *aghub.Store, fed *federation.Service) aghub.PeerSettler 
 		}
 		if !out.Success && out.ErrorReason == "" {
 			// JSON, but not a facilitator's refusal: a hub refusal always
-			// names its reason. An error body from a proxy or from a
-			// server-side failure (`{"error": ...}`) decodes to this, and
-			// it does not say whether the ledger hub settled. Passing it
-			// on as a refusal would tell the merchant the payment failed,
-			// with an errorReason no client can branch on, while the payer
-			// may have been charged.
+			// names its reason, and it does not say whether the ledger hub
+			// settled. Passing it on as a refusal would tell the merchant
+			// the payment failed, with an errorReason no client can branch
+			// on, while the payer may have been charged.
 			return aghub.SettlementPending(auth, network,
 				"the ledger hub "+peerAID+" answered with neither a success nor a reason: "+
 					truncate(string(raw), 200), nil), true
@@ -196,6 +213,26 @@ func peerSettler(store *aghub.Store, fed *federation.Service) aghub.PeerSettler 
 		}
 		return store.ClearPeerSettlement(from, fed.PeerKEL, out, auth, req), true
 	}
+}
+
+// notSettledReasons are the hub refusals of a /fed/v3/settle request that
+// the ledger hub gives before its ledger sees the request (federation
+// authPeer and the wire contract): the payment was not settled, and asking
+// again the same way does not change that.
+var notSettledReasons = map[string]bool{
+	"not_peer": true, "unauthorized": true, "key_retired": true, "ts_stale": true, "replayed": true,
+	"bad_request": true, "too_large": true, "not_found": true, "wire_too_old": true, "wire_too_new": true,
+}
+
+// refusalReason is the reason of a hub's wire-3 refusal body, or "".
+func refusalReason(body []byte) string {
+	var r struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(body, &r) != nil {
+		return ""
+	}
+	return r.Reason
 }
 
 // truncate shortens a peer's answer for an error detail, so a large error

@@ -479,7 +479,10 @@ func coreSchema() []string {
 		   credits INTEGER NOT NULL DEFAULT 0
 		 )`,
 		// Every movement, so a balance can be explained rather than just
-		// asserted.
+		// asserted. Kept 14 days (the ledger window, janitor.go); at is
+		// ledgerStamp, so text order is time order. AUTOINCREMENT, so a
+		// seq is never given out twice and the largest one ever written
+		// outlives the rows (a supply epoch's ledger_hw).
 		`CREATE TABLE IF NOT EXISTS credit_entry (
 		   seq INTEGER PRIMARY KEY AUTOINCREMENT,
 		   aid TEXT NOT NULL,
@@ -487,33 +490,53 @@ func coreSchema() []string {
 		   reason TEXT NOT NULL DEFAULT '',
 		   at TEXT NOT NULL
 		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_credit_entry_aid ON credit_entry(aid, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_credit_entry_at ON credit_entry(at)`,
 		// One row per settled authorization: the idempotency key and the
 		// replay guard in one. Inserted before the balance moves, so a
 		// concurrent second settle loses on the primary key rather than
 		// on a check it raced. receipt is the hub's signed receipt, kept so
-		// a repeat is answered with the same bytes; bound marks the row
-		// that holds its (payer, interaction_id) binding (A2A-DESIGN §8.5).
+		// a repeat is answered with the same bytes. not_after is the
+		// authorization's (unix ms): the row is kept until 7 days after it,
+		// and a repeat after that is expired anyway. guard_h is the
+		// settle_guard key the settlement holds, NULL without a binding;
+		// via is the peer hub that forwarded it (/fed/v3/settle), '' for a
+		// settlement asked for here.
 		`CREATE TABLE IF NOT EXISTS credit_settled (
 		   auth_id TEXT PRIMARY KEY,
 		   payer TEXT NOT NULL,
 		   pay_to TEXT NOT NULL,
 		   amount INTEGER NOT NULL,
-		   interaction_id TEXT NOT NULL DEFAULT '',
 		   at TEXT NOT NULL,
-		   bound INTEGER NOT NULL DEFAULT 0,
-		   receipt BLOB
+		   receipt BLOB,
+		   not_after INTEGER NOT NULL,
+		   guard_h BLOB,
+		   via TEXT NOT NULL DEFAULT ''
 		 )`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_settled_binding
-		   ON credit_settled(payer, interaction_id) WHERE interaction_id != '' AND bound = 1`,
+		`CREATE INDEX IF NOT EXISTS idx_settled_not_after ON credit_settled(not_after)`,
+		`CREATE INDEX IF NOT EXISTS idx_settled_guard ON credit_settled(guard_h) WHERE guard_h IS NOT NULL`,
+		// One settlement per payer and task (hub-payment-privacy PAY-L3):
+		// h is evidence.SettleGuard(payer, pay_bind) (core L33), so the
+		// guard holds no payer and no task; until (unix ms) is 30 days
+		// after the settlement.
+		`CREATE TABLE IF NOT EXISTS settle_guard (
+		   h BLOB PRIMARY KEY,
+		   until INTEGER NOT NULL
+		 ) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS idx_settle_guard_until ON settle_guard(until)`,
 		// Foreign authorizations already cleared here, so a peer
-		// repeating a receipt cannot credit our user twice.
+		// repeating a receipt cannot credit our user twice. settle_at is
+		// the receipt's (unix ms): kept until 8 days after it, a day
+		// longer than a receipt is accepted at all.
 		`CREATE TABLE IF NOT EXISTS credit_cleared (
 		   auth_id TEXT PRIMARY KEY,
 		   peer_aid TEXT NOT NULL,
 		   pay_to TEXT NOT NULL,
 		   amount INTEGER NOT NULL,
-		   at TEXT NOT NULL
+		   at TEXT NOT NULL,
+		   settle_at INTEGER NOT NULL
 		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_cleared_settle_at ON credit_cleared(settle_at)`,
 		// What each peer hub owes this one. A claim on another hub, kept
 		// apart from credit here — the two must not be allowed to look
 		// alike.
@@ -554,14 +577,19 @@ func coreSchema() []string {
 			blob        BLOB NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_attestation_chain ON head_attestation(chain_did, seq)`,
+		// Kept 14 days, like credit_entry (the operator reads them with
+		// anet-hub redemptions within that time); seq is what
+		// /agents/{aid}/redemptions states as oldest_seq.
 		`CREATE TABLE IF NOT EXISTS credit_redemption (
-			auth_id   TEXT PRIMARY KEY,
+			seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+			auth_id   TEXT NOT NULL UNIQUE,
 			aid       TEXT NOT NULL,
 			amount    INTEGER NOT NULL,
 			reference TEXT NOT NULL DEFAULT '',
 			at        TEXT NOT NULL
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_redemption_aid ON credit_redemption(aid)`,
+		`CREATE INDEX IF NOT EXISTS idx_redemption_aid ON credit_redemption(aid, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_redemption_at ON credit_redemption(at)`,
 		// A peer hub's signed discharge of what it owed us. Keyed on the
 		// statement id so a replayed discharge clears the debt once.
 		`CREATE TABLE IF NOT EXISTS hub_cleared (
@@ -583,14 +611,14 @@ func coreSchema() []string {
 		   kel BLOB NOT NULL,
 		   at  TEXT NOT NULL
 		 )`,
-		// The debtor side of the same relationship, keyed by payee rather
-		// than by hub: this hub settled a payment to an agent that banks
-		// elsewhere, so the credit left this ledger and is owed to
-		// whichever hub holds that agent. Keyed by payee because that is
-		// what the authorization names — which hub holds it is a fact this
-		// hub may not have.
+		// The debtor side of the same relationship: what this hub owes
+		// each peer hub. A peer that forwarded a settlement for its own
+		// agent (/fed/v3/settle, signed by that peer) is owed what left
+		// this ledger. Keyed by the peer that signed the request, a fact
+		// this hub verified, not by the payee, whose hub it would only be
+		// guessing (hub-payment-privacy PAY-L4).
 		`CREATE TABLE IF NOT EXISTS hub_due (
-		   payee_aid TEXT PRIMARY KEY,
+		   peer_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
 		// Small hub-wide settings, one row each (the admission mode).
