@@ -348,6 +348,26 @@ func TestAReviewUploadIsAtMost16KiB(t *testing.T) {
 	}
 }
 
+// PAY-V1 step 4 takes the provider's key history from its account here, a
+// peer's card or departed_kel: a provider that left after the task can
+// still be reviewed for it.
+func TestAProviderThatLeftCanStillBeReviewed(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	prov, req := twoAgents(t)
+	register(t, srv, prov, "Provider", []string{"work.do"})
+	register(t, srv, req, "Requester", nil)
+	k := makeEvidence(t, prov, req, "ix-departed", 4, "")
+	if _, err := store.Deregister(prov.AID(), aghub.DeregSelf); err != nil {
+		t.Fatal(err)
+	}
+	if code, b := uploadReview(t, srv, k); code != http.StatusOK {
+		t.Fatalf("a review of a provider that left: %d %s", code, b)
+	}
+	if !reviewStored(t, store, k) {
+		t.Fatal("not stored")
+	}
+}
+
 // A receipt is judged by the provider's key history at the start of its own
 // day (SI-36): a key the provider retired before then signs nothing for it.
 func TestAReceiptSignedWithARetiredKeyIsNotReviewable(t *testing.T) {
@@ -802,6 +822,18 @@ func TestAPeerReviewIsCheckedLikeALocalOne(t *testing.T) {
 		}
 		if err := store.AdmitFedReview(peer.AID, peer.Ctrl.KEL(), aghub.FedEntryForTest(t, peer.Ctrl, k, today, 1)); !errors.Is(err, aghub.ErrReviewExists) {
 			t.Fatalf("a peer's review of an interaction reviewed here: %v", err)
+		}
+		// And the other way round: reviewed at a peer first, the upload
+		// here is review_exists (PAY-V1 step 9 reads fed_review too).
+		k2 := makeEvidence(t, prov, req, "ix-fed-first", 4, "")
+		if err := store.AdmitFedReview(peer.AID, peer.Ctrl.KEL(), aghub.FedEntryForTest(t, peer.Ctrl, k2, today, 2)); err != nil {
+			t.Fatalf("the peer's review: %v", err)
+		}
+		if code, b := uploadReview(t, srv, k2); code != http.StatusConflict || !strings.Contains(string(b), `"review_exists"`) {
+			t.Fatalf("an upload of an interaction a peer reviewed: %d %s, want 409 review_exists", code, b)
+		}
+		if reviewStored(t, store, k2) {
+			t.Fatal("stored as a local review as well")
 		}
 	})
 }
