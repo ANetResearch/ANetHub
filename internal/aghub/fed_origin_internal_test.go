@@ -195,7 +195,7 @@ func TestAMovedRecipientIsFoundAgainAfterA404(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyset, _, _, _ := b.store.LocalKeys(recip.aid)
-	if _, err := c.store.PublishKeys(recip.aid, keyset, recip.c.KEL(), c.clock()); err != nil {
+	if _, err := c.store.PublishKeys(recip.aid, keyset, 0, recip.c.KEL(), c.clock()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.store.db.Exec(`DELETE FROM agent WHERE aid=?`, recip.aid); err != nil {

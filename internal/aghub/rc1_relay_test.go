@@ -319,8 +319,9 @@ func TestRC1OneSignerFillingItsStateStopsNobody(t *testing.T) {
 		t.Fatalf("the valve did not run: attacker 1 still holds %d times", len(recent))
 	}
 
+	recipKey := fixturePublish(t, h.store, &relayAgent{c: recip, aid: recip.AID()}, 1, time.Now())
 	env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: recip.AID(), Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("ct"),
+		KID: recipKey.KID, Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("ct"),
 		Access: &seal.Access{Kind: seal.AccessKindSession}}
 	envB, _ := env.Marshal()
 	// The victim's signed request is the opening of its session; the send

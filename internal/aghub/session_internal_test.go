@@ -174,7 +174,7 @@ func TestSessionReplayOnlyDedupes(t *testing.T) {
 		t.Errorf("the replay took or wrote something: %s", d)
 	}
 	for i := 1; i <= MaxRedeliveries; i++ {
-		msgs, _ := sc.h.store.RelayPoll(sc.recip.aid, 0, 10, 1<<20)
+		msgs, _, _ := sc.h.store.RelayPoll(sc.recip.aid, 0, 10, 1<<20)
 		if _, err := sc.h.store.RelayAck(sc.recip.aid, []int64{msgs[0].ID}); err != nil {
 			t.Fatal(err)
 		}
@@ -388,6 +388,9 @@ func TestProbationSessionRate(t *testing.T) {
 	// Probation over: the bucket refills at the full rate up to the full
 	// burst.
 	h.advance(72 * time.Hour)
+	for _, o := range others { // the keys they published have expired (FS-H1)
+		h.publish(o, o.mbox.Epoch+1)
+	}
 	sc.ss = h.openSession(sc.sender.c)                           // the old one ended long ago
 	h.srv.relay.firstContact.buckets = map[string]*relayBucket{} // the recipients' share is not under test
 	if n := burst(250); n != int(rateSessionSend.burst) {

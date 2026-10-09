@@ -176,6 +176,9 @@ type Store struct {
 	quotas quotaCache
 	// dirBits is dir_max_bits as last computed (directory.go).
 	dirBits dirBitsCache
+	// kids is the decoded key sets of recent recipients, for the kid
+	// check of every queued envelope (relay.go kidAcceptable).
+	kids kidCache
 	// dirNotice, when set, gives the witness notice a directory entry
 	// carries (directory.go dirNoticeOf).
 	dirNotice func(q rowQuerier, aid string) ([]byte, error)

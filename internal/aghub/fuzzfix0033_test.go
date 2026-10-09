@@ -257,9 +257,9 @@ func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 	}
 	code, b := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
 	var v struct {
-		KeySet string `json:"keyset"`
+		Keys string `json:"keys"`
 	}
-	if code != http.StatusOK || json.Unmarshal(b, &v) != nil || v.KeySet != base64.StdEncoding.EncodeToString(raw) {
+	if code != http.StatusOK || json.Unmarshal(b, &v) != nil || v.Keys != base64.RawURLEncoding.EncodeToString(raw) {
 		t.Errorf("the stored set changed: %d %s", code, b)
 	}
 	raw, _ = mintKeySet(t, c, math.MaxInt64)

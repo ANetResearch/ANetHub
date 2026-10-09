@@ -238,30 +238,47 @@ func FuzzHubRegister(f *testing.F) {
 			// A public card with prices is never listed.
 			body["a2a_card"] = fzA2ACardOrRaw(t, c, seq, skills, withExtension(priceExtension(priceV1URI)))
 		}
+		// The key set, base64url, with a prev_seq that follows the stored
+		// set, is 0, or is missing (FS-H4).
+		storedSeq := uint64(0)
+		if ks, _, _, _ := h.store.LocalKeys(c.AID()); ks != nil {
+			if p := decodeSetSeq(ks); p != nil {
+				storedSeq = *p
+			}
+		}
+		withKeys := func(raw []byte) {
+			body["enc_keys"] = base64.RawURLEncoding.EncodeToString(raw)
+			switch keysMode / 7 % 3 {
+			case 0:
+				body["prev_seq"] = storedSeq
+			case 1:
+				body["prev_seq"] = 0
+			}
+		}
 		switch keysMode % 7 {
 		case 1:
 			raw, _ := fzKeySet(t, c, seq|1, 0)
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		case 2:
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(keysRaw)
+			withKeys(keysRaw)
 		case 3:
-			body["enc_keys"] = string(keysRaw)
+			body["enc_keys"], body["prev_seq"] = string(keysRaw), storedSeq
 		case 4:
 			raw, _ := fzKeySet(t, stranger, seq|1, 0)
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		case 5:
 			var shift int64
 			if len(keysRaw) > 0 {
 				shift = int64(int8(keysRaw[0])) * 86_400_000 / 8
 			}
 			raw, _ := fzKeySet(t, c, seq, shift)
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		case 6:
 			raw, _ := fzKeySet(t, c, seq|1, 0)
 			if len(keysRaw) > 0 {
 				raw[int(keysRaw[0])%len(raw)] ^= 1
 			}
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		}
 		raw := fzJSON(t, body)
 		if who%4 == 3 {
@@ -349,13 +366,15 @@ func FuzzHubRegister(f *testing.F) {
 }
 
 // FuzzHubKeys publishes key sets (valid with fuzzed terms, another
-// agent's, mutated, or raw bytes) and looks up keys, KELs and cards with
-// fuzzed bodies and paths. Properties:
+// agent's, mutated, or raw bytes) with a prev_seq that follows the stored
+// set, is 0, is the set's own seq or is missing, and looks up keys, KELs
+// and cards with fuzzed bodies and paths. Properties:
 //
 //   - POST /agents/{aid}/keys answers 200, 400 or 409; 200 "ok" only for
-//     a set whose seq is above the stored one, "unchanged" only for the
-//     stored seq; after any answer the stored set verifies for the agent,
-//     and a refusal leaves it as it was;
+//     a set whose seq is above the stored one and a prev_seq no lower than
+//     it (FS-H4), "unchanged" only for the stored seq; 409 only as
+//     keys_rollback naming the stored seq; after any answer the stored set
+//     verifies for the agent, and a refusal leaves it as it was;
 //   - the lookups answer 200, 400, 404 or 413 and never serve a key set,
 //     KEL or card that does not verify for the AID that was asked for.
 func FuzzHubKeys(f *testing.F) {
@@ -377,7 +396,10 @@ func FuzzHubKeys(f *testing.F) {
 	f.Add(uint8(1), uint64(0), int64(0), []byte{1, 2}, []byte(`{"aid":"`+withCard.AID()+`"}`), withCard.AID())
 	f.Add(uint8(2), uint64(9), int64(0), []byte{40}, []byte(`{"aid":""}`), "")
 	f.Add(uint8(3), uint64(10), int64(0), []byte(nil), []byte(`{"aid":"`+h.hubAID+`"}`), h.hubAID)
-	f.Add(uint8(4), uint64(0), int64(0), []byte(`{"keyset":"!!"}`), []byte(`{}`), "x/y")
+	f.Add(uint8(4), uint64(0), int64(0), []byte(`{"keys":"!!","prev_seq":0}`), []byte(`{}`), "x/y")
+	f.Add(uint8(5), uint64(3), int64(0), []byte(nil), []byte(`{}`), k.AID())  // prev_seq 0
+	f.Add(uint8(10), uint64(4), int64(0), []byte(nil), []byte(`{}`), k.AID()) // prev_seq the set's own seq
+	f.Add(uint8(15), uint64(5), int64(0), []byte(nil), []byte(`{}`), k.AID()) // no prev_seq
 	f.Add(uint8(0), uint64(1<<63), int64(-86_400_000*30), []byte(nil), []byte(`null`), "%zz")
 	// Go's fuzzer changes an integer by at most 100 per mutation, so the
 	// int64 boundary has to come from a seed.
@@ -387,19 +409,38 @@ func FuzzHubKeys(f *testing.F) {
 		raw, lookup, getAID = clipB(raw, 8<<10), clipB(lookup, 8<<10), clip(getAID, 512)
 		shift %= 60 * 86_400_000
 		before, _, _, _ := h.store.LocalKeys(k.AID())
+		var priorSeq uint64
+		if p := decodeSetSeq(before); p != nil {
+			priorSeq = *p
+		}
+		// prev_seq: what the hub holds, 0, the published set's own seq, or
+		// none.
+		prevMode := mode / 5 % 4
+		publish := func(ks []byte) []byte {
+			b := map[string]any{"keys": base64.RawURLEncoding.EncodeToString(ks)}
+			switch prevMode {
+			case 0:
+				b["prev_seq"] = priorSeq
+			case 1:
+				b["prev_seq"] = 0
+			case 2:
+				b["prev_seq"] = seq
+			}
+			return fzJSON(t, b)
+		}
 		var body []byte
 		switch mode % 5 {
 		case 0:
 			ks, _ := fzKeySet(t, k, seq, shift)
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(ks)})
+			body = publish(ks)
 		case 1:
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(raw)})
+			body = publish(raw)
 		case 2:
 			ks, _ := fzKeySet(t, k, seq, shift)
 			if len(raw) > 0 {
 				ks[int(raw[0])%len(ks)] ^= 1 << (raw[0] % 8)
 			}
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(ks)})
+			body = publish(ks)
 		case 3:
 			// Named for k, signed by somebody else.
 			now := uint64(time.Now().UnixMilli())
@@ -414,13 +455,26 @@ func FuzzHubKeys(f *testing.F) {
 				t.Fatal(err)
 			}
 			ks, _ := signed.Marshal()
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(ks)})
+			body = publish(ks)
 		case 4:
 			body = raw
 		}
 		rec := h.signedDo(k, relayauth.ActionKeys, http.MethodPost, "/agents/"+k.AID()+"/keys", "", body)
 		if !allowed(rec.Code, 200, 400, 409) {
 			t.Fatalf("publish: unexpected %d %s", rec.Code, rec.Body.Bytes())
+		}
+		if mode%5 != 4 && prevMode == 3 && rec.Code != http.StatusBadRequest {
+			t.Fatalf("a publication without prev_seq was answered %d %s", rec.Code, rec.Body.Bytes())
+		}
+		if rec.Code == http.StatusConflict {
+			var refusal struct {
+				Reason    string  `json:"reason"`
+				StoredSeq *uint64 `json:"stored_seq"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil || refusal.Reason != "keys_rollback" ||
+				refusal.StoredSeq == nil || *refusal.StoredSeq != priorSeq || before == nil {
+				t.Fatalf("409 is keys_rollback naming the stored seq %d: %s", priorSeq, rec.Body.Bytes())
+			}
 		}
 		after, kelBytes, _, _ := h.store.LocalKeys(k.AID())
 		afterSet, err := seal.UnmarshalSignedEncKeySet(after)
@@ -440,14 +494,17 @@ func FuzzHubKeys(f *testing.F) {
 			if err != nil {
 				t.Fatalf("keys_status %s for a set that does not verify: %v", out.KeysStatus, err)
 			}
-			var priorSeq uint64
-			if p := decodeSetSeq(before); p != nil {
-				priorSeq = *p
-			}
 			switch out.KeysStatus {
 			case aghub.KeysStatusOK:
-				if set.Seq <= priorSeq {
+				if set.Seq <= priorSeq && before != nil {
 					t.Fatalf("keys_status ok for seq %d over the stored %d", set.Seq, priorSeq)
+				}
+				var sent struct {
+					PrevSeq uint64 `json:"prev_seq"`
+				}
+				_ = json.Unmarshal(body, &sent)
+				if before != nil && sent.PrevSeq < priorSeq {
+					t.Fatalf("keys_status ok for prev_seq %d under the stored seq %d (FS-H4)", sent.PrevSeq, priorSeq)
 				}
 			case aghub.KeysStatusUnchanged:
 				if set.Seq != priorSeq {
@@ -506,8 +563,14 @@ func checkLookup(t *testing.T, h *fz, kind, aid string, body []byte) {
 		if err := json.Unmarshal(body, &v); err != nil || v.AID != aid {
 			t.Fatalf("keys lookup for %s answered %s", aid, body)
 		}
-		ks, _ := base64.StdEncoding.DecodeString(v.KeySet)
-		kl, _ := base64.StdEncoding.DecodeString(v.KEL)
+		ks, err := base64.RawURLEncoding.DecodeString(v.Keys)
+		if err != nil {
+			t.Fatalf("keys lookup served keys that are not base64url: %v", err)
+		}
+		kl, err := base64.RawURLEncoding.DecodeString(v.KEL)
+		if err != nil {
+			t.Fatalf("keys lookup served a KEL that is not base64url: %v", err)
+		}
 		signed, err := seal.UnmarshalSignedEncKeySet(ks)
 		if err != nil {
 			t.Fatalf("keys lookup served an undecodable set: %v", err)

@@ -45,9 +45,10 @@ func dirAgent(t *testing.T, store *aghub.Store) *identity.Controller {
 		t.Fatal(err)
 	}
 	raw, _ := mintKeySet(t, c, 1)
-	if _, err := store.PublishKeys(c.AID(), raw, c.KEL(), time.Now()); err != nil {
+	if _, err := store.PublishKeys(c.AID(), raw, 0, c.KEL(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
+	noteKeys(c.AID(), raw)
 	return c
 }
 
@@ -605,7 +606,7 @@ func TestDirBoxRecomputedOnChange(t *testing.T) {
 	// 1. registration, with the key set.
 	k1, _ := mintKeySet(t, c, 1)
 	body := registerBody(t, c, "Agent", nil)
-	body["enc_keys"] = base64.StdEncoding.EncodeToString(k1)
+	withEncKeys(t, srv, body, c.AID(), k1)
 	if code, b := registerFunded(t, srv, c, body); code != 200 {
 		t.Fatalf("register with keys: %d %s", code, b)
 	}
@@ -716,7 +717,7 @@ func TestRegistryEntryPrecision(t *testing.T) {
 	c, _ := twoAgents(t)
 	k1, _ := mintKeySet(t, c, 1)
 	body := registerBody(t, c, "Agent", []string{"work.do"})
-	body["enc_keys"] = base64.StdEncoding.EncodeToString(k1)
+	withEncKeys(t, srv, body, c.AID(), k1)
 	body["a2a_card"] = signA2A(t, c, a2aCardFor(c, 1))
 	if code, b := registerFunded(t, srv, c, body); code != 200 {
 		t.Fatalf("register: %d %s", code, b)
@@ -987,7 +988,7 @@ func TestDirEntryCarriesACardListedAgain(t *testing.T) {
 	c, _ := twoAgents(t)
 	k1, _ := mintKeySet(t, c, 1)
 	body := registerBody(t, c, "Agent", nil)
-	body["enc_keys"] = base64.StdEncoding.EncodeToString(k1)
+	withEncKeys(t, srv, body, c.AID(), k1)
 	if code, b := registerFunded(t, srv, c, body); code != http.StatusOK {
 		t.Fatalf("register: %d %s", code, b)
 	}

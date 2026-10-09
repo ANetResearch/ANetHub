@@ -72,7 +72,7 @@ func TestPublishKeysMboxEpochMustRise(t *testing.T) {
 		if err := json.Unmarshal(body, &v); err != nil {
 			t.Fatal(err)
 		}
-		raw, err := base64.StdEncoding.DecodeString(v.KeySet)
+		raw, err := base64.RawURLEncoding.DecodeString(v.Keys)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +100,7 @@ func TestPublishKeysMboxEpochMustRise(t *testing.T) {
 		// The same set in a registration: registered, the set reported
 		// invalid with why, nothing stored.
 		reg := registerBody(t, c, "Agent", nil)
-		reg["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+		withEncKeys(t, srv, reg, c.AID(), raw)
 		code, body = registerFunded(t, srv, c, reg)
 		var out aghub.RegisterResponse
 		if err := json.Unmarshal(body, &out); err != nil || code != http.StatusOK {
@@ -133,7 +133,7 @@ func TestPublishKeysMboxEpochMustRise(t *testing.T) {
 	register(t, srv, fresh, "Fresh", nil)
 	for _, e := range []uint64{epochBound, epochBound + 1, ^uint64(0)} {
 		raw := mboxEpochSet(t, fresh, 1, seal.Mbox{Epoch: e, Pub: newMboxPub(t)})
-		if _, err := store.PublishKeys(fresh.AID(), raw, fresh.KEL(), time.Now()); err == nil {
+		if _, err := store.PublishKeys(fresh.AID(), raw, 0, fresh.KEL(), time.Now()); err == nil {
 			t.Errorf("a first set with epoch %d was stored", e)
 		}
 	}

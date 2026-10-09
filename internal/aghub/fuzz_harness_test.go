@@ -178,7 +178,8 @@ func (f *fz) agent(tb testing.TB, name string, caps []string, withKeys bool) (*i
 	if withKeys {
 		var raw []byte
 		raw, kp = fzKeySet(tb, c, 1, 0)
-		body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+		body["enc_keys"], body["prev_seq"] = base64.RawURLEncoding.EncodeToString(raw), 0
+		noteKeys(c.AID(), raw)
 	}
 	rec := f.register(c, fzJSON(tb, body))
 	if rec.Code != http.StatusOK {
@@ -244,7 +245,8 @@ func fzKeySet(tb testing.TB, c *identity.Controller, seq uint64, shiftMS int64) 
 	return raw, kp
 }
 
-// fzEnvelope is a structurally valid sealed envelope addressed to "to".
+// fzEnvelope is a structurally valid sealed envelope addressed to "to",
+// sealed to the key to published last (publishedKID).
 func fzEnvelope(tb testing.TB, to string, ct []byte) []byte {
 	tb.Helper()
 	if len(ct) == 0 {
@@ -252,7 +254,7 @@ func fzEnvelope(tb testing.TB, to string, ct []byte) []byte {
 	}
 	env := &seal.SealedEnvelope{
 		V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
+		KID: publishedKID(to), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
 		Access: &seal.Access{Kind: seal.AccessKindSession},
 	}
 	b, err := env.Marshal()

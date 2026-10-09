@@ -107,7 +107,7 @@ func agentWithKeys(t *testing.T, store *aghub.Store) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PublishKeys(c.AID(), raw, c.KEL(), time.Now()); err != nil {
+	if _, err := store.PublishKeys(c.AID(), raw, 0, c.KEL(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	return c.AID()

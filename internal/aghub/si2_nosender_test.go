@@ -16,7 +16,7 @@ func TestASendLeavesTheSenderInNoTable(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newHubAt(t, dir)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	before := rowsNaming(t, dir, sender.AID())
 	for i := 0; i < 3; i++ {

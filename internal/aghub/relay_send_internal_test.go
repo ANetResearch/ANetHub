@@ -568,7 +568,7 @@ func TestRelaySendOrder_Step9(t *testing.T) {
 					if got := decodeSent(sc.h.t, sc.h.send0(sc.ss, env, kind0Opts{})); got.Status != RelayQueued {
 						sc.h.t.Fatalf("delivery %d: %+v", i, got)
 					}
-					msgs, _ := sc.h.store.RelayPoll(sc.recip.aid, 0, 10, 1<<20)
+					msgs, _, _ := sc.h.store.RelayPoll(sc.recip.aid, 0, 10, 1<<20)
 					if _, err := sc.h.store.RelayAck(sc.recip.aid, []int64{msgs[0].ID}); err != nil {
 						sc.h.t.Fatal(err)
 					}
@@ -589,7 +589,7 @@ func TestRelaySendOrder_Step9(t *testing.T) {
 	env := sc.env()
 	for i := 0; i < MaxRedeliveries; i++ {
 		decodeSent(t, sc.send1(env, sc.contact))
-		msgs, _ := sc.h.store.RelayPoll(sc.recip.aid, 0, 10, 1<<20)
+		msgs, _, _ := sc.h.store.RelayPoll(sc.recip.aid, 0, 10, 1<<20)
 		_, _ = sc.h.store.RelayAck(sc.recip.aid, []int64{msgs[0].ID})
 	}
 	expectRefusal(t, sc.send1(env, sc.contact), 429, "redelivery_limited")
@@ -604,7 +604,8 @@ func TestRelaySendOrder_Step10(t *testing.T) {
 		for i := 0; i < n; i++ {
 			env := envelope(sc.h.t, sc.recip.aid, []byte("filler "+strconv.Itoa(i)))
 			d, _ := seal.EnvDigest(env)
-			if _, err := sc.h.store.RelayEnqueue(RelayItem{To: sc.recip.aid, Envelope: env, Digest: d, Class: class, CapID: capID}); err != nil {
+			if _, err := sc.h.store.RelayEnqueue(RelayItem{To: sc.recip.aid, Envelope: env, Digest: d, Class: class, CapID: capID,
+				KID: fixtureKID(sc.recip.aid)}); err != nil {
 				sc.h.t.Fatal(err)
 			}
 		}
@@ -659,7 +660,7 @@ func TestAnOuterExpiryBeyondTheTableIsRefused(t *testing.T) {
 	far := func(sc *relayScene) []byte {
 		v := uint64(math.MaxUint64)
 		env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: sc.recip.aid, Suite: seal.SuiteX25519,
-			KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("far"),
+			KID: fixtureKID(sc.recip.aid), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte("far"),
 			Access: &seal.Access{Kind: seal.AccessKindSession}, Exp: &v}
 		b, err := env.Marshal()
 		if err != nil {

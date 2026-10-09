@@ -530,15 +530,16 @@ type RegisterRequest struct {
 	Summary string   `json:"summary"`
 	Readme  string   `json:"readme"`
 	KEL     string   `json:"kel"` // base64url(identity.MarshalKEL)
-	// EncKeys is the agent's encryption key set: base64 (std) of the
-	// seal.SignedEncKeySet encoding (§3.1). Optional. A set that does not
-	// verify, or does not advance the stored one, is reported in
-	// keys_status and does not fail the registration. v030-todo(FS-3):
-	// base64url (core G2).
+	// EncKeys is the agent's encryption key set: base64url of the
+	// seal.SignedEncKeySet encoding (§3.1, core G2). Optional. A set that
+	// does not decode or verify is reported in keys_status and does not
+	// fail the registration; one that does not follow the stored set fails
+	// it with 409 keys_rollback (PAY-A1 step 9, forward-secrecy FS-H4).
 	EncKeys string `json:"enc_keys,omitempty"`
-	// PrevSeq is the key-set sequence number the agent last saw stored
-	// here. v030-todo(FS-3): required with enc_keys (PAY-A1 step 3) and
-	// compared and swapped (step 9).
+	// PrevSeq is the seq of the last key set the agent signed before
+	// EncKeys (0 for none): required with enc_keys (PAY-A1 step 3), and
+	// compared with the stored set's seq as POST /agents/{aid}/keys does
+	// (step 9).
 	PrevSeq *uint64 `json:"prev_seq,omitempty"`
 	// A2ACard is the agent's signed A2A AgentCard as a JSON object.
 	// Optional. It is verified against KEL and the stored card's
@@ -622,14 +623,16 @@ var registerKELReplays atomic.Int64
 //	0  X-ANet-Wire (wire3.Contract, before this handler)
 //	1  the registration rate of the client's address
 //	2  the body: size, strict decoding, invite_removed before bad_request
-//	3  aid and kel present; X-ANet-AID == aid; caps; the pow's shape
+//	3  aid and kel present; X-ANet-AID == aid; caps; the pow's shape;
+//	   enc_keys base64url, with prev_seq
 //	4  the admission gate, for an AID not registered here
 //	5  the KEL: decode, replay, derive the AID; the relayauth signature
 //	6  the KEL only extends what this hub holds (registered or departed);
 //	   a deactivated one is refused
 //	7  the witness is this hub (KEL H-1; not for check_only)
 //	8  check_only answers here
-//	9  the key set and the A2A card (reported per field; after the row)
+//	9  the key set follows the stored one (prev_seq, 409 keys_rollback);
+//	   the key set and the A2A card are reported per field after the row
 //	10 one transaction: the agent row and what admission writes beside it
 //	11 a refusal after step 4 gives the reservation back
 func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
@@ -692,6 +695,21 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	if err := validateCaps(req.Caps); err != nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: sentence(err)})
 		return
+	}
+	// A key set comes with the seq it follows, and is base64url like every
+	// binary value here (core CORE-E5): both are wire errors of the request,
+	// not a stale or bad set, so they fail it whole.
+	var encKeys []byte
+	if req.EncKeys != "" {
+		if req.PrevSeq == nil {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+				Error: "A registration that carries enc_keys carries prev_seq too (the seq of the last key set signed before it, 0 for none); add it and send again."})
+			return
+		}
+		if encKeys, err = wire3.DecodeB64URL("enc_keys", req.EncKeys); err != nil {
+			wire3.RefuseDecode(w, err)
+			return
+		}
 	}
 	var powSeed, powNonce []byte
 	if req.PoW != nil {
@@ -804,6 +822,21 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, CheckOnlyResponse{Status: checkStatus})
 		return
 	}
+	// 9. The key set follows the one stored here (FS-H4): checked before
+	// anything is written, and again where the set is written below, after
+	// the row (a publication that raced this one between the two is
+	// answered the same way, with the row written: registering again is
+	// harmless). The A2A card is reported per field after the row.
+	if encKeys != nil {
+		var rb *KeysRollbackError
+		if err := s.store.KeysRollbackOf(req.AID, encKeys, *req.PrevSeq); errors.As(err, &rb) {
+			refuseKeys(w, rb)
+			return
+		} else if err != nil {
+			wire3.Internal(w, err)
+			return
+		}
+	}
 	// 10. One transaction: the row, and for a first registration how it came
 	// in and the list's grant. RegisterAgent repeats the KEL extension
 	// check inside it, for a concurrent registration of the same AID that
@@ -837,16 +870,19 @@ func (s *Server) hRegister(w http.ResponseWriter, r *http.Request) {
 	out := RegisterResponse{AID: req.AID, Status: "registered",
 		KeysStatus: KeysStatusAbsent, CardStatus: CardStatusAbsent}
 	// The key set and the A2A card are reported per field, after the
-	// registration is written: a node whose key set is stale or malformed
-	// is still registered and can publish a corrected set with POST
-	// /agents/{aid}/keys, instead of being unable to register at all.
-	if req.EncKeys != "" {
-		raw, derr := base64.StdEncoding.DecodeString(req.EncKeys)
-		if derr != nil {
-			out.KeysStatus, out.KeysError = KeysStatusInvalid, "enc_keys not base64"
-		} else {
-			out.KeysStatus, out.KeysError = keysStatusOf(s.store.PublishKeys(req.AID, raw, kel, time.Now()))
+	// registration is written: a node whose key set does not verify, or
+	// breaks the mailbox key rule (SSR-W9), is still registered and can
+	// publish a corrected set with POST /agents/{aid}/keys, instead of being
+	// unable to register at all. Only a set that does not follow the stored
+	// one fails the registration (step 9).
+	if encKeys != nil {
+		status, err := s.store.PublishKeys(req.AID, encKeys, *req.PrevSeq, kel, time.Now())
+		var rb *KeysRollbackError
+		if errors.As(err, &rb) {
+			refuseKeys(w, rb)
+			return
 		}
+		out.KeysStatus, out.KeysError = keysStatusOf(status, err)
 	}
 	// Also when the field is absent: the stored card is re-verified
 	// against the KEL just registered, which may have rotated away from
@@ -1344,15 +1380,21 @@ type RelayPollRequest struct {
 	AfterID int64 `json:"after_id,omitempty"`
 }
 
-// RelayEnvelopeView is one mailbox entry on the wire.
+// RelayEnvelopeView is one mailbox entry on the wire: the envelope
+// (base64url, core G2) and when this hub accepted it (unix milliseconds,
+// relay_message.created_at), which the daemon's arrival time and key
+// deletion read (forward-secrecy FS-H5, engine H-3).
 type RelayEnvelopeView struct {
-	ID       int64  `json:"id"`
-	Envelope string `json:"envelope"` // base64 (std)
+	ID         int64  `json:"id"`
+	Envelope   string `json:"envelope"`
+	AcceptedAt uint64 `json:"accepted_at"`
 }
 
-// RelayPollResponse is the /relay/poll answer.
+// RelayPollResponse is the /relay/poll answer. More says whether envelopes
+// the page could not hold remain past it (Store.RelayPoll, FS-H5).
 type RelayPollResponse struct {
 	Messages []RelayEnvelopeView `json:"messages"`
+	More     bool                `json:"more"`
 }
 
 // RelayAckRequest is the /relay/ack body (relayauth v2, action "ack").
@@ -1419,8 +1461,8 @@ const HeaderAccess = "X-ANet-Access"
 //	7  the same envelope already waiting: duplicate, no token taken
 //	7a non-contact mail no larger than the recipient's non-contact share
 //	8  the buckets, all of them or none
-//	9, 10 Store.RelayEnqueue: the redelivery count and the mailbox, in the
-//	   transaction that writes the row
+//	9, 10 Store.RelayEnqueue: the redelivery count, the kid (FS-H1) and the
+//	   mailbox, in the transaction that writes the row
 //	11 queued, with the rid
 //
 // A kind-1 refusal at step 2 or 5 is the same status and the same bytes,
@@ -1636,10 +1678,11 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 		wire3.Write(w, wire3.Refusal{Reason: refusals[failed], RetryAfter: wait})
 		return
 	}
-	// 9, 10. The redelivery count and the mailbox, in the transaction
-	// that writes the row. A refusal gives the tokens back.
+	// 9, 10. The redelivery count, the kid (409 kid_stale, FS-H1) and the
+	// mailbox, in the transaction that writes the row. A refusal gives the
+	// tokens back.
 	queued, err := s.store.RelayEnqueue(RelayItem{To: outer.To, Envelope: body, Digest: digest,
-		Class: class, CapID: capID, Exp: outer.Exp})
+		Class: class, CapID: capID, Exp: outer.Exp, KID: outer.KID})
 	if err != nil || queued.Duplicate {
 		refundAll(takes)
 	}
@@ -1652,6 +1695,8 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 		s.answerRelay(w, RelayQueued, queued.RID, outer.To)
 	case errors.As(err, &limited):
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRedeliveryLimited, RetryAfter: limited.Wait})
+	case errors.Is(err, ErrKidStale):
+		wire3.Refuse(w, wire3.ReasonKidStale)
 	case errors.Is(err, ErrMailboxFull):
 		wire3.Refuse(w, wire3.ReasonMailboxFull)
 	case errors.Is(err, ErrStrangersBusy):
@@ -1896,8 +1941,8 @@ func withinSkew(ts uint64, now time.Time, skew time.Duration) bool {
 	return d <= skew.Milliseconds()
 }
 
-// hRelayPoll returns the caller's own mailbox, from after_id on when the
-// request names one.
+// hRelayPoll returns a page of the caller's own mailbox, from after_id on
+// when the request names one, and whether more follows it (FS-H5).
 func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.authRegistered(w, r, relayauth.ActionPoll, signedBodyLimit)
 	if !ok {
@@ -1923,15 +1968,15 @@ func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 	// work, and a node that has stopped asking will not, whatever else it
 	// might still be answering.
 	s.store.SeenPolling(a.AID)
-	msgs, err := s.store.RelayPoll(a.AID, req.AfterID, req.Limit, s.limits.PollBudget)
+	msgs, more, err := s.store.RelayPoll(a.AID, req.AfterID, req.Limit, s.limits.PollBudget)
 	if err != nil {
 		wire3.Internal(w, err)
 		return
 	}
-	out := RelayPollResponse{Messages: make([]RelayEnvelopeView, 0, len(msgs))}
+	out := RelayPollResponse{Messages: make([]RelayEnvelopeView, 0, len(msgs)), More: more}
 	for _, m := range msgs {
 		out.Messages = append(out.Messages, RelayEnvelopeView{
-			ID: m.ID, Envelope: base64.StdEncoding.EncodeToString(m.Payload)})
+			ID: m.ID, Envelope: wire3.EncodeB64URL(m.Payload), AcceptedAt: uint64(m.CreatedAt)})
 	}
 	writeJSON(w, http.StatusOK, out)
 }

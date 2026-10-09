@@ -71,7 +71,7 @@ func TestPollingIsWhatSaysAnAgentIsStillThere(t *testing.T) {
 func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	provider, sender := twoAgents(t)
-	register(t, srv, provider, "Worker", []string{"work.do"})
+	registerWithKeys(t, srv, provider, "Worker", []string{"work.do"})
 	register(t, srv, sender, "Sender", nil)
 
 	// The provider collected its mail a long time ago and has not since.

@@ -212,7 +212,7 @@ func TestABucketLookupDoesNotNameTheRecipient(t *testing.T) {
 		}
 		raw, _ := mintKeySet(t, p.c, uint64(time.Now().UnixMilli()))
 		req = signedRequest(t, srv, p.c, relayauth.ActionKeys, http.MethodPost,
-			"/agents/"+p.c.AID()+"/keys", map[string]any{"keyset": base64.StdEncoding.EncodeToString(raw)})
+			"/agents/"+p.c.AID()+"/keys", map[string]any{"keys": base64.RawURLEncoding.EncodeToString(raw), "prev_seq": 0})
 		req.Header.Set("X-Real-IP", p.ip)
 		if code, b, _ := send(t, req); code != 200 {
 			t.Fatalf("publish keys: %d %s", code, b)

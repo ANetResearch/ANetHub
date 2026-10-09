@@ -98,7 +98,7 @@ func propNoSwallow(t *testing.T, seed int64) {
 		case op < 5:
 			send(rng.Intn(len(pool)))
 		case op == 5: // the recipient takes its mail
-			msgs, err := h.store.RelayPoll(sc.recip.aid, 0, 1000, 1<<30)
+			msgs, _, err := h.store.RelayPoll(sc.recip.aid, 0, 1000, 1<<30)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -347,7 +347,7 @@ func TestSendsLeaveNoSenderBehind(t *testing.T) {
 	}
 	// The recipient takes its mail: the envelopes, which carry the
 	// credentials, are gone from the files (secure_delete).
-	msgs, _ := h.store.RelayPoll(sc.recip.aid, 0, 1000, 1<<30)
+	msgs, _, _ := h.store.RelayPoll(sc.recip.aid, 0, 1000, 1<<30)
 	for _, m := range msgs {
 		if _, err := h.store.RelayAck(sc.recip.aid, []int64{m.ID}); err != nil {
 			t.Fatal(err)

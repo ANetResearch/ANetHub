@@ -237,7 +237,7 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 func TestTheRelayRefusesAnythingButASealedEnvelopeForTheRecipient(t *testing.T) {
 	srv := newHub(t)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 
 	outer := func(mut func(m map[uint64]any)) []byte {
@@ -295,9 +295,9 @@ func TestTheFirstContactBucketAnswers429WithRetryAfter(t *testing.T) {
 	srv := newHub(t)
 	recip, sender := twoAgents(t)
 	other, _ := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
-	register(t, srv, other, "Other", nil)
+	registerWithKeys(t, srv, other, "Other", nil)
 	env := func(to string, i int) []byte { return testEnvelope(t, to, []byte(strconv.Itoa(i))) }
 	busy := -1
 	for i := 0; i < 80 && busy < 0; i++ {
@@ -334,7 +334,7 @@ func TestAFullMailboxAnswers507(t *testing.T) {
 		t.Fatal(err)
 	}
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	for i := 0; i < 2; i++ {
 		if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), []byte{byte(i)})); code != 200 {
@@ -370,7 +370,7 @@ func TestAnOversizedEnvelopeIs413(t *testing.T) {
 		t.Fatal(err)
 	}
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	// 880 bytes of ct leave room for the outer header with its access (key 7) under 1024.
 	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), bytes.Repeat([]byte("x"), 880))); code != 200 {
@@ -390,7 +390,7 @@ func TestTheRelayDoesNotStoreTheSender(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newHubAt(t, dir)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), nil)); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
@@ -431,7 +431,7 @@ func TestAnAckDeletesTheRow(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newHubAt(t, dir)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	for i := 0; i < 2; i++ {
 		if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), []byte{byte(i)})); code != 200 {
@@ -471,7 +471,7 @@ func TestAnAckDeletesTheRow(t *testing.T) {
 func TestUndeliveredEnvelopesExpire(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), nil)); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
@@ -504,11 +504,7 @@ func TestAnAckedEnvelopeLeavesNoBytesOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recip, _ := twoAgents(t)
-	kel, _ := identity.MarshalKEL(recip.KEL())
-	if err := store.PutAgent(recip.AID(), "Recipient", nil, kel); err != nil {
-		t.Fatal(err)
-	}
+	recip := storeAgentWithKeys(t, store, "Recipient")
 	canary := []byte("CANARY-" + strings.Repeat("7f3a", 64))
 	q, err := store.QueueEnvelope(recip.AID(), testEnvelope(t, recip.AID(), canary))
 	if err != nil {
@@ -662,8 +658,8 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 // ---- encryption keys ----
 
 // The publisher rule: strictly greater seq stores, the same set again is
-// a 200 no-op, anything else is 409; a set that does not verify for the
-// agent is 400.
+// a 200 no-op, anything else is 409 keys_rollback; a set that does not
+// verify for the agent is 400.
 func TestKeyPublisherRules(t *testing.T) {
 	srv := newHub(t)
 	c, other := twoAgents(t)
@@ -685,12 +681,12 @@ func TestKeyPublisherRules(t *testing.T) {
 		t.Fatalf("the same set again: %s, want 200 unchanged", got)
 	}
 	k9, _ := mintKeySet(t, c, 9)
-	if code, b := publishKeys(t, srv, c, k9); code != http.StatusConflict {
-		t.Errorf("a lower seq: %d %s, want 409", code, b)
+	if code, b := publishKeys(t, srv, c, k9); code != http.StatusConflict || !strings.Contains(string(b), `"keys_rollback"`) {
+		t.Errorf("a lower seq: %d %s, want 409 keys_rollback", code, b)
 	}
 	k10b, _ := mintKeySet(t, c, 10)
-	if code, b := publishKeys(t, srv, c, k10b); code != http.StatusConflict {
-		t.Errorf("the stored seq with other content: %d %s, want 409", code, b)
+	if code, b := publishKeys(t, srv, c, k10b); code != http.StatusConflict || !strings.Contains(string(b), `"stored_seq":10`) {
+		t.Errorf("the stored seq with other content: %d %s, want 409 with stored_seq 10", code, b)
 	}
 	// A set for another AID, and a set signed by another key, are refused
 	// even when their seq would advance.
@@ -707,7 +703,7 @@ func TestKeyPublisherRules(t *testing.T) {
 	}
 	// The agent cannot publish for somebody else.
 	if code, b := signedDo(t, srv, c, relayauth.ActionKeys, http.MethodPost, "/agents/"+other.AID()+"/keys",
-		map[string]any{"keyset": base64.StdEncoding.EncodeToString(k11)}); code != http.StatusUnauthorized {
+		map[string]any{"keys": base64.RawURLEncoding.EncodeToString(k11), "prev_seq": 0}); code != http.StatusUnauthorized {
 		t.Errorf("publishing on another agent's path: %d %s, want 401", code, b)
 	}
 	// GET returns the stored set with the KEL it verifies against.
@@ -719,11 +715,11 @@ func TestKeyPublisherRules(t *testing.T) {
 	if err := json.Unmarshal(b, &view); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
+	raw, _ := base64.RawURLEncoding.DecodeString(view.Keys)
 	if !bytes.Equal(raw, k11) {
 		t.Error("GET does not return the newest set")
 	}
-	kelRaw, _ := base64.StdEncoding.DecodeString(view.KEL)
+	kelRaw, _ := base64.RawURLEncoding.DecodeString(view.KEL)
 	events, err := identity.UnmarshalKEL(kelRaw)
 	if err != nil {
 		t.Fatal(err)
@@ -735,13 +731,18 @@ func TestKeyPublisherRules(t *testing.T) {
 }
 
 // /register carries the key set and the A2A card as optional fields
-// whose problems are reported, not fatal.
+// whose problems are reported, not fatal; a key set that does not follow
+// the stored one is 409 keys_rollback (FS-H4).
 func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 	srv := newHub(t)
 	c, other := twoAgents(t)
 	regWith := func(extra map[string]any) (int, aghub.RegisterResponse) {
 		body := registerBody(t, c, "Agent", nil)
 		for k, v := range extra {
+			if k == "enc_keys" {
+				withEncKeys(t, srv, body, c.AID(), v.([]byte))
+				continue
+			}
 			body[k] = v
 		}
 		code, b := registerFunded(t, srv, c, body)
@@ -754,21 +755,21 @@ func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 	// registration or the key set beside it (registry_test.go covers
 	// admission itself).
 	card := json.RawMessage(`{"name":"Agent","signatures":[{"protected":"x","signature":"y"}]}`)
-	code, out := regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(k5), "a2a_card": card})
+	code, out := regWith(map[string]any{"enc_keys": k5, "a2a_card": card})
 	if code != 200 || out.KeysStatus != aghub.KeysStatusOK || out.CardStatus != aghub.CardStatusInvalid || out.CardError == "" {
 		t.Fatalf("first registration: %d %+v", code, out)
 	}
 	// A restarted daemon re-registers with the same set.
-	if code, out = regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(k5)}); code != 200 || out.KeysStatus != aghub.KeysStatusUnchanged {
+	if code, out = regWith(map[string]any{"enc_keys": k5}); code != 200 || out.KeysStatus != aghub.KeysStatusUnchanged {
 		t.Fatalf("re-registration with the same set: %d %+v", code, out)
 	}
-	// A stale set does not fail the registration.
+	// A stale set is refused with what the hub holds.
 	k4, _ := mintKeySet(t, c, 4)
-	if code, out = regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(k4)}); code != 200 || out.KeysStatus != aghub.KeysStatusConflict || out.KeysError == "" {
-		t.Fatalf("stale set: %d %+v", code, out)
+	if code, _ = regWith(map[string]any{"enc_keys": k4}); code != http.StatusConflict {
+		t.Fatalf("stale set: %d, want 409 keys_rollback", code)
 	}
 	foreign, _ := mintKeySet(t, other, 50)
-	if code, out = regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(foreign), "a2a_card": json.RawMessage(`"not an object"`)}); code != 200 ||
+	if code, out = regWith(map[string]any{"enc_keys": foreign, "a2a_card": json.RawMessage(`"not an object"`)}); code != 200 ||
 		out.KeysStatus != aghub.KeysStatusInvalid || out.CardStatus != aghub.CardStatusInvalid {
 		t.Fatalf("foreign set and a non-object card: %d %+v", code, out)
 	}
@@ -779,7 +780,7 @@ func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 	_, b := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
 	var view aghub.KeysView
 	_ = json.Unmarshal(b, &view)
-	if raw, _ := base64.StdEncoding.DecodeString(view.KeySet); !bytes.Equal(raw, k5) {
+	if raw, _ := base64.RawURLEncoding.DecodeString(view.Keys); !bytes.Equal(raw, k5) {
 		t.Error("a refused set replaced the stored one")
 	}
 }
@@ -840,8 +841,8 @@ func TestARealSealedMessageCrossesTheRelay(t *testing.T) {
 	_, b := getJSON(t, srv.URL+"/agents/"+recip.AID()+"/keys")
 	var view aghub.KeysView
 	_ = json.Unmarshal(b, &view)
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
-	kelRaw, _ := base64.StdEncoding.DecodeString(view.KEL)
+	raw, _ := base64.RawURLEncoding.DecodeString(view.Keys)
+	kelRaw, _ := base64.RawURLEncoding.DecodeString(view.KEL)
 	events, _ := identity.UnmarshalKEL(kelRaw)
 	signed, _ := seal.UnmarshalSignedEncKeySet(raw)
 	set, err := seal.VerifyEncKeySet(signed, recip.AID(), events, uint64(time.Now().UnixMilli()))
@@ -857,7 +858,7 @@ func TestARealSealedMessageCrossesTheRelay(t *testing.T) {
 		t.Fatalf("send: %d %s", code, b)
 	}
 	p := relayPoll(t, srv, recip)
-	got, _ := base64.StdEncoding.DecodeString(p.Messages[0].Envelope)
+	got, _ := base64.RawURLEncoding.DecodeString(p.Messages[0].Envelope)
 	opened, err := seal.Open(got, recip.AID(), seal.StaticKeyRing{kp}, nil)
 	if err != nil {
 		t.Fatalf("the recipient cannot open what the relay delivered: %v", err)
@@ -911,7 +912,7 @@ func TestRegistrationIsRateLimitedPerClientIP(t *testing.T) {
 func TestAPollAfterACursorReturnsOnlyLaterEnvelopes(t *testing.T) {
 	srv := newHub(t)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	for i := 0; i < 5; i++ {
 		env := testEnvelope(t, recip.AID(), []byte{byte('a' + i)})

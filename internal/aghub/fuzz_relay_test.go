@@ -328,7 +328,7 @@ func FuzzHubRelayPollAck(f *testing.F) {
 					t.Fatalf("poll after %d: ids not ascending above it: %+v", preq.AfterID, out.Messages)
 				}
 				last = m.ID
-				raw, err := base64.StdEncoding.DecodeString(m.Envelope)
+				raw, err := base64.RawURLEncoding.DecodeString(m.Envelope)
 				if err != nil {
 					t.Fatal(err)
 				}

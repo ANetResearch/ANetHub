@@ -44,7 +44,7 @@ func wire3DirectorySetup(t *testing.T) *wire3test.Env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.PublishKeys(alice.AID(), raw, alice.KEL(), time.Now()); err != nil {
+	if _, err := store.PublishKeys(alice.AID(), raw, 0, alice.KEL(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	h, err := dirbox.Hash(alice.AID())

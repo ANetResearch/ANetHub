@@ -105,7 +105,7 @@ func TestWire3JSONFields(t *testing.T) {
 		req("POST", "/register", reflect.TypeFor[RegisterRequest](), ""),
 		{"POST", "/register", true, "registration", reflect.TypeFor[RegisterResponse](), "v030-todo(KEL-5)"},
 		{"POST", "/register", true, "check_only", reflect.TypeFor[CheckOnlyResponse](), ""},
-		req("POST", "/agents/{aid}/keys", reflect.TypeFor[KeysPublishRequest](), "v030-todo(FS-3)"),
+		req("POST", "/agents/{aid}/keys", reflect.TypeFor[KeysPublishRequest](), ""),
 		req("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
 		resp("POST", "/agents/kel:push", nil, "v030-todo(KEL-5)"),
 		resp("GET", "/hub/identity", reflect.TypeFor[hubid.IdentityResponse](), ""),
@@ -275,6 +275,11 @@ func wire3SupplySetup(t *testing.T) *wire3test.Env {
 //	${env_cap}      an envelope to bob under the credential, ${access_cap}
 //	${env_forged}   the same credential with a proof by another key,
 //	                ${access_forged}
+//	${env_stale}    a first contact from alice to bob sealed to a key bob
+//	                does not publish, MAC ${mac_stale}; ${env_cap_stale} the
+//	                same under the credential, ${access_cap_stale}
+//	${env_more1}, ${env_more2}  two more first contacts to bob, MACs
+//	                ${mac_more1}, ${mac_more2}
 //
 // The MACs are over POST /relay/send, no X-ANet-Home, at ${ts}; ${access0}
 // is the kind-0 access.
@@ -299,22 +304,29 @@ func wire3RelaySetup(t *testing.T) *wire3test.Env {
 	}
 	b64 := base64.RawURLEncoding.EncodeToString
 	ts := uint64(time.Now().UnixMilli())
-	first := func(name, to string) {
-		e := envelope(t, to, []byte(name))
+	staleKID := bytes.Repeat([]byte{0x5a}, seal.KIDLen) // no key bob publishes
+	firstTo := func(name, to string, kid []byte) {
+		e := envelopeTo(t, to, kid, []byte(name))
 		mac, err := relayauth.SessionMAC(ss.key, ss.sid, ts, http.MethodPost, "/relay/send", "", e)
 		if err != nil {
 			t.Fatal(err)
 		}
 		env.Vars["env_"+name], env.Vars["mac_"+name] = b64(e), relayauth.EncodeMAC(mac)
 	}
+	first := func(name, to string) { firstTo(name, to, fixtureKID(to)) }
 	first("first", bob.AID())
 	first("unknown", nobody.AID())
+	firstTo("stale", bob.AID(), staleKID)
+	first("more1", bob.AID())
+	first("more2", bob.AID())
 	g := (&relayHub{t: t, now: time.Now()}).issue(owner, seal.CapClassContact, 24*time.Hour)
 	withAccess := func(name string, g grant) {
 		e := withCap(t, envelope(t, bob.AID(), []byte(name)), g)
 		env.Vars["env_"+name], env.Vars["access_"+name] = b64(e), b64(accessRaw(t, e))
 	}
 	withAccess("cap", g)
+	staleCap := withCap(t, envelopeTo(t, bob.AID(), staleKID, []byte("cap_stale")), g)
+	env.Vars["env_cap_stale"], env.Vars["access_cap_stale"] = b64(staleCap), b64(accessRaw(t, staleCap))
 	_, g.holder, _ = ed25519.GenerateKey(nil)
 	withAccess("forged", g)
 	env.Vars["bob"], env.Vars["nobody"] = bob.AID(), nobody.AID()

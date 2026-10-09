@@ -15,6 +15,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -122,9 +123,10 @@ func signedDo(t *testing.T, srv *httptest.Server, c *identity.Controller, action
 	return code, b
 }
 
-// testEnvelope is a structurally valid sealed envelope addressed to "to".
-// The hub only parses the outer layer, so the ciphertext need not be real
-// for tests of the relay itself; relayRoundTrip below uses a real one.
+// testEnvelope is a structurally valid sealed envelope addressed to "to",
+// sealed to the key to published last (publishedKID). The hub only parses
+// the outer layer, so the ciphertext need not be real for tests of the
+// relay itself; relayRoundTrip below uses a real one.
 func testEnvelope(t *testing.T, to string, ct []byte) []byte {
 	t.Helper()
 	if len(ct) == 0 {
@@ -132,7 +134,7 @@ func testEnvelope(t *testing.T, to string, ct []byte) []byte {
 	}
 	env := &seal.SealedEnvelope{
 		V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
+		KID: publishedKID(to), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
 		Access: &seal.Access{Kind: seal.AccessKindSession},
 	}
 	b, err := env.Marshal()
@@ -313,11 +315,128 @@ func mintKeySet(t *testing.T, c *identity.Controller, seq uint64) ([]byte, *seal
 	return raw, kp
 }
 
-// publishKeys posts a key set for c.
+// publishKeys posts a key set for c as a daemon that follows what the hub
+// holds: prev_seq is the seq of the set srv serves for c (0 for none).
 func publishKeys(t *testing.T, srv *httptest.Server, c *identity.Controller, raw []byte) (int, []byte) {
 	t.Helper()
-	return signedDo(t, srv, c, relayauth.ActionKeys, http.MethodPost, "/agents/"+c.AID()+"/keys",
-		map[string]any{"keyset": base64.StdEncoding.EncodeToString(raw)})
+	return publishKeysPrev(t, srv, c, raw, storedKeySeq(t, srv, c.AID()))
+}
+
+// publishKeysPrev posts a key set for c with prev_seq prev (FS-H4). A set
+// the hub took is what testEnvelope seals to c from then on.
+func publishKeysPrev(t *testing.T, srv *httptest.Server, c *identity.Controller, raw []byte, prev uint64) (int, []byte) {
+	t.Helper()
+	code, b := signedDo(t, srv, c, relayauth.ActionKeys, http.MethodPost, "/agents/"+c.AID()+"/keys",
+		map[string]any{"keys": base64.RawURLEncoding.EncodeToString(raw), "prev_seq": prev})
+	if code == http.StatusOK {
+		noteKeys(c.AID(), raw)
+	}
+	return code, b
+}
+
+// registerWithKeys registers c (register) and publishes a key set for it,
+// which testEnvelope seals to c from then on: a recipient the hub queues
+// mail for (forward-secrecy FS-H1).
+func registerWithKeys(t *testing.T, srv *httptest.Server, c *identity.Controller, name string, caps []string) {
+	t.Helper()
+	register(t, srv, c, name, caps)
+	raw, _ := mintKeySet(t, c, uint64(time.Now().UnixMilli()))
+	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
+		t.Fatalf("publish the key set of %s: %d %s", name, code, b)
+	}
+}
+
+// storeAgentWithKeys puts a new agent with a key set straight into store,
+// for a test of the store itself.
+func storeAgentWithKeys(t *testing.T, store *aghub.Store, name string) *identity.Controller {
+	t.Helper()
+	c, err := identitytest.Hub()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kel, err := identity.MarshalKEL(c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutAgent(c.AID(), name, nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := mintKeySet(t, c, uint64(time.Now().UnixMilli()))
+	if _, err := store.PublishKeys(c.AID(), raw, 0, c.KEL(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	noteKeys(c.AID(), raw)
+	return c
+}
+
+// withEncKeys puts the key set raw in a registration body for aid at srv,
+// as a daemon does: base64url, with prev_seq the seq of the set srv holds.
+func withEncKeys(t *testing.T, srv *httptest.Server, body map[string]any, aid string, raw []byte) map[string]any {
+	t.Helper()
+	body["enc_keys"] = base64.RawURLEncoding.EncodeToString(raw)
+	body["prev_seq"] = storedKeySeq(t, srv, aid)
+	noteKeys(aid, raw)
+	return body
+}
+
+// storedKeySeq is the seq of the key set srv serves for aid, 0 for none.
+func storedKeySeq(t *testing.T, srv *httptest.Server, aid string) uint64 {
+	t.Helper()
+	code, b := getJSON(t, srv.URL+"/agents/"+aid+"/keys")
+	if code != http.StatusOK {
+		return 0
+	}
+	var v aghub.KeysView
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(v.Keys)
+	if err != nil {
+		t.Fatalf("the served key set is not base64url: %v", err)
+	}
+	return keySetOf(t, raw).Seq
+}
+
+// keySetOf decodes a signed key set.
+func keySetOf(t *testing.T, raw []byte) seal.EncKeySet {
+	t.Helper()
+	signed, err := seal.UnmarshalSignedEncKeySet(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var es seal.EncKeySet
+	if err := coredet.UnmarshalStrict(signed.Set, &es); err != nil {
+		t.Fatal(err)
+	}
+	return es
+}
+
+// publishedKIDs is the kid of the last key set each agent of these tests
+// published, by AID: testEnvelope seals to it, so a well-formed send passes
+// the hub's kid check (forward-secrecy FS-H1). Agents that published no set
+// get a kid no set holds.
+var publishedKIDs sync.Map
+
+// noteKeys records the last key of the set raw as aid's (sets that do not
+// decode are not recorded).
+func noteKeys(aid string, raw []byte) {
+	signed, err := seal.UnmarshalSignedEncKeySet(raw)
+	if err != nil {
+		return
+	}
+	var es seal.EncKeySet
+	if coredet.UnmarshalStrict(signed.Set, &es) != nil || len(es.Keys) == 0 {
+		return
+	}
+	publishedKIDs.Store(aid, es.Keys[len(es.Keys)-1].KID)
+}
+
+// publishedKID is the kid testEnvelope seals an envelope to to.
+func publishedKID(to string) []byte {
+	if k, ok := publishedKIDs.Load(to); ok {
+		return k.([]byte)
+	}
+	return bytes.Repeat([]byte{7}, seal.KIDLen)
 }
 
 // sealFrom seals a real inner message from sender to the recipient key.

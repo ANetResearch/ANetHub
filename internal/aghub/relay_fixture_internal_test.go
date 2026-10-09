@@ -143,29 +143,76 @@ func (h *relayHub) publish(a *relayAgent, epoch uint64) {
 // publishTo is publish at the time at.
 func (h *relayHub) publishTo(a *relayAgent, epoch uint64, at time.Time) {
 	h.t.Helper()
+	fixturePublish(h.t, h.store, a, epoch, at)
+}
+
+// fixturePublish gives a a new mailbox key under epoch and publishes, at
+// store, a key set carrying it and one encryption key valid at at, which
+// envelope seals to from then on (fixtureKIDs). It returns that key.
+func fixturePublish(t testing.TB, store *Store, a *relayAgent, epoch uint64, at time.Time) seal.EncKey {
+	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
-		h.t.Fatal(err)
+		t.Fatal(err)
 	}
 	a.mbox, a.mboxPriv = seal.Mbox{Epoch: epoch, Pub: pub}, priv
 	now := uint64(at.UnixMilli())
 	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 	if err != nil {
-		h.t.Fatal(err)
+		t.Fatal(err)
 	}
 	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: a.aid, Seq: now + epoch,
 		Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: a.mbox}
 	signed, err := seal.SignEncKeySet(set, a.c.Sign)
 	if err != nil {
-		h.t.Fatal(err)
+		t.Fatal(err)
 	}
 	raw, err := signed.Marshal()
 	if err != nil {
-		h.t.Fatal(err)
+		t.Fatal(err)
 	}
-	if _, err := h.store.PublishKeys(a.aid, raw, a.c.KEL(), at); err != nil {
-		h.t.Fatal(err)
+	var prev uint64 // the set this one follows (FS-H4): the one stored
+	_ = store.db.QueryRow(`SELECT seq FROM agent_keys WHERE aid=?`, a.aid).Scan(&prev)
+	if _, err := store.PublishKeys(a.aid, raw, prev, a.c.KEL(), at); err != nil {
+		t.Fatal(err)
 	}
+	fixtureKIDs.Store(a.aid, kp.Public)
+	return kp.Public
+}
+
+// sealToKeysAt makes envelope seal to aid's key at store: the newest key of
+// the set store holds for aid (when one agent published other sets at other
+// hubs).
+func sealToKeysAt(t testing.TB, store *Store, aid string) {
+	t.Helper()
+	keyset, _, _, err := store.LocalKeys(aid)
+	if err != nil || keyset == nil {
+		t.Fatalf("no key set for %s: %v", aid, err)
+	}
+	signed, err := seal.UnmarshalSignedEncKeySet(keyset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var es seal.EncKeySet
+	if err := coredet.UnmarshalStrict(signed.Set, &es); err != nil {
+		t.Fatal(err)
+	}
+	fixtureKIDs.Store(aid, es.Keys[len(es.Keys)-1])
+}
+
+// fixtureKIDs is the encryption key of the key set each agent of these
+// fixtures published last, by AID (a seal.EncKey). envelope seals to it, so
+// a well-formed send passes the hub's kid check (forward-secrecy FS-H1);
+// an envelope to an agent that published nothing carries a kid no key set
+// holds.
+var fixtureKIDs sync.Map
+
+// fixtureKID is the kid envelope seals an envelope to to.
+func fixtureKID(to string) []byte {
+	if k, ok := fixtureKIDs.Load(to); ok {
+		return k.(seal.EncKey).KID
+	}
+	return bytes.Repeat([]byte{7}, seal.KIDLen)
 }
 
 // relaySigned hands out relayauth times: every request a different, later
@@ -296,15 +343,22 @@ func mustB64(t testing.TB, s string) []byte {
 }
 
 // envelope is a structurally valid envelope for to (the hub only reads the
-// outer layer), with a kind-0 access; ct varies it.
+// outer layer), with a kind-0 access; ct varies it. It is sealed to the key
+// to published last in these fixtures (fixtureKID).
 func envelope(t testing.TB, to string, ct []byte) []byte {
+	t.Helper()
+	return envelopeTo(t, to, fixtureKID(to), ct)
+}
+
+// envelopeTo is envelope sealed to kid.
+func envelopeTo(t testing.TB, to string, kid, ct []byte) []byte {
 	t.Helper()
 	if len(ct) == 0 {
 		ct = []byte("ciphertext")
 	}
 	env := &seal.SealedEnvelope{
 		V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
+		KID: kid, Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
 		Access: &seal.Access{Kind: seal.AccessKindSession},
 	}
 	b, err := env.Marshal()
