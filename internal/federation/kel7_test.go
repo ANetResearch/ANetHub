@@ -147,6 +147,38 @@ func TestPinnedPeerKELExtendsNotReplaces(t *testing.T) {
 	}
 }
 
+// KEL R-9, H-15, H-16: the first pin of a peer is checked as every
+// extension is, so a key history with an event from the future is not
+// pinned at all; and only the hubs of the peer table are served as pinned,
+// not a pin left by a hub that is no longer a peer.
+func TestFirstPinAndPinnedSetOfPeers(t *testing.T) {
+	self, peer, stranger := threeHubIdentities(t)
+	var served servedKEL
+	svc := peerOf(t, self, peer, &served)
+	future := copyOf(t, peer.Ctrl)
+	if err := identitytest.Rotate(future, uint64(time.Now().Add(10*time.Minute).UnixMilli())); err != nil {
+		t.Fatal(err)
+	}
+	served.set(marshalKEL(t, future.KEL()))
+	if _, err := svc.PeerKEL(peer.AID); err == nil {
+		t.Fatal("a first key history with an event from the future was pinned")
+	}
+	if n := pinnedPeerKELs(t, svc); n != 0 {
+		t.Fatalf("%d pins", n)
+	}
+	served.set(peer.KEL)
+	if n := pinLen(t, svc, peer.AID); n != 1 {
+		t.Fatalf("the peer's own key history: %d events", n)
+	}
+	if err := svc.storePin(stranger.AID, stranger.KEL); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := svc.PinnedHubKELs()
+	if err != nil || len(pinned) != 1 || pinned[0].AID != peer.AID {
+		t.Fatalf("PinnedHubKELs with a pin of a hub not in the peer table: %+v %v", pinned, err)
+	}
+}
+
 // KEL SI-43, M19 (the hub's side): a strict prefix of the pin, such as the
 // history from before an emergency rotation, which whoever holds the old
 // key can serve, is never used: a notice the old key signs after the
