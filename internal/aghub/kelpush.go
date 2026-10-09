@@ -353,7 +353,11 @@ func (s *Store) pushKELLocked(aid string, kel []identity.SignedEvent, now time.T
 		return res, registered, err
 	}
 	if registered {
-		if _, err := tx.Exec(`UPDATE agent SET kel=? WHERE aid=?`, raw, aid); err != nil {
+		tipSeq, tipHead := storedTip(raw)
+		if _, err := tx.Exec(`UPDATE agent SET kel=?, tip_seq=?, tip_head=? WHERE aid=?`, raw, tipSeq, tipHead, aid); err != nil {
+			return res, registered, err
+		}
+		if err := countKELChangeTx(tx); err != nil {
 			return res, registered, err
 		}
 		if last.Event.Type == identity.Deactivation {
@@ -368,6 +372,11 @@ func (s *Store) pushKELLocked(aid string, kel []identity.SignedEvent, now time.T
 			if err := kelChangedTx(tx, aid, raw); err != nil {
 				return res, registered, err
 			}
+			// A longer key history than the one held: a restore
+			// quarantine ends for this AID (KEL H-20 a).
+			if err := releaseTx(tx, aid, releasedLongerKEL, now); err != nil {
+				return res, registered, err
+			}
 			if err := s.refreshDirTx(tx, aid); err != nil {
 				return res, registered, err
 			}
@@ -378,5 +387,6 @@ func (s *Store) pushKELLocked(aid string, kel []identity.SignedEvent, now time.T
 	if err := tx.Commit(); err != nil {
 		return res, registered, err
 	}
+	s.syncKELHighWater()
 	return res, registered, nil
 }

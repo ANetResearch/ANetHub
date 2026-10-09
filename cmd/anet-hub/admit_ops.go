@@ -14,11 +14,12 @@ package main
 //	anet-hub due, anet-hub clear          (clear.go, clear_fed.go)
 //	anet-hub redemptions [--json]         (redemptions.go)
 //	anet-hub identity status|setup-recovery|rotate   (identity_ops.go)
+//	anet-hub restore <backup>             (restore.go; the hub stopped)
 //
 // Each opens the hub's database beside a running hub (WAL, a busy timeout,
 // IMMEDIATE transactions), so none needs the hub stopped, but for the
-// identity's setup-recovery and rotate, which run while it is stopped. What
-// they print comes from text.go.
+// identity's setup-recovery and rotate and for restore, which run while it is
+// stopped. What they print comes from text.go.
 
 import (
 	"encoding/json"
@@ -46,6 +47,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 	"due":         runDue,         // clear.go; clear is clear_fed.go's
 	"identity":    runIdentity,    // identity_ops.go
 	"redemptions": runRedemptions, // redemptions.go
+	"restore":     runRestore,     // restore.go
 }
 
 // runSubcommand runs the subcommand name with args; data is the --data the
@@ -53,7 +55,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 func runSubcommand(c *console, name, data string, args []string) int {
 	f, ok := subcommands[name]
 	if !ok {
-		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply|due|clear|redemptions|identity …")
+		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply|due|clear|redemptions|identity|restore …")
 	}
 	return f(c, data, args)
 }

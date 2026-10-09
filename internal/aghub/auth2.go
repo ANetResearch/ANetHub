@@ -619,6 +619,10 @@ func (s *Server) authRegistered(w http.ResponseWriter, r *http.Request, action s
 		writeAuthFailure(w, f)
 		return authed{}, false
 	}
+	// Signed under the tip of the stored key history (H-3): after a
+	// restore, that is what releases the AID once its wait is over (KEL
+	// H-20 b), before the answer that may carry its notice.
+	s.store.releaseOnCurrentKey(a.AID)
 	if _, err := s.store.maybeGrantTrial(a.AID, clientAddr(r)); err != nil {
 		log.Printf("hub: trial credit of %s: %v", a.AID, err)
 	}

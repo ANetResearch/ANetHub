@@ -157,7 +157,7 @@ func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 	union := arm(`SELECT a.aid AS aid, c.card AS card, c.verified_at AS verified_at,
 	                     a.registered_at AS registered_at, a.last_seen_at AS last_seen_at, '' AS home,
 	                     a.kel AS kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid) AS keys,
-	                     (SELECT n.blob FROM notice_cache n WHERE n.aid = a.aid) AS notice`,
+	                     `+tipNoticeColumn+` AS notice`,
 		`agent_a2a_card c JOIN agent a ON a.aid = c.aid WHERE c.verified_at IS NOT NULL`,
 		"a.aid", "agent_skill", "agent_tag", "c.search")
 	if q.Federated {
@@ -202,7 +202,10 @@ func (s *Store) A2ARegistry(q RegistryQuery) ([]A2AAgentEntry, bool, error) {
 		e.CardVerification = CardVerificationOK
 		e.VerifiedAt = toTheHour(e.VerifiedAt)
 		e.LastSeen, e.Quiet = live.LastSeen, live.Quiet
-		e.KEL, e.Keys, e.KeyStateNotice = b64url(kel), b64url(keys), b64url(noticeOfTip(kel, notice))
+		// The notice states the tip of kel: for an agent of this hub the
+		// query took it only then (tipNoticeColumn), and a peer's card row
+		// keeps one only then (fedNoticeToStore).
+		e.KEL, e.Keys, e.KeyStateNotice = b64url(kel), b64url(keys), b64url(notice)
 		out = append(out, e)
 	}
 	return out, false, rows.Err()

@@ -27,13 +27,16 @@ import (
 // admission was revoked.
 //
 // A review names no reviewer (evidence v2, SI-48), so an AID is in review,
-// review_blob and fed_review only as the subject.
+// review_blob and fed_review only as the subject. The first verification of
+// a payment it made (x402_first_verify, KEL H-40) goes with its settlement,
+// 7 days after the authorization's NotAfter.
 var deregAllowed = map[string]bool{
 	"departed_kel":        true,
 	"credit_balance":      true,
 	"credit_entry":        true,
 	"liab_leaf":           true,
 	"credit_settled":      true,
+	"x402_first_verify":   true,
 	"credit_cleared":      true,
 	"credit_redemption":   true,
 	"review":              true,

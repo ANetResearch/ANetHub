@@ -407,8 +407,9 @@ func (s *Store) verifiedAuth(hubAID string, p *payment.PaymentPayload) (
 	return auth, id, kel, nil
 }
 
-// currentAuth is what a new settlement needs beyond verifiedAuth: the
-// validity window, and the signing key being valid now and not only at
+// currentAuth is what a new settlement needs beyond verifiedAuth when the
+// authorization has no first verification at its key's tip (keyAtFirstVerify):
+// the validity window, and the signing key being valid now and not only at
 // IssuedAt. Checking the key at IssuedAt alone would let a key the payer
 // has rotated away sign a spendable authorization by backdating it.
 func currentAuth(auth *payment.Authorization, kel []identity.SignedEvent, now int64) *Refusal {
@@ -416,6 +417,149 @@ func currentAuth(auth *payment.Authorization, kel []identity.SignedEvent, now in
 		return refuse(verifyReason(err), "%v", err)
 	}
 	return nil
+}
+
+// The payer's key is judged as of this hub's first verification of the
+// authorization (KEL H-40 to H-42).
+//
+// A payer that rotates its key while a payment it signed is between the
+// merchant's /x402/verify and /x402/settle must not have that payment
+// refused: it was signed by the key that was current, and this hub said so.
+// So the ledger hub records, the first time it verifies an authorization
+// whole (signature, validity window and terms), whether the key that signed
+// it was then the tip of the payer's key history held here, and active
+// (x402_first_verify). Later, while the record is kept, an authorization
+// recorded so is judged against the key history as it stood then: its window
+// at now, its signature under that key state. One recorded otherwise, or not
+// recorded, needs the key to be current now (currentAuth), and a retired key
+// signing a backdated authorization is refused as before (INVALID_SIGNATURE).
+// Planned and emergency rotations are alike (H-42). The record is kept until
+// 7 days after the authorization's NotAfter, like its settlement (janitor.go).
+//
+// Only the ledger hub verifies a payer's signature and records; an entry hub
+// forwarding a payment to the payer's hub does neither.
+
+// firstVerifySchema is the record of first verifications (KEL S-3, core
+// §2.16): one row per authorization id; payer and key_state_seq are the
+// payer and the key state that signed it, tip_at_first whether that state was
+// the active tip then (1) or not (0); times in unix ms. It goes into backups
+// with the ledger window's tables.
+func firstVerifySchema() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS x402_first_verify (
+		   auth_id TEXT PRIMARY KEY,
+		   payer TEXT NOT NULL,
+		   key_state_seq INTEGER NOT NULL,
+		   tip_at_first INTEGER NOT NULL,
+		   first_verified_at INTEGER NOT NULL,
+		   delete_after INTEGER NOT NULL
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_first_verify_delete ON x402_first_verify(delete_after)`,
+	}
+}
+
+// keyAtFirstVerify is the check of an authorization's validity window and
+// signing key at now, for an authorization verifiedAuth accepted (signed by
+// its payer, under a key state of kel, at IssuedAt) whose terms the caller
+// has compared. First the window, at now, with the signature under the key
+// state that signed as if it were the tip; then, the authorization being
+// verified whole, its first verification is recorded (recordFirstVerify);
+// then, unless that record says the key was the active tip, the key must be
+// current now (currentAuth).
+func (s *Store) keyAtFirstVerify(auth *payment.Authorization, id string, kel []identity.SignedEvent, now int64) *Refusal {
+	seq := auth.Envelope.KeyStateSeq
+	if seq >= uint64(len(kel)) {
+		return currentAuth(auth, kel, now)
+	}
+	if err := auth.Verify(kel[:seq+1], now); err != nil {
+		return refuse(verifyReason(err), "%v", err)
+	}
+	tip, err := s.recordFirstVerify(auth, id, now)
+	if err != nil {
+		return refuse(payment.ReasonSettlementFailed, "recording the first verification: %v", err)
+	}
+	if tip {
+		return nil
+	}
+	return currentAuth(auth, kel, now)
+}
+
+// recordFirstVerify records this hub's first whole verification of the
+// authorization id at now, unless one is recorded, and reports whether the
+// recorded one found the key state that signed it to be the active tip of
+// the payer's key history (H-40). The key history is read in the transaction
+// that writes the record, so a rotation this hub takes concurrently is
+// either before the record or after it, never between.
+func (s *Store) recordFirstVerify(auth *payment.Authorization, id string, now int64) (bool, error) {
+	seq := auth.Envelope.KeyStateSeq
+	// Recorded already, as for a settlement after the merchant's verify: read
+	// without the write lock a transaction here takes.
+	if tip, found, err := firstVerifyOf(s.db, id, auth.Payer, seq); err != nil || found {
+		return tip, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if tip, found, err := firstVerifyOf(tx, id, auth.Payer, seq); err != nil || found {
+		return tip, err
+	}
+	var raw []byte
+	if err := tx.QueryRow(`SELECT kel FROM agent WHERE aid = ?`, auth.Payer).Scan(&raw); err != nil {
+		return false, err
+	}
+	kel, err := identity.UnmarshalKEL(raw)
+	if err != nil {
+		return false, err
+	}
+	states, err := identity.Replay(kel)
+	if err != nil {
+		return false, err
+	}
+	last := states[len(states)-1]
+	tip := last.KeyStateSeq == seq && last.Status == identity.StatusActive
+	if seq > math.MaxInt64 {
+		return false, fmt.Errorf("key state %d is beyond what this hub stores", seq)
+	}
+	if _, err := tx.Exec(`INSERT INTO x402_first_verify(auth_id, payer, key_state_seq, tip_at_first, first_verified_at, delete_after)
+	    VALUES(?,?,?,?,?,?)`, id, auth.Payer, int64(seq), tip, now, firstVerifyDeleteAfter(auth.NotAfter)); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return tip, nil
+}
+
+// firstVerifyOf reads the first verification recorded for the authorization
+// id, through q: found when there is one, and tip when it says the key state
+// that signed was the active tip. A record speaks only for the payer and the
+// key state it was made for: the id covers the terms, not the signature.
+func firstVerifyOf(q rowQuerier, id, payer string, seq uint64) (tip, found bool, err error) {
+	var rowPayer string
+	var rowSeq int64
+	var rowTip bool
+	err = q.QueryRow(`SELECT payer, key_state_seq, tip_at_first FROM x402_first_verify WHERE auth_id = ?`, id).
+		Scan(&rowPayer, &rowSeq, &rowTip)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return rowTip && rowPayer == payer && rowSeq >= 0 && uint64(rowSeq) == seq, true, nil
+}
+
+// firstVerifyDeleteAfter is when a first verification of an authorization
+// valid until notAfter is deleted: settledKeptAfter later, as its
+// settlement's row is, without overflowing int64.
+func firstVerifyDeleteAfter(notAfter int64) int64 {
+	keep := settledKeptAfter.Milliseconds()
+	if notAfter > math.MaxInt64-keep {
+		return math.MaxInt64
+	}
+	return notAfter + keep
 }
 
 // verifyReason classifies a payment.Authorization.Verify failure.
@@ -522,7 +666,7 @@ func (s *Store) SettleWithRequirements(hubAID string, p *payment.PaymentPayload,
 	if out, done := s.repeatOf(hubAID, id, auth, ""); done {
 		return out
 	}
-	if rf := currentAuth(auth, kel, s.now().UnixMilli()); rf != nil {
+	if rf := s.keyAtFirstVerify(auth, id, kel, s.now().UnixMilli()); rf != nil {
 		return refusedSettlement(rf, auth, own)
 	}
 	return s.settleAuth(hubAID, auth, id, "")
@@ -581,7 +725,7 @@ func (s *Store) SettleForPeer(hubAID, peerAID string, p *payment.PaymentPayload,
 	if out, done := s.repeatOf(hubAID, id, auth, peerAID); done {
 		return out
 	}
-	if rf := currentAuth(auth, kel, s.now().UnixMilli()); rf != nil {
+	if rf := s.keyAtFirstVerify(auth, id, kel, s.now().UnixMilli()); rf != nil {
 		return refusedSettlement(rf, auth, own)
 	}
 	return s.settleAuth(hubAID, auth, id, peerAID)
@@ -1072,7 +1216,7 @@ func (s *Store) VerifyWithRequirements(hubAID string, p *payment.PaymentPayload,
 			return invalid(refuse(payment.ReasonDuplicateBinding, "binding held by %q", holder), auth)
 		}
 	}
-	if rf := currentAuth(auth, kel, now); rf != nil {
+	if rf := s.keyAtFirstVerify(auth, id, kel, now); rf != nil {
 		return invalid(rf, auth)
 	}
 	amt, ok := amountInt64(auth.Amount)

@@ -107,14 +107,14 @@ func DirEntriesTooLarge() int64 { return dirEntriesTooLarge.Load() }
 
 // dirNoticeOf returns the witness notice (NoticeWire) aid's directory entry
 // carries, or nil for none: the notice this hub keeps as aid's witness for
-// the tip of kel, aid's key history as stored (notice.go cachedNoticeOf).
+// the tip of aid's key history as stored (notice.go cachedNoticeOf).
 // A new notice, at most one every NoticeReissue per AID (KEL H-11), is
 // written in a transaction that recomputes the entry (NoticeFor).
-func (s *Store) dirNoticeOf(q rowQuerier, aid string, kel []byte) ([]byte, error) {
+func (s *Store) dirNoticeOf(q rowQuerier, aid string) ([]byte, error) {
 	if s.dirNotice != nil {
 		return s.dirNotice(q, aid)
 	}
-	return cachedNoticeOf(q, aid, kel)
+	return cachedNoticeOf(q, aid)
 }
 
 // RefreshDirEntry recomputes aid's directory entry (SSR-H17), for a change
@@ -151,7 +151,7 @@ func (s *Store) refreshDirTx(tx *sql.Tx, aid string) error {
 	if err != nil {
 		return err
 	}
-	notice, err := s.dirNoticeOf(tx, aid, kel)
+	notice, err := s.dirNoticeOf(tx, aid)
 	if err != nil {
 		return err
 	}

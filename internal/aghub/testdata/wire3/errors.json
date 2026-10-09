@@ -384,7 +384,7 @@
       "status": 400,
       "body": {
         "reason": "witness_not_this_hub",
-        "error": "Your key history names another hub as its witness; register at that hub, or rotate to make this hub your witness."
+        "error": "The latest event in the key history does not name this hub as its witness; add a rotation that names this hub, then register again."
       }
     }
   ]

@@ -58,6 +58,7 @@ const (
 	nextCommand     = "command"
 	nextChangeInput = "change_input"
 	nextContact     = "contact"
+	nextRetryLater  = "retry_later"
 )
 
 // hubText is every sentence of anet-hub.
@@ -169,6 +170,27 @@ var hubText = []textRow{
 	{Key: "redemptions.summary", Class: classI,
 		Zh: "最近 14 天共 {n} 笔兑付，合计 {m} credits；更早的明细已删除，请在 14 天内处理。",
 		En: "{n} redemptions in the last 14 days, {m} credits in total; older records are deleted, so handle each within 14 days."},
+
+	// anet-hub restore (KEL H-20, H-23): the backup is in place, the hub
+	// is stopped; or why nothing was changed.
+	{Key: "restore.ok", Class: classI,
+		Zh: "已从 {path} 恢复 hub 数据库（{n} 个 agent）；启动 hub 后，各 agent 的身份确认会暂停最多 30 分钟，不在线的等它的节点重新连上。",
+		En: "Restored the hub database from {path} ({n} agents); once the hub starts, each agent's key confirmation pauses for up to 30 minutes, or until its node connects again if it is offline."},
+	{Key: "restore.hub_running", Class: classC, Exit: 1, NextKind: nextRetryLater,
+		Zh: "hub 正在运行，什么都没有改；请先停止 hub，停下后重试。",
+		En: "The hub is running, so nothing was changed; stop the hub and try again when it has stopped."},
+	{Key: "restore.no_backup", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "在 {path} 找不到 hub 备份（hub-backup-日期.db），什么都没有改；请指向备份文件或它所在的目录后重试。",
+		En: "No hub backup (hub-backup-<date>.db) was found at {path}, so nothing was changed; point to a backup file or the directory that holds one and try again."},
+	{Key: "restore.no_identity", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 里没有 hub 身份，什么都没有改；请把原 hub 的身份文件放回这个目录，或用 --data 指向 hub 的数据目录后重试。",
+		En: "There is no hub identity in {path}, so nothing was changed; put the hub's identity file back there, or point --data at the hub's data directory, and try again."},
+	{Key: "restore.bad_backup", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 不是本版本 anet-hub 的完整备份，什么都没有改；请换一个备份后重试。",
+		En: "{path} is not a whole hub backup from this version of anet-hub, so nothing was changed; use another backup and try again."},
+	{Key: "restore.backup_too_new", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 由更新版本的 anet-hub 写入，本版本恢复不了，什么都没有改；请升级 anet-hub 后重试。",
+		En: "{path} was written by a newer anet-hub, which this version cannot restore, so nothing was changed; upgrade anet-hub and try again."},
 
 	// Every subcommand: the data directory holds no hub.
 	{Key: "data.missing", Class: classC, Exit: 1, NextKind: nextChangeInput,

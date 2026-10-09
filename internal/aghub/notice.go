@@ -46,9 +46,10 @@ import (
 // states, and reused while it is at most NoticeReissue old, whoever asks
 // (H-11): the agent's poll and registration, the directory, the registry
 // and the federation card stream all carry the same one. A KEL change, a
-// deregistration and (KEL-6) a quarantine invalidate it in the transaction
-// that makes them (core §2.16, KEL S-3). The table is left out of every
-// backup (core §2.16): a restored hub signs afresh.
+// deregistration and a quarantine beginning or ending (restore.go) invalidate
+// it in the transaction that makes them (core §2.16, KEL S-3). The table is
+// left out of every backup (core §2.16): a restored hub signs afresh, once
+// each AID is out of quarantine.
 //
 // The hub process keeps the notice of every agent that has a key set (and
 // so a directory entry and a place in the registry) at most NoticeReissue
@@ -97,7 +98,10 @@ type noticeJudgement struct {
 	fresh []byte // the cached notice of tip, at most NoticeReissue old
 }
 
-// judgeNotice applies H-10 and H-11 to aid at now, reading through q.
+// judgeNotice applies H-10 and H-11 to aid at now, reading through q. The
+// conditions are taken in the order of H-10, so an AID in quarantine is
+// answered quarantine only when nothing else stops this hub from stating its
+// tip: an agent that moved to another hub is not_witness, restore or not.
 func (s *Store) judgeNotice(q rowQuerier, aid string, now time.Time) (noticeJudgement, error) {
 	if s.hubKey == nil || aid == s.hubAID {
 		// A hub without an identity witnesses nobody, and a hub does not
@@ -107,17 +111,16 @@ func (s *Store) judgeNotice(q rowQuerier, aid string, now time.Time) (noticeJudg
 	var kelBytes, blob []byte
 	var seq, observed sql.NullInt64
 	var head sql.NullString
-	err := q.QueryRow(`SELECT a.kel, n.seq, n.head, n.observed_at, n.blob
+	var quarantined bool
+	err := q.QueryRow(`SELECT a.kel, n.seq, n.head, n.observed_at, n.blob, `+inQuarantine+`
 	    FROM agent a LEFT JOIN notice_cache n ON n.aid = a.aid WHERE a.aid = ?`, aid).
-		Scan(&kelBytes, &seq, &head, &observed, &blob)
+		Scan(&kelBytes, &seq, &head, &observed, &blob, &quarantined)
 	if errors.Is(err, sql.ErrNoRows) {
 		return noticeJudgement{why: NoticeErrNotAdmitted}, nil
 	}
 	if err != nil {
 		return noticeJudgement{}, err
 	}
-	// v030-todo(KEL-6): H-10 5, an AID in quarantine after a restore
-	// (restore_state) is answered NoticeErrQuarantine here.
 	kel, err := seal.ParseKEL(kelBytes)
 	if err != nil {
 		// Stored before /register capped KELs: no sender accepts it, and
@@ -132,6 +135,11 @@ func (s *Store) judgeNotice(q rowQuerier, aid string, now time.Time) (noticeJudg
 	if tip.AID != aid || tip.Toad != identity.ToadAgent || tip.Witness != s.hubAID ||
 		tip.Status == identity.StatusDeactivated {
 		return noticeJudgement{why: NoticeErrNotWitness}, nil
+	}
+	if quarantined {
+		// H-10 5: restored from a backup (or rolled back), and this AID not
+		// released yet (restore.go). Nothing is signed, nothing cached.
+		return noticeJudgement{why: NoticeErrQuarantine}, nil
 	}
 	j := noticeJudgement{tip: tip}
 	if blob != nil && seq.Int64 == int64(tip.KeyStateSeq) && head.String == tip.LastEventID {
@@ -200,52 +208,28 @@ func (s *Store) issueNoticeTx(tx *sql.Tx, aid string, now time.Time) (notice []b
 }
 
 // forgetNoticeTx drops aid's cached notice in tx: its KEL changed (H-2), or
-// whether this hub may state it changed (KEL S-3). The next request signs a
-// new one, or answers why it cannot.
+// whether this hub may state it changed (KEL S-3: a quarantine that begins or
+// ends, restore.go). The next request signs a new one, or answers why it
+// cannot.
 func forgetNoticeTx(tx *sql.Tx, aid string) error {
 	_, err := tx.Exec(`DELETE FROM notice_cache WHERE aid = ?`, aid)
 	return err
 }
 
-// cachedNoticeOf is the notice cached for aid when it states the tip of
-// kel (the key history the caller holds for aid, as stored), else nil. It
-// signs nothing: it is what the directory entry, the registry and the
-// federation card stream carry (NoticeFor and RunNoticeRefresher keep it
-// fresh).
-func cachedNoticeOf(q rowQuerier, aid string, kel []byte) ([]byte, error) {
-	var seq int64
-	var head string
+// cachedNoticeOf is the notice cached for aid while it states the tip of
+// the key history the agent row holds (tip_seq, tip_head, written with the
+// history), else nil. It signs nothing and decodes no key history: it is what
+// the directory entry and the federation card stream carry (NoticeFor and
+// RunNoticeRefresher keep it fresh). A cached notice about another tip is
+// one a KEL change failed to drop (forgetNoticeTx), and a reader would refuse
+// it anyway (witness-mismatch).
+func cachedNoticeOf(q rowQuerier, aid string) ([]byte, error) {
 	var blob []byte
-	err := q.QueryRow(`SELECT seq, head, blob FROM notice_cache WHERE aid = ?`, aid).Scan(&seq, &head, &blob)
+	err := q.QueryRow(`SELECT `+tipNoticeColumn+` FROM agent a WHERE a.aid = ?`, aid).Scan(&blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	if tseq, thead, ok := kelTip(kel); !ok || tseq != uint64(seq) || thead != head {
-		// Written for another tip: a KEL change that did not drop it
-		// (forgetNoticeTx) is a bug, and a reader would refuse the notice
-		// anyway (witness-mismatch).
-		return nil, nil
-	}
-	return blob, nil
-}
-
-// noticeOfTip is notice when it is a notice about the tip of kel (both as
-// a listing holds them), else nil: what a registry entry may carry.
-func noticeOfTip(kel, notice []byte) []byte {
-	if len(notice) == 0 {
-		return nil
-	}
-	body, _, err := identity.DecodeNotice(notice)
-	if err != nil {
-		return nil
-	}
-	if seq, head, ok := kelTip(kel); !ok || body.Seq != seq || body.Head != head {
-		return nil
-	}
-	return notice
+	return blob, err
 }
 
 // kelTip is the seq and event id of the last event of the stored key
@@ -263,10 +247,26 @@ func kelTip(kel []byte) (seq uint64, head string, ok bool) {
 // ends, the notice of every agent registered here that has a key set, when
 // its cached notice is missing or more than NoticeReissue old
 // (RefreshNotices). Only the hub process runs it.
+//
+// It is also where the hub process starts serving a restored database
+// (BeginServing): before its first round, so the directory has its entries
+// again by the time notices are renewed; and, should that fail, again each
+// round until it does, since until then the wait of H-20 b does not start.
 func (s *Store) RunNoticeRefresher(ctx context.Context) {
 	t := time.NewTicker(noticeRefreshEvery)
 	defer t.Stop()
+	serving := false
 	for {
+		if !serving {
+			if err := s.BeginServing(); err != nil {
+				log.Printf("hub: starting to serve the restored database (tried again next round): %v", err)
+			} else {
+				serving = true
+			}
+		}
+		if err := s.EndQuarantineWhenNoneHeld(); err != nil {
+			log.Printf("hub: closing the restore quarantine: %v", err)
+		}
 		if _, err := s.RefreshNotices(ctx); err != nil {
 			log.Printf("hub: renewing witness notices: %v", err)
 		}
