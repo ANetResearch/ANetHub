@@ -50,6 +50,15 @@ func TestAuthPeer(t *testing.T) {
 		{"a time not in canonical decimal", b, relayauth.ActionFedForward,
 			func(r *http.Request) { r.Header.Set(relayauth.HeaderTS, "0"+r.Header.Get(relayauth.HeaderTS)) }, 401, "unauthorized"},
 		{"a hub that is not a peer", stranger, relayauth.ActionFedForward, nil, 403, "not_peer"},
+		// Step 1 comes before the signature's own headers are read.
+		{"a hub that is not a peer, its signature malformed", stranger, relayauth.ActionFedForward,
+			func(r *http.Request) { r.Header.Set(relayauth.HeaderSig, "not a signature") }, 403, "not_peer"},
+		{"a hub that is not a peer, its time missing", stranger, relayauth.ActionFedForward,
+			func(r *http.Request) { r.Header.Del(relayauth.HeaderTS) }, 403, "not_peer"},
+		{"a peer, its signature malformed", b, relayauth.ActionFedForward,
+			func(r *http.Request) { r.Header.Set(relayauth.HeaderSig, "not a signature") }, 401, "unauthorized"},
+		{"no signer named", b, relayauth.ActionFedForward,
+			func(r *http.Request) { r.Header.Del(relayauth.HeaderAID) }, 401, "unauthorized"},
 		{"a peer naming another peer's AID", stranger, relayauth.ActionFedForward,
 			func(r *http.Request) { r.Header.Set(relayauth.HeaderAID, b.id.AID) }, 401, "unauthorized"},
 		{"another action", b, relayauth.ActionFedBucket, nil, 401, "unauthorized"},
@@ -229,8 +238,9 @@ func TestForwardRetriesReplayedOnce(t *testing.T) {
 // answer of a peer that states another hub wire, or none, is counted, and
 // this hub stops talking to that peer: the next requests fail without being
 // sent, until peerWireRetry has passed; then one goes through, and a peer
-// that speaks wire 3 again is talked to as before. A 5xx without the header
-// (a proxy in front of a hub that is down) is not counted.
+// that speaks wire 3 again is talked to as before. A refusal without the
+// header (a proxy in front of the hub: a 502 for a hub that is down, a 413
+// for a body over the proxy's own limit) is not counted and stops nothing.
 func TestFedPeerWireMismatchStops(t *testing.T) {
 	var wire atomic.Value
 	wire.Store("2")
@@ -240,6 +250,9 @@ func TestFedPeerWireMismatchStops(t *testing.T) {
 		switch v := wire.Load().(string); v {
 		case "proxy":
 			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		case "proxy-413":
+			http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
 			return
 		case "":
 		default:
@@ -299,6 +312,20 @@ func TestFedPeerWireMismatchStops(t *testing.T) {
 	}
 	if err := ask(); err != nil || hits.Load() != 6 {
 		t.Fatalf("the peer was cut off after a proxy's 502: %v, %d sent", err, hits.Load())
+	}
+	// Nor is a proxy's 413: an envelope larger than the peer's proxy takes
+	// must not cut every sender here off from the peer.
+	wire.Store("proxy-413")
+	for i := 0; i < 2; i++ {
+		resp, err := svc.wire.RoundTrip(mustReq(t, peer.URL+"/fed/v3/forward"))
+		if err != nil || resp.StatusCode != http.StatusRequestEntityTooLarge || svc.PeerWireMismatches() != 2 {
+			t.Fatalf("a proxy's 413: %v, %d counted", err, svc.PeerWireMismatches())
+		}
+		resp.Body.Close()
+	}
+	wire.Store("3")
+	if err := ask(); err != nil || hits.Load() != 9 {
+		t.Fatalf("the peer was cut off after a proxy's 413: %v, %d sent", err, hits.Load())
 	}
 }
 

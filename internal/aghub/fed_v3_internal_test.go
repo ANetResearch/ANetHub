@@ -305,6 +305,8 @@ func TestFedForwardOrder(t *testing.T) {
 		{name: "7 header and body differ", as: a, env: good("7"), edit: func(r *http.Request) {
 			r.Header.Set(HeaderAccess, base64.RawURLEncoding.EncodeToString(accessRaw(t, good("7b"))))
 		}, status: 400, reason: "bad_envelope"},
+		{name: "7 a recipient AID holding U+0000", as: a, env: envelope(t, other.aid+"\x00x", []byte("7n")),
+			status: 400, reason: "bad_request"},
 		// 8. The credential, completed: a proof for another envelope.
 		{name: "8 proof", as: a, env: func() []byte {
 			e, g := capEnv(t, b, owner, seal.CapClassContact, time.Hour, "8")
@@ -819,6 +821,80 @@ func TestForwardAnswerMapping(t *testing.T) {
 	resetWire(t, a, b)
 	b.down.Store(true)
 	expectRefusal(t, a.send0To(recip.aid, b.hubAID, "down"), 502, "home_unreachable")
+}
+
+// TestAProxysRefusalDoesNotCutThePeerOff (sealed-sender §8.2 SS-6, core
+// CORE-V1): a refusal without X-ANet-Wire comes from a proxy in front of the
+// home, such as a 413 for an envelope over the proxy's body limit when the
+// home runs a smaller -relay-max-envelope than this hub. The sender is told
+// home_unreachable; it is not counted as another wire, and the next send to
+// that home goes through: one sender cannot stop this hub's federation with
+// a peer.
+func TestAProxysRefusalDoesNotCutThePeerOff(t *testing.T) {
+	net := newFedNet(t, 2)
+	a, b := net.nodes[0], net.nodes[1]
+	recip := b.agent()
+	var refused atomic.Bool
+	b.mu.Lock()
+	b.answer = func(w http.ResponseWriter, r *http.Request) {
+		if refused.CompareAndSwap(false, true) {
+			http.Error(w, "413 Request Entity Too Large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		b.mu.Lock()
+		root := b.root
+		b.mu.Unlock()
+		root.ServeHTTP(w, r)
+	}
+	b.mu.Unlock()
+	expectRefusal(t, a.send0To(recip.aid, b.hubAID, "over the proxy's limit"), 502, "home_unreachable")
+	if rec := a.send0To(recip.aid, b.hubAID, "within it"); rec.Code != 200 {
+		t.Fatalf("a send after the proxy's 413: %d %s", rec.Code, rec.Body)
+	}
+	if n := a.fed.PeerWireMismatches(); n != 0 {
+		t.Errorf("the proxy's 413 was counted as another wire (%d)", n)
+	}
+	if n := b.queued(recip.aid); n != 1 {
+		t.Errorf("the home holds %d envelopes, want the one sent after the proxy's 413", n)
+	}
+}
+
+// TestTheHomeSaysWhetherTheRecipientIsQuiet (core §2.12.2, SSR-H13): the
+// home answers a forward with recipient_quiet as it answers a send of its
+// own, and the origin hands it on to the sender.
+func TestTheHomeSaysWhetherTheRecipientIsQuiet(t *testing.T) {
+	net := newFedNet(t, 2)
+	a, b := net.nodes[0], net.nodes[1]
+	recip := b.agent()
+	if _, err := b.store.db.Exec(`UPDATE agent SET last_seen_at=? WHERE aid=?`,
+		time.Now().Add(-30*24*time.Hour).UTC().Format(time.RFC3339Nano), recip.aid); err != nil {
+		t.Fatal(err)
+	}
+	rec := a.send0To(recip.aid, b.hubAID, "to a quiet agent")
+	var out RelaySendResponse
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil || !out.RecipientQuiet || out.ViaHub != b.hubAID {
+		t.Fatalf("%d %s; want 200, via B, recipient_quiet", rec.Code, rec.Body)
+	}
+}
+
+// TestAHintedHomeIsTheOnlyPeerAsked (SSR-H12, §4.2.6): for a credential's
+// owner whose home only the sender's hint names (no federated card, nothing
+// resolved before), the origin asks that one peer for the owner's entry,
+// and no other peer learns the bucket.
+func TestAHintedHomeIsTheOnlyPeerAsked(t *testing.T) {
+	net := newFedNet(t, 3)
+	a, b, c := net.nodes[0], net.nodes[1], net.nodes[2]
+	owner := b.agent()
+	env, _ := capEnv(t, b, owner, seal.CapClassContact, time.Hour, "hinted")
+	if rec := a.send1Hint(env, b.hubAID, ""); rec.Code != 200 {
+		t.Fatalf("a send with the owner's home as the hint: %d %s", rec.Code, rec.Body)
+	}
+	if n := b.hitsOf("/fed/v3/directory:bucket"); n == 0 {
+		t.Fatal("the hinted home was not asked for the owner's entry")
+	}
+	if n := c.hitsOf("/fed/v3/directory:bucket"); n != 0 {
+		t.Fatalf("a peer the hint did not name was asked %d bucket requests", n)
+	}
 }
 
 func reasonOfBody(b string) string {

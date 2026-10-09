@@ -96,11 +96,13 @@ func parseHubAuth(r *http.Request) (hubAuth, error) {
 type peerGate func(w http.ResponseWriter, peerAID string) bool
 
 // authPeer authenticates one /fed/v3 request for action (SSR-H16, core G3),
-// in this order:
+// in this order (sealed-sender §4.2.7 steps 1 to 4):
 //
-//  1. the four relayauth headers: 401 unauthorized;
-//  2. the signer is a hub of the peer table (open is the route's switch):
-//     403 not_peer;
+//  1. the signer the request names (X-ANet-AID, once) is a hub of the peer
+//     table (open is the route's switch): 403 not_peer, before anything
+//     else of the request is looked at; a request that names no signer is
+//     not signed: 401 unauthorized;
+//  2. the other three relayauth headers: 401 unauthorized;
 //  3. gate, when the route has one (the source-hub bucket of a forward);
 //  4. the body, at most limit bytes: 413 too_large;
 //  5. the signing time within MaxSkew of this hub's clock, then the
@@ -112,13 +114,21 @@ type peerGate func(w http.ResponseWriter, peerAID string) bool
 //
 // It returns the peer and the body, or false once it has answered.
 func (s *Service) authPeer(w http.ResponseWriter, r *http.Request, action string, open bool, limit int64, gate peerGate) (*Peer, []byte, bool) {
+	var peer *Peer
+	if vs := r.Header.Values(relayauth.HeaderAID); len(vs) == 1 && vs[0] != "" {
+		if peer = s.peer(vs[0]); !open || peer == nil || s.kernel == nil {
+			wire3.Refuse(w, wire3.ReasonNotPeer)
+			return nil, nil, false
+		}
+	}
 	a, err := parseHubAuth(r)
 	if err != nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonUnauthorized, Error: err.Error()})
 		return nil, nil, false
 	}
-	peer := s.peer(a.aid)
-	if !open || peer == nil || s.kernel == nil {
+	if peer == nil || peer.AID != a.aid {
+		// parseHubAuth read the one signer checked above; anything else
+		// is no peer.
 		wire3.Refuse(w, wire3.ReasonNotPeer)
 		return nil, nil, false
 	}

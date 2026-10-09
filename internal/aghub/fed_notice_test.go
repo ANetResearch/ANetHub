@@ -2,6 +2,7 @@ package aghub_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 // The A2A card stream carries the witness notice of each card's KEL tip
 // (core §2.12.2 key_state_notice): the home hub serves the notice its
 // directory entry carries, and a peer keeps it with the card when it
-// decodes as a notice about that agent, and drops it otherwise (it is
-// advisory, as the key set is: a reader verifies it itself).
+// decodes as a notice about that agent and is no larger than a notice is,
+// and drops it otherwise (it is advisory, as the key set is: a reader
+// verifies it itself).
 func TestTheCardStreamCarriesTheNotice(t *testing.T) {
 	hub := newFedHub(t)
 	agent, other := twoAgents(t)
@@ -40,6 +42,13 @@ func TestTheCardStreamCarriesTheNotice(t *testing.T) {
 		return n
 	}
 	notice := noticeOf(agent)
+	// A notice about the agent that decodes, but whose head is no event id:
+	// a peer could fill a row with it.
+	oversized, err := identity.SignNotice(witness.Ctrl, identity.NoticeBody{AID: agent.AID(), Seq: 1,
+		Head: strings.Repeat("h", 8<<10), ObservedAt: uint64(time.Now().UnixMilli())})
+	if err != nil {
+		t.Fatal(err)
+	}
 	hub.store.SetDirNoticeForTest(func(aid string) []byte {
 		if aid == agent.AID() {
 			return notice
@@ -68,6 +77,7 @@ func TestTheCardStreamCarriesTheNotice(t *testing.T) {
 		{"the agent's notice", notice, true},
 		{"another agent's notice", noticeOf(other), false},
 		{"not a notice", []byte("not a notice"), false},
+		{"a notice larger than a notice is", oversized, false},
 		{"none", nil, false},
 	} {
 		peer := openPeerStore(t)

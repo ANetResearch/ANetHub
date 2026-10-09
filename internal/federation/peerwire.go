@@ -25,10 +25,16 @@ import (
 // talked to as before. Each mismatch is counted (PeerWireMismatches) and
 // logged when the stop begins.
 //
-// A response with no X-ANet-Wire and a 5xx status is not counted: it comes
-// from whatever stands in front of the hub (a reverse proxy whose upstream
-// is down), not from a hub of another wire, and the caller treats it as the
-// peer being unreachable, which it is.
+// A refusal with no X-ANet-Wire (any 4xx or 5xx status) is not counted: a
+// hub states its wire on every answer, refusals included, so a refusal
+// without it comes from whatever stands in front of the hub — a reverse
+// proxy whose upstream is down (502), or whose own limit a request passed
+// (413 for a body over its client_max_body_size, 429 from its rate limit)
+// — not from a hub of another wire. The caller reads it as no answer of the
+// contract (a forward is told home_unreachable, a bucket is missing). Were
+// it a stop, one sender could cut this hub off from a peer for
+// peerWireRetry at a time: an envelope this hub accepts and the peer's
+// proxy does not (the peer runs a smaller -relay-max-envelope) is enough.
 
 // peerWireRetry is how long this hub stops talking to a peer whose answer
 // stated another wire.
@@ -81,7 +87,7 @@ func (p *peerWire) RoundTrip(req *http.Request) (*http.Response, error) {
 			log.Printf("hub: federation peer %s speaks hub wire %d again; talking to it again", origin, wire3.Version)
 		}
 		return resp, nil
-	case len(vs) == 0 && resp.StatusCode >= 500:
+	case len(vs) == 0 && resp.StatusCode >= 400:
 		return resp, nil
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
