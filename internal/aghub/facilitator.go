@@ -1294,7 +1294,12 @@ func (s *Store) ClearFromPeer(peerAID string, peerKEL []identity.SignedEvent,
 	if done, err := clearedTx(tx, rec.AuthID); err != nil || done {
 		return err
 	}
-	if age := now.UnixMilli() - rec.SettleAt; age > peerReceiptMaxAge.Milliseconds() || -age > relayauth.MaxSkewMillis {
+	// SettleAt is the peer's to write, any int64: it is compared with the
+	// two ends of the window, never subtracted from now, since a SettleAt
+	// 2^63 ms before now made now − SettleAt wrap to math.MinInt64, which
+	// neither "too old" nor (negated, still negative) "too new" caught.
+	nowMs := now.UnixMilli()
+	if rec.SettleAt < nowMs-peerReceiptMaxAge.Milliseconds() || rec.SettleAt > nowMs+relayauth.MaxSkewMillis {
 		// Logged for the operator, without the payee or the payment's id:
 		// the peer, the amount and the day are what the two operators
 		// need to settle it between them (anet-hub clear).

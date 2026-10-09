@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -347,6 +348,19 @@ func TestAPeerReceiptOlderThanSevenDaysIsNotCleared(t *testing.T) {
 	} {
 		if err := s.ClearFromPeer(peer.AID(), peer.KEL(), receipt("old-"+c.name, c.at)); !errors.Is(err, errReceiptOutOfWindow) {
 			t.Errorf("%s: %v, want receipt_too_old", c.name, err)
+		}
+	}
+	// SettleAt is the peer's to write, any int64. Dated exactly 2^63 ms
+	// before now, now − SettleAt does not fit an int64: it wrapped to
+	// math.MinInt64, which passed both ends of the window and was cleared.
+	for _, ms := range []int64{now.UnixMilli() + math.MinInt64, math.MinInt64, math.MaxInt64} {
+		rec := receipt(fmt.Sprintf("edge-%d", ms), now)
+		rec.SettleAt, rec.Envelope = ms, nil
+		if err := rec.Sign(peer); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ClearFromPeer(peer.AID(), peer.KEL(), rec); !errors.Is(err, errReceiptOutOfWindow) {
+			t.Errorf("a receipt dated %d (now %d): %v, want receipt_too_old", ms, now.UnixMilli(), err)
 		}
 	}
 	if after := ledgerRows(t, s); after != before {
