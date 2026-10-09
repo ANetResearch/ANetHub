@@ -141,7 +141,7 @@
       "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "pending"},
         "json": {"aid": "${pending}", "kel": "${pending_kel}"}},
       "response": {"status": 400, "body": {"reason": "witness_not_this_hub",
-        "error": "Your key history names another hub as its witness; register at that hub, or rotate to make this hub your witness."}}
+        "error": "The latest event in the key history does not name this hub as its witness; add a rotation that names this hub, then register again."}}
     },
     {
       "name": "check_only does not ask for the witness",
@@ -155,7 +155,8 @@
       "cite": "KEL H-1 1",
       "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "elsewhere"},
         "json": {"aid": "${elsewhere}", "kel": "${elsewhere_kel}"}},
-      "response": {"status": 400, "body_has": {"reason": "witness_not_this_hub"}}
+      "response": {"status": 400, "body": {"reason": "witness_not_this_hub",
+        "error": "The latest event in the key history does not name this hub as its witness; add a rotation that names this hub, then register again."}}
     },
     {
       "name": "naming this hub 10 minutes before its clock is kel_ts_out_of_window",

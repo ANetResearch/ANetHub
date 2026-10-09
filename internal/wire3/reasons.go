@@ -180,7 +180,7 @@ var reasons = map[Reason]reasonInfo{
 	ReasonInviteRemoved: {http.StatusBadRequest, nil,
 		"Hubs no longer use invites; register without one and send the admit command to the operator."},
 	ReasonWitnessNotThisHub: {http.StatusBadRequest, nil,
-		"Your key history names another hub as its witness; register at that hub, or rotate to make this hub your witness."},
+		"The latest event in the key history does not name this hub as its witness; add a rotation that names this hub, then register again."},
 	ReasonAIDDeactivated: {http.StatusGone, nil,
 		"This identity is deactivated and cannot register again; create a new identity to come back."},
 	ReasonUnknownAID: {http.StatusNotFound, nil,

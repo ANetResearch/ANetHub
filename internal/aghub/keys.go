@@ -274,10 +274,15 @@ func (s *Store) PublishKeys(aid string, raw []byte, prevSeq uint64, kel []identi
 	}
 	defer tx.Rollback()
 	if decision == seal.Same {
-		// The same set may arrive with a new signature, for example
-		// re-signed after a KEL rotation. The set is unchanged; the
-		// signature just verified against the current KEL, so it replaces
-		// the stored one, which a consumer may no longer accept.
+		// The same set in other bytes. A rotation never leads here: taking a
+		// key history with a rot deletes the stored set unless it is signed
+		// under the new tip (KEL H-2, kelChangedTx), and a set must be signed
+		// under the tip (VerifyEncKeySet), so after a rotation there is no
+		// stored set to be the same as. What does lead here is the current
+		// key signing the same set again into other bytes, which a signer
+		// whose Ed25519 signatures are not deterministic does. Both
+		// signatures verify under the current key; the newer one replaces
+		// the stored one, and the set is reported unchanged.
 		if _, err := tx.Exec(`UPDATE agent_keys SET keyset=?, stored_at=? WHERE aid=?`,
 			canon, nowStamp(), aid); err != nil {
 			return "", err
