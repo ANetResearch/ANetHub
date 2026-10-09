@@ -12,6 +12,7 @@ package main
 //	anet-hub grant <AID> --amount N [--reason R]
 //	anet-hub supply                       (supply.go)
 //	anet-hub due, anet-hub clear          (clear.go, clear_fed.go)
+//	anet-hub redemptions [--json]         (redemptions.go)
 //	anet-hub identity status|setup-recovery|rotate   (identity_ops.go)
 //
 // Each opens the hub's database beside a running hub (WAL, a busy timeout,
@@ -36,14 +37,15 @@ import (
 
 // subcommands are the one-off operations (core G12). Areas add theirs here.
 var subcommands = map[string]func(c *console, data string, args []string) int{
-	"admit":      runAdmit,
-	"admissions": runAdmissions,
-	"admission":  runAdmission,
-	"grant":      runGrant,
-	"quota":      runQuota,    // quota.go
-	"supply":     runSupply,   // supply.go
-	"due":        runDue,      // clear.go; clear is clear_fed.go's
-	"identity":   runIdentity, // identity_ops.go
+	"admit":       runAdmit,
+	"admissions":  runAdmissions,
+	"admission":   runAdmission,
+	"grant":       runGrant,
+	"quota":       runQuota,       // quota.go
+	"supply":      runSupply,      // supply.go
+	"due":         runDue,         // clear.go; clear is clear_fed.go's
+	"identity":    runIdentity,    // identity_ops.go
+	"redemptions": runRedemptions, // redemptions.go
 }
 
 // runSubcommand runs the subcommand name with args; data is the --data the
@@ -51,7 +53,7 @@ var subcommands = map[string]func(c *console, data string, args []string) int{
 func runSubcommand(c *console, name, data string, args []string) int {
 	f, ok := subcommands[name]
 	if !ok {
-		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply|due|clear|identity …")
+		return c.usage("anet-hub [flags] | anet-hub admit|admissions|admission|grant|quota|supply|due|clear|redemptions|identity …")
 	}
 	return f(c, data, args)
 }
@@ -86,6 +88,23 @@ func newSubFlags(name, data string) (*flag.FlagSet, *string) {
 // hub there and report success. The hub's identity is loaded too: credit a
 // subcommand issues comes off the hub's own row, which its AID names.
 func openHub(c *console, dir string) (*aghub.Store, int) {
+	store, code := openHubData(c, dir)
+	if store == nil {
+		return nil, code
+	}
+	id, err := hubid.LoadOrIncept(dir)
+	if err != nil {
+		store.Close()
+		return nil, c.refuseIdentity(err)
+	}
+	store.SetHubKey(id.Ctrl)
+	return store, 0
+}
+
+// openHubData is openHub without the hub's identity, for a subcommand that
+// only reads the database (anet-hub redemptions): the same refusals of a
+// directory that is not the hub's or that this release does not open.
+func openHubData(c *console, dir string) (*aghub.Store, int) {
 	if _, err := os.Stat(filepath.Join(dir, "hub.db")); err != nil {
 		return nil, c.say("data.missing", map[string]string{"path": dir})
 	}
@@ -96,12 +115,6 @@ func openHub(c *console, dir string) (*aghub.Store, int) {
 	if err != nil {
 		return nil, c.refuseData(err)
 	}
-	id, err := hubid.LoadOrIncept(dir)
-	if err != nil {
-		store.Close()
-		return nil, c.refuseIdentity(err)
-	}
-	store.SetHubKey(id.Ctrl)
 	return store, 0
 }
 
