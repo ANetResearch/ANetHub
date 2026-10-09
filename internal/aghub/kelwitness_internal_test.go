@@ -220,16 +220,14 @@ func TestKSNScanCatches(t *testing.T) {
 // can run the one file whose cases hold its rule. The run is this test
 // binary again, as go test would run it.
 func TestWire3RunFilteredIsGreen(t *testing.T) {
-	if os.Getenv("ANET_WIRE3_FILTERED_CHILD") != "" {
-		t.Skip("a child of TestWire3RunFilteredIsGreen does not run it again")
-	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, file := range []string{"kel.json", "errors.json", "register.json"} {
+		// The filter selects TestWire3Fixtures only, so the child does
+		// not run this test again.
 		cmd := exec.Command(exe, "-test.run", "^TestWire3Fixtures$/^"+regexp.QuoteMeta(file)+"$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), "ANET_WIRE3_FILTERED_CHILD=1")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Errorf("TestWire3Fixtures/%s alone: %v\n%s", file, err, tail(out))
