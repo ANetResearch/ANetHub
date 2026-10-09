@@ -78,8 +78,8 @@ func newSubFlags(name, data string) (*flag.FlagSet, *string) {
 
 // openHub opens the hub's database in dir, which must be one a hub has run
 // with: a subcommand pointed at the wrong directory must not create an empty
-// hub there and report success. The hub's key is loaded too, for the
-// credit a subcommand may issue (it is signed onto the supply record).
+// hub there and report success. The hub's identity is loaded too: credit a
+// subcommand issues comes off the hub's own row, which its AID names.
 func openHub(c *console, dir string) (*aghub.Store, int) {
 	if _, err := os.Stat(filepath.Join(dir, "hub.db")); err != nil {
 		return nil, c.say("data.missing", map[string]string{"path": dir})

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -175,6 +176,57 @@ func TestEverySupplyEventCountsAndATransferDoesNot(t *testing.T) {
 	// event, only by the daily rule.
 	if _, _, ok := store.SupplyHead(); ok {
 		t.Error("a supply event published an epoch")
+	}
+}
+
+// A running total that cannot take a supply event refuses the event with
+// invalid_amount, in the transaction that moves the credit, so nothing
+// moves: not the account, not the hub's row, not the count. Issuance meets
+// issuanceRoom first, and what is redeemed never passes what was issued, so
+// this is the last bound and not the one a hub normally reaches; it is the
+// one Credit, which does not check the room, has.
+func TestASupplyTotalThatCannotTakeTheEventRefusesIt(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	hubAID := hubAIDOf(t, srv)
+	a, _ := twoAgents(t)
+	register(t, srv, a, "A", nil)
+	for _, c := range []struct {
+		name, col string
+		event     func() error
+	}{
+		{"issued", "issued", func() error { return store.Credit(a.AID(), 10, "past the bound") }},
+		{"redeemed", "redeemed", func() error {
+			opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
+				Amount: "10", Asset: payment.AssetCredit, PayTo: hubAID}
+			var pp payment.PaymentPayload
+			if err := json.Unmarshal(mustPayload(t, a, opt, "past-the-bound"), &pp); err != nil {
+				t.Fatal(err)
+			}
+			_, err := store.Redeem(hubAID, &pp, "past-the-bound")
+			return err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := store.DBForTest().Exec(`UPDATE supply_totals SET `+c.col+` = ?`, int64(math.MaxInt64)-5); err != nil {
+				t.Fatal(err)
+			}
+			before := supplyOf(t, srv)
+			bal := balanceOf(t, srv, a.AID())
+			err := c.event()
+			if err == nil || !strings.Contains(err.Error(), payment.ReasonInvalidAmount) {
+				t.Fatalf("an event of 10 on a %s total of 2^63-6: %v, want %s", c.col, err, payment.ReasonInvalidAmount)
+			}
+			if after := supplyOf(t, srv); after.Issued != before.Issued || after.Redeemed != before.Redeemed ||
+				after.EventsSincePublish != before.EventsSincePublish || after.HubRow != before.HubRow {
+				t.Errorf("the refused event moved the supply: %+v -> %+v", before, after)
+			}
+			if got := balanceOf(t, srv, a.AID()); got != bal {
+				t.Errorf("the refused event moved the balance: %d -> %d", bal, got)
+			}
+			if _, err := store.DBForTest().Exec(`UPDATE supply_totals SET ` + c.col + ` = 0`); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -607,6 +659,45 @@ func TestTheStoredLeavesRebuildTheSignedRoot(t *testing.T) {
 	if err := store.DBForTest().QueryRow(`SELECT ledger_hw, leaves FROM liab_meta WHERE to_day = ?`, e.ToDay).
 		Scan(&meta.hw, &meta.leaves); err != nil || meta.leaves != int64(len(entries)) || meta.hw == 0 {
 		t.Errorf("liab_meta = %+v, %v", meta, err)
+	}
+}
+
+// ledger_hw is where the ledger stood at the close: the largest
+// credit_entry.seq written by then. Entries are deleted once they leave the
+// 14-day ledger window, so an epoch that closes after a quiet fortnight
+// finds none; it still states the same mark, never 0 or one below the
+// previous epoch's, which is what a node's balance continuity counts from
+// (hub-payment-privacy PAY-S9).
+func TestTheLedgerHighWaterMarkOutlivesTheEntries(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	a, _ := twoAgents(t)
+	register(t, srv, a, "A", nil)
+	hw := func(e aghub.SupplyEpochEntry) uint64 {
+		t.Helper()
+		toDay := e.ToDay
+		p, err := store.LiabilityProofAtForTest(a.AID(), &toDay, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p.LedgerHW
+	}
+	first := hw(publishEpoch(t, store))
+	if first == 0 {
+		t.Fatal("setup: the ledger had no entries at the first close")
+	}
+	// A quiet fortnight: the window deletes every entry.
+	if _, err := store.DBForTest().Exec(`DELETE FROM credit_entry`); err != nil {
+		t.Fatal(err)
+	}
+	if second := hw(publishEpoch(t, store)); second != first {
+		t.Errorf("after the entries were deleted the epoch states ledger_hw %d, the one before %d", second, first)
+	}
+	// The next entry is numbered after the mark, and the next close states it.
+	if err := store.GrantCredit(a.AID(), 3, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	if third := hw(publishEpoch(t, store)); third <= first {
+		t.Errorf("after a grant the epoch states ledger_hw %d, not above %d", third, first)
 	}
 }
 

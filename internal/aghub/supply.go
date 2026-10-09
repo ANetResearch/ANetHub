@@ -291,7 +291,12 @@ func (s *Store) closeEpochTx(tx *sql.Tx, fromDay, toDay uint64, outstanding int6
 		s.hubAID).Scan(&hubRow); err != nil {
 		return nil, err
 	}
-	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM credit_entry`).Scan(&ledgerHW); err != nil {
+	// The largest credit_entry.seq ever written, which AUTOINCREMENT keeps
+	// in sqlite_sequence. MAX(seq) over the rows is the same number until
+	// the ledger window deletes every entry (a quiet fortnight), and then it
+	// is 0: an epoch would state a high-water mark below the previous one's.
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'credit_entry'), 0)`).
+		Scan(&ledgerHW); err != nil {
 		return nil, err
 	}
 	tree, err := liabtree.Build(leaves, toDay, nil)
