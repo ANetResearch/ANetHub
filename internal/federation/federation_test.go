@@ -128,8 +128,10 @@ func TestTheReviewStreamIsSignedV3(t *testing.T) {
 	if code, body, _ := do(t, a.signedReq(svcB.id, relayauth.ActionFedCards, http.MethodGet, "/fed/v3/reviews", nil, 0, nil)); code != http.StatusUnauthorized {
 		t.Fatalf("a request signed for another action: %d %s", code, body)
 	}
-	if code, body, _ := do(t, a.signedReq(svcB.id, relayauth.ActionFedReviews, http.MethodGet, "/fed/v3/reviews?cursor=01", nil, 0, nil)); code != http.StatusBadRequest {
-		t.Fatalf("a cursor not in canonical decimal: %d %s", code, body)
+	for _, q := range []string{"cursor=01", "cursor=-1", "cursor=1&cursor=2"} {
+		if code, body, _ := do(t, a.signedReq(svcB.id, relayauth.ActionFedReviews, http.MethodGet, "/fed/v3/reviews?"+q, nil, 0, nil)); code != http.StatusBadRequest {
+			t.Fatalf("%s, not one non-negative integer in canonical decimal: %d %s", q, code, body)
+		}
 	}
 	if admitted, refused := svcB.SyncOnce(context.Background()); admitted != 2 || refused != 0 {
 		t.Fatalf("admitted %d refused %d", admitted, refused)
@@ -220,4 +222,28 @@ func (f *fakeWitness) Attest(peerAID, headID string, seq uint64) ([]byte, error)
 		seq             uint64
 	}{peerAID, headID, seq})
 	return []byte("attestation"), nil
+}
+
+// The home of a federated card is a hub URL; it names a delivery peer when
+// it is that peer's endpoint, whatever the case of its scheme and host and
+// with or without a trailing slash (sealed-sender SSR-H12 step 3).
+func TestADeliveryPeerIsFoundByItsURL(t *testing.T) {
+	a := newTestHub(t)
+	peer := Peer{AID: "did:anet:peer", Endpoint: "https://Hub-B.example/"}
+	svc := a.start(Config{Delivery: "allowlist", Peers: []Peer{peer}}, nil)
+	for home, want := range map[string]string{
+		"https://hub-b.example":     peer.AID,
+		"HTTPS://HUB-B.EXAMPLE/":    peer.AID,
+		"https://hub-b.example/hub": "",
+		"https://hub-c.example":     "",
+		"":                          "",
+	} {
+		if got := svc.DeliveryPeerAt(home); got != want {
+			t.Errorf("DeliveryPeerAt(%q) = %q, want %q", home, got, want)
+		}
+	}
+	off := newTestHub(t).start(Config{Delivery: "off", Peers: []Peer{peer}}, nil)
+	if got := off.DeliveryPeerAt("https://hub-b.example"); got != "" {
+		t.Errorf("with delivery off, %q is a delivery peer", got)
+	}
 }

@@ -859,6 +859,44 @@ func TestAProxysRefusalDoesNotCutThePeerOff(t *testing.T) {
 	}
 }
 
+// TestTheHomeSaysWhetherTheRecipientIsQuiet (core §2.12.2, SSR-H13): the
+// home answers a forward with recipient_quiet as it answers a send of its
+// own, and the origin hands it on to the sender.
+func TestTheHomeSaysWhetherTheRecipientIsQuiet(t *testing.T) {
+	net := newFedNet(t, 2)
+	a, b := net.nodes[0], net.nodes[1]
+	recip := b.agent()
+	if _, err := b.store.db.Exec(`UPDATE agent SET last_seen_at=? WHERE aid=?`,
+		time.Now().Add(-30*24*time.Hour).UTC().Format(time.RFC3339Nano), recip.aid); err != nil {
+		t.Fatal(err)
+	}
+	rec := a.send0To(recip.aid, b.hubAID, "to a quiet agent")
+	var out RelaySendResponse
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil || !out.RecipientQuiet || out.ViaHub != b.hubAID {
+		t.Fatalf("%d %s; want 200, via B, recipient_quiet", rec.Code, rec.Body)
+	}
+}
+
+// TestAHintedHomeIsTheOnlyPeerAsked (SSR-H12, §4.2.6): for a credential's
+// owner whose home only the sender's hint names (no federated card, nothing
+// resolved before), the origin asks that one peer for the owner's entry,
+// and no other peer learns the bucket.
+func TestAHintedHomeIsTheOnlyPeerAsked(t *testing.T) {
+	net := newFedNet(t, 3)
+	a, b, c := net.nodes[0], net.nodes[1], net.nodes[2]
+	owner := b.agent()
+	env, _ := capEnv(t, b, owner, seal.CapClassContact, time.Hour, "hinted")
+	if rec := a.send1Hint(env, b.hubAID, ""); rec.Code != 200 {
+		t.Fatalf("a send with the owner's home as the hint: %d %s", rec.Code, rec.Body)
+	}
+	if n := b.hitsOf("/fed/v3/directory:bucket"); n == 0 {
+		t.Fatal("the hinted home was not asked for the owner's entry")
+	}
+	if n := c.hitsOf("/fed/v3/directory:bucket"); n != 0 {
+		t.Fatalf("a peer the hint did not name was asked %d bucket requests", n)
+	}
+}
+
 func reasonOfBody(b string) string {
 	var r struct{ Reason string }
 	_ = json.Unmarshal([]byte(b), &r)
