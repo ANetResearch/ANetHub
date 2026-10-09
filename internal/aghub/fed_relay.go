@@ -233,6 +233,24 @@ func (s *Server) PeerRC1(w http.ResponseWriter, aid string, ts uint64) bool {
 	return true
 }
 
+// PeerFloor is RC1's floor for the peer hub aid now (federation authPeer):
+// a signing time at or below it is refused whatever its signature, so
+// /fed/v3 refuses it before it reads the body (sealed-sender SSR-H16). It
+// takes nothing and adds no state.
+func (s *Server) PeerFloor(aid string) uint64 { return s.replay.floorOf(aid) }
+
+// floorOf is aid's floor now: its own, or for a signer without state the
+// floor of its part (PAY-R6a).
+func (r *rc1State) floorOf(aid string) uint64 {
+	sh := r.shard(aid)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if st := sh.signers[aid]; st != nil {
+		return st.floor
+	}
+	return sh.gone
+}
+
 // ForwardSourceEmpty is step 2 of /fed/v3/forward: whether the peer aid's
 // source bucket holds less than a token, without taking one.
 func (s *Server) ForwardSourceEmpty(aid string) (bool, time.Duration) {

@@ -2,10 +2,22 @@
 // own, persisted in the data dir (the guest-broker precedent, promoted).
 // This AID is what federation peers verify (K208 §2) and what the hub will
 // sign ForwardEnvelopes with.
+//
+// The identity is a hub identity (toad 0, KEL H-30): no witness, ever. Its
+// file is the identity file v2 (KEL §2.9, hub_identity.kel), written
+// temporary file, fsync, rename. Its icp commits a hot key (C-32), which
+// `anet-hub identity setup-recovery` reveals in the first rotation; every
+// later next key comes from the recovery seed, which only the anet-hub
+// command holds, outside the data directory (cmd/anet-hub identity_ops.go).
+// Rotations happen while the hub is stopped (H-32): the hub holds the data
+// directory's lock (Lock) for as long as it runs.
 package hubid
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +28,14 @@ import (
 
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
+
+// FileName is the hub identity file in the hub data directory.
+const FileName = "hub_identity.kel"
+
+// ErrIdentityV02 is a hub identity file that is not an identity file v2: a
+// 0.2 hub's, which 0.3.0 does not carry over (KEL S-2; core CORE-V4). The
+// hub refuses to start on it (hub_identity_v02) and leaves it where it is.
+var ErrIdentityV02 = identity.ErrNotIdentityV2
 
 // Identity is the hub's own KEL-backed identity.
 type Identity struct {
@@ -28,37 +48,179 @@ type Identity struct {
 	DirMaxBits func() int
 }
 
-// LoadOrIncept restores the persisted hub identity or incepts one on first
-// run (stable AID across restarts).
-func LoadOrIncept(dir string) (*Identity, error) {
-	path := filepath.Join(dir, "hub_identity.kel")
-	var ctrl *identity.Controller
-	if b, err := os.ReadFile(path); err == nil {
-		ctrl, err = identity.Restore(b)
-		if err != nil {
-			return nil, err
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	} else {
-		var ierr error
-		ctrl, ierr = identity.InceptHub(uint64(time.Now().UnixMilli()))
-		if ierr != nil {
-			return nil, ierr
-		}
-		blob, ierr := ctrl.Export()
-		if ierr != nil {
-			return nil, ierr
-		}
-		if ierr := os.WriteFile(path, blob, 0o600); ierr != nil {
-			return nil, ierr
-		}
+// path is the identity file of the hub data directory dir.
+func path(dir string) string { return filepath.Join(dir, FileName) }
+
+// CheckFile reports whether the hub identity file in dir, if there is one,
+// is one this release opens, without writing anything: nil when there is
+// none or it is an identity file v2, ErrIdentityV02 for a 0.2 file (or any
+// file that is not an identity file v2 at all). The hub checks it before it
+// opens or creates anything in dir.
+func CheckFile(dir string) error {
+	b, err := os.ReadFile(path(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
+	if err != nil {
+		return err
+	}
+	_, err = identity.ParseIdentityFile(b)
+	return err
+}
+
+// Exists reports whether dir holds a hub identity file.
+func Exists(dir string) bool {
+	_, err := os.Stat(path(dir))
+	return err == nil
+}
+
+// Load restores the hub identity of dir. A directory without one is
+// os.ErrNotExist; a 0.2 identity file is ErrIdentityV02.
+func Load(dir string) (*Identity, error) {
+	b, err := os.ReadFile(path(dir))
+	if err != nil {
+		return nil, err
+	}
+	ctrl, err := identity.Restore(b)
+	if err != nil {
+		return nil, err
+	}
+	if ctrl.Toad() != identity.ToadHub {
+		return nil, fmt.Errorf("hubid: %s is an agent's identity (toad %d), not a hub's", path(dir), ctrl.Toad())
+	}
+	return newIdentity(ctrl)
+}
+
+// LoadOrIncept restores the persisted hub identity or incepts one on first
+// run (stable AID across restarts). The new identity file is written
+// temporary file, fsync, rename (KEL §2.9), so a crash leaves either no file
+// or a whole one.
+func LoadOrIncept(dir string) (*Identity, error) {
+	id, err := Load(dir)
+	if !errors.Is(err, os.ErrNotExist) {
+		return id, err
+	}
+	if id, err = Incept(); err != nil {
+		return nil, err
+	}
+	if err := id.Save(dir); err != nil {
+		return nil, err
+	}
+	return id, nil
+}
+
+// Incept makes a new hub identity (KEL H-30: toad 0, its icp committing a
+// hot key) without writing it anywhere; the caller saves it (Save) once it
+// is to be kept.
+func Incept() (*Identity, error) {
+	ctrl, err := identity.InceptHub(uint64(time.Now().UnixMilli()))
+	if err != nil {
+		return nil, err
+	}
+	return newIdentity(ctrl)
+}
+
+func newIdentity(ctrl *identity.Controller) (*Identity, error) {
 	kel, err := identity.MarshalKEL(ctrl.KEL())
 	if err != nil {
 		return nil, err
 	}
 	return &Identity{Ctrl: ctrl, AID: ctrl.AID(), KEL: kel}, nil
+}
+
+// Save writes the identity file of i into dir: temporary file, fsync,
+// rename, fsync of the directory (KEL §2.9). The file holds the hub's
+// private key and is written 0600.
+func (i *Identity) Save(dir string) error {
+	blob, err := i.Ctrl.Export()
+	if err != nil {
+		return err
+	}
+	return WriteFileAtomic(path(dir), blob, 0o600)
+}
+
+// RecoverySet reports whether the hub's recovery seed is set up: the icp's
+// hot key has been revealed (anet-hub identity setup-recovery, KEL H-31), so
+// the next key of the hub is no longer in its data directory. Until then
+// the hub says hub_recovery_setup_required at every start.
+func (i *Identity) RecoverySet() bool { return len(i.Ctrl.Accepted()) > 1 }
+
+// Seq is the key state the hub signs under: the seq of its KEL's last event.
+func (i *Identity) Seq() uint64 { return i.Ctrl.CurrentSeq() }
+
+// Commitment is the next-key digest the KEL's last event commits (KeyEvent
+// key 6): the key the next rotation must reveal.
+func (i *Identity) Commitment() []byte {
+	kel := i.Ctrl.Accepted()
+	return append([]byte(nil), kel[len(kel)-1].Event.NextDigest...)
+}
+
+// Rotate rotates the hub identity in memory (KEL H-31, H-32): a rot at ts,
+// or one millisecond after the last event when ts is not later than it,
+// that reveals revealed (nil: the icp's hot key, which only the first
+// rotation reveals) and commits next, with key 12 when emergency. A hub's
+// rot needs no witness, so it is the hub's at once. The caller saves the
+// identity (Save) before it relies on the rotation.
+func (i *Identity) Rotate(revealed ed25519.PrivateKey, next []byte, emergency bool, ts uint64) error {
+	kel := i.Ctrl.Accepted()
+	if last := kel[len(kel)-1].Event.Timestamp; ts <= last {
+		ts = last + 1
+	}
+	ev, err := i.Ctrl.BuildRotation(revealed, next, "", emergency, ts)
+	if err != nil {
+		return err
+	}
+	if err := i.Ctrl.Adopt(ev); err != nil {
+		return err
+	}
+	b, err := identity.MarshalKEL(i.Ctrl.KEL())
+	if err != nil {
+		return err
+	}
+	i.KEL = b
+	return nil
+}
+
+// WriteFileAtomic writes data to name through a temporary file in the same
+// directory: write, fsync, rename over name, fsync the directory. A crash
+// leaves either the old file or the new one, never a torn one.
+func WriteFileAtomic(name string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(name)
+	f, err := os.CreateTemp(dir, "."+filepath.Base(name)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // a no-op once renamed
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, name); err != nil {
+		return err
+	}
+	return SyncDir(dir)
+}
+
+// SyncDir fsyncs the directory dir, so a rename in it is durable.
+func SyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // IdentityResponse is the body of GET /hub/identity.

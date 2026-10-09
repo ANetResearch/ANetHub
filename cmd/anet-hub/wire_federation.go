@@ -63,6 +63,20 @@ func init() {
 		// Wired here rather than imported, so the kernel still knows
 		// nothing about federation (K207).
 		d.srv0.SetPeerKELResolver(fed.PeerKEL)
+		// What a peer signed under a key state past its pinned key
+		// history has that history fetched again, once a minute at most
+		// (KEL H-34, H-15).
+		d.store.SetPeerKELRefresher(fed.RefreshPeerKEL)
+		// GET /hub/kels serves this hub's key history and the peers'
+		// pinned ones (KEL H-16).
+		d.srv0.SetHubKELSet(func() ([]aghub.HubKEL, error) {
+			pinned, err := fed.PinnedHubKELs()
+			out := make([]aghub.HubKEL, 0, len(pinned))
+			for _, p := range pinned {
+				out = append(out, aghub.HubKEL{AID: p.AID, KEL: p.KEL})
+			}
+			return out, err
+		})
 		// And where that peer lives, so /x402/witnesses can tell a reader
 		// where to go and check an attestation for themselves.
 		d.srv0.SetPeerEndpointResolver(fed.PeerEndpoint)
@@ -71,17 +85,22 @@ func init() {
 		// why a peer's attestation is worth more than the subject's own
 		// record of itself.
 		fed.SetWitness(aghub.FedWitness{S: d.store})
+		ctx, cancel := context.WithCancel(context.Background())
+		if fed.Enabled() || fed.DiscoveryEnabled() {
+			// Each peer's key history is read every 10 minutes and its
+			// pin extended, never replaced (KEL H-15).
+			go fed.RunPeerKELSync(ctx)
+		}
 		if fed.DiscoveryEnabled() {
 			d.srv0.SetFederatedDirectory(d.store.FederatedAgents)
-			ctx, cancel := context.WithCancel(context.Background())
 			go syncLoop(ctx, fed)
 			if cfg.WitnessEnabled() {
 				go witnessLoop(ctx, fed)
 				log.Printf("anet-hub federation: witnessing %d peer(s)", len(cfg.Peers))
 			}
-			stop = func() error { cancel(); return fed.Close() }
 			log.Printf("anet-hub federation: discovery=%s home=%s", cfg.Discovery, cfg.Home)
 		}
+		stop = func() error { cancel(); return fed.Close() }
 		return stop, nil
 	}})
 }

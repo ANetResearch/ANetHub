@@ -246,6 +246,175 @@
       "next_kind": "change_input",
       "zh": "这个 hub 数据目录由更新版本的 anet-hub 写入，本版本打不开；请升级 anet-hub 后重试（不要删除这个目录）。",
       "en": "This hub data directory was written by a newer anet-hub, which this version cannot open; upgrade anet-hub and try again (do not delete the directory)."
+    },
+    {
+      "key": "data.in_use",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "{path} 正被另一个 anet-hub 进程使用；请等它结束或先停止它后重试。",
+      "en": "{path} is in use by another anet-hub process; wait for it to finish or stop it, then try again."
+    },
+    {
+      "key": "hub_recovery_setup_required",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "command",
+      "next": "anet-hub identity setup-recovery",
+      "zh": "hub 的恢复口令还没设置：数据目录泄露时无法收回 hub 身份；请在 hub 停止时运行 anet-hub identity setup-recovery。",
+      "en": "The hub's recovery passphrase is not set: if the data directory leaks, the hub identity cannot be taken back; run anet-hub identity setup-recovery while the hub is stopped."
+    },
+    {
+      "key": "hub_running",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "command",
+      "next": "anet-hub identity {action}",
+      "zh": "hub 正在运行；请先停止它，再运行 anet-hub identity {action}。",
+      "en": "The hub is running; stop it first, then run anet-hub identity {action}."
+    },
+    {
+      "key": "hub_passphrase_too_short",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "口令至少要 12 个字符；请换一个更长的口令，例如 4 个以上的随机词。",
+      "en": "The passphrase needs at least 12 characters; use a longer one, such as four or more random words."
+    },
+    {
+      "key": "hub_passphrase_not_utf8",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "口令里有无法识别的字符（终端不是 UTF-8 编码）；请把终端切换为 UTF-8（例如 LANG=C.UTF-8）后重试。",
+      "en": "The passphrase has characters that cannot be read (the terminal is not using UTF-8); switch the terminal to UTF-8 (for example LANG=C.UTF-8) and try again."
+    },
+    {
+      "key": "hub_identity.rotated",
+      "class": "I",
+      "exit": 0,
+      "zh": "hub 身份已轮换：密钥序号 {from} → {to}；下次启动生效，对等 hub 与节点在 10 分钟内同步。",
+      "en": "The hub identity was rotated: key number {from} → {to}; it takes effect at the next start, and peers and nodes pick it up within 10 minutes."
+    },
+    {
+      "key": "hub_identity.secrets_regenerated",
+      "class": "I",
+      "exit": 0,
+      "zh": "已重新生成：{list}。",
+      "en": "Regenerated: {list}."
+    },
+    {
+      "key": "hub_identity.secrets_by_operator",
+      "class": "I",
+      "exit": 0,
+      "zh": "这些不在 hub 数据目录里，anet-hub 换不了，请自己更换：{list}。",
+      "en": "These are not in the hub data directory, so anet-hub cannot replace them; replace them yourself: {list}."
+    },
+    {
+      "key": "hub_identity.recovery_written",
+      "class": "I",
+      "exit": 0,
+      "zh": "已写入恢复文件 {path}（口令加密）。请另存一份到别处。",
+      "en": "Recovery file written to {path} (passphrase-encrypted). Keep a copy somewhere else."
+    },
+    {
+      "key": "hub_identity.recovery_file_note",
+      "class": "I",
+      "exit": 0,
+      "zh": "这份文件加上口令可以轮换这个 hub 的身份；单独这份文件无法使用。请另存一份到别处。",
+      "en": "With the passphrase, this file can rotate this hub's identity; on its own it is useless. Keep a copy somewhere else."
+    },
+    {
+      "key": "hub_identity.recovery_already",
+      "class": "I",
+      "exit": 0,
+      "zh": "hub 的恢复口令已经设置过，不需要操作；要更换口令请运行 anet-hub identity rotate --new-recovery。",
+      "en": "The hub's recovery passphrase is already set, nothing to do; to change it, run anet-hub identity rotate --new-recovery."
+    },
+    {
+      "key": "hub_identity.tty_required",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "command",
+      "next": "anet-hub identity {action}",
+      "zh": "这一步要在终端里输入恢复口令，什么都没有改；请在终端里运行 anet-hub identity {action}。",
+      "en": "This step reads the recovery passphrase from a terminal, so nothing was changed; run anet-hub identity {action} in a terminal."
+    },
+    {
+      "key": "hub_identity.recovery_file_missing",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "找不到恢复文件 {path}，什么都没有改；请用 --recovery-file 指向 setup-recovery 写下的那份后重试。",
+      "en": "There is no recovery file at {path}, so nothing was changed; point --recovery-file at the one setup-recovery wrote and try again."
+    },
+    {
+      "key": "hub_identity.recovery_file_invalid",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "{path} 不是一份完整的恢复文件，什么都没有改；请改用另存的那份副本后重试。",
+      "en": "{path} is not a whole recovery file, so nothing was changed; use the copy you kept elsewhere and try again."
+    },
+    {
+      "key": "hub_identity.recovery_wrong_identity",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "{path} 不是这个 hub 身份的恢复文件（或者被改过），什么都没有改；请用 --recovery-file 指向本 hub 的恢复文件后重试。",
+      "en": "{path} is not the recovery file of this hub identity (or it was altered), so nothing was changed; point --recovery-file at this hub's recovery file and try again."
+    },
+    {
+      "key": "hub_identity.recovery_stale",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "{path} 已经作废（之后又换过恢复口令），什么都没有改；请改用最近一次写下的恢复文件后重试。",
+      "en": "{path} no longer works (the recovery passphrase was changed after it was written), so nothing was changed; use the recovery file written last and try again."
+    },
+    {
+      "key": "hub_identity.recovery_file_exists",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "{path} 已经有一份恢复文件，没有覆盖，什么都没有改；请用 --recovery-file 指定另一个位置后重试。",
+      "en": "There is already a recovery file at {path}; it was not overwritten and nothing was changed; choose another place with --recovery-file and try again."
+    },
+    {
+      "key": "hub_identity.passphrase_wrong",
+      "class": "C",
+      "exit": 1,
+      "next_kind": "change_input",
+      "zh": "恢复口令不对，什么都没有改；请输入设置这份恢复文件时用的口令后重试。",
+      "en": "The recovery passphrase is wrong, so nothing was changed; enter the passphrase this recovery file was set with and try again."
+    },
+    {
+      "key": "hub_identity.prompt.passphrase",
+      "class": "T",
+      "exit": 0,
+      "zh": "恢复口令：",
+      "en": "Recovery passphrase:"
+    },
+    {
+      "key": "hub_identity.prompt.new_passphrase",
+      "class": "T",
+      "exit": 0,
+      "zh": "新的恢复口令：",
+      "en": "New recovery passphrase:"
+    },
+    {
+      "key": "hub_identity.prompt.again",
+      "class": "T",
+      "exit": 0,
+      "zh": "再输一次：",
+      "en": "Type it again:"
+    },
+    {
+      "key": "hub_identity.prompt.mismatch",
+      "class": "T",
+      "exit": 0,
+      "zh": "两次输入不一致，请重新输入。",
+      "en": "The two entries differ; enter it again."
     }
   ]
 }

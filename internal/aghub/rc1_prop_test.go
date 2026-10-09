@@ -34,17 +34,8 @@ const rc1PropSeeds = 300
 // rc1PropAIDs are the signers of a run besides the noise.
 var rc1PropAIDs = []string{"alpha", "bravo", "charlie", "delta"}
 
-// floorOf is the floor a signer is held to now: its own, or its part's
-// for a signer without state.
-func (r *rc1State) floorOf(aid string) uint64 {
-	sh := r.shard(aid)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-	if s := sh.signers[aid]; s != nil {
-		return s.floor
-	}
-	return sh.gone
-}
+// rc1State.floorOf (fed_relay.go) is the floor a signer is held to now:
+// its own, or its part's for a signer without state.
 
 // Properties 1 and 2.
 func TestRC1PropAtMostOnceAndNeverAtOrBelowTheFloor(t *testing.T) {

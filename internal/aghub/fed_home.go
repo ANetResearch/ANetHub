@@ -628,13 +628,17 @@ func (s *Server) verifyEntry(aid, peer string, pe peerEntry, now time.Time) (*re
 		}
 	}
 	if len(e.Notice) > 0 {
+		// The key state the witness signed under, so that a peer's pinned
+		// key history that does not reach it yet is fetched again once
+		// (KEL H-34); a notice that does not decode fails below anyway.
+		_, env, _ := identity.DecodeNotice(e.Notice)
 		hubKELs := func(hubAID string) ([]identity.SignedEvent, bool) {
 			// The witness may be this hub: an agent that named it as
 			// its witness and is now registered at a peer.
 			if c := s.store.hubKey; c != nil && hubAID == s.hubAID {
 				return c.KEL(), true
 			}
-			k, err := s.peerKEL(hubAID)
+			k, err := s.store.peerKELFor(s.peerKEL, hubAID, env.KeyStateSeq)
 			return k, err == nil
 		}
 		if err := identity.VerifyNotice(e.Notice, kel, hubKELs, uint64(now.UnixMilli())); err != nil {
