@@ -568,6 +568,55 @@ func TestPollMore(t *testing.T) {
 	})
 }
 
+// TestPollDoesNotWaitForWriters (FS-H5): the snapshot a poll page and its
+// more are read from is a read transaction, not a write one. The store
+// begins its transactions IMMEDIATE (aghub.go Open), so a poll that began an
+// ordinary one would take the database's write lock for as long as it reads
+// a page of up to PollBudget bytes, and every send, ack and registration of
+// the hub would wait behind each poll. Here a writer holds the write lock:
+// the poll still answers at once, from the last committed state.
+func TestPollDoesNotWaitForWriters(t *testing.T) {
+	h := newRelayHub(t)
+	recip := h.agent()
+	ids := h.queueTo(recip, 2, 16, nil, "w")
+	writer, err := h.store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			_ = writer.Rollback()
+		}
+	}
+	defer release()
+	// A row the writer adds and has not committed is not in the snapshot.
+	if _, err := writer.Exec(`DELETE FROM relay_message WHERE id=?`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	type page struct {
+		n    int
+		more bool
+		err  error
+	}
+	done := make(chan page, 1)
+	go func() {
+		msgs, more, err := h.store.RelayPoll(recip.aid, 0, 1, 1<<20)
+		done <- page{len(msgs), more, err}
+	}()
+	select {
+	case p := <-done:
+		if p.err != nil || p.n != 1 || !p.more {
+			t.Fatalf("a poll while a writer holds the lock: %d messages, more %v, %v; want 1 and more", p.n, p.more, p.err)
+		}
+	case <-time.After(3 * time.Second):
+		release()
+		<-done
+		t.Fatal("a poll waited for a writer: it took the database's write lock")
+	}
+}
+
 // TestHubResponsesCarryDate (FS-H8): every answer of the hub, refusals
 // included, carries an HTTP Date the daemon checks its clock against
 // (FS-K14).

@@ -2,6 +2,7 @@ package aghub
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"errors"
@@ -482,7 +483,12 @@ func (s *Store) RelayPoll(toAID string, afterID int64, limit int, budget int64) 
 		afterID = 0
 	}
 	nowMS := s.now().UnixMilli()
-	tx, err := s.db.Begin()
+	// A read transaction: ReadOnly begins it deferred, where every other
+	// transaction of the store begins IMMEDIATE (Open), so the poll reads one
+	// snapshot of the WAL without taking the write lock. Begun IMMEDIATE it
+	// would hold that lock while it reads a page of up to the poll budget, and
+	// every send, ack and registration of the hub would wait for each poll.
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, false, err
 	}
