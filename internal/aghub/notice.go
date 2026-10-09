@@ -259,7 +259,7 @@ func (s *Store) RunNoticeRefresher(ctx context.Context) {
 	for {
 		if !serving {
 			if err := s.BeginServing(); err != nil {
-				log.Printf("hub: starting to serve the restored database (tried again in %v): %v", noticeRefreshEvery, err)
+				log.Printf("hub: starting to serve the restored database (tried again next round): %v", err)
 			} else {
 				serving = true
 			}
