@@ -247,6 +247,53 @@ func TestKidCheckInsideEnqueueTx(t *testing.T) {
 	})
 }
 
+// TestKidCheckOrder (core G23, SS §4.2.1 step 10): in the transaction that
+// writes the row, the kid is checked after the duplicate re-check and before
+// the mailbox capacity. An envelope already waiting is the same envelope
+// whatever happened to its key since it was queued: a sender retrying after
+// a lost answer is told it is queued (duplicate, the same rid), not to seal
+// it again. And an envelope no key opens is refused as that (409 kid_stale,
+// fetch the keys and seal again), not as a full mailbox to wait for.
+func TestKidCheckOrder(t *testing.T) {
+	t.Run("the duplicate re-check comes first", func(t *testing.T) {
+		sc := newScene(t)
+		h := sc.h
+		env := sc.env()
+		d, _ := seal.EnvDigest(env)
+		item := RelayItem{To: sc.recip.aid, Envelope: env, Digest: d, Class: seal.CapClassStranger,
+			KID: fixtureKID(sc.recip.aid)}
+		first, err := h.store.RelayEnqueue(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _, seq := replacementSet(t, h, sc.recip, h.clock())
+		if _, err := h.store.PublishKeys(sc.recip.aid, raw, seq-1, sc.recip.c.KEL(), h.clock()); err != nil {
+			t.Fatal(err)
+		}
+		again, err := h.store.RelayEnqueue(item)
+		if err != nil || !again.Duplicate || !bytes.Equal(again.RID, first.RID) {
+			t.Fatalf("the waiting envelope again after its key was replaced: %+v, %v; want a duplicate with rid %x",
+				again, err, first.RID)
+		}
+	})
+	t.Run("the kid comes before the capacity", func(t *testing.T) {
+		sc := newScene(t)
+		h := sc.h
+		l := DefaultLimits()
+		l.MailboxMessages = 1
+		if err := h.srv.SetLimits(l); err != nil {
+			t.Fatal(err)
+		}
+		decodeSent(t, sc.send1(sc.env(), sc.contact))
+		if rec := sc.send1(sc.env(), sc.contact); rec.Code != http.StatusInsufficientStorage {
+			t.Fatalf("the mailbox is not full: %d %s", rec.Code, rec.Body)
+		}
+		before := h.effects()
+		stale := bytes.Repeat([]byte{0x6b}, seal.KIDLen)
+		expectKidStale(t, h, before, sc.send1(envelopeTo(t, sc.recip.aid, stale, []byte("full")), sc.contact))
+	})
+}
+
 // Publications and sends at once (under -race): a send that starts after a
 // publication that replaced its key returned is refused, every queued row is
 // one the old key was still published for, and no send fails otherwise.
