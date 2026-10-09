@@ -219,8 +219,6 @@ func TestAuthorizationHeaderIsParsedNotTrimmed(t *testing.T) {
 	}
 }
 
-// Restoring an agent puts its governance state back too.
-//
 // Deleting an official agent that was never registered is not recorded as a
 // delete.
 //

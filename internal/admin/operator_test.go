@@ -30,6 +30,7 @@ import (
 	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -350,6 +351,9 @@ func TestAdminListsByTheRegistryRule(t *testing.T) {
 	if err != nil || v.Listed {
 		t.Fatalf("an agent without a key set: %+v %v, want not listed", v, err)
 	}
+	if tot, err := hub.Totals(); err != nil || tot.Agents != 1 || tot.Listed != 0 {
+		t.Errorf("totals without a key set %+v %v, want 1 agent and none listed", tot, err)
+	}
 	publishTestKeys(t, h.store, c)
 	if v, err = hub.Agent(c.AID()); err != nil || !v.Listed {
 		t.Fatalf("with a key set: %+v %v, want listed", v, err)
@@ -656,4 +660,207 @@ func uploadTestReview(t *testing.T, h *testHub, prov, reviewer *identity.Control
 	if code, out := h.signed(reviewer, relayauth.ActionReview, http.MethodPost, "/reviews", body); code != http.StatusOK {
 		t.Fatalf("uploading the review: %d %s", code, out["_raw"])
 	}
+}
+
+// A registered key history that does not extend the tombstone this hub keeps for the AID cannot
+// become its tombstone (PAY-O1 step 2): the operator's delete answers 409 and changes nothing. The
+// agent is still registered and admitted, the tombstone is the one it was, the hub process has no
+// deregistration to act on, and the console records no delete and no moderation mark.
+func TestAdminDeleteRefusesAShrinkingTombstone(t *testing.T) {
+	h := newTestHub(t, aghub.AdmissionClosed)
+	c := newTestAgent(t) // icp and one rot
+	h.admitted(c)
+	exported, err := c.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	longer, err := identity.Restore(exported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotate(t, longer) // icp and two rots: what the registered history does not extend
+	tomb := kelBytes(t, longer)
+	db := openRaw(t, h.dir)
+	if _, err := db.Exec(`INSERT INTO departed_kel(aid, kel, at) VALUES(?,?,?)`,
+		c.AID(), tomb, "2026-10-01T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, store, _ := h.admin()
+	w, _ := doReq(t, handler, "DELETE", "/admin/api/agents/"+c.AID(), "test-token", nil)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("delete: %d %s, want 409", w.Code, w.Body.String())
+	}
+	for _, x := range []struct {
+		table string
+		want  int
+	}{{"agent", 1}, {"admitted", 1}, {"dereg_event", 0}} {
+		if n := count(t, db, x.table, "aid", c.AID()); n != x.want {
+			t.Errorf("%s has %d row(s) of the agent after the refused delete, want %d", x.table, n, x.want)
+		}
+	}
+	var held []byte
+	if err := db.QueryRow(`SELECT kel FROM departed_kel WHERE aid = ?`, c.AID()).Scan(&held); err != nil ||
+		!bytes.Equal(held, tomb) {
+		t.Errorf("the tombstone changed (%v)", err)
+	}
+	if d, err := store.DeletedAgents(10); err != nil || len(d) != 0 {
+		t.Errorf("the refused delete is recorded: %v %v", d, err)
+	}
+	if mods, err := store.Moderations(); err != nil || mods[c.AID()].Status != "" {
+		t.Errorf("the refused delete left a moderation mark: %+v %v", mods[c.AID()], err)
+	}
+}
+
+// A hub.db whose schema is still only in its write-ahead log (a hub that is writing it now, with no
+// checkpoint yet) looks empty to aghub.CheckData, which reads the file alone. OpenHubDB reads it
+// again through the log and refuses another release's data all the same.
+func TestAdminRefusesOldHubDataSeenThroughTheLog(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		version int
+		want    error
+	}{{"version 2", 2, aghub.ErrHubDataV02}, {"version 4", aghub.SchemaVersion + 1, aghub.ErrHubDataTooNew}} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writer, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+
+				"?_pragma=journal_mode(WAL)&_pragma=wal_autocheckpoint(0)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { writer.Close() })
+			writer.SetMaxOpenConns(1) // the one connection stays open, so the log is not checkpointed
+			for _, q := range []string{
+				`CREATE TABLE agent (aid TEXT PRIMARY KEY, kel BLOB NOT NULL)`,
+				`PRAGMA user_version = ` + strconv.Itoa(c.version),
+			} {
+				if _, err := writer.Exec(q); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := aghub.CheckData(dir); err != nil {
+				t.Fatalf("setup: the file alone already shows the version (%v)", err)
+			}
+			hub, err := OpenHubDB(dir)
+			if hub != nil {
+				hub.Close()
+			}
+			if !errors.Is(err, c.want) {
+				t.Errorf("OpenHubDB: %v, want %v", err, c.want)
+			}
+		})
+	}
+}
+
+// Reviews are listed newest day first and, within a day, by ix_commit (PAY-O5), not in the order
+// they were stored: that order would tell the operator more than the day (SI-48).
+func TestAdminReviewsNewestDayFirst(t *testing.T) {
+	dir, provAID, _ := buildHubDB(t) // one review: ix_commit 1c…, day 20001
+	hs, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range []struct {
+		ix  byte
+		day uint64
+	}{{0x2b, 20001}, {0x0a, 20001}, {0x05, 19999}, {0x3f, 20003}} {
+		if err := hs.StoreReview(aghub.StoredReview{IXCommit: bytes.Repeat([]byte{r.ix}, 32), Subject: provAID,
+			Tag: bytes.Repeat([]byte{byte(0x40 + i)}, 16), TagKeyID: 1, Rating: 3,
+			ReceiptCID: fmt.Sprintf("bafy-receipt-order-%d", i), CompletedDay: r.day, CreatedDay: r.day, StoredDay: r.day},
+			[]byte{0xa0}, []byte{0xa0}, []byte{0xa0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hs.Close()
+	hub, err := OpenHubDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	want := []byte{0x3f, 0x0a, 0x1c, 0x2b, 0x05}
+	order := func(rs []HubReview) []byte {
+		var out []byte
+		for _, r := range rs {
+			ix, _ := base64.RawURLEncoding.DecodeString(r.IXCommit)
+			if len(ix) > 0 {
+				out = append(out, ix[0])
+			}
+		}
+		return out
+	}
+	recent, err := hub.RecentReviews(0)
+	if err != nil || !bytes.Equal(order(recent), want) {
+		t.Errorf("RecentReviews in the order %x (%v), want %x", order(recent), err, want)
+	}
+	of, err := hub.ReviewsOf(provAID, 0)
+	if err != nil || !bytes.Equal(order(of), want) {
+		t.Errorf("ReviewsOf in the order %x (%v), want %x", order(of), err, want)
+	}
+}
+
+// The operator's delete takes the write lock when its transaction begins (BEGIN IMMEDIATE, PAY-O3),
+// as the hub's own transactions do. Begun deferred, it reads first and then has to become a writer;
+// when the hub process writes in between (it writes on every poll), SQLite refuses the upgrade at
+// once, without waiting, and the delete fails with "database is locked".
+func TestAdminDeleteBesideABusyHub(t *testing.T) {
+	dir := t.TempDir()
+	hs, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aids []string
+	for i := 0; i < 100; i++ {
+		c, err := identitytest.Hub()
+		if err != nil {
+			t.Fatal(err)
+		}
+		kel, err := identity.MarshalKEL(c.KEL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hs.PutAgent(c.AID(), "busy", []string{"x.y"}, kel); err != nil {
+			t.Fatal(err)
+		}
+		aids = append(aids, c.AID())
+	}
+	hs.Close()
+	hub, err := OpenHubDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	busy, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+
+		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(15000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	busy.SetMaxOpenConns(1)
+	stop, done, writing := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, err := busy.Exec(`INSERT INTO hub_meta(key, value) VALUES('test-busy', ?)
+			    ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.Itoa(i))
+			if i == 0 {
+				if err != nil {
+					t.Errorf("the hub's writes: %v", err)
+				}
+				close(writing)
+			}
+		}
+	}()
+	<-writing
+	for _, aid := range aids {
+		if _, err := hub.DeleteAgent(aid); err != nil {
+			t.Errorf("deleting %s beside a busy hub: %v", aid, err)
+		}
+	}
+	close(stop)
+	<-done
 }

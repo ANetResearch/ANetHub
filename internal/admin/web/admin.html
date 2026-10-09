@@ -664,7 +664,7 @@ async function vRecycle(){
 }
 async function exportAdmitFile(){
   try{
-    const r = await fetch(BASE+'/api/deleted?format=admit', {headers:{'Authorization':'Bearer '+TOKEN}});
+    const r = await fetch(BASE+'/api/deleted?format=admit&limit=500', {headers:{'Authorization':'Bearer '+TOKEN}});
     if(r.status===401){logout();throw new Error('登录已失效')}
     if(!r.ok) throw new Error('HTTP '+r.status);
     const blob = new Blob([await r.text()], {type:'text/plain'});
