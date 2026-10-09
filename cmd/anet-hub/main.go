@@ -139,8 +139,8 @@ var removedFlags = []struct {
 
 // removedUse is one removed flag on the command line.
 type removedUse struct {
-	flag, subcommand        string
-	modifier, fixed, noneOf bool
+	flag, subcommand      string
+	modifier, fixed, none bool
 }
 
 // removedFlagValue records that a removed flag was given; boolean ones take
@@ -156,7 +156,7 @@ type removedFlagValue struct {
 func (v *removedFlagValue) String() string { return "" }
 func (v *removedFlagValue) Set(string) error {
 	*v.seen = append(*v.seen, removedUse{flag: "-" + v.name, subcommand: v.subcommand,
-		modifier: v.modifier, fixed: v.fixed, noneOf: v.none})
+		modifier: v.modifier, fixed: v.fixed, none: v.none})
 	return nil
 }
 func (v *removedFlagValue) IsBoolFlag() bool { return v.boolean }
@@ -200,7 +200,7 @@ func beforeServing(f *hubFlags, fs *flag.FlagSet, c *console) (code int, done bo
 		switch {
 		case u.fixed:
 			return c.say("hub_flag_removed.fixed", map[string]string{"flag": u.flag}), true
-		case u.noneOf:
+		case u.none:
 			return c.say("hub_flag_removed.none", map[string]string{"flag": u.flag}), true
 		}
 		return c.say("hub_flag_removed", map[string]string{"flag": u.flag, "subcommand": u.subcommand}), true
