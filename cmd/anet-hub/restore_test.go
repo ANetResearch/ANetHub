@@ -6,6 +6,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -101,6 +102,9 @@ func TestRestoreRefusals(t *testing.T) {
 			if err := os.WriteFile(bad, []byte("not a database"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			tooNew := filepath.Join(t.TempDir(), "hub-backup-20261006.db")
+			backupInto(t, dir, tooNew)
+			setVersion(t, tooNew, aghub.SchemaVersion+1)
 			empty := t.TempDir()
 			missing := filepath.Join(empty, "nothing.db")
 			noHub := t.TempDir()
@@ -112,6 +116,8 @@ func TestRestoreRefusals(t *testing.T) {
 				sentenceOf(lang, "restore.no_backup", map[string]string{"path": missing}))
 			expectErr(t, cli(t, lang, "-data", dir, "restore", bad), 1,
 				sentenceOf(lang, "restore.bad_backup", map[string]string{"path": bad}))
+			expectErr(t, cli(t, lang, "-data", dir, "restore", tooNew), 1,
+				sentenceOf(lang, "restore.backup_too_new", map[string]string{"path": tooNew}))
 			expectErr(t, cli(t, lang, "-data", noHub, "restore", good), 1,
 				sentenceOf(lang, "restore.no_identity", map[string]string{"path": noHub}))
 			if r := cli(t, lang, "-data", dir, "restore"); r.code != 2 || r.stdout != "" {
@@ -127,6 +133,19 @@ func TestRestoreRefusals(t *testing.T) {
 				t.Errorf("a refused restore wrote into a directory with no hub: %v", entries)
 			}
 		})
+	}
+}
+
+// setVersion makes the database at path say it is of schema v.
+func setVersion(t *testing.T, path string, v int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v)); err != nil {
+		t.Fatal(err)
 	}
 }
 
