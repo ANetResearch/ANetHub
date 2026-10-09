@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,6 +38,7 @@ import (
 // is nobody's requester (carol) and one on probation (probie), and an agent
 // registered nowhere (stranger).
 type reviewHub struct {
+	srv                      *httptest.Server
 	store                    *aghub.Store
 	prov, req, carol, probie *identity.Controller
 	stranger                 *identity.Controller
@@ -47,7 +49,7 @@ type reviewHub struct {
 func newReviewHub(t *testing.T) (*reviewHub, func(k *aghub.ReviewKit, as *identity.Controller, body map[string]string) (int, []byte)) {
 	t.Helper()
 	srv, store := newHubWithStore(t)
-	h := &reviewHub{store: store}
+	h := &reviewHub{srv: srv, store: store}
 	h.prov, h.req = twoAgents(t)
 	h.carol, h.probie = twoAgents(t)
 	h.stranger, _ = aghub.NewAgentForTest()
@@ -309,6 +311,43 @@ func TestReviewUploadFollowsPAYV1(t *testing.T) {
 	})
 }
 
+// The upload body is at most 16 KiB (hub-payment-privacy §0.4, §2.5): one
+// byte over is 413 too_large before anything in it is read; at the limit
+// the body is read (and this one, carrying a member no upload has, is
+// refused for that).
+func TestAReviewUploadIsAtMost16KiB(t *testing.T) {
+	h, _ := newReviewHub(t)
+	srv := h.srv
+	k := aghub.NewReviewKitForTest(t, h.prov, h.req, "ix-size", 5)
+	sized := func(n int) []byte {
+		t.Helper()
+		body := k.Body(t)
+		body["pad"] = ""
+		base, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body["pad"] = strings.Repeat("A", n-len(base))
+		raw, _ := json.Marshal(body)
+		if len(raw) != n {
+			t.Fatalf("built %d bytes, want %d", len(raw), n)
+		}
+		return raw
+	}
+	const limit = 16 << 10
+	code, b := signedDo(t, srv, h.req, relayauth.ActionReview, http.MethodPost, "/reviews", sized(limit+1))
+	if code != http.StatusRequestEntityTooLarge || !strings.Contains(string(b), `"too_large"`) {
+		t.Fatalf("%d bytes: %d %s, want 413 too_large", limit+1, code, b)
+	}
+	code, b = signedDo(t, srv, h.req, relayauth.ActionReview, http.MethodPost, "/reviews", sized(limit))
+	if code != http.StatusBadRequest || !strings.Contains(string(b), `"bad_request"`) || !strings.Contains(string(b), "pad") {
+		t.Fatalf("%d bytes: %d %s, want 400 bad_request naming the member", limit, code, b)
+	}
+	if reviewStored(t, h.store, k) {
+		t.Fatal("stored")
+	}
+}
+
 // A receipt is judged by the provider's key history at the start of its own
 // day (SI-36): a key the provider retired before then signs nothing for it.
 func TestAReceiptSignedWithARetiredKeyIsNotReviewable(t *testing.T) {
@@ -345,12 +384,17 @@ func TestAReceiptSignedWithARetiredKeyIsNotReviewable(t *testing.T) {
 // The attestation is the hub's signed word on what it stored (PAY-V2, L32):
 // this review, this receipt, this subject, the reviewer's tag under the
 // current key and today; checkable by anyone with the hub's key history.
+// The task ended three days ago and the review was written yesterday, so
+// the attestation's day and the row's three days cannot stand in for one
+// another.
 func TestTheAttestationIsTheHubsWordOnWhatItStored(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	prov, req := twoAgents(t)
 	register(t, srv, prov, "Provider", []string{"work.do"})
 	register(t, srv, req, "Requester", nil)
 	k := makeEvidence(t, prov, req, "ix-attested", 5, "")
+	today := aghub.TodayForTest()
+	k.Receipt.CompletedDay, k.Review.CreatedDay = today-3, today-1
 	code, b := uploadReview(t, srv, k)
 	if code != 200 {
 		t.Fatalf("upload: %d %s", code, b)
@@ -384,8 +428,22 @@ func TestTheAttestationIsTheHubsWordOnWhatItStored(t *testing.T) {
 	}
 	tag, _ := aghub.ReviewTagForTest(key, req.AID(), prov.AID())
 	if body.ReviewCID != reviewCID || body.ReceiptCID != receiptCID || body.Subject != prov.AID() ||
-		!bytes.Equal(body.Tag, tag) || body.TagKeyID != keyID || body.Day != aghub.TodayForTest() || body.Hub != hub.AID {
+		!bytes.Equal(body.Tag, tag) || body.TagKeyID != keyID || body.Day != today || body.Hub != hub.AID {
 		t.Fatalf("attestation %+v", body)
+	}
+	// The row says the same, with the receipt's and the review's own days.
+	var (
+		rowTag                       []byte
+		rowKeyID, completed, created uint64
+		stored                       uint64
+	)
+	if err := store.DBForTest().QueryRow(`SELECT tag, tag_key_id, completed_day, created_day, stored_day
+		FROM review WHERE ix_commit=?`, k.IXCommit()).Scan(&rowTag, &rowKeyID, &completed, &created, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rowTag, tag) || rowKeyID != keyID || completed != today-3 || created != today-1 || stored != today {
+		t.Fatalf("stored row: tag %x key %d completed %d created %d stored %d (today %d)",
+			rowTag, rowKeyID, completed, created, stored, today)
 	}
 }
 
@@ -655,6 +713,59 @@ func TestAPeerReviewIsCheckedLikeALocalOne(t *testing.T) {
 		}
 	})
 
+	t.Run("refused for now: no key history of the peer yet", func(t *testing.T) {
+		// Until this hub holds the peer's key history it cannot check the
+		// attestation; the entry waits rather than being passed for good.
+		e, k := entry("ix-fed-no-peer-kel")
+		if err := store.AdmitFedReview(peer.AID, nil, e); !errors.Is(err, federation.ErrRefusedForNow) {
+			t.Fatalf("no key history of the peer: %v, want refused for now", err)
+		}
+		raw, _ := json.Marshal(e)
+		failing := aghub.FedDirectory{S: store, PeerKEL: func(string) ([]identity.SignedEvent, error) {
+			return nil, errors.New("not pinned yet")
+		}}
+		if err := failing.AdmitFedReview(peer.AID, raw); !errors.Is(err, federation.ErrRefusedForNow) {
+			t.Fatalf("the peer's key history not to be had: %v, want refused for now", err)
+		}
+		if err := (aghub.FedDirectory{S: store}).AdmitFedReview(peer.AID, raw); !errors.Is(err, federation.ErrRefusedForNow) {
+			t.Fatalf("no resolver of peer key histories: %v, want refused for now", err)
+		}
+		if fedStored(t, store, k) {
+			t.Fatal("stored")
+		}
+	})
+
+	t.Run("an attestation is judged at its own day", func(t *testing.T) {
+		// CORE-L8: the peer's attestation is checked against the peer's key
+		// history as it stood on the attestation's day. The peer signed
+		// today under the key it then retired today: that key still spoke
+		// for today, not for tomorrow.
+		p := otherHub(t)
+		snap, err := p.Ctrl.Export()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := identitytest.Rotate(p.Ctrl, uint64(time.Now().UnixMilli())+5); err != nil {
+			t.Fatal(err)
+		}
+		old, err := identity.Restore(snap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k := makeEvidence(t, prov, req, "ix-fed-old-key-today", 5, "")
+		if err := store.AdmitFedReview(p.AID, p.Ctrl.KEL(), aghub.FedEntryForTest(t, old, k, today, 1)); err != nil {
+			t.Fatalf("attested today under the key retired later today: %v", err)
+		}
+		k = makeEvidence(t, prov, req, "ix-fed-old-key-tomorrow", 5, "")
+		err = store.AdmitFedReview(p.AID, p.Ctrl.KEL(), aghub.FedEntryForTest(t, old, k, today+1, 2))
+		if err == nil || errors.Is(err, federation.ErrRefusedForNow) {
+			t.Fatalf("attested tomorrow under the key retired today: %v, want refused for good", err)
+		}
+		if fedStored(t, store, k) {
+			t.Fatal("stored")
+		}
+	})
+
 	t.Run("a provider history the peer cut short", func(t *testing.T) {
 		// This hub knows the provider rotated; a peer sends the history
 		// from before, under which the retired key looks current. The
@@ -913,5 +1024,33 @@ func TestTheReviewTagKey(t *testing.T) {
 	var v string
 	if err := s.DBForTest().QueryRow(`SELECT value FROM hub_meta WHERE key='tag_key_id'`).Scan(&v); err != nil || v != "3" {
 		t.Fatalf("tag_key_id %q (%v), want 3", v, err)
+	}
+}
+
+// A key file beside a database that never named one (hub.db made anew next
+// to an existing keys directory) is that database's first key: tag_key_id 1,
+// never 0, so its tags are counted under an id like any other's.
+func TestATagKeyBesideANewDatabaseIsItsFirst(t *testing.T) {
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{0x5c}, evidence.TagKeySize)
+	path := aghub.TagKeyPath(dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got, id, err := s.ReviewTagKeyForTest()
+	if err != nil || id != 1 || !bytes.Equal(got, key) {
+		t.Fatalf("id %d, the file's key %v, %v; want id 1 and the file's key", id, bytes.Equal(got, key), err)
+	}
+	var v string
+	if err := s.DBForTest().QueryRow(`SELECT value FROM hub_meta WHERE key='tag_key_id'`).Scan(&v); err != nil || v != "1" {
+		t.Fatalf("tag_key_id %q (%v), want 1", v, err)
 	}
 }
