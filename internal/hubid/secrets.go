@@ -2,59 +2,89 @@ package hubid
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 )
 
-// The secrets a hub emergency rotation replaces (kel-rotation H-33, core
-// G18).
+// The secrets an emergency rotation of the hub identity replaces (KEL H-33,
+// core G18).
 //
-// An emergency rotation says the hub's identity key may be in somebody
-// else's hands, and with it whatever else lay in the same data directory.
-// Every persistent secret there that authenticates or tags something is
-// therefore made anew together with the key. Each area that keeps such a
-// secret registers it here, with its name and the function that makes a new
-// one; the rotation runs every entry and names them to the operator
-// (hub_identity.secrets_regenerated). A secret that lives only in the hub
-// process's memory (the proof-of-work key, a first-contact session key) is
-// gone at the restart the rotation needs anyway and is not listed.
+// An emergency rotation says the hub's data directory may have leaked. A
+// new identity key does not undo that alone: every secret the hub keeps to
+// authenticate or to tag with was in the same directory, so each is
+// generated again. The list is here so that it is one list: an area that
+// adds a persistent secret of that kind registers it (its name and how to
+// make a new one), and `anet-hub identity rotate --emergency` replaces each
+// and says which. pow_key lives in process memory only and the first-contact
+// session keys are made one by one at random, so neither is listed.
 
-// EmergencySecret is one persistent secret of the hub's data directory.
+// EmergencySecret is one secret an emergency rotation replaces.
 type EmergencySecret struct {
-	// Name is how the operator is told about it, e.g. hub_tag_key.
+	// Name is how the operator knows the secret: a file of the hub data
+	// directory, or the setting that holds it.
 	Name string
-	// Regenerate replaces the secret in the data directory dir with a new
-	// one. It runs while the hub is stopped (KEL H-32), and returns only
-	// once the old secret is no longer usable.
+	// Regenerate replaces the secret in the hub data directory dir with a
+	// fresh one. Nil for a secret anet-hub does not keep (it lives outside
+	// the data directory): the operator replaces it, and the rotation says
+	// so by name.
 	Regenerate func(dir string) error
 }
 
-var emergency struct {
-	mu   sync.Mutex
-	list []EmergencySecret
-}
+var (
+	secretsMu sync.Mutex
+	secrets   []EmergencySecret
+)
 
-// RegisterEmergencySecret adds s to the list an emergency rotation
-// regenerates. The package that owns the secret calls it from init. A
-// second secret of the same name, or one without a name or a function, is a
-// programming error and panics.
+// RegisterEmergencySecret adds s to the list. A name is registered once; an
+// empty or repeated one is a programming error.
 func RegisterEmergencySecret(s EmergencySecret) {
-	if s.Name == "" || s.Regenerate == nil {
-		panic("hubid: an emergency secret needs a name and a Regenerate function")
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	if s.Name == "" {
+		panic("hubid: an emergency secret needs a name")
 	}
-	emergency.mu.Lock()
-	defer emergency.mu.Unlock()
-	for _, e := range emergency.list {
-		if e.Name == s.Name {
-			panic(fmt.Sprintf("hubid: emergency secret %s registered twice", s.Name))
+	for _, have := range secrets {
+		if have.Name == s.Name {
+			panic(fmt.Sprintf("hubid: emergency secret %q registered twice", s.Name))
 		}
 	}
-	emergency.list = append(emergency.list, s)
+	secrets = append(secrets, s)
 }
 
-// EmergencySecrets is the list an emergency rotation regenerates, in the
-// order the secrets were registered.
+// EmergencySecrets is the list, in the order of registration.
 func EmergencySecrets() []EmergencySecret {
-	emergency.mu.Lock()
-	defer emergency.mu.Unlock()
-	return append([]EmergencySecret(nil), emergency.list...)
+	secretsMu.Lock()
+	defer secretsMu.Unlock()
+	return slices.Clone(secrets)
+}
+
+// AdminTokenSecret names the hub admin token (core G18): the ADMIN_TOKEN
+// of anet-hub-admin, which its service's environment holds, not the hub
+// data directory, so anet-hub cannot replace it.
+const AdminTokenSecret = "ADMIN_TOKEN (anet-hub-admin)"
+
+func init() {
+	RegisterEmergencySecret(EmergencySecret{Name: AdminTokenSecret})
+}
+
+// RegenerateEmergencySecrets replaces every registered secret anet-hub
+// keeps in the hub data directory dir, and returns the names it replaced
+// and those the operator has to replace. It goes on past a secret it
+// cannot replace and returns the first error with the names done so far.
+func RegenerateEmergencySecrets(dir string) (replaced, byOperator []string, err error) {
+	for _, s := range EmergencySecrets() {
+		if s.Regenerate == nil {
+			byOperator = append(byOperator, s.Name)
+			continue
+		}
+		if rerr := s.Regenerate(dir); rerr != nil {
+			if err == nil {
+				err = fmt.Errorf("hubid: replacing %s: %w", s.Name, rerr)
+			}
+			byOperator = append(byOperator, s.Name)
+			continue
+		}
+		replaced = append(replaced, s.Name)
+	}
+	return replaced, byOperator, err
 }
