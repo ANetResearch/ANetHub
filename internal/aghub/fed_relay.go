@@ -259,7 +259,8 @@ func (s *Server) MaxEnvelope() int64 { return s.limits.MaxEnvelope }
 //	   larger than the recipient's share
 //	11 the buckets, all or none: the source hub's; a first contact's
 //	   recipient's first-contact bucket, or the credential's
-//	12 Store.RelayEnqueue
+//	12 Store.RelayEnqueue: the redelivery count, the kid (409 kid_stale,
+//	   FS-H3) and the mailbox
 //	13 queued, with the rid
 //
 // A first contact was authenticated by the source hub, which also took the
@@ -411,7 +412,7 @@ func (s *Server) ServeForward(w http.ResponseWriter, r *http.Request, peer strin
 	// that writes the row (§4.2.1 steps 9, 10). A refusal gives the tokens
 	// back.
 	queued, err := s.store.RelayEnqueue(RelayItem{To: outer.To, Envelope: body, Digest: digest,
-		Class: class, CapID: capID, Exp: outer.Exp})
+		Class: class, CapID: capID, Exp: outer.Exp, KID: outer.KID})
 	if err != nil || queued.Duplicate {
 		refundAll(takes)
 	}
@@ -424,6 +425,10 @@ func (s *Server) ServeForward(w http.ResponseWriter, r *http.Request, peer strin
 		s.answerForward(w, RelayQueued, queued.RID, outer.To)
 	case errors.As(err, &limited):
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRedeliveryLimited, RetryAfter: limited.Wait})
+	case errors.Is(err, ErrKidStale):
+		// The home checks the kid (FS-H3); the origin answers the sender
+		// with this status and body as they are (passedThrough).
+		wire3.Refuse(w, wire3.ReasonKidStale)
 	case errors.Is(err, ErrMailboxFull):
 		wire3.Refuse(w, wire3.ReasonMailboxFull)
 	case errors.Is(err, ErrStrangersBusy):

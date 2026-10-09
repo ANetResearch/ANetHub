@@ -317,7 +317,7 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 	srv := newHub(t)
 	recip, _ := identitytest.Hub()
 	sender, _ := identitytest.Hub()
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 
 	env := testEnvelope(t, recip.AID(), []byte("hello mailbox"))
@@ -340,7 +340,7 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 	if len(p.Messages) != 1 {
 		t.Fatalf("polled = %+v, want 1 message", p.Messages)
 	}
-	got, _ := base64.StdEncoding.DecodeString(p.Messages[0].Envelope)
+	got, _ := base64.RawURLEncoding.DecodeString(p.Messages[0].Envelope)
 	if !bytes.Equal(got, env) {
 		t.Fatal("the envelope changed in the relay")
 	}

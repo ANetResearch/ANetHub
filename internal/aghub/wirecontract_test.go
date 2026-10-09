@@ -380,8 +380,8 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		{"SessionResponse", aghub.SessionResponse{}, []string{"ct", "enc", "exp", "sid"}},
 		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"recipient_quiet", "rid", "status", "via_hub"}},
 		{"RelayPollRequest", aghub.RelayPollRequest{}, []string{"after_id", "limit"}},
-		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"messages"}},
-		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"envelope", "id"}},
+		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"messages", "more"}},
+		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"accepted_at", "envelope", "id"}},
 		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"ids"}},
 		{"RelayAckResponse", aghub.RelayAckResponse{}, []string{"acked"}},
 		{"RegisterRequest", aghub.RegisterRequest{}, []string{
@@ -392,13 +392,13 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 			"trial"}},
 		{"CheckOnlyResponse", aghub.CheckOnlyResponse{}, []string{"status"}},
 		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "readme", "summary"}},
-		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keyset"}},
+		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keys"}},
 		// POST /directory:bucket, the daemon's recipient lookup, which
 		// names no agent (sealed-sender §2.9) [redteam:F3].
 		{"DirBucketRequest", aghub.DirBucketRequest{}, []string{"bits", "cursor", "prefix"}},
 		{"DirBucketResponse", aghub.DirBucketResponse{}, []string{"entries", "max_bits", "next", "partial"}},
 		{"DirBucketEntry", aghub.DirBucketEntry{}, []string{"box", "h"}},
-		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keyset"}},
+		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keys", "prev_seq"}},
 		{"KeysPublishResponse", aghub.KeysPublishResponse{}, []string{"aid", "keys_status"}},
 		// The A2A registry (A2A-DESIGN §10.5), read by the daemon's
 		// list_agents (ANet internal/hubapi pins the same names).
@@ -423,7 +423,7 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 	// The per-field status values a daemon branches on.
 	for _, pair := range [][2]string{
 		{aghub.KeysStatusOK, "ok"}, {aghub.KeysStatusUnchanged, "unchanged"}, {aghub.KeysStatusAbsent, "absent"},
-		{aghub.KeysStatusInvalid, "invalid"}, {aghub.KeysStatusConflict, "conflict"},
+		{aghub.KeysStatusInvalid, "invalid"},
 		{aghub.CardStatusOK, "ok"}, {aghub.CardStatusUnchanged, "unchanged"}, {aghub.CardStatusAbsent, "absent"},
 		{aghub.CardStatusInvalid, "invalid"}, {aghub.CardStatusConflict, "conflict"},
 		{aghub.CardStatusWithdrawn, "withdrawn"},
@@ -484,8 +484,8 @@ func TestTheWire2RoutesAreServed(t *testing.T) {
 	}
 	code, body := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
 	var out map[string]string
-	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
-		t.Errorf("GET keys of an unknown AID: %d %s, want the handler's JSON 404", code, body)
+	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" || out["reason"] != "unknown_aid" {
+		t.Errorf("GET keys of an unknown AID: %d %s, want the handler's 404 unknown_aid", code, body)
 	}
 	// The anonymous directory route answers a query from its own handler.
 	code, body, _ = send(t, newRequest(t, srv, http.MethodPost, "/directory:bucket", []byte(`{"prefix":"","bits":0}`)))

@@ -180,7 +180,7 @@ func TestLeavingDoesNotEraseWhatHappened(t *testing.T) {
 func TestLeavingWarnsAboutMailNobodyWillCollect(t *testing.T) {
 	srv := newHub(t)
 	provider, sender := twoAgents(t)
-	register(t, srv, provider, "Provider", []string{"work.do"})
+	registerWithKeys(t, srv, provider, "Provider", []string{"work.do"})
 	register(t, srv, sender, "Sender", nil)
 	if code, b, _ := relaySend(t, srv, sender, provider.AID(), testEnvelope(t, provider.AID(), nil)); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
@@ -213,7 +213,7 @@ func TestLeavingWarnsAboutMailNobodyWillCollect(t *testing.T) {
 func TestLeavingCountsOnlyTheMailStillWaiting(t *testing.T) {
 	srv := newHub(t)
 	provider, sender := twoAgents(t)
-	register(t, srv, provider, "Provider", []string{"work.do"})
+	registerWithKeys(t, srv, provider, "Provider", []string{"work.do"})
 	register(t, srv, sender, "Sender", nil)
 
 	for i := 0; i < 3; i++ {

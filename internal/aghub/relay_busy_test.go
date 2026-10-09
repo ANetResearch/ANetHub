@@ -26,7 +26,7 @@ func TestRelayEnqueueSurvivesConcurrentWriters(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	const to = "bafyreirecipientforbusytest"
+	to := storeAgentWithKeys(t, s, "busy").AID()
 	var n atomic.Int64
 
 	stop := make(chan struct{})

@@ -131,7 +131,10 @@ func storedKeys(t *testing.T, srvURL, aid string) []byte {
 	if err := json.Unmarshal(b, &view); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
+	raw, err := base64.RawURLEncoding.DecodeString(view.Keys)
+	if err != nil {
+		t.Fatalf("the served key set is not base64url: %v", err)
+	}
 	return raw
 }
 
@@ -164,7 +167,7 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 		t.Errorf("the same set under a broken signature: %d %s, want 400", code, b)
 	}
 	body := registerBody(t, c, "Agent", nil)
-	body["enc_keys"] = base64.StdEncoding.EncodeToString(broken)
+	withEncKeys(t, srv, body, c.AID(), broken)
 	code, b := registerFunded(t, srv, c, body)
 	var reg aghub.RegisterResponse
 	_ = json.Unmarshal(b, &reg)
@@ -214,7 +217,7 @@ func TestAPollIsBoundedByTheBudgetAndOldestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	var sent [][]byte
 	for i, n := range []int{1500, 300, 300, 300} {
@@ -225,7 +228,7 @@ func TestAPollIsBoundedByTheBudgetAndOldestFirst(t *testing.T) {
 		sent = append(sent, env)
 	}
 	envelopeOf := func(p polled, i int) []byte {
-		b, _ := base64.StdEncoding.DecodeString(p.Messages[i].Envelope)
+		b, _ := base64.RawURLEncoding.DecodeString(p.Messages[i].Envelope)
 		return b
 	}
 	p := relayPoll(t, srv, recip)

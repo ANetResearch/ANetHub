@@ -714,7 +714,7 @@ func TestNegativeCacheMissAfterOwnerMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyset, _, _, _ := b.store.LocalKeys(owner.aid)
-	if _, err := c.store.PublishKeys(owner.aid, keyset, owner.c.KEL(), c.clock()); err != nil {
+	if _, err := c.store.PublishKeys(owner.aid, keyset, 0, owner.c.KEL(), c.clock()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.store.db.Exec(`DELETE FROM agent WHERE aid=?`, owner.aid); err != nil {
@@ -1173,6 +1173,7 @@ func TestForkedEntriesResolveNothing(t *testing.T) {
 		}
 		at.hub.publish(&relayAgent{c: at.c, aid: at.c.AID()}, 1)
 	}
+	sealToKeysAt(t, b.store, c0.AID()) // what is sent goes to B's agent
 	expectRefusal(t, a.send0To(c0.AID(), "", "fork"), 404, "recipient_unknown")
 	if b.forwards()+c.forwards() != 0 {
 		t.Fatalf("a forked recipient was forwarded to: %d at B, %d at C", b.forwards(), c.forwards())
@@ -1256,7 +1257,7 @@ func TestAMovedOwnerIsFoundAgainAfterARefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	keyset, _, _, _ := b.store.LocalKeys(owner.aid)
-	if _, err := c.store.PublishKeys(owner.aid, keyset, owner.c.KEL(), c.clock()); err != nil {
+	if _, err := c.store.PublishKeys(owner.aid, keyset, 0, owner.c.KEL(), c.clock()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.store.db.Exec(`DELETE FROM agent WHERE aid=?`, owner.aid); err != nil {

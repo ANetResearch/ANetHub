@@ -120,7 +120,7 @@ func registerWithKeys(t *testing.T, h *fedHub) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.PublishKeys(c.AID(), raw, c.KEL(), time.Now()); err != nil {
+	if _, err := h.store.PublishKeys(c.AID(), raw, 0, c.KEL(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	return c.AID()

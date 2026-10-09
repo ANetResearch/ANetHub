@@ -89,7 +89,7 @@ func FuzzHubMboxEpoch(f *testing.F) {
 			return
 		}
 		raw, _ := signed.Marshal()
-		body := fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(raw)})
+		body := fzJSON(t, map[string]any{"keys": base64.RawURLEncoding.EncodeToString(raw), "prev_seq": prevSeq})
 		rec = h.signedDo(k, relayauth.ActionKeys, http.MethodPost, "/agents/"+k.AID()+"/keys", "", body).Code
 		if !allowed(rec, 200, 400, 409) {
 			t.Fatalf("publish: unexpected %d", rec)

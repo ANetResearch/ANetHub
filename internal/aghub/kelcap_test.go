@@ -90,7 +90,7 @@ func TestAKeyHistoryStoredBeforeTheCapIsNotServed(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := mintKeySet(t, legacy, uint64(time.Now().UnixMilli()))
-	if _, err := store.PublishKeys(legacy.AID(), raw, legacy.KEL(), time.Now()); err != nil {
+	if _, err := store.PublishKeys(legacy.AID(), raw, 0, legacy.KEL(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if code, b := getJSON(t, srv.URL+"/agents/"+legacy.AID()+"/jwks.json"); code != http.StatusNotFound {

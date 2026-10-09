@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -52,9 +53,12 @@ func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 
 	// Since hub wire 2 the relay holds sealed envelopes only: the
 	// delegate, the reply and the result below are opaque to the hub and
-	// to this admin plane, which is the property these tests pin.
+	// to this admin plane, which is the property these tests pin. The hub
+	// queues an envelope only for a key its recipient publishes (the kid
+	// check), so both agents publish one.
+	kids := map[string][]byte{prov.AID(): publishTestKeys(t, hs, prov), req.AID(): publishTestKeys(t, hs, req)}
 	for i, to := range []string{prov.AID(), req.AID(), req.AID()} {
-		if _, err := hs.QueueEnvelope(to, sealedForTest(t, to, fmt.Sprintf("%s %d", testCanary, i))); err != nil {
+		if _, err := hs.QueueEnvelope(to, sealedForTest(t, to, kids[to], fmt.Sprintf("%s %d", testCanary, i))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -87,14 +91,42 @@ func newTestServer(t *testing.T) (*Server, *Store, *Harvester, string, string) {
 	return srv, store, hv, provAID, reqAID
 }
 
-// sealedForTest is a structurally valid sealed envelope for "to" whose
-// ciphertext is the given text. A real one is encrypted; the point here
-// is that even a ciphertext holding plaintext bytes is not decoded or
-// copied by the admin plane.
-func sealedForTest(t *testing.T, to, ct string) []byte {
+// publishTestKeys stores a key set for c at hs and returns the kid of its
+// one key.
+func publishTestKeys(t *testing.T, hs *aghub.Store, c *identity.Controller) []byte {
+	t.Helper()
+	now := uint64(time.Now().UnixMilli())
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mbox, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := seal.SignEncKeySet(&seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: now,
+		Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: seal.Mbox{Epoch: 1, Pub: mbox}}, c.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := signed.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hs.PublishKeys(c.AID(), raw, 0, c.KEL(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	return kp.Public.KID
+}
+
+// sealedForTest is a structurally valid sealed envelope for "to", sealed
+// to kid, whose ciphertext is the given text. A real one is encrypted; the
+// point here is that even a ciphertext holding plaintext bytes is not
+// decoded or copied by the admin plane.
+func sealedForTest(t *testing.T, to string, kid []byte, ct string) []byte {
 	t.Helper()
 	env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct),
+		KID: kid, Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct),
 		Access: &seal.Access{Kind: seal.AccessKindSession}}
 	b, err := env.Marshal()
 	if err != nil {

@@ -1,12 +1,15 @@
 package aghub
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/seal"
 )
 
@@ -32,6 +35,15 @@ import (
 // relay_redelivery counts how often one env_digest was queued within a day
 // (§4.2.1 step 9): a sender retrying an envelope its recipient already took
 // is answered as a new message, but only three times a day.
+//
+// An envelope is queued only if it can still be opened (forward-secrecy
+// FS-H1): it is sealed to a key in the recipient's registered key set, and
+// it is accepted no later than DeliveryDeadline after that key's not_after.
+// Everything the recipient's key deletion relies on follows from it: once a
+// key is out of the published set, or past its deadline, nothing more
+// sealed to it is accepted, so the recipient can delete it once it has read
+// what was. The kid is read from the envelope when it is queued and is not
+// stored (FS-H6): the relay table has no kid column and no index by kid.
 
 // RelayMessage is one queued envelope.
 type RelayMessage struct {
@@ -52,6 +64,19 @@ var ErrMailboxFull = errors.New("hub: recipient mailbox full")
 // came under already has MaxStrangerCapRows rows waiting (§4.2.2). Contact
 // mail still fits. The HTTP layer answers 429 strangers_busy.
 var ErrStrangersBusy = errors.New("hub: the recipient's share for non-contacts is full")
+
+// ErrKidStale is RelayEnqueue's refusal of an envelope sealed to a key the
+// recipient does not publish (it has no key set registered here, or the
+// key is not in it), or accepted more than DeliveryDeadline after that
+// key's not_after (forward-secrecy FS-H1). The HTTP layer answers 409
+// kid_stale, which a sender answers by fetching the recipient's current
+// keys and sealing again.
+var ErrKidStale = errors.New("hub: the envelope is sealed to a key the recipient does not publish, or past its deadline")
+
+// DeliveryDeadline is D (forward-secrecy §0): how long after a key's
+// not_after this hub still accepts an envelope sealed to it. The daemon
+// reads the same constant (seal.DeliveryDeadlineMS).
+const DeliveryDeadline = time.Duration(seal.DeliveryDeadlineMS) * time.Millisecond
 
 // ErrBadEnvelope is the refusal of bytes that are not a structurally valid
 // sealed envelope addressed to the recipient (QueueEnvelope). The HTTP layer
@@ -89,6 +114,9 @@ type RelayItem struct {
 	CapID []byte
 	// Exp is outer key 8, nil when absent.
 	Exp *uint64
+	// KID is outer key 4, the recipient key the envelope is sealed to, as
+	// seal.ParseOuter read it from Envelope (FS-H1).
+	KID []byte
 }
 
 // Queued is what RelayEnqueue did: queued a new row, or found the same
@@ -149,7 +177,13 @@ func (s *Store) RelayQueued(to string, digest [32]byte) (rid []byte, ok bool, er
 //     a send that raced this one): Duplicate, nothing written;
 //  2. the envelope queued MaxRedeliveries times within RedeliveryWindow:
 //     *RedeliveryLimitedError;
-//  3. the kid (FS-H1): v030-todo(FS-3);
+//  3. the kid (FS-H1, FS-H2): the recipient's registered key set holds
+//     it, and the envelope is accepted no later than DeliveryDeadline after
+//     its not_after (ErrKidStale). The key set and the time of acceptance
+//     are read here, in the transaction that writes the row, under the
+//     store's lock that a key set publication also takes: a send is checked
+//     against the key set in force when it is queued, never one replaced
+//     while it waited;
 //  4. the mailbox: the whole of it (ErrMailboxFull), then for a non-contact
 //     envelope the non-contact share and the credential's rows
 //     (ErrStrangersBusy);
@@ -174,6 +208,9 @@ func (s *Store) RelayEnqueue(it RelayItem) (Queued, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if enqueueLocked != nil {
+		enqueueLocked(s)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Queued{}, err
@@ -206,9 +243,11 @@ func (s *Store) RelayEnqueue(it RelayItem) (Queued, error) {
 	case !errors.Is(err, sql.ErrNoRows):
 		return Queued{}, err
 	}
-	// v030-todo(FS-3): the kid of the envelope against the recipient's key
-	// set (FS-H1, 409 kid_stale), here: after the duplicate check, before
-	// the capacity (core G23).
+	// The kid, after the duplicate check and before the capacity (core
+	// G23).
+	if err := s.kidAcceptable(tx, it.To, it.KID, nowMS); err != nil {
+		return Queued{}, err
+	}
 	size := int64(len(it.Envelope))
 	var n int
 	var total int64
@@ -287,6 +326,103 @@ func (s *Store) RelayEnqueue(it RelayItem) (Queued, error) {
 // process dying there (P-SS-1). Nil outside tests.
 var enqueueFault func() error
 
+// enqueueLocked, when a test sets it, runs once RelayEnqueue on s holds the
+// store's lock and before it reads anything: what it changes there (the key
+// set, the clock) is what the send is checked against. Nil outside tests.
+var enqueueLocked func(s *Store)
+
+// kidAcceptable is FS-H1 for an envelope to to sealed to kid, accepted at
+// acceptedMS: nil, or ErrKidStale. It reads to's key set through q, which
+// RelayEnqueue passes its transaction as.
+func (s *Store) kidAcceptable(q rowQuerier, to string, kid []byte, acceptedMS int64) error {
+	var seq uint64
+	var raw []byte
+	err := q.QueryRow(`SELECT seq, keyset FROM agent_keys WHERE aid=?`, to).Scan(&seq, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: the recipient has registered no key set", ErrKidStale)
+	}
+	if err != nil {
+		return err
+	}
+	keys, err := s.kids.keysOf(to, seq, raw)
+	if err != nil {
+		return err
+	}
+	if len(kid) != seal.KIDLen {
+		return fmt.Errorf("%w: the kid is %d bytes", ErrKidStale, len(kid))
+	}
+	notAfter, ok := keys[[seal.KIDLen]byte(kid)]
+	if !ok {
+		return fmt.Errorf("%w: the kid is not in the recipient's key set seq %d", ErrKidStale, seq)
+	}
+	if !withinDeadline(notAfter, acceptedMS) {
+		return fmt.Errorf("%w: accepted at %d, more than %s after the key's not_after %d",
+			ErrKidStale, acceptedMS, DeliveryDeadline, notAfter)
+	}
+	return nil
+}
+
+// withinDeadline reports whether an envelope accepted at acceptedMS is
+// within DeliveryDeadline of a key's notAfter: acceptedMS <= notAfter + D,
+// without overflow.
+func withinDeadline(notAfter uint64, acceptedMS int64) bool {
+	if acceptedMS < 0 {
+		return true
+	}
+	at := uint64(acceptedMS)
+	return at <= notAfter || at-notAfter <= uint64(seal.DeliveryDeadlineMS)
+}
+
+// kidCache holds the decoded key set of recent recipients, by AID: which
+// kids each publishes and their not_after (forward-secrecy §4.2, "cache the
+// decoded key set by (aid, seq)"). An entry is used only for the very bytes
+// it was decoded from, so a new set, or the same seq stored again after a
+// deregistration, is decoded afresh. It holds published keys only, nothing
+// of any envelope. Its methods are called under the store's lock.
+type kidCache struct {
+	mu      sync.Mutex
+	entries map[string]*kidEntry
+}
+
+type kidEntry struct {
+	seq  uint64
+	raw  []byte
+	keys map[[seal.KIDLen]byte]uint64
+}
+
+// kidCacheMax bounds the cache. It is emptied when full: the next sends
+// decode their recipients' sets again.
+const kidCacheMax = 4096
+
+// keysOf returns the kids and not_after of the key set raw (seq), stored
+// for aid.
+func (c *kidCache) keysOf(aid string, seq uint64, raw []byte) (map[[seal.KIDLen]byte]uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.entries[aid]; e != nil && e.seq == seq && bytes.Equal(e.raw, raw) {
+		return e.keys, nil
+	}
+	signed, err := seal.UnmarshalSignedEncKeySet(raw)
+	if err != nil {
+		return nil, fmt.Errorf("hub: stored key set for %s undecodable: %w", aid, err)
+	}
+	var es seal.EncKeySet
+	if err := coredet.UnmarshalStrict(signed.Set, &es); err != nil {
+		return nil, fmt.Errorf("hub: stored key set for %s undecodable: %w", aid, err)
+	}
+	keys := make(map[[seal.KIDLen]byte]uint64, len(es.Keys))
+	for _, k := range es.Keys {
+		if len(k.KID) == seal.KIDLen {
+			keys[[seal.KIDLen]byte(k.KID)] = k.NotAfter
+		}
+	}
+	if c.entries == nil || len(c.entries) >= kidCacheMax {
+		c.entries = map[string]*kidEntry{}
+	}
+	c.entries[aid] = &kidEntry{seq: seq, raw: append([]byte(nil), raw...), keys: keys}
+	return keys, nil
+}
+
 // QueueEnvelope queues an envelope for toAID that reached this hub without
 // a credential checked here: an operator tool, a test. (A peer hub's
 // forward is checked like a local send, ServeForward, and queued with
@@ -303,14 +439,30 @@ func (s *Store) QueueEnvelope(toAID string, envelope []byte) (Queued, error) {
 		return Queued{}, fmt.Errorf("%w: %v", ErrBadEnvelope, err)
 	}
 	return s.RelayEnqueue(RelayItem{To: toAID, Envelope: envelope, Digest: digest,
-		Class: seal.CapClassStranger, Exp: outer.Exp})
+		Class: seal.CapClassStranger, Exp: outer.Exp, KID: outer.KID})
 }
 
-// RelayPoll returns undelivered envelopes for toAID with an id above
-// afterID, oldest first. afterID 0 is the whole mailbox.
-// limit <= 0 means 100. budget bounds the cumulative envelope bytes of one
-// response; the first message is always returned, even when it alone
-// exceeds the budget, so that one large message is still deliverable.
+// MaxPollLimit is the most envelopes one /relay/poll page holds, whatever
+// limit the request asks for: as many as one /relay/ack takes (at most 1000
+// items, core §2.12.2), so a page is acknowledged in one request.
+const MaxPollLimit = 1000
+
+// RelayPoll returns a page of the undelivered envelopes for toAID with an
+// id above afterID, oldest first, and more: whether such envelopes remain
+// after the page (forward-secrecy FS-H5). afterID 0 is the whole mailbox.
+// limit <= 0 means 100, and at most MaxPollLimit. budget bounds the
+// cumulative envelope bytes of one page; the first envelope is always
+// returned, even when it alone exceeds the budget, so that one large
+// envelope is still deliverable.
+//
+// An envelope whose outer exp has passed (exp <= now) can no longer be
+// opened: it is neither returned nor counted in more (CUX-H2).
+//
+// The page and more are read in one read transaction, so they describe one
+// snapshot of the mailbox: more is false only when the snapshot holds
+// nothing returnable past the page. A daemon relies on that to know it has
+// read everything queued before it asked (FS-K9): a page cut short by the
+// limit or the byte budget always says more.
 //
 // afterID is the recipient's cursor (A2A-DESIGN §3.7, decision Q1). A
 // daemon leaves an envelope it could not process yet in the mailbox (§3.6,
@@ -319,34 +471,82 @@ func (s *Store) QueueEnvelope(toAID string, envelope []byte) (Queued, error) {
 // of messages for interactions it does not know. With afterID the daemon
 // reads on past them and returns to the head later. Ids only grow
 // (AUTOINCREMENT), so "above afterID" is "queued after it".
-func (s *Store) RelayPoll(toAID string, afterID int64, limit int, budget int64) ([]RelayMessage, error) {
+func (s *Store) RelayPoll(toAID string, afterID int64, limit int, budget int64) (msgs []RelayMessage, more bool, err error) {
 	if limit <= 0 {
 		limit = 100
+	}
+	if limit > MaxPollLimit {
+		limit = MaxPollLimit
 	}
 	if afterID < 0 {
 		afterID = 0
 	}
-	rows, err := s.db.Query(
-		`SELECT id, to_aid, size, created_at, payload FROM relay_message
-		  WHERE to_aid=? AND id>? ORDER BY id LIMIT ?`, toAID, afterID, limit)
+	nowMS := s.now().UnixMilli()
+	tx, err := s.db.Begin()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	defer rows.Close()
-	var out []RelayMessage
+	defer tx.Rollback()
+	// One row past the page says whether there is more; its payload is not
+	// read.
+	rows, err := tx.Query(
+		`SELECT id, to_aid, size, created_at FROM relay_message
+		  WHERE to_aid=? AND id>? AND (exp IS NULL OR exp>?) ORDER BY id LIMIT ?`,
+		toAID, afterID, nowMS, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
 	var acc int64
 	for rows.Next() {
 		var m RelayMessage
-		if err := rows.Scan(&m.ID, &m.ToAID, &m.Size, &m.CreatedAt, &m.Payload); err != nil {
-			return nil, err
+		if err := rows.Scan(&m.ID, &m.ToAID, &m.Size, &m.CreatedAt); err != nil {
+			rows.Close()
+			return nil, false, err
 		}
-		if len(out) > 0 && acc+int64(len(m.Payload)) > budget {
+		if len(msgs) == limit || len(msgs) > 0 && acc+m.Size > budget {
+			more = true
 			break
 		}
-		acc += int64(len(m.Payload))
-		out = append(out, m)
+		acc += m.Size
+		msgs = append(msgs, m)
 	}
-	return out, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(msgs) == 0 {
+		return nil, more, nil
+	}
+	// The payloads of the page, from the same snapshot: the returnable rows
+	// from its first id to its last are exactly the page.
+	prows, err := tx.Query(
+		`SELECT id, payload FROM relay_message
+		  WHERE to_aid=? AND id BETWEEN ? AND ? AND (exp IS NULL OR exp>?) ORDER BY id`,
+		toAID, msgs[0].ID, msgs[len(msgs)-1].ID, nowMS)
+	if err != nil {
+		return nil, false, err
+	}
+	defer prows.Close()
+	i := 0
+	for prows.Next() {
+		var id int64
+		var payload []byte
+		if err := prows.Scan(&id, &payload); err != nil {
+			return nil, false, err
+		}
+		if i == len(msgs) || msgs[i].ID != id {
+			return nil, false, fmt.Errorf("hub: the mailbox of %s changed within one read", toAID)
+		}
+		msgs[i].Payload = payload
+		i++
+	}
+	if err := prows.Err(); err != nil {
+		return nil, false, err
+	}
+	if i != len(msgs) {
+		return nil, false, fmt.Errorf("hub: the mailbox of %s changed within one read", toAID)
+	}
+	return msgs, more, nil
 }
 
 // RelayAck deletes delivered envelopes, scoped to toAID so that a caller

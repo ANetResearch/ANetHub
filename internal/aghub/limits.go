@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ANetResearch/ANetCore/seal"
 )
 
 // Limits are the operator-set bounds of the relay and of registration
@@ -34,7 +36,7 @@ type Limits struct {
 	MailboxMessages int
 	MailboxBytes    int64
 	// UndeliveredTTL is how long an envelope waits for its recipient
-	// before the janitor deletes it.
+	// before the janitor deletes it; at most MaxUndeliveredTTL.
 	UndeliveredTTL time.Duration
 	// PollBudget bounds the cumulative envelope bytes of one /relay/poll
 	// response (the first message is always returned).
@@ -58,7 +60,17 @@ func DefaultLimits() Limits {
 	}
 }
 
-// Validate reports the first limit that is not positive.
+// MaxUndeliveredTTL is the longest an undelivered envelope may be kept
+// (forward-secrecy FS-T1): this hub accepts an envelope up to
+// DeliveryDeadline after its key's not_after, and the recipient deletes the
+// key at not_after + seal.MaxMessageLifetimeMS by a clock that may run up to
+// seal.ClockSkewMS ahead. An envelope kept longer could outlive the only key
+// that opens it, so the operator cannot set a longer -relay-ttl. It is 14
+// days 22 hours 55 minutes; the default is 14 days.
+const MaxUndeliveredTTL = time.Duration(seal.MaxMessageLifetimeMS-seal.DeliveryDeadlineMS-seal.ClockSkewMS) * time.Millisecond
+
+// Validate reports the first limit that is not positive, or the undelivered
+// TTL past MaxUndeliveredTTL.
 func (l Limits) Validate() error {
 	switch {
 	case l.MaxEnvelope <= 0:
@@ -67,6 +79,9 @@ func (l Limits) Validate() error {
 		return fmt.Errorf("mailbox limits must be positive")
 	case l.UndeliveredTTL <= 0:
 		return fmt.Errorf("undelivered TTL must be positive")
+	case l.UndeliveredTTL > MaxUndeliveredTTL:
+		return fmt.Errorf("undelivered TTL %s is longer than %s, after which a recipient may have deleted the key "+
+			"that opens an envelope; set -relay-ttl to %s or less", l.UndeliveredTTL, MaxUndeliveredTTL, MaxUndeliveredTTL)
 	case l.PollBudget <= 0:
 		return fmt.Errorf("poll budget must be positive")
 	case l.RegisterPerMinute <= 0 || l.RegisterBurst <= 0:

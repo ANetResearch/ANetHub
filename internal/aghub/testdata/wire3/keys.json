@@ -1,0 +1,170 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "The key set endpoints (core §2.12.2; forward-secrecy FS-H4, CORE-E5, CORE-E7, G1). POST /agents/{aid}/keys, signed for \"keys\" by the agent itself, takes {keys, prev_seq}: keys is the signed key set in base64url, decoded strictly (a padded or standard-alphabet spelling, or the wire-2 member keyset, is 400 bad_request), and prev_seq, required, is the seq of the last set the publisher signed before it. A hub that holds a set with a higher seq than prev_seq refuses it 409 keys_rollback and names that seq (stored_seq), and so does a set whose seq is not above the stored one; the stored set sent again is unchanged whatever its prev_seq. A set that does not verify for the agent, or breaks the mailbox key rule (SSR-W9), is 400 bad_request saying why. GET /agents/{aid}/keys answers {aid, keys, kel}, both base64url, or 404: unknown_aid for an AID not registered here, not_found for an agent with no key set. /register with enc_keys (base64url) needs prev_seq too, and refuses a set that does not follow the stored one with 409 keys_rollback before it writes anything.",
+  "setup": "keys",
+  "cases": [
+    {
+      "name": "the keys of an AID not registered here",
+      "cite": "G1",
+      "request": {"method": "GET", "path": "/agents/${mallory}/keys", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 404, "body": {"reason": "unknown_aid",
+        "error": "No agent with this AID is registered here, and this hub serves the key sets of its own agents only; ask the agent's own hub."}}
+    },
+    {
+      "name": "the keys of an agent that published none",
+      "cite": "G1",
+      "request": {"method": "GET", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 404, "body": {"reason": "not_found",
+        "error": "This agent is registered here but has published no encryption key set yet; ask again once its anet daemon is running."}}
+    },
+    {
+      "name": "a publication without prev_seq",
+      "cite": "FS-H4",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys1000}"}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "A key set publication carries keys and prev_seq (the seq of the last set signed before it, 0 for none); add them and send again."}}
+    },
+    {
+      "name": "hb64-keys: the key set in standard base64",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys1000_std}", "prev_seq": 0}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"keys\" is not base64url (the URL-safe alphabet, no padding, no white space); encode it that way and send again."}}
+    },
+    {
+      "name": "the wire-2 member name",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keyset": "${keys1000}", "prev_seq": 0}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The request body has the member \"keyset\", which this route does not take; remove it and send again."}}
+    },
+    {
+      "name": "the refused publications stored nothing",
+      "cite": "FS-H4",
+      "request": {"method": "GET", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "the first set",
+      "cite": "FS-H4",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys1000}", "prev_seq": 0}},
+      "response": {"status": 200, "body": {"aid": "${alice}", "keys_status": "ok"}}
+    },
+    {
+      "name": "the keys of an agent, base64url",
+      "cite": "CORE-E5",
+      "request": {"method": "GET", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body": {"aid": "${alice}", "keys": "${keys1000}", "kel": "${alice_kel}"}}
+    },
+    {
+      "name": "the stored set again, with the prev_seq of its first publication",
+      "cite": "FS-H4",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys1000}", "prev_seq": 0}},
+      "response": {"status": 200, "body": {"aid": "${alice}", "keys_status": "unchanged"}}
+    },
+    {
+      "name": "a newer set that follows an older one than the hub holds",
+      "cite": "FS-H4",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys2000}", "prev_seq": 999}},
+      "response": {"status": 409, "body": {"reason": "keys_rollback",
+        "error": "This hub holds a newer key set (stored_seq) than the one this publication follows (prev_seq); sign the next set after stored_seq and publish it with prev_seq set to stored_seq.",
+        "stored_seq": 1000}}
+    },
+    {
+      "name": "a set below the stored one",
+      "cite": "FS-H4",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys500}", "prev_seq": 1000}},
+      "response": {"status": 409, "body": {"reason": "keys_rollback",
+        "error": "The key set is not newer than the one this hub holds (stored_seq); publish one with a higher sequence number.",
+        "stored_seq": 1000}}
+    },
+    {
+      "name": "a set signed by somebody else",
+      "cite": "FS-C4",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys_foreign}", "prev_seq": 1000}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a new mailbox key under the same epoch",
+      "cite": "SSR-W9",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys_w9}", "prev_seq": 1000}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The key set was not accepted: the mailbox key changed but its epoch stayed 1; a new mailbox key needs epoch 2 or more."}}
+    },
+    {
+      "name": "the refused sets left the stored one",
+      "cite": "FS-H4",
+      "request": {"method": "GET", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 200, "body": {"aid": "${alice}", "keys": "${keys1000}", "kel": "${alice_kel}"}}
+    },
+    {
+      "name": "the newer set, following the stored one",
+      "cite": "FS-H4",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys2000}", "prev_seq": 1000}},
+      "response": {"status": 200, "body": {"aid": "${alice}", "keys_status": "ok"}}
+    },
+    {
+      "name": "unsigned",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/agents/${alice}/keys", "headers": {"X-ANet-Wire": "3"},
+        "json": {"keys": "${keys3000}", "prev_seq": 2000}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "on another agent's path",
+      "cite": "core §2.12.3",
+      "request": {"method": "POST", "path": "/agents/${mallory}/keys", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "keys", "as": "alice"},
+        "json": {"keys": "${keys3000}", "prev_seq": 2000}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "/register with enc_keys and no prev_seq",
+      "cite": "PAY-A1 step 3",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}", "enc_keys": "${keys3000}"}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "A registration that carries enc_keys carries prev_seq too (the seq of the last key set signed before it, 0 for none); add it and send again."}}
+    },
+    {
+      "name": "/register with enc_keys in standard base64",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}", "enc_keys": "${keys1000_std}", "prev_seq": 2000}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"enc_keys\" is not base64url (the URL-safe alphabet, no padding, no white space); encode it that way and send again."}}
+    },
+    {
+      "name": "/register with a set that does not follow the stored one",
+      "cite": "PAY-A1 step 9",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}", "enc_keys": "${keys3000}", "prev_seq": 1000}},
+      "response": {"status": 409, "body": {"reason": "keys_rollback",
+        "error": "This hub holds a newer key set (stored_seq) than the one this publication follows (prev_seq); sign the next set after stored_seq and publish it with prev_seq set to stored_seq.",
+        "stored_seq": 2000}}
+    },
+    {
+      "name": "/register with the set that follows",
+      "cite": "PAY-A1 step 9",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}", "enc_keys": "${keys3000}", "prev_seq": 2000}},
+      "response": {"status": 200, "body_has": {"aid": "${alice}", "status": "registered", "keys_status": "ok"}}
+    },
+    {
+      "name": "/register with the stored set and an old prev_seq",
+      "cite": "FS-H4",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "alice"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}", "enc_keys": "${keys3000}", "prev_seq": 0}},
+      "response": {"status": 200, "body_has": {"keys_status": "unchanged"}}
+    }
+  ]
+}
