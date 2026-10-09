@@ -5,7 +5,6 @@
 package hubid
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -65,7 +64,8 @@ func LoadOrIncept(dir string) (*Identity, error) {
 // IdentityResponse is the body of GET /hub/identity.
 type IdentityResponse struct {
 	AID string `json:"aid"`
-	// KEL is the hub's key history, CoreDet CBOR in standard base64.
+	// KEL is the hub's key history, CoreDet CBOR in base64url without
+	// padding, like every binary value of hub wire 3 (core CORE-E5).
 	KEL string `json:"kel"`
 	// Wire is the hub wire contract this hub speaks (core CORE-V1): a
 	// daemon or a peer can tell before its first signed request whether
@@ -94,7 +94,7 @@ func (i *Identity) Handler() http.Handler {
 			wire3.Refuse(w, wire3.ReasonNotFound)
 			return
 		}
-		out := IdentityResponse{AID: i.AID, KEL: base64.StdEncoding.EncodeToString(i.KEL), Wire: wire3.Version}
+		out := IdentityResponse{AID: i.AID, KEL: wire3.EncodeB64URL(i.KEL), Wire: wire3.Version}
 		if i.DirMaxBits != nil {
 			out.DirMaxBits = i.DirMaxBits()
 		}

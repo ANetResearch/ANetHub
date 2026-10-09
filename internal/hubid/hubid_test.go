@@ -71,7 +71,7 @@ func mustB64(t *testing.T, s string) []byte {
 }
 
 func jsonB64(s string) ([]byte, error) {
-	return base64.StdEncoding.DecodeString(s)
+	return base64.RawURLEncoding.DecodeString(s)
 }
 
 // /hub/identity answers with the identity as it is when asked, and states
@@ -90,7 +90,7 @@ func TestServedIdentityIsCurrent(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.KEL != base64.StdEncoding.EncodeToString(id.KEL) || out.AID != id.AID || out.Wire != 3 {
+	if out.KEL != base64.RawURLEncoding.EncodeToString(id.KEL) || out.AID != id.AID || out.Wire != 3 {
 		t.Fatalf("served %+v, not the identity as it is now", out)
 	}
 	if rec.Header().Get("X-ANet-Wire") != "3" {
