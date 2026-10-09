@@ -19,13 +19,20 @@ import (
 // before it can tell the peer from someone using the peer's public AID. A
 // forward's body may be as large as an envelope (96 MiB by default), so
 // without a bound, a few concurrent requests naming a peer would make this
-// hub buffer more than it has. Every /fed/v3 request reserves what it reads
-// from one budget, fedBodyBudget bytes for the whole hub, and gives it back
-// when its handler returns; a request that does not fit is 429 source_rate
-// with Retry-After 1 (the origin answers its sender 502, SSR-H13), before
-// it reads past the budget. A declared Content-Length is reserved whole
-// before any byte is read; a body of unknown length reserves what it reads
-// as it reads it.
+// hub buffer more than it has. Every /fed/v3 request reserves the bytes it
+// reads from one budget, fedBodyBudget bytes for the whole hub, as it reads
+// them, and gives them back when its handler returns; a body that does not
+// fit is 429 source_rate with Retry-After 1 (the origin answers its sender
+// 502, SSR-H13): a declared Content-Length more than is free now before any
+// of it is read, any other body once what it read passes the bound.
+//
+// A declared length is checked against what is free, not reserved ahead of
+// its bytes. The headers that pass authPeer's checks before the body are
+// public (a peer's AID, the time, a key state its key history reaches), so
+// reserving a declared length would let anyone hold the whole budget with a
+// few requests that declare 96 MiB and then send nothing, and refuse every
+// peer's forwards for as long as those connections stay open. Reserved as
+// read, the budget is held only by bytes that were sent.
 
 // fedBodyBudget is the bytes of /fed/v3 request bodies held at once. A code
 // constant, not configuration.
@@ -56,6 +63,13 @@ func (b *bodyBudget) give(n int64) {
 	b.mu.Lock()
 	b.used -= n
 	b.mu.Unlock()
+}
+
+// free is the bytes not reserved now.
+func (b *bodyBudget) free() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.limit - b.used
 }
 
 // held is the bytes reserved now.
@@ -124,8 +138,8 @@ var errOverBudget = errors.New("federation: the request bodies held at once are 
 var testHookPeerBodyRead func()
 
 // readPeerBody is step 5 of authPeer: the body of r, at most limit bytes,
-// within the budget. It answers 413 too_large, 429 source_rate or 400
-// bad_request and returns false when it cannot.
+// within the budget, reserved as it is read. It answers 413 too_large, 429
+// source_rate or 400 bad_request and returns false when it cannot.
 func (s *Service) readPeerBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
 	tooLarge := func() ([]byte, bool) {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonTooLarge,
@@ -140,18 +154,14 @@ func (s *Service) readPeerBody(w http.ResponseWriter, r *http.Request, limit int
 	if r.ContentLength > limit {
 		return tooLarge()
 	}
-	hold := s.holdOf(r)
-	if r.ContentLength >= 0 && !hold.take(r.ContentLength) {
+	if r.ContentLength > s.bodies.free() {
 		return overBudget()
 	}
+	hold := s.holdOf(r)
 	if testHookPeerBodyRead != nil {
 		testHookPeerBodyRead()
 	}
-	src := io.Reader(http.MaxBytesReader(w, r.Body, limit))
-	if r.ContentLength < 0 {
-		src = &budgetReader{r: src, hold: hold}
-	}
-	body, err := io.ReadAll(src)
+	body, err := io.ReadAll(&budgetReader{r: http.MaxBytesReader(w, r.Body, limit), hold: hold})
 	if err != nil {
 		var tooBig *http.MaxBytesError
 		switch {
@@ -166,7 +176,7 @@ func (s *Service) readPeerBody(w http.ResponseWriter, r *http.Request, limit int
 	return body, true
 }
 
-// budgetReader reserves what it reads, for a body of unknown length.
+// budgetReader reserves what it reads as it reads it.
 type budgetReader struct {
 	r    io.Reader
 	hold *bodyHold

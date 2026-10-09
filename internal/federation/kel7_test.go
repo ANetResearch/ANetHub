@@ -345,10 +345,12 @@ func TestFedBodyIsReadOnlyAfterHeaderChecks(t *testing.T) {
 }
 
 // SSR-H16: the /fed/v3 request bodies held at once are bounded for the
-// whole hub. A body that does not fit is refused, 429 source_rate with
-// Retry-After 1: a declared length before any of it is read, one of unknown
-// length once what it read passes the bound. What a request held is given
-// back when it is answered.
+// whole hub, and what a request holds is the bytes it sent. A body that
+// does not fit is refused, 429 source_rate with Retry-After 1: a declared
+// length more than is free before any of it is read, one of unknown length
+// once what it read passes the bound. A request that declares a length and
+// sends nothing holds nothing, so idle requests that name a peer cannot
+// refuse the others. What a request held is given back when it is answered.
 func TestFedBodyBudget(t *testing.T) {
 	a, b := newTestHub(t), newTestHub(t)
 	a.start(Config{Delivery: "allowlist", Peers: []Peer{b.peer()}}, nil)
@@ -365,6 +367,16 @@ func TestFedBodyBudget(t *testing.T) {
 			t.Fatalf("%s: its body was not read", what)
 		}
 	}
+	waitHeld := func(what string, n int64) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for a.svc.bodies.held() != n {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %d is held, want %d", what, a.svc.bodies.held(), n)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	body := func(n int, b byte) []byte { return bytes.Repeat([]byte{b}, n) }
 	send := func(r *http.Request) (int, string, http.Header) {
 		resp, err := http.DefaultClient.Do(r)
@@ -375,21 +387,31 @@ func TestFedBodyBudget(t *testing.T) {
 		out, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, reasonOf(out), resp.Header
 	}
-	// 1: 3 KiB, its upload held open.
-	b1 := body(3<<10, 1)
-	pr, pw := io.Pipe()
-	// A failure below must not leave the upload open: the test server
-	// would wait for it to end.
-	t.Cleanup(func() { pw.CloseWithError(io.ErrUnexpectedEOF) })
-	req1 := a.signedReq(b.id, relayauth.ActionFedForward, http.MethodPost, "/fed/v3/forward", b1, 0, nil)
-	req1.Body, req1.ContentLength, req1.GetBody = pr, int64(len(b1)), nil
-	done1 := make(chan int, 1)
-	go func() { code, _, _ := send(req1); done1 <- code }()
-	waitRead("the held request")
-	if held := a.svc.bodies.held(); held != int64(len(b1)) {
-		t.Fatalf("a reading request holds %d", held)
+	// held is a forward of body whose upload the test sends: declared
+	// whole, sent as the test writes to the returned pipe.
+	held := func(what string, payload []byte) (*io.PipeWriter, chan int) {
+		t.Helper()
+		pr, pw := io.Pipe()
+		// A failure below must not leave the upload open: the test server
+		// would wait for it to end.
+		t.Cleanup(func() { pw.CloseWithError(io.ErrUnexpectedEOF) })
+		req := a.signedReq(b.id, relayauth.ActionFedForward, http.MethodPost, "/fed/v3/forward", payload, 0, nil)
+		req.Body, req.ContentLength, req.GetBody = pr, int64(len(payload)), nil
+		done := make(chan int, 1)
+		go func() { code, _, _ := send(req); done <- code }()
+		waitRead(what)
+		return pw, done
 	}
-	// 2: 2 KiB more does not fit; nothing of it is read.
+	// 1: 3 KiB declared. Nothing is held before its bytes arrive; 2.5 KiB
+	// of it sent are 2.5 KiB held.
+	b1 := body(3<<10, 1)
+	pw1, done1 := held("the held request", b1)
+	if n := a.svc.bodies.held(); n != 0 {
+		t.Fatalf("a request that sent nothing holds %d", n)
+	}
+	go pw1.Write(b1[:2560])
+	waitHeld("2.5 KiB sent", 2560)
+	// 2: 2 KiB declared, more than the 1.5 KiB free; nothing of it is read.
 	code, reason, h := send(a.signedReq(b.id, relayauth.ActionFedForward, http.MethodPost, "/fed/v3/forward", body(2<<10, 2), 0, nil))
 	if code != 429 || reason != "source_rate" || h.Get("Retry-After") != "1" {
 		t.Fatalf("over the bound: %d %s Retry-After %q", code, reason, h.Get("Retry-After"))
@@ -405,18 +427,30 @@ func TestFedBodyBudget(t *testing.T) {
 		t.Fatalf("a chunked body over the bound: %d %s", code, reason)
 	}
 	waitRead("the chunked request")
+	waitHeld("after the chunked request", 2560)
+	// 4: a request that declares 1 KiB and sends nothing holds nothing: a
+	// 1 KiB forward sent whole still fits beside it.
+	pwIdle, doneIdle := held("the idle request", body(1<<10, 4))
+	if n := a.svc.bodies.held(); n != 2560 {
+		t.Fatalf("an idle request: %d held, want 2560", n)
+	}
+	if code, reason, _ := send(a.signedReq(b.id, relayauth.ActionFedForward, http.MethodPost, "/fed/v3/forward", body(1<<10, 5), 0, nil)); code != 200 {
+		t.Fatalf("1 KiB beside an idle request: %d %s", code, reason)
+	}
+	waitRead("the 1 KiB request")
+	pwIdle.CloseWithError(io.ErrUnexpectedEOF)
+	<-doneIdle
 	// 1 completes and gives back what it held.
-	go func() { pw.Write(b1); pw.Close() }()
+	go func() { pw1.Write(b1[2560:]); pw1.Close() }()
 	if code := <-done1; code != 200 {
 		t.Fatalf("the held request: %d", code)
 	}
-	if held := a.svc.bodies.held(); held != 0 {
-		t.Fatalf("after the requests were answered %d is held", held)
-	}
-	if code, reason, _ := send(a.signedReq(b.id, relayauth.ActionFedForward, http.MethodPost, "/fed/v3/forward", body(2<<10, 4), 0, nil)); code != 200 {
+	waitHeld("after the requests were answered", 0)
+	if code, reason, _ := send(a.signedReq(b.id, relayauth.ActionFedForward, http.MethodPost, "/fed/v3/forward", body(2<<10, 6), 0, nil)); code != 200 {
 		t.Fatalf("2 KiB once the bound is free: %d %s", code, reason)
 	}
-	if got := a.k.forwarded(); len(got) != 2 || !bytes.Equal(got[0].body, b1) {
+	got := a.k.forwarded()
+	if len(got) != 3 || !bytes.Equal(got[1].body, b1) {
 		t.Fatalf("the kernel got %d forwards", len(got))
 	}
 	// The bound of the hub is 256 MiB.
