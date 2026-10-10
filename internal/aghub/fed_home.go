@@ -53,6 +53,13 @@ const (
 	// again on demand: after a credential under an older epoch than the one
 	// held, or after its home refused a credential.
 	HomeRefreshEvery = time.Minute
+	// HomeRefreshesPerMinute bounds the resolutions made again on demand by
+	// the whole hub, whatever AIDs they are for (SSR-H14a, 2026-10-09): past
+	// it, a use takes the resolution kept. A credential that does not verify
+	// under the mailbox key held has its owner resolved again, and anyone can
+	// send one: without this bound, forged credentials for each owner this
+	// hub knows would have it ask every delivery peer once a minute per owner.
+	HomeRefreshesPerMinute = 60
 	// HomeCacheMax bounds the AIDs whose resolution is kept.
 	HomeCacheMax = 100_000
 	// NegCacheMax bounds the refused credentials kept (SSR-H14a).
@@ -222,9 +229,12 @@ type peerEntry struct {
 
 // fedState is what the federation part of the kernel keeps in memory.
 type fedState struct {
-	mu          sync.Mutex
-	homes       *lru[string, homeInfo]
-	refreshed   *lru[string, time.Time]
+	mu        sync.Mutex
+	homes     *lru[string, homeInfo]
+	refreshed *lru[string, time.Time]
+	// recent is when the last HomeRefreshesPerMinute resolutions made again
+	// on demand were made, oldest first (mayRefresh).
+	recent      []time.Time
 	neg         *lru[negKey, uint64]
 	buckets     *lru[bucketKey, *bucketAnswer]
 	bucketBytes int
@@ -271,13 +281,23 @@ func (f *fedState) markStale(aid string, now time.Time) {
 }
 
 // mayRefresh reports whether aid's resolution may be made again on demand
-// now, and if so records that it is: at most once every HomeRefreshEvery.
+// now, and if so records that it is: at most once every HomeRefreshEvery
+// for aid, and at most HomeRefreshesPerMinute times in any minute for the
+// whole hub (SSR-H14a). A refresh the hub's bound refuses is not recorded
+// for aid, so aid's next use may make it once the bound allows.
 func (f *fedState) mayRefresh(aid string, now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if last, ok := f.refreshed.get(aid); ok && now.Sub(last) < HomeRefreshEvery && !now.Before(last) {
 		return false
 	}
+	if len(f.recent) == HomeRefreshesPerMinute {
+		if oldest := f.recent[0]; now.Sub(oldest) < time.Minute && !now.Before(oldest) {
+			return false
+		}
+		f.recent = f.recent[1:]
+	}
+	f.recent = append(f.recent, now)
 	f.refreshed.put(aid, now)
 	return true
 }

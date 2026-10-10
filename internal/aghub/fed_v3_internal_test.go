@@ -775,6 +775,18 @@ func TestForwardAnswerMapping(t *testing.T) {
 		{200, `{"status":"queued"}`, "", "3", 502, "home_unreachable", "60"},
 		{200, `{"status":"queued","rid":"` + rid + `","recipient_quiet":true}`, "", "2", 502, "home_unreachable", "60"},
 		{429, refusal(wire3.ReasonKidStale), "", "3", 502, "home_unreachable", "60"},
+		// A Retry-After passed on is held between a second and an hour
+		// (SSR-H13, 2026-10-09).
+		{429, refusal(wire3.ReasonRateLimited), "4294967295", "3", 429, "rate_limited", "3600"},
+		{507, refusal(wire3.ReasonMailboxFull), "3601", "3", 507, "mailbox_full", "3600"},
+		{429, refusal(wire3.ReasonStrangersBusy), "0", "3", 429, "strangers_busy", "1"},
+		{429, refusal(wire3.ReasonSourceRate), "86400", "3", 502, "home_unreachable", "3600"},
+		{503, "busy", "0", "", 502, "home_unreachable", "1"},
+		// A 413 without a hub's body: the proxy in front of the home took
+		// no larger body (SSR-H13, 2026-10-09).
+		{413, "<html>413 Request Entity Too Large</html>", "", "", 413, "too_large", ""},
+		{413, `{"error":"too big"}`, "", "3", 413, "too_large", ""},
+		{413, `{"reason":"payload_too_big","error":"x"}`, "", "", 413, "too_large", ""},
 	}
 	for i, r := range rows {
 		t.Run(fmt.Sprintf("%d %d %s", i, r.status, reasonOfBody(r.body)), func(t *testing.T) {
@@ -847,7 +859,9 @@ func TestAProxysRefusalDoesNotCutThePeerOff(t *testing.T) {
 		root.ServeHTTP(w, r)
 	}
 	b.mu.Unlock()
-	expectRefusal(t, a.send0To(recip.aid, b.hubAID, "over the proxy's limit"), 502, "home_unreachable")
+	// The envelope does not fit there, and sending it again will not help
+	// (SSR-H13, 2026-10-09): 413 too_large, not home_unreachable.
+	expectRefusal(t, a.send0To(recip.aid, b.hubAID, "over the proxy's limit"), 413, "too_large")
 	if rec := a.send0To(recip.aid, b.hubAID, "within it"); rec.Code != 200 {
 		t.Fatalf("a send after the proxy's 413: %d %s", rec.Code, rec.Body)
 	}

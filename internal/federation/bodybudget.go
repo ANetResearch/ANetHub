@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -37,6 +38,20 @@ import (
 // fedBodyBudget is the bytes of /fed/v3 request bodies held at once. A code
 // constant, not configuration.
 const fedBodyBudget = 256 << 20
+
+// A body is read within fedBodyReadDeadline of the end of the header checks
+// (SSR-H16, 2026-10-10), or the request is answered and its connection
+// closed, and what it held is given back. Holding the budget takes sending
+// the bytes, but a caller that sends about 256 MiB and then stops would
+// still hold it for as long as its connections stay open, and every peer's
+// request with a body would be 429. 96 MiB in 120 seconds is about
+// 0.8 MiB/s, which hubs that peer have. The headers themselves are bounded
+// by the hub's http.Server (cmd/anet-hub: ReadHeaderTimeout, 10 seconds,
+// for every route).
+const fedBodyReadDeadline = 120 * time.Second
+
+// bodyReadDeadline is fedBodyReadDeadline; a test shortens it.
+var bodyReadDeadline = fedBodyReadDeadline
 
 // bodyBudget is the reservations against fedBodyBudget.
 type bodyBudget struct {
@@ -138,8 +153,9 @@ var errOverBudget = errors.New("federation: the request bodies held at once are 
 var testHookPeerBodyRead func()
 
 // readPeerBody is step 5 of authPeer: the body of r, at most limit bytes,
-// within the budget, reserved as it is read. It answers 413 too_large, 429
-// source_rate or 400 bad_request and returns false when it cannot.
+// within the budget, reserved as it is read, within bodyReadDeadline. It
+// answers 413 too_large, 429 source_rate or 400 bad_request and returns
+// false when it cannot; past the deadline the 400 closes the connection.
 func (s *Service) readPeerBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
 	tooLarge := func() ([]byte, bool) {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonTooLarge,
@@ -161,14 +177,29 @@ func (s *Service) readPeerBody(w http.ResponseWriter, r *http.Request, limit int
 	if testHookPeerBodyRead != nil {
 		testHookPeerBodyRead()
 	}
+	// A ResponseWriter that is not a connection's (a test's recorder) has
+	// no deadline to set; its body is in memory.
+	rc := http.NewResponseController(w)
+	timed := rc.SetReadDeadline(time.Now().Add(bodyReadDeadline)) == nil
 	body, err := io.ReadAll(&budgetReader{r: http.MaxBytesReader(w, r.Body, limit), hold: hold})
+	if timed {
+		// The rest of the request is the handler's: a deadline left set
+		// would end the connection under it.
+		_ = rc.SetReadDeadline(time.Time{})
+	}
 	if err != nil {
 		var tooBig *http.MaxBytesError
+		var ne net.Error
 		switch {
 		case errors.As(err, &tooBig):
 			return tooLarge()
 		case errors.Is(err, errOverBudget):
 			return overBudget()
+		case errors.As(err, &ne) && ne.Timeout():
+			w.Header().Set("Connection", "close")
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: fmt.Sprintf(
+				"The request body was not sent within %d seconds; send it again.", int(fedBodyReadDeadline/time.Second))})
+			return nil, false
 		}
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: "The request body could not be read; send it again."})
 		return nil, false
