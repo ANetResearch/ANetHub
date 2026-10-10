@@ -8,7 +8,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+
+	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/federation"
@@ -30,7 +33,8 @@ const clearReference = "anet-hub clear"
 // due is refused before anything is signed (clear.over_due); the statement
 // is signed and delivered; the peer's answer decides. Accepted (200), the
 // due falls by amount (clear.ok). Refused by the peer, nothing changes
-// here (clear.refused). No answer the hub can read — the peer unreachable,
+// here (clear.refused, naming the peer's reason code, or the HTTP status
+// when what it sent is not shaped like one). No answer the hub can read — the peer unreachable,
 // a proxy's error page, a reply cut off — and nobody here can tell whether
 // the peer recorded it: nothing changes here, and the operator is told so
 // (clear.unconfirmed). Sending another would be a second statement, applied
@@ -99,7 +103,8 @@ func runClear(c *console, data string, args []string) int {
 		if rerr == nil && json.Unmarshal(answer, &refusal) == nil && refusal.Reason != "" &&
 			resp.StatusCode >= 400 && resp.StatusCode < 500 {
 			// A hub's own refusal: the statement was not applied.
-			return c.say("clear.refused", map[string]string{"peer": peer, "value": refusal.Reason})
+			return c.say("clear.refused", map[string]string{"peer": peer,
+				"value": refusalValue(refusal.Reason, resp.StatusCode)})
 		}
 		return c.say("clear.unconfirmed", map[string]string{"peer": peer})
 	}
@@ -124,6 +129,18 @@ func runClear(c *console, data string, args []string) int {
 		return c.fail(err)
 	}
 	return c.say("clear.ok", map[string]string{"peer": peer, "n": num(*amount), "m": num(left)})
+}
+
+// refusalValue is what clear.refused shows of a peer's refusal: its reason
+// when that is shaped like a reason code (core CORE-K19:
+// ^[a-z][a-z0-9_]{0,29}$), else the HTTP status. The peer's own text is never
+// put in front of the operator (ux UX-G2): a peer could otherwise write
+// anything to the operator's terminal, control characters included.
+func refusalValue(reason string, status int) string {
+	if seal.ValidNoteReason(reason) {
+		return reason
+	}
+	return strconv.Itoa(status)
 }
 
 // peerEndpointOf is the endpoint federation.json gives the peer hub aid, or

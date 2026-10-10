@@ -640,17 +640,25 @@ func (s *Store) AdmitFedReview(peerAID string, peerKEL []identity.SignedEvent, e
 
 // checkPeerAttestation verifies a peer's attestation (CORE-L8: under the
 // peer's key history at the attestation's own day) and returns its body.
+//
+// A peer that rotated signs under its new key at once. An attestation
+// signed under a key state past peerKEL has the peer's key history fetched
+// again, once, and at most once a minute per peer (KEL H-34; peerKELFor),
+// so it is admitted in the same pass of the review stream instead of after
+// the next periodic fetch; when the history still does not reach it, it is
+// refused for now.
 func (s *Store) checkPeerAttestation(peerAID string, peerKEL []identity.SignedEvent, att *evidence.ReviewAttWire) (*evidence.ReviewAttBody, error) {
-	if len(peerKEL) == 0 {
-		return nil, fmt.Errorf("%w: this hub holds no key history of %s to check its attestation with",
-			federation.ErrRefusedForNow, peerAID)
-	}
 	ab, err := att.Open()
 	if err != nil {
 		return nil, fmt.Errorf("attestation: %w", err)
 	}
 	if ab.Hub != peerAID || att.Env == nil || att.Env.SignerAID != peerAID {
 		return nil, fmt.Errorf("the attestation is %s's, not the peer %s's", ab.Hub, peerAID)
+	}
+	held := func(string) ([]identity.SignedEvent, error) { return peerKEL, nil }
+	if peerKEL, err = s.peerKELFor(held, peerAID, att.Env.KeyStateSeq); err != nil || len(peerKEL) == 0 {
+		return nil, fmt.Errorf("%w: this hub holds no key history of %s to check its attestation with",
+			federation.ErrRefusedForNow, peerAID)
 	}
 	if verr := plausibleSignature(peerKEL, att.Env.KeyStateSeq, att.Body, att.Env.Sig); verr != nil {
 		return nil, attestationRefusal(peerAID, verr)

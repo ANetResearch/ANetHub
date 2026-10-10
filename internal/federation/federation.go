@@ -145,6 +145,8 @@ type Service struct {
 
 	// clearing answers the settlement routes (settle.go).
 	clearing Clearing
+	// status answers the peers' status checks (relaystatus.go).
+	status DeliveryStatus
 }
 
 // peerKELFetch serializes the fetches of one peer's KEL and remembers how
@@ -509,6 +511,7 @@ func dropUnprovenPeerKELs(db *sql.DB) error {
 //
 //	POST /fed/v3/forward            an envelope for an agent registered here (forward_v3.go)
 //	POST /fed/v3/directory:bucket   a bucket of this hub's directory (bucket.go)
+//	POST /fed/v3/relay-status       a sender's status check, asked by its hub (relaystatus.go)
 //	GET  /fed/v3/cards              the A2A card stream (a2acards.go)
 //	GET  /fed/v3/reviews            the review stream (below)
 //	POST /fed/v3/settle             a payment on this hub's ledger for a peer's payee (settle.go)
@@ -521,6 +524,7 @@ func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /fed/v3/forward", s.hForward)
 	mux.HandleFunc("POST /fed/v3/directory:bucket", s.hBucket)
+	mux.HandleFunc("POST /fed/v3/relay-status", s.hRelayStatus)
 	mux.HandleFunc("GET /fed/v3/cards", s.hA2ACards)
 	mux.HandleFunc("GET /fed/v3/reviews", s.hFedReviewStream)
 	mux.HandleFunc("POST /fed/v3/settle", s.hSettle)

@@ -326,11 +326,7 @@ func main() {
 	}
 	log.Printf("anet-hub modules:%s", names)
 
-	srv := &http.Server{
-		Addr:              *f.addr,
-		Handler:           hubHandler(root),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := newHTTPServer(*f.addr, hubHandler(root))
 
 	go func() {
 		log.Printf("anet-hub %s (commit %s) listening on %s (data: %s)",
@@ -345,6 +341,19 @@ func main() {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
+}
+
+// readHeaderTimeout bounds the reading of a request's headers, for every
+// route (sealed-sender SSR-H16, 2026-10-10): a connection that sends its
+// headers slower than that is closed. The /fed/v3 routes bound their bodies
+// as well (internal/federation, 120 seconds after the header checks); the
+// other routes do not, since a sender's link may be slow and the relay
+// bounds what each AID may queue.
+const readHeaderTimeout = 10 * time.Second
+
+// newHTTPServer is the hub's HTTP server on addr.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: readHeaderTimeout}
 }
 
 // openStore opens the hub's database in dir for serving. A database this

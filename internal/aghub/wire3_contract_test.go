@@ -94,10 +94,10 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("POST", "/relay/send", reflect.TypeFor[RelaySendResponse](), ""),
 		req("POST", "/relay/poll", reflect.TypeFor[RelayPollRequest](), ""),
 		resp("POST", "/relay/poll", reflect.TypeFor[RelayPollResponse](), ""),
-		req("POST", "/relay/ack", reflect.TypeFor[RelayAckRequest](), "v030-todo(RC-3)"),
-		resp("POST", "/relay/ack", reflect.TypeFor[RelayAckResponse](), "v030-todo(RC-3)"),
-		req("POST", "/relay/status", nil, "v030-todo(RC-3)"),
-		resp("POST", "/relay/status", nil, "v030-todo(RC-3)"),
+		req("POST", "/relay/ack", reflect.TypeFor[RelayAckRequest](), ""),
+		resp("POST", "/relay/ack", reflect.TypeFor[RelayAckResponse](), ""),
+		req("POST", "/relay/status", reflect.TypeFor[RelayStatusRequest](), ""),
+		resp("POST", "/relay/status", reflect.TypeFor[RelayStatusResponse](), ""),
 		req("POST", "/mailbox/revoke", reflect.TypeFor[MailboxRevokeRequest](), ""),
 		resp("POST", "/mailbox/revoke", reflect.TypeFor[MailboxRevokeResponse](), ""),
 		req("POST", "/directory:bucket", reflect.TypeFor[DirBucketRequest](), ""),
@@ -123,8 +123,8 @@ func TestWire3JSONFields(t *testing.T) {
 		resp("POST", "/fed/v3/forward", reflect.TypeFor[FedForwardResponse](), ""),
 		req("POST", "/fed/v3/directory:bucket", reflect.TypeFor[DirBucketRequest](), ""),
 		resp("POST", "/fed/v3/directory:bucket", reflect.TypeFor[FedBucketResponse](), ""),
-		req("POST", "/fed/v3/relay-status", nil, "v030-todo(RC-3)"),
-		resp("POST", "/fed/v3/relay-status", nil, "v030-todo(RC-3)"),
+		req("POST", "/fed/v3/relay-status", reflect.TypeFor[FedRelayStatusRequest](), ""),
+		resp("POST", "/fed/v3/relay-status", reflect.TypeFor[RelayStatusResponse](), ""),
 		resp("GET", "/fed/v3/reviews", reflect.TypeFor[FedReviewEntry](), ""),           // per entry
 		resp("GET", "/fed/v3/cards", reflect.TypeFor[federation.FedA2ACardEntry](), ""), // per entry
 	}

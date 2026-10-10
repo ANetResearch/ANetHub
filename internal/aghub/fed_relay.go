@@ -66,6 +66,11 @@ var passedThrough = map[wire3.Reason]bool{
 // gave none (SSR-H13).
 const homeUnreachableWait = 60 * time.Second
 
+// MaxPassedRetryAfter bounds a Retry-After this hub passes on from a peer
+// hub (SSR-H13, 2026-10-09; p2p-receipts DLV-W-18): at least a second, at
+// most an hour.
+const MaxPassedRetryAfter = time.Hour
+
 // fwdSend is one send the origin hands on to a home.
 type fwdSend struct {
 	home     string
@@ -109,17 +114,21 @@ func (s *Server) forwardSend(w http.ResponseWriter, r *http.Request, f fwdSend) 
 //     as refused (SSR-H14a), the owner's resolution is made again at its
 //     next use, and the client address's bucket of refusals loses a token
 //     (SSR-H3b);
+//   - a 413 without a hub's error body, which the reverse proxy in front of
+//     the home answers for a body over its own bound: 413 too_large. The
+//     envelope does not fit there, and sending it again will not change
+//     that (2026-10-09);
 //   - anything else (not_peer, another 401, source_rate, a 5xx, an answer
 //     that is not the contract's): 502 home_unreachable, with the home's
 //     Retry-After or 60 seconds.
+//
+// A Retry-After passed on from the home is held between a second and an
+// hour (passedRetryAfter): the home's number is its own, and the sender's
+// hub does not make a sender wait days on it.
 func (s *Server) forwardAnswer(w http.ResponseWriter, resp *http.Response, f fwdSend) {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	wait := retryAfterOf(resp)
 	unreachable := func() {
-		if wait <= 0 {
-			wait = homeUnreachableWait
-		}
-		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonHomeUnreachable, RetryAfter: wait})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonHomeUnreachable, RetryAfter: passedRetryAfter(resp, homeUnreachableWait)})
 	}
 	if err != nil {
 		unreachable()
@@ -154,22 +163,40 @@ func (s *Server) forwardAnswer(w http.ResponseWriter, resp *http.Response, f fwd
 		s.fedState.putNegative(negKey{f.home, f.capBody.Owner, string(f.capBody.CapID)}, f.capBody.CapExp)
 		s.fedState.markStale(f.capBody.Owner, s.store.now())
 		s.refuseAccess(w, f.addr)
+	case resp.StatusCode == http.StatusRequestEntityTooLarge && !wire3.Known(reason):
+		wire3.Refuse(w, wire3.ReasonTooLarge)
 	case passedThrough[reason] && reason != wire3.ReasonAccessInvalid && resp.StatusCode == wire3.Status(reason):
-		wire3.Write(w, wire3.Refusal{Reason: reason, RetryAfter: wait})
+		wire3.Write(w, wire3.Refusal{Reason: reason, RetryAfter: passedRetryAfter(resp, 0)})
 	default:
 		unreachable()
 	}
 }
 
-// retryAfterOf is a response's Retry-After in delta-seconds, 0 when it has
-// none that reads.
-func retryAfterOf(resp *http.Response) time.Duration {
+// passedRetryAfter is the Retry-After this hub passes on from a peer hub's
+// answer (DLV-W-18, sealed-sender SSR-H13): the peer's, between a second
+// and MaxPassedRetryAfter, or otherwise when it gave none.
+func passedRetryAfter(resp *http.Response, otherwise time.Duration) time.Duration {
+	d, ok := retryAfterOf(resp)
+	switch {
+	case !ok:
+		return otherwise
+	case d < time.Second:
+		return time.Second
+	case d > MaxPassedRetryAfter:
+		return MaxPassedRetryAfter
+	}
+	return d
+}
+
+// retryAfterOf is a response's Retry-After in delta-seconds, and whether it
+// has one that reads.
+func retryAfterOf(resp *http.Response) (time.Duration, bool) {
 	v := resp.Header.Get("Retry-After")
 	n, err := strconv.ParseUint(v, 10, 32)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return time.Duration(n) * time.Second
+	return time.Duration(n) * time.Second, true
 }
 
 // capPrecheckRemote is step 2 of a kind-1 send whose owner is not

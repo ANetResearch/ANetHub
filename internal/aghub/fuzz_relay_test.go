@@ -78,7 +78,7 @@ func FuzzHubRelayAuthV2(f *testing.F) {
 	seeds := [][]byte{
 		[]byte(`{}`),
 		[]byte(`{"limit":5,"after_id":0}`),
-		[]byte(`{"ids":[1,2,3]}`),
+		[]byte(`{"items":[{"id":1},{"id":2}]}`),
 		[]byte(`{"to_aid":"` + a.AID() + `","envelope":"` + env + `"}`),
 		[]byte(`{"summary":"s","readme":"r","pricing":"p"}`),
 		[]byte(`{"visibility":"hub-local"}`),
@@ -259,9 +259,13 @@ func pollAll(t *testing.T, h *fz, c *identity.Controller, afterID int64) []polle
 //   - a 200 lists only the caller's envelopes, ids strictly ascending and
 //     above after_id, at most limit of them (100 when limit is not
 //     positive);
-//   - ack answers 200 or 400, deletes only ids in the caller's own
-//     mailbox, reports exactly how many it deleted, and leaves the other
-//     mailbox as it was.
+//   - ack answers 200 or 400 (400 exactly when the body does not decode
+//     strictly or its items are not 1 to 1000 with an id each and a 16-byte
+//     handle and an 80-byte dack together or neither, DLV-W-14), deletes only
+//     ids in the caller's own mailbox, reports exactly how many it deleted,
+//     stores exactly one delivery confirmation for each row it deleted whose
+//     first item carries one (DLV-H-3), and leaves the other mailbox as it
+//     was; a 400 deletes and stores nothing.
 func FuzzHubRelayPollAck(f *testing.F) {
 	h := newFZ(f)
 	me, _ := h.agent(f, "fuzz-mailbox", nil, true)
@@ -276,12 +280,18 @@ func FuzzHubRelayPollAck(f *testing.F) {
 		}
 	}
 	refill(f)
-	f.Add([]byte(`{}`), []byte(`{"ids":[]}`))
-	f.Add([]byte(`{"limit":3,"after_id":2}`), []byte(`{"ids":[1,2,3]}`))
-	f.Add([]byte(`{"limit":-1,"after_id":-1}`), []byte(`{"ids":[-1,0,9223372036854775807]}`))
-	f.Add([]byte(`{"limit":1e3}`), []byte(`{"ids":null}`))
+	handle := base64.RawURLEncoding.EncodeToString(make([]byte, 16))
+	dack := base64.RawURLEncoding.EncodeToString(make([]byte, 80))
+	f.Add([]byte(`{}`), []byte(`{"items":[]}`))
+	f.Add([]byte(`{"limit":3,"after_id":2}`), []byte(`{"items":[{"id":1},{"id":2},{"id":3}]}`))
+	f.Add([]byte(`{"limit":-1,"after_id":-1}`), []byte(`{"items":[{"id":-1},{"id":0},{"id":9223372036854775807}]}`))
+	f.Add([]byte(`{"limit":1e3}`), []byte(`{"items":null}`))
 	f.Add([]byte(nil), []byte(`[1]`))
-	f.Add([]byte(`{"after_id":9223372036854775807,"limit":2147483647}`), []byte(`{"ids":[9,9,9]}`))
+	f.Add([]byte(`{"after_id":9223372036854775807,"limit":2147483647}`), []byte(`{"items":[{"id":9},{"id":9},{"id":9}]}`))
+	f.Add([]byte(`{}`), []byte(`{"items":[{"id":1,"handle":"`+handle+`","dack":"`+dack+`"},{"id":1,"handle":"`+handle+`","dack":"`+dack+`"}]}`))
+	f.Add([]byte(`{}`), []byte(`{"items":[{"id":2,"handle":"`+handle+`"}]}`))
+	f.Add([]byte(`{}`), []byte(`{"items":[{"id":2,"handle":"`+handle+`=","dack":"`+dack+`"}]}`))
+	f.Add([]byte(`{}`), []byte(`{"ids":[1,2,3]}`))
 
 	f.Fuzz(func(t *testing.T, pollBody, ackBody []byte) {
 		pollBody, ackBody = clipB(pollBody, 4<<10), clipB(ackBody, 4<<10)
@@ -338,33 +348,23 @@ func FuzzHubRelayPollAck(f *testing.F) {
 			}
 		}
 
-		var areq struct {
-			IDs []int64 `json:"ids"`
-		}
-		aerr := json.Unmarshal(ackBody, &areq)
 		mine := map[int64]bool{}
 		for _, m := range pollAll(t, h, me, 0) {
 			mine[m.ID] = true
 		}
-		expect := 0
-		seen := map[int64]bool{}
-		for _, id := range areq.IDs {
-			if mine[id] && !seen[id] {
-				expect++
-			}
-			seen[id] = true
-		}
+		valid, expect, expectStored := ackExpectation(ackBody, mine)
 		otherBefore, _ := h.store.RelayPending(other.AID())
 		mineBefore, _ := h.store.RelayPending(me.AID())
+		dacksBefore := dackRows(t, h.store)
 		rec = h.signedDo(me, relayauth.ActionAck, http.MethodPost, "/relay/ack", "", ackBody)
 		otherAfter, _ := h.store.RelayPending(other.AID())
 		mineAfter, _ := h.store.RelayPending(me.AID())
 		if otherAfter != otherBefore {
 			t.Fatalf("ack %q changed another agent's mailbox: %d -> %d", ackBody, otherBefore, otherAfter)
 		}
-		if aerr != nil {
-			if rec.Code != http.StatusBadRequest || mineAfter != mineBefore {
-				t.Fatalf("ack %q: %d (mailbox %d -> %d), want 400 and nothing deleted", ackBody, rec.Code, mineBefore, mineAfter)
+		if !valid {
+			if rec.Code != http.StatusBadRequest || mineAfter != mineBefore || dackRows(t, h.store) != dacksBefore {
+				t.Fatalf("ack %q: %d (mailbox %d -> %d), want 400 and nothing deleted or stored", ackBody, rec.Code, mineBefore, mineAfter)
 			}
 			return
 		}
@@ -372,11 +372,62 @@ func FuzzHubRelayPollAck(f *testing.F) {
 			t.Fatalf("ack %q: %d %s", ackBody, rec.Code, rec.Body.Bytes())
 		}
 		var out struct {
-			Acked int `json:"acked"`
+			Acked  int `json:"acked"`
+			Stored int `json:"stored"`
 		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
 		if out.Acked != expect || mineBefore-mineAfter != expect {
 			t.Fatalf("ack %q: reported %d, deleted %d, want %d", ackBody, out.Acked, mineBefore-mineAfter, expect)
 		}
+		if out.Stored != expectStored || dackRows(t, h.store) > dacksBefore+expectStored {
+			t.Fatalf("ack %q: stored %d delivery confirmations, want %d", ackBody, out.Stored, expectStored)
+		}
 	})
+}
+
+// ackExpectation is what a /relay/ack with body must do to a mailbox whose
+// ids are mine (DLV-W-14, DLV-H-3): whether it is taken, how many rows it
+// deletes, and how many delivery confirmations it stores (one for each row
+// it deletes whose first item carries one).
+func ackExpectation(body []byte, mine map[int64]bool) (valid bool, acked, stored int) {
+	var req aghub.RelayAckRequest
+	if wire3.DecodeStrict(body, &req) != nil || len(req.Items) == 0 || len(req.Items) > aghub.MaxAckItems {
+		return false, 0, 0
+	}
+	for _, it := range req.Items {
+		if it.ID == nil || *it.ID <= 0 || (it.Handle == "") != (it.DAck == "") {
+			return false, 0, 0
+		}
+		if it.Handle != "" {
+			if _, err := wire3.DecodeB64URLSize("handle", it.Handle, 16); err != nil {
+				return false, 0, 0
+			}
+			if _, err := wire3.DecodeB64URLSize("dack", it.DAck, 80); err != nil {
+				return false, 0, 0
+			}
+		}
+	}
+	seen := map[int64]bool{}
+	for _, it := range req.Items {
+		id := *it.ID
+		if !mine[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		acked++
+		if it.Handle != "" {
+			stored++
+		}
+	}
+	return true, acked, stored
+}
+
+// dackRows is how many delivery confirmations the store holds.
+func dackRows(t *testing.T, store *aghub.Store) int {
+	t.Helper()
+	var n int
+	if err := store.DBForTest().QueryRow(`SELECT COUNT(*) FROM relay_dack`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

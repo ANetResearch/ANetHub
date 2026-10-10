@@ -129,7 +129,9 @@ var hubText = []textRow{
 		En: "{aid} is not registered here, so nothing was granted; check the AID and try again."},
 
 	// anet-hub clear: the peer accepted the discharge; it would be more than
-	// is due; the peer refused it (its reason as {value}); or no answer came
+	// is due; the peer refused it ({value}: its reason when that is shaped
+	// like a reason code, else the HTTP status; never the peer's text, ux
+	// UX-G2); or no answer came
 	// back, so whether the peer recorded it is unknown. In the last two this
 	// hub's record is unchanged, and a second clear would be a second
 	// discharge, so the next step is the peer's operator.
