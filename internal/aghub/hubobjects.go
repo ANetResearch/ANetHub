@@ -7,11 +7,13 @@ import (
 
 // What a peer hub signed, checked here (KEL H-34, core CORE-L8): a witness
 // notice in a peer's directory entry (fed_home.go), a settlement receipt
-// (ClearFromPeer), a clearing statement (SettleOwed). Each is verified under
-// the peer's key history as it was when the object was signed: VerifyObject
-// at the object's own time (the receipt's settle_at, the notice's
-// observed_at), not at now. A receipt a peer signed before it rotated stays
-// good; a key the peer retired signs nothing dated after it.
+// (ClearFromPeer), a clearing statement (SettleOwed), a review attestation
+// on the peer's review stream (reviews.go checkPeerAttestation). Each is
+// verified under the peer's key history as it was when the object was
+// signed: VerifyObject at the object's own time (the receipt's settle_at,
+// the notice's observed_at, the attestation's day), not at now. A receipt a
+// peer signed before it rotated stays good; a key the peer retired signs
+// nothing dated after it.
 //
 // The peer's key history is the one the federation module pinned, which
 // only grows (KEL H-15). A peer that rotated signs under a key state past

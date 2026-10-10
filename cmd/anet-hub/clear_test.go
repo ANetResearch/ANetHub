@@ -247,3 +247,46 @@ func writeFederation(t *testing.T, dir, aid, endpoint string) {
 		t.Fatal(err)
 	}
 }
+
+// TestClearRefusalShowsOnlyACode (ux UX-G2, hub-payment-privacy §5.4): a
+// peer's refusal is named in clear.refused by its reason only when that is
+// shaped like a reason code (^[a-z][a-z0-9_]{0,29}$), and by the HTTP status
+// otherwise: whatever text the peer sends, terminal control characters
+// included, never reaches the operator's terminal.
+func TestClearRefusalShowsOnlyACode(t *testing.T) {
+	for _, c := range []struct {
+		name, reason string
+		status       int
+		value        string
+	}{
+		{"a code", "bad_request", 400, "bad_request"},
+		{"a code of 30 characters", strings.Repeat("a", 30), 409, strings.Repeat("a", 30)},
+		{"terminal control characters", "\\u001b[2J\\u001b[31mpaid in full\\u001b[0m", 400, "400"},
+		{"a sentence", "Contact sales at the example office", 403, "403"},
+		{"31 characters", strings.Repeat("a", 31), 409, "409"},
+		{"capitals", "Not_Peer", 422, "422"},
+		{"a new line", "not_peer\\nanet-hub: all cleared", 400, "400"},
+		{"a leading digit", "4xx", 400, "400"},
+	} {
+		for _, lang := range []string{"en", "zh"} {
+			t.Run(c.name+"/"+lang, func(t *testing.T) {
+				dir := hubDir(t)
+				_, peerAID := newAID(t)
+				owe(t, dir, peerAID, 12)
+				peer := newFakePeer(t, func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(c.status)
+					_, _ = io.WriteString(w, `{"reason":"`+c.reason+`","error":"x"}`)
+				})
+				r := cli(t, lang, "-data", dir, "clear", peerAID, "--amount", "5", "--peer-endpoint", peer.srv.URL)
+				expectErr(t, r, 1, sentenceOf(lang, "clear.refused", map[string]string{"peer": peerAID, "value": c.value}))
+				if strings.ContainsAny(r.stderr+r.stdout, "\x1b\r") || strings.Count(r.stderr, "\n") != 1 {
+					t.Errorf("the peer's text reached the terminal: %q", r.stderr)
+				}
+				if due := dueOf(t, dir, peerAID); due != 12 {
+					t.Errorf("due after a refusal: %d, want 12", due)
+				}
+			})
+		}
+	}
+}

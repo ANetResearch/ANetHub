@@ -21,9 +21,12 @@ import (
 // them, and its 200 to a forward is not a statement that it queued
 // anything. So this hub stops talking to it: the next requests to that peer
 // fail at once, without being sent, until peerWireRetry has passed; then
-// one request goes through again, and a peer that has been upgraded is
-// talked to as before. Each mismatch is counted (PeerWireMismatches) and
-// logged when the stop begins.
+// exactly one request goes through again, while the others still fail at
+// once (SSR-H16a): a peer that has been upgraded is talked to as before, one
+// that still answers with another wire is stopped again, and when that one
+// request got no answer of either kind, the next request is the one that
+// goes through. Each mismatch is counted (PeerWireMismatches) and logged
+// when the stop begins.
 //
 // A refusal with no X-ANet-Wire (any 4xx or 5xx status) is not counted: a
 // hub states its wire on every answer, refusals included, so a refusal
@@ -51,11 +54,12 @@ type peerWire struct {
 	now     func() time.Time
 	mu      sync.Mutex
 	stopped map[string]time.Time // origin → until when no request is sent
+	probing map[string]bool      // origin → the one request after a stop is out
 	count   atomic.Int64
 }
 
 func newPeerWire(base http.RoundTripper, now func() time.Time) *peerWire {
-	return &peerWire{base: base, now: now, stopped: map[string]time.Time{}}
+	return &peerWire{base: base, now: now, stopped: map[string]time.Time{}, probing: map[string]bool{}}
 }
 
 // RoundTrip implements http.RoundTripper.
@@ -64,13 +68,25 @@ func (p *peerWire) RoundTrip(req *http.Request) (*http.Response, error) {
 	p.mu.Lock()
 	until, stopped := p.stopped[origin]
 	now := p.now()
-	if stopped && now.Before(until) {
+	if stopped && (now.Before(until) || p.probing[origin]) {
 		p.mu.Unlock()
 		if req.Body != nil {
 			req.Body.Close()
 		}
-		return nil, fmt.Errorf("%w: %s answered with another wire; this hub asks it again after %s",
-			ErrPeerWire, origin, until.Sub(now).Round(time.Second))
+		wait := "once the request asking it again is answered"
+		if now.Before(until) {
+			wait = "after " + until.Sub(now).Round(time.Second).String()
+		}
+		return nil, fmt.Errorf("%w: %s answered with another wire; this hub asks it again %s", ErrPeerWire, origin, wait)
+	}
+	if stopped {
+		// The stop is over: this request is the one that asks again.
+		p.probing[origin] = true
+		defer func() {
+			p.mu.Lock()
+			delete(p.probing, origin)
+			p.mu.Unlock()
+		}()
 	}
 	p.mu.Unlock()
 	resp, err := p.base.RoundTrip(req)

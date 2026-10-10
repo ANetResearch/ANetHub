@@ -166,6 +166,8 @@ type Store struct {
 	// kids is the decoded key sets of recent recipients, for the kid
 	// check of every queued envelope (relay.go kidAcceptable).
 	kids kidCache
+	// dack is the row count of relay_dack, once counted (dack.go).
+	dack dackState
 	// dirNotice, when a test sets it, gives the witness notice a directory
 	// entry carries instead of the notice cache (directory.go dirNoticeOf).
 	dirNotice func(q rowQuerier, aid string) ([]byte, error)

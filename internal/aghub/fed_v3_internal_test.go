@@ -46,9 +46,12 @@ type fedNode struct {
 	// down makes the hub answer every request 503 without the wire
 	// header, as a reverse proxy in front of a hub that is down does.
 	down atomic.Bool
-	// answer, when set, answers /fed/v3/forward in place of the hub, and
-	// bucket /fed/v3/directory:bucket.
-	answer, bucket http.HandlerFunc
+	// answer, when set, answers /fed/v3/forward in place of the hub,
+	// bucket /fed/v3/directory:bucket and status /fed/v3/relay-status.
+	answer, bucket, status http.HandlerFunc
+	// statusSeen holds every request to /fed/v3/relay-status as it
+	// crossed: its headers and its body.
+	statusSeen [][]byte
 }
 
 // fedNet is hubs peered for delivery, each with each other one.
@@ -88,6 +91,7 @@ func newFedNet(t testing.TB, n int) *fedNet {
 func (nd *fedNode) wire(fed *federation.Service) {
 	nd.fed = fed
 	fed.SetKernel(nd.srv)
+	fed.SetDeliveryStatus(nd.srv)
 	nd.srv.SetFederation(fed)
 	nd.srv.SetPeerKELResolver(fed.PeerKEL)
 	mux := http.NewServeMux()
@@ -106,16 +110,24 @@ func (nd *fedNode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	nd.mu.Lock()
 	nd.hits[r.URL.Path]++
-	root, answer, bucket := nd.root, nd.answer, nd.bucket
-	if r.URL.Path == "/fed/v3/forward" {
+	root, answer, bucket, status := nd.root, nd.answer, nd.bucket, nd.status
+	if r.URL.Path == "/fed/v3/forward" || r.URL.Path == "/fed/v3/relay-status" {
 		var dump bytes.Buffer
 		_ = r.Header.Write(&dump)
 		body, _ := io.ReadAll(r.Body)
 		dump.Write(body)
-		nd.seen = append(nd.seen, dump.Bytes())
+		if r.URL.Path == "/fed/v3/forward" {
+			nd.seen = append(nd.seen, dump.Bytes())
+		} else {
+			nd.statusSeen = append(nd.statusSeen, dump.Bytes())
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
 	nd.mu.Unlock()
+	if status != nil && r.URL.Path == "/fed/v3/relay-status" {
+		status(w, r)
+		return
+	}
 	if answer != nil && r.URL.Path == "/fed/v3/forward" {
 		answer(w, r)
 		return
@@ -775,6 +787,18 @@ func TestForwardAnswerMapping(t *testing.T) {
 		{200, `{"status":"queued"}`, "", "3", 502, "home_unreachable", "60"},
 		{200, `{"status":"queued","rid":"` + rid + `","recipient_quiet":true}`, "", "2", 502, "home_unreachable", "60"},
 		{429, refusal(wire3.ReasonKidStale), "", "3", 502, "home_unreachable", "60"},
+		// A Retry-After passed on is held between a second and an hour
+		// (SSR-H13, 2026-10-09).
+		{429, refusal(wire3.ReasonRateLimited), "4294967295", "3", 429, "rate_limited", "3600"},
+		{507, refusal(wire3.ReasonMailboxFull), "3601", "3", 507, "mailbox_full", "3600"},
+		{429, refusal(wire3.ReasonStrangersBusy), "0", "3", 429, "strangers_busy", "1"},
+		{429, refusal(wire3.ReasonSourceRate), "86400", "3", 502, "home_unreachable", "3600"},
+		{503, "busy", "0", "", 502, "home_unreachable", "1"},
+		// A 413 without a hub's body: the proxy in front of the home took
+		// no larger body (SSR-H13, 2026-10-09).
+		{413, "<html>413 Request Entity Too Large</html>", "", "", 413, "too_large", ""},
+		{413, `{"error":"too big"}`, "", "3", 413, "too_large", ""},
+		{413, `{"reason":"payload_too_big","error":"x"}`, "", "", 413, "too_large", ""},
 	}
 	for i, r := range rows {
 		t.Run(fmt.Sprintf("%d %d %s", i, r.status, reasonOfBody(r.body)), func(t *testing.T) {
@@ -847,7 +871,9 @@ func TestAProxysRefusalDoesNotCutThePeerOff(t *testing.T) {
 		root.ServeHTTP(w, r)
 	}
 	b.mu.Unlock()
-	expectRefusal(t, a.send0To(recip.aid, b.hubAID, "over the proxy's limit"), 502, "home_unreachable")
+	// The envelope does not fit there, and sending it again will not help
+	// (SSR-H13, 2026-10-09): 413 too_large, not home_unreachable.
+	expectRefusal(t, a.send0To(recip.aid, b.hubAID, "over the proxy's limit"), 413, "too_large")
 	if rec := a.send0To(recip.aid, b.hubAID, "within it"); rec.Code != 200 {
 		t.Fatalf("a send after the proxy's 413: %d %s", rec.Code, rec.Body)
 	}
