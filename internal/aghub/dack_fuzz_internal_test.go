@@ -95,7 +95,7 @@ func FuzzHubRelayStatus(f *testing.F) {
 		// A second a check: the address's bucket refills and keeps nothing,
 		// and the stored confirmations age as the model says.
 		h.advance(time.Second)
-		rec := h.serve(hr, "10.1.2.3")
+		rec := h.serve(hr, "192.0.2.99")
 		switch {
 		case rec.Code >= 500:
 			t.Fatalf("%d %s", rec.Code, rec.Body)
