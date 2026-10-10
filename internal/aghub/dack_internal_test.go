@@ -665,3 +665,33 @@ func TestDeliveryConfirmationBoundsAreConstants(t *testing.T) {
 		t.Errorf("counters %v", names)
 	}
 }
+
+// TestARIDThatMeetsARowsIsDrawnAgain (DLV-H-1): a rid is drawn in the
+// queueing transaction, and one that meets another row's is drawn again; the
+// row is queued under the new one.
+func TestARIDThatMeetsARowsIsDrawnAgain(t *testing.T) {
+	h := newRelayHub(t)
+	r := h.agent()
+	first := h.queue(r, "first")
+	fresh := randomBytes(t, RIDLen)
+	draws := [][]byte{first.RID, first.RID, fresh}
+	prev := newRID
+	newRID = func() ([]byte, error) {
+		d := draws[0]
+		if len(draws) > 1 {
+			draws = draws[1:]
+		}
+		return append([]byte(nil), d...), nil
+	}
+	t.Cleanup(func() { newRID = prev })
+	q := h.queue(r, "second")
+	if !bytes.Equal(q.RID, fresh) || q.Duplicate {
+		t.Fatalf("queued under %x, want the third draw %x", q.RID, fresh)
+	}
+	if n := h.rows(r.aid); n != 2 {
+		t.Fatalf("the mailbox holds %d rows", n)
+	}
+	if got := h.status("192.0.2.31", "", [2][]byte{first.RID, randomBytes(t, 16)}, [2][]byte{fresh, randomBytes(t, 16)}); got[0].State != RelayStatusQueued || got[1].State != RelayStatusQueued {
+		t.Fatalf("the two rids: %v", got)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,6 +132,18 @@ type Queued struct {
 // RIDLen is the length of a relay id (core §2.16).
 const RIDLen = 16
 
+// ridAttempts is how many rids RelayEnqueue draws for one row before it
+// gives up: one that meets another row's is drawn again (DLV-H-1), which
+// with 16 random bytes is never needed twice.
+const ridAttempts = 4
+
+// newRID draws a relay id; a test replaces it to make one meet a row's.
+var newRID = func() ([]byte, error) {
+	rid := make([]byte, RIDLen)
+	_, err := rand.Read(rid)
+	return rid, err
+}
+
 // CheckEnvelope is the hub's structural check on an envelope it did not take
 // through /relay/send: seal.ParseOuter (v2, a known suite, a 16-byte kid, an
 // enc of the suite's length, a non-empty ct, a well-formed access) and
@@ -203,8 +216,8 @@ func (s *Store) RelayEnqueue(it RelayItem) (Queued, error) {
 		return Queued{}, errors.New("hub: contact mail comes only under a delivery credential")
 	}
 	q := s.QuotaFor(it.To)
-	rid := make([]byte, RIDLen)
-	if _, err := rand.Read(rid); err != nil {
+	rid, err := newRID()
+	if err != nil {
 		return Queued{}, err
 	}
 	s.mu.Lock()
@@ -291,9 +304,20 @@ func (s *Store) RelayEnqueue(it RelayItem) (Queued, error) {
 	if it.CapID != nil {
 		capID = it.CapID
 	}
-	res, err := tx.Exec(`INSERT INTO relay_message(rid, to_aid, env_digest, class, cap_id, size, created_at, exp, payload)
-	                     VALUES(?,?,?,?,?,?,?,?,?)`,
-		rid, it.To, it.Digest[:], it.Class, capID, size, nowMS, exp, it.Envelope)
+	// The rid is new in this hub (core §2.16 UNIQUE): one that meets a
+	// row's is drawn again (p2p-receipts DLV-H-1).
+	var res sql.Result
+	for attempt := 0; ; attempt++ {
+		res, err = tx.Exec(`INSERT INTO relay_message(rid, to_aid, env_digest, class, cap_id, size, created_at, exp, payload)
+		                     VALUES(?,?,?,?,?,?,?,?,?)`,
+			rid, it.To, it.Digest[:], it.Class, capID, size, nowMS, exp, it.Envelope)
+		if err == nil || attempt == ridAttempts-1 || !strings.Contains(err.Error(), "relay_message.rid") {
+			break
+		}
+		if rid, err = newRID(); err != nil {
+			return Queued{}, err
+		}
+	}
 	if err != nil {
 		return Queued{}, err
 	}
