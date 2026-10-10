@@ -635,7 +635,7 @@ func TestTheWeeklyBackupKeepsRevocationsAndQuotas(t *testing.T) {
 		}
 	}
 	logb, _ := os.ReadFile(filepath.Join(dir, "roll.log"))
-	for _, want := range []string{"rows of relay_message relay_redelivery dereg_event notice_cache excluded", "kept 2 revocations, 1 raised quotas"} {
+	for _, want := range []string{"rows of relay_message relay_redelivery dereg_event relay_dack notice_cache excluded", "kept 2 revocations, 1 raised quotas"} {
 		if !bytes.Contains(logb, []byte(want)) {
 			t.Errorf("roll.log lacks %q:\n%s", want, logb)
 		}
@@ -643,9 +643,11 @@ func TestTheWeeklyBackupKeepsRevocationsAndQuotas(t *testing.T) {
 }
 
 // hub-db-roll.sh's backup leaves out the tables that matter only to the
-// running hub — dereg_event (PAY-O2), relay_dack (delivery confirmations
-// waiting at the hub, once RC-3 has the table) and notice_cache (KEL) — and
-// keeps the balance proofs of the last 14 days, liab_leaf and liab_meta
+// running hub — dereg_event (PAY-O2), relay_message and relay_dack (the
+// envelopes and the delivery confirmations waiting at the hub, p2p-receipts
+// DLV-ST-5: a hub restored from it answers a status check unknown, and the
+// sender sends again) and notice_cache (KEL) — and keeps the balance proofs
+// of the last 14 days, liab_leaf and liab_meta
 // (hub-payment-privacy §3.4: a restored hub still gives an account the
 // proof of an epoch it was on). The backup is hub.db alone: the review tag
 // key (keys/review_tag.key) is in no backup file (PAY-L1).
@@ -657,17 +659,17 @@ func TestTheBackupKeepsTheProofsAndLeavesOutTheRunningHubsTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Close()
-	dereg, notice, dack := canary(t, "DEREG"), canary(t, "NOTICE"), canary(t, "DACK")
+	dereg, notice, dack, env := canary(t, "DEREG"), canary(t, "NOTICE"), canary(t, "DACK"), canary(t, "ENVELOPE")
 	leaf, tagKey := canary(t, "LEAF"), canary(t, "TAGKEY")
 	execAll(t, filepath.Join(dir, "hub.db"), []string{
 		`INSERT INTO dereg_event(aid, at) VALUES(?, 1)`,
 		`INSERT INTO notice_cache(aid, seq, head, observed_at, blob) VALUES(?, 1, 'h', 1, x'00')`,
-		// relay_dack is RC-3's; the backup leaves it out once a hub has it.
-		`CREATE TABLE relay_dack (rid BLOB PRIMARY KEY, token BLOB NOT NULL)`,
-		`INSERT INTO relay_dack(rid, token) VALUES(x'01', ?)`,
+		`INSERT INTO relay_dack(handle, dack, exp) VALUES(x'01', ?, 1)`,
+		`INSERT INTO relay_message(rid, to_aid, env_digest, class, size, created_at, payload)
+		   VALUES(x'02', 'bafyagent', x'03', 2, 1, 1, ?)`,
 		`INSERT INTO liab_leaf(to_day, pos, aid, balance, salt) VALUES(20454, 0, ?, 7919, x'00')`,
 		`INSERT INTO liab_meta(to_day, ledger_hw, leaves) VALUES(20454, 3, 16)`,
-	}, []any{dereg}, []any{notice}, nil, []any{[]byte(dack)}, []any{leaf}, nil)
+	}, []any{dereg}, []any{notice}, []any{[]byte(dack)}, []any{[]byte(env)}, []any{leaf}, nil)
 	writeFile(t, filepath.Join(dir, "keys", "review_tag.key"), tagKey, 0o600)
 
 	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
@@ -679,6 +681,7 @@ func TestTheBackupKeepsTheProofsAndLeavesOutTheRunningHubsTables(t *testing.T) {
 		`SELECT COUNT(*) FROM dereg_event`:                                       0,
 		`SELECT COUNT(*) FROM notice_cache`:                                      0,
 		`SELECT COUNT(*) FROM relay_dack`:                                        0,
+		`SELECT COUNT(*) FROM relay_message`:                                     0,
 		`SELECT COUNT(*) FROM liab_leaf WHERE to_day = 20454 AND balance = 7919`: 1,
 		`SELECT COUNT(*) FROM liab_meta WHERE to_day = 20454 AND leaves = 16`:    1,
 	} {
@@ -686,7 +689,7 @@ func TestTheBackupKeepsTheProofsAndLeavesOutTheRunningHubsTables(t *testing.T) {
 			t.Errorf("the backup: %s = %d, want %d", q, n, want)
 		}
 	}
-	for _, c := range []string{dereg, notice, dack} {
+	for _, c := range []string{dereg, notice, dack, env} {
 		if hits := filesHolding(t, c, backup); len(hits) != 0 {
 			t.Errorf("the backup holds an excluded row's bytes (%s)", c[:6])
 		}

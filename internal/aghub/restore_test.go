@@ -644,7 +644,7 @@ func TestRestoreClearsWhatNoBackupHolds(t *testing.T) {
 	}
 	srv, store = serveAt(t, dir)
 	db := store.DBForTest()
-	for _, table := range []string{"relay_message", "relay_redelivery", "dereg_event", "notice_cache"} {
+	for _, table := range []string{"relay_message", "relay_redelivery", "dereg_event", "relay_dack", "notice_cache"} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
 			t.Fatal(err)

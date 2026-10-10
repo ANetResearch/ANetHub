@@ -506,8 +506,8 @@ func TestAnAckedEnvelopeLeavesNoBytesOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, err := store.RelayAck(recip.AID(), []int64{q.ID}); err != nil || n != 1 {
-		t.Fatalf("ack: %d %v", n, err)
+	if n, err := store.RelayAck(recip.AID(), []int64{q.ID}); err != nil || len(n) != 1 {
+		t.Fatalf("ack: %v %v", n, err)
 	}
 	// While the hub is running, after the WAL checkpoint that
 	// deploy/hub-db-roll.sh runs. Until that checkpoint the WAL still holds

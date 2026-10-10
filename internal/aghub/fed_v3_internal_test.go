@@ -46,9 +46,12 @@ type fedNode struct {
 	// down makes the hub answer every request 503 without the wire
 	// header, as a reverse proxy in front of a hub that is down does.
 	down atomic.Bool
-	// answer, when set, answers /fed/v3/forward in place of the hub, and
-	// bucket /fed/v3/directory:bucket.
-	answer, bucket http.HandlerFunc
+	// answer, when set, answers /fed/v3/forward in place of the hub,
+	// bucket /fed/v3/directory:bucket and status /fed/v3/relay-status.
+	answer, bucket, status http.HandlerFunc
+	// statusSeen holds every request to /fed/v3/relay-status as it
+	// crossed: its headers and its body.
+	statusSeen [][]byte
 }
 
 // fedNet is hubs peered for delivery, each with each other one.
@@ -88,6 +91,7 @@ func newFedNet(t testing.TB, n int) *fedNet {
 func (nd *fedNode) wire(fed *federation.Service) {
 	nd.fed = fed
 	fed.SetKernel(nd.srv)
+	fed.SetDeliveryStatus(nd.srv)
 	nd.srv.SetFederation(fed)
 	nd.srv.SetPeerKELResolver(fed.PeerKEL)
 	mux := http.NewServeMux()
@@ -106,16 +110,24 @@ func (nd *fedNode) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	nd.mu.Lock()
 	nd.hits[r.URL.Path]++
-	root, answer, bucket := nd.root, nd.answer, nd.bucket
-	if r.URL.Path == "/fed/v3/forward" {
+	root, answer, bucket, status := nd.root, nd.answer, nd.bucket, nd.status
+	if r.URL.Path == "/fed/v3/forward" || r.URL.Path == "/fed/v3/relay-status" {
 		var dump bytes.Buffer
 		_ = r.Header.Write(&dump)
 		body, _ := io.ReadAll(r.Body)
 		dump.Write(body)
-		nd.seen = append(nd.seen, dump.Bytes())
+		if r.URL.Path == "/fed/v3/forward" {
+			nd.seen = append(nd.seen, dump.Bytes())
+		} else {
+			nd.statusSeen = append(nd.statusSeen, dump.Bytes())
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 	}
 	nd.mu.Unlock()
+	if status != nil && r.URL.Path == "/fed/v3/relay-status" {
+		status(w, r)
+		return
+	}
 	if answer != nil && r.URL.Path == "/fed/v3/forward" {
 		answer(w, r)
 		return

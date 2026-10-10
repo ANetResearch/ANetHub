@@ -278,10 +278,14 @@ func relayPoll(t *testing.T, srv *httptest.Server, c *identity.Controller) polle
 	return p
 }
 
-// relayAck acks ids from c's mailbox.
+// relayAck acks ids from c's mailbox, without delivery confirmations.
 func relayAck(t *testing.T, srv *httptest.Server, c *identity.Controller, ids ...int64) int {
 	t.Helper()
-	code, b := signedDo(t, srv, c, relayauth.ActionAck, http.MethodPost, "/relay/ack", map[string]any{"ids": ids})
+	items := make([]map[string]any, len(ids))
+	for i, id := range ids {
+		items[i] = map[string]any{"id": id}
+	}
+	code, b := signedDo(t, srv, c, relayauth.ActionAck, http.MethodPost, "/relay/ack", map[string]any{"items": items})
 	if code != http.StatusOK {
 		t.Fatalf("ack: %d %s", code, b)
 	}

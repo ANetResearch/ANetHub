@@ -97,7 +97,7 @@ var rateFedSource = relayRate{1000, 10_000}
 
 // Federation is the federation module as the kernel asks it
 // (cmd/anet-hub wires *federation.Service with SetFederation): which hubs
-// are peers of delivery, and the two requests this hub makes to one. Its
+// are peers of delivery, and the three requests this hub makes to one. Its
 // methods take standard types only, so the kernel does not import the
 // module for it (K207). Nil in a build without federation, or with
 // delivery federation off: then a recipient is registered here or unknown.
@@ -116,6 +116,10 @@ type Federation interface {
 	// Bucket asks the peer for a bucket with /fed/v3/directory:bucket; body
 	// is the JSON request. The response is the caller's to close.
 	Bucket(ctx context.Context, peerAID string, body []byte) (*http.Response, error)
+	// RelayStatus asks the peer about envelopes it queued with
+	// /fed/v3/relay-status (p2p-receipts DLV-W-18); body is the JSON
+	// request. The response is the caller's to close.
+	RelayStatus(ctx context.Context, peerAID string, body []byte) (*http.Response, error)
 }
 
 // SetFederation wires the federation module. Call it before serving.

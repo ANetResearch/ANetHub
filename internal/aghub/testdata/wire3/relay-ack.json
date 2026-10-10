@@ -1,0 +1,350 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /relay/ack (core §2.12.2; p2p-receipts §2.4.2, §2.4.4, DLV-W-14, DLV-W-15, DLV-H-3, DLV-H-9): the mailbox owner, signed for \"ack\", names 1 to 1000 rows by id, each with the delivery confirmation of its envelope (handle, 16 bytes, and dack, 80 bytes, base64url without padding) or none. The hub deletes the caller's rows the items name and keeps the confirmation of each row this request deleted for 7 days; acked counts the rows deleted, stored the confirmations kept. A confirmation with a row that is not the caller's, or was deleted before, is dropped. An item without an id, a handle without its dack or the other way round, a value of another length or spelling, no items or more than 1000 refuse the whole request, 400 bad_ack_item naming the item, and nothing is deleted or stored; a member the route does not take is 400 bad_request.",
+  "setup": "relay_ack",
+  "cases": [
+    {
+      "name": "an ack with a delivery confirmation",
+      "cite": "DLV-H-3, DLV-W-15",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id1},\"handle\":\"${h1}\",\"dack\":\"${d1}\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "body": {
+          "acked": 1,
+          "stored": 1
+        }
+      }
+    },
+    {
+      "name": "an ack without one",
+      "cite": "core §2.12.2",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id2}}]}"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "acked": 1,
+          "stored": 0
+        }
+      }
+    },
+    {
+      "name": "a row acked before, with a confirmation",
+      "cite": "DLV-H-3",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id1},\"handle\":\"${h2}\",\"dack\":\"${d2}\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "acked": 0,
+          "stored": 0
+        }
+      }
+    },
+    {
+      "name": "another agent's row, with a confirmation",
+      "cite": "DLV-H-3",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id_other},\"handle\":\"${h2}\",\"dack\":\"${d2}\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "acked": 0,
+          "stored": 0
+        }
+      }
+    },
+    {
+      "name": "a handle without its dack",
+      "cite": "DLV-W-14",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id2}},{\"id\":${id3},\"handle\":\"${h2}\"}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_ack_item",
+          "error": "Item 1: an id is required, handle (16 bytes) and dack (80 bytes) go together, and at most 1000 items are taken."
+        }
+      }
+    },
+    {
+      "name": "a dack without its handle",
+      "cite": "DLV-W-14",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id3},\"dack\":\"${d2}\"}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_ack_item",
+          "error": "Item 0: an id is required, handle (16 bytes) and dack (80 bytes) go together, and at most 1000 items are taken."
+        }
+      }
+    },
+    {
+      "name": "an item without an id",
+      "cite": "DLV-W-14",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"handle\":\"${h2}\",\"dack\":\"${d2}\"}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_ack_item",
+          "error": "Item 0: an id is required, handle (16 bytes) and dack (80 bytes) go together, and at most 1000 items are taken."
+        }
+      }
+    },
+    {
+      "name": "no items",
+      "cite": "DLV-W-14",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_ack_item",
+          "error": "Item 0: an id is required, handle (16 bytes) and dack (80 bytes) go together, and at most 1000 items are taken."
+        }
+      }
+    },
+    {
+      "name": "a padded handle",
+      "cite": "DLV-W-14, CORE-E5",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id3},\"handle\":\"${h_padded}\",\"dack\":\"${d2}\"}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_ack_item",
+          "error": "Item 0: an id is required, handle (16 bytes) and dack (80 bytes) go together, and at most 1000 items are taken."
+        }
+      }
+    },
+    {
+      "name": "a dack in the standard alphabet",
+      "cite": "DLV-W-14, CORE-E5",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id3},\"handle\":\"${h2}\",\"dack\":\"${d_std}\"}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_ack_item",
+          "error": "Item 0: an id is required, handle (16 bytes) and dack (80 bytes) go together, and at most 1000 items are taken."
+        }
+      }
+    },
+    {
+      "name": "a 15-byte handle",
+      "cite": "DLV-W-14",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id3},\"handle\":\"${h_short}\",\"dack\":\"${d2}\"}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_ack_item",
+          "error": "Item 0: an id is required, handle (16 bytes) and dack (80 bytes) go together, and at most 1000 items are taken."
+        }
+      }
+    },
+    {
+      "name": "the ids of wire 2",
+      "cite": "CORE-E7; core §1.2",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"ids\":[${id3}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_request",
+          "error": "The request body has the member \"ids\", which this route does not take; remove it and send again."
+        }
+      }
+    },
+    {
+      "name": "an item with an outcome",
+      "cite": "CORE-E7, CORE-K13",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id3},\"outcome\":1}]}"
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_request",
+          "error": "The request body has the member \"items[0].outcome\", which this route does not take; remove it and send again."
+        }
+      }
+    },
+    {
+      "name": "unsigned",
+      "cite": "core §2.12.3",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "text": "{\"items\":[{\"id\":${id3}}]}"
+      },
+      "response": {
+        "status": 401,
+        "body_has": {
+          "reason": "unauthorized"
+        }
+      }
+    },
+    {
+      "name": "the refused acks deleted and stored nothing",
+      "cite": "DLV-W-14",
+      "request": {
+        "method": "POST",
+        "path": "/relay/ack",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "sign": {
+          "action": "ack",
+          "as": "r"
+        },
+        "text": "{\"items\":[{\"id\":${id3},\"handle\":\"${h2}\",\"dack\":\"${d2}\"}]}"
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "acked": 1,
+          "stored": 1
+        }
+      }
+    }
+  ]
+}

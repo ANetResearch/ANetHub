@@ -556,35 +556,50 @@ func (s *Store) RelayPoll(toAID string, afterID int64, limit int, budget int64) 
 }
 
 // RelayAck deletes delivered envelopes, scoped to toAID so that a caller
-// can only remove rows from its own mailbox. Returns how many rows were
+// can only remove rows from its own mailbox, and returns the ids it
 // deleted. An id that is not in the mailbox (already acked, expired, or
-// somebody else's) is skipped.
-//
-// relay_message uses AUTOINCREMENT, so a deleted id is never reused: a
-// repeated ack for an id that was already deleted cannot remove a later
-// message.
-func (s *Store) RelayAck(toAID string, ids []int64) (int, error) {
+// somebody else's) is skipped. /relay/ack, which also stores the delivery
+// confirmations of the rows it deletes, is StoreDAcks.
+func (s *Store) RelayAck(toAID string, ids []int64) (map[int64]bool, error) {
 	if len(ids) == 0 {
-		return 0, nil
+		return map[int64]bool{}, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer tx.Rollback()
-	total := 0
+	deleted, err := relayAckTx(tx, toAID, ids)
+	if err != nil {
+		return nil, err
+	}
+	return deleted, tx.Commit()
+}
+
+// relayAckTx deletes, in tx, the rows of toAID's mailbox that ids name and
+// returns the ids it deleted: the rows this call took out of the mailbox,
+// and no other (DLV-H-3).
+//
+// relay_message uses AUTOINCREMENT, so a deleted id is never reused: a
+// repeated ack for an id that was already deleted cannot remove a later
+// message.
+func relayAckTx(tx *sql.Tx, toAID string, ids []int64) (map[int64]bool, error) {
+	deleted := map[int64]bool{}
 	for _, id := range ids {
+		if deleted[id] {
+			continue
+		}
 		res, err := tx.Exec(`DELETE FROM relay_message WHERE id=? AND to_aid=?`, id, toAID)
 		if err != nil {
-			return 0, err
+			return nil, err
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
-			total++
+			deleted[id] = true
 		}
 	}
-	return total, tx.Commit()
+	return deleted, nil
 }
 
 // RelayPending counts the undelivered envelopes queued for toAID.
@@ -643,6 +658,7 @@ var relayTables = []string{
 	   count INTEGER NOT NULL,
 	   window_start INTEGER NOT NULL
 	 ) WITHOUT ROWID`,
+	dackTable, // the delivery confirmations (dack.go)
 }
 
 // relayIndexes are created after relayTables.
@@ -652,6 +668,7 @@ var relayIndexes = []string{
 	`CREATE INDEX IF NOT EXISTS idx_relay_exp ON relay_message(exp) WHERE exp IS NOT NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_relay_cap ON relay_message(to_aid, cap_id) WHERE cap_id IS NOT NULL`,
 	`CREATE INDEX IF NOT EXISTS idx_relay_redelivery ON relay_redelivery(window_start)`,
+	dackIndex,
 }
 
 // Meta returns a hub_meta value and whether it is set.

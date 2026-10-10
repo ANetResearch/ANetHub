@@ -40,6 +40,10 @@ func init() {
 		// The settlement routes (/fed/v3/settle, /fed/v3/clear) are the
 		// kernel's ledger, asked by a peer that signed for it.
 		fed.SetClearing(d.srv0)
+		// A peer's status check of envelopes this hub queued for its
+		// senders (/fed/v3/relay-status) is the kernel's mailbox and
+		// delivery confirmations.
+		fed.SetDeliveryStatus(d.srv0)
 		d.srv0.SetFederation(fed)
 		if fed.Enabled() {
 			log.Printf("anet-hub federation: delivery=%s peers=%d", cfg.Delivery, len(cfg.Peers))

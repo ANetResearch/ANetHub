@@ -80,6 +80,9 @@ type Server struct {
 	// them: resolved homes, refused credentials, peers' buckets.
 	fed      Federation
 	fedState *fedState
+	// delivery is what the status checks keep in memory: their buckets
+	// and the delivery confirmation counters (dack.go).
+	delivery *deliveryState
 }
 
 // SetPeerEndpointResolver installs the federation hook for "where does
@@ -154,7 +157,7 @@ func NewServer(store *Store) *Server {
 		jwks:           newJWKSCache(jwksCacheBytes, a2acard.JWKS),
 		dirLimiter:     newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst),
 		kelPushLimiter: newRateLimiter(KELPushPerMinute/60.0, KELPushBurst),
-		relay:          newRelayState(store.now), fedState: newFedState()}
+		relay:          newRelayState(store.now), fedState: newFedState(), delivery: newDeliveryState(store.now)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid
 	}
@@ -178,8 +181,9 @@ func (s *Server) SetLimits(l Limits) error {
 // Limits returns the limits in force.
 func (s *Server) Limits() Limits { return s.limits }
 
-// RunRelayJanitor deletes envelopes older than the undelivered TTL, once
-// at start and then every interval, until ctx ends.
+// RunRelayJanitor deletes envelopes older than the undelivered TTL and
+// the delivery confirmations whose time is over (DLV-H-7), once at start and
+// then every interval, until ctx ends.
 func (s *Server) RunRelayJanitor(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
@@ -189,6 +193,11 @@ func (s *Server) RunRelayJanitor(ctx context.Context, every time.Duration) {
 		} else if n > 0 {
 			log.Printf("hub: relay TTL purge deleted %d undelivered envelope(s) older than %s",
 				n, s.limits.UndeliveredTTL)
+		}
+		if n, err := s.store.PurgeExpiredDAcks(s.store.now()); err != nil {
+			log.Printf("hub: delivery confirmation purge: %v", err)
+		} else {
+			s.delivery.counters.expired.Add(int64(n))
 		}
 		select {
 		case <-ctx.Done():
@@ -332,6 +341,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /relay/send", s.hRelaySend)
 	mux.HandleFunc("POST /relay/poll", s.hRelayPoll)
 	mux.HandleFunc("POST /relay/ack", s.hRelayAck)
+	// A sender asks, anonymously, whether its envelope was collected and
+	// what its recipient left for it (dack.go).
+	mux.HandleFunc("POST /relay/status", s.hRelayStatus)
 	// A mailbox owner revokes delivery credentials it issued (revoke.go).
 	mux.HandleFunc("POST /mailbox/revoke", s.hMailboxRevoke)
 	// There is no guest mode (A2A-DESIGN §9 row 访客模式). The hub used to
@@ -1233,14 +1245,26 @@ type RelayPollResponse struct {
 	KeyStateNoticeError string              `json:"key_state_notice_error,omitempty"`
 }
 
-// RelayAckRequest is the /relay/ack body (relayauth v2, action "ack").
+// RelayAckRequest is the /relay/ack body (relayauth v2, action "ack"; core
+// §2.12.2): 1 to MaxAckItems items.
 type RelayAckRequest struct {
-	IDs []int64 `json:"ids"`
+	Items []RelayAckItem `json:"items"`
 }
 
-// RelayAckResponse is the /relay/ack answer: how many rows were deleted.
+// RelayAckItem is one mailbox row the caller is done with (its id from
+// /relay/poll), with the delivery confirmation of the envelope when the
+// caller gives one: handle and dack, base64url, together or neither.
+type RelayAckItem struct {
+	ID     *int64 `json:"id"`
+	Handle string `json:"handle,omitempty"`
+	DAck   string `json:"dack,omitempty"`
+}
+
+// RelayAckResponse is the /relay/ack answer: how many mailbox rows were
+// deleted, and how many delivery confirmations were stored (DLV-W-15).
 type RelayAckResponse struct {
-	Acked int `json:"acked"`
+	Acked  int `json:"acked"`
+	Stored int `json:"stored"`
 }
 
 // relayState is what /relay/session and /relay/send keep in this process's
@@ -1818,23 +1842,85 @@ func (s *Server) hRelayPoll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// hRelayAck deletes envelopes the caller has processed.
+// hRelayAck deletes envelopes the caller has processed and keeps their
+// delivery confirmations for their senders (DLV-H-3): the signature
+// (relayauth ack), the body decoded strictly (400 bad_request), the items
+// (DLV-W-14: 400 bad_ack_item, nothing deleted, nothing stored), then
+// StoreDAcks in one transaction.
 func (s *Server) hRelayAck(w http.ResponseWriter, r *http.Request) {
 	a, ok := s.authRegistered(w, r, relayauth.ActionAck, signedBodyLimit)
 	if !ok {
 		return
 	}
 	var req RelayAckRequest
-	if err := json.Unmarshal(a.Body, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+	if err := wire3.DecodeStrict(a.Body, &req); err != nil {
+		wire3.RefuseDecode(w, err)
 		return
 	}
-	n, err := s.store.RelayAck(a.AID, req.IDs)
+	items, bad := decodeAckItems(req.Items)
+	if bad >= 0 {
+		wire3.Write(w, badAckItem(bad))
+		return
+	}
+	res, err := s.store.StoreDAcks(a.AID, items)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, RelayAckResponse{Acked: n})
+	s.delivery.counters.stored.Add(int64(res.Stored))
+	s.delivery.counters.evicted.Add(int64(res.Evicted))
+	writeJSON(w, http.StatusOK, RelayAckResponse{Acked: res.Acked, Stored: res.Stored})
+}
+
+// hRelayStatus is POST /relay/status, a sender's anonymous status check
+// (p2p-receipts §2.4.3), in the one order of DLV-W-16:
+//
+//	1  X-ANet-Wire (wire3.Contract, before this handler), and the client
+//	   address's bucket: 429 rate_limited, before the body is read
+//	2  no identity header: 400 identity_headers_not_allowed
+//	3  the body, at most StatusBodyLimit: 413 too_large
+//	4  decoded strictly: 400 bad_request
+//	5  1 to MaxStatusItems items, each rid and handle 16 bytes in base64url,
+//	   one via_hub for all (or none): 400 bad_status_query
+//	6  the answer, here or at the peer hub that queued the envelopes
+//	   (answerStatus): 200, or 502 home_unreachable
+//
+// Nothing of the request is kept or written to a log, and nothing in it is
+// tied to an identity (DLV-W-17).
+func (s *Server) hRelayStatus(w http.ResponseWriter, r *http.Request) {
+	if ok, wait := s.delivery.byAddr.take(clientIP(r), rateRelayStatus); !ok {
+		s.delivery.counters.statusLimited.Add(1)
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait, Error: sentenceStatusRateLimited})
+		return
+	}
+	if hasIdentityHeaders(r) {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonIdentityHeadersNotAllowed, Error: sentenceStatusAnonymous})
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, StatusBodyLimit))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonTooLarge, Error: sentenceStatusTooLarge})
+			return
+		}
+		wire3.RefuseDecode(w, &wire3.DecodeError{Kind: wire3.KindRead, Detail: err.Error()})
+		return
+	}
+	var req RelayStatusRequest
+	if err := wire3.DecodeStrict(body, &req); err != nil {
+		wire3.RefuseDecode(w, err)
+		return
+	}
+	items, ok := decodeStatusItems(len(req.Items), func(i int) (string, string) { return req.Items[i].RID, req.Items[i].Handle })
+	for _, it := range req.Items {
+		ok = ok && it.ViaHub == req.Items[0].ViaHub
+	}
+	if !ok {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadStatusQuery, Error: sentenceBadStatusQuery})
+		return
+	}
+	s.answerStatus(r.Context(), w, items, req.Items[0].ViaHub)
 }
 
 func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {
