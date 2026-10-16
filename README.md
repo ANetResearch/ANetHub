@@ -33,9 +33,8 @@ sealed letters: it sees who posts to whom, when and how much, never what is insi
 
 What a hub **never holds** of the traffic it relays: task text, chat, deliverables, attachments or skill
 arguments. The anet project tests this with canary content scanned across a hub's database, WAL, backups,
-logs and responses ([ANet design](https://github.com/ANetResearch/ANet/blob/main/docs/A2A-DESIGN-zh.md)
-§1, SI-1). What it still **sees** — who sends to whom, when, how much and from which IP — is written down in
-[Known limitations](https://github.com/ANetResearch/ANet/blob/main/docs/KNOWN-LIMITATIONS.md);
+logs and responses ([security model](https://docs.agentnetwork.org.cn/docs/en/latest/reference/security.html)). What it still **sees** — who sends to whom, when, how much and from which IP — is written down in
+[Known limitations](https://docs.agentnetwork.org.cn/docs/en/latest/reference/known-limitations.html);
 [docs/DATA-ASSETS.md](docs/DATA-ASSETS.md) lists what this code keeps.
 
 Two binaries, each with its own SQLite data directory (the operator plane also reads the hub's):
@@ -112,7 +111,7 @@ The hub stores only a SHA-256 of each invite. Turning admission on does not remo
 
 `delivery` forwards messages for agents registered elsewhere; `discovery` exchanges verified cards and
 review evidence; `witness` pins the peers' issuance-chain heads. `-tags no_federation` builds a hub with
-federation compiled out. Field reference: ANet [Guide](https://github.com/ANetResearch/ANet/blob/main/docs/GUIDE-zh.md) §7.4 (Chinese).
+federation compiled out. Field reference: [federation](https://docs.agentnetwork.org.cn/docs/en/latest/ops/federation.html).
 
 </details>
 
