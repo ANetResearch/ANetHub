@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { Menu, X } from "lucide-react";
+import { Icon } from "./Icon";
+import { Menu, X } from "../lib/icons";
+import { ThemeToggle } from "./ThemeToggle";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 import { useLang, setLang, t } from "../lib/lang";
@@ -72,13 +74,14 @@ export function Header({ onJoin, showTasks = false }: { onJoin: () => void; show
 
       <div className="hidden md:flex items-center gap-4">
         <LangBtn />
+        <ThemeToggle />
         <Button variant="brand" size="sm" className="font-bebas tracking-[0.08em] text-sm px-4" onClick={onJoin}>
           {t(lang, "加入网络", "JOIN")}
         </Button>
       </div>
 
       <button className="md:hidden inline-flex size-10 items-center justify-center text-white" onClick={() => setOpen(!open)} aria-label="menu">
-        {open ? <X className="size-5" /> : <Menu className="size-5" />}
+        <Icon icon={open ? X : Menu} size={20} />
       </button>
 
       <div

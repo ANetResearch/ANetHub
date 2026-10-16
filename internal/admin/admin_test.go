@@ -365,7 +365,7 @@ func TestServerAuthAndAgents(t *testing.T) {
 	}
 
 	// The SPA is served at the base path without auth (its own token gate is client-side).
-	if w, _ := doReq(t, h, "GET", "/admin/", "", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "ANetHub Admin") {
+	if w, _ := doReq(t, h, "GET", "/admin/", "", nil); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Agent Network Hub") {
 		t.Fatalf("SPA not served: %d", w.Code)
 	}
 }

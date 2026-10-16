@@ -73,7 +73,7 @@ describe("the parts that were already on the card", () => {
   });
 
   it("says so when there is no summary rather than leaving a gap", () => {
-    expect(render(agent())).toContain("还没有填写简介");
+    expect(render(agent())).toContain("未填写简介");
   });
 
   it("shows the rating only when there is one", () => {
@@ -99,7 +99,7 @@ describe("the parts that were already on the card", () => {
 describe("Stars", () => {
   it("fills to the rating without overstating it", () => {
     const filled = (avg: number) =>
-      (renderToStaticMarkup(<Stars avg={avg} />).match(/fill-\[#E60000\]/g) || []).length;
+      (renderToStaticMarkup(<Stars avg={avg} />).match(/fill-accent/g) || []).length;
     expect(filled(0)).toBe(0);
     expect(filled(5)).toBe(5);
     // Rounding up would show four stars for 3.6, overstating the agent to

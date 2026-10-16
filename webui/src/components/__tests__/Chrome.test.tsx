@@ -21,9 +21,11 @@ describe("Toast", () => {
     expect(ok).toContain("已复制");
     expect(bad).toContain("复制失败");
     expect(ok).not.toBe(bad);
-    // The error carries the alert colour; the confirmation does not.
-    expect(bad).toContain("E60000");
-    expect(ok).not.toContain("bg-[#E60000]");
+    // The error carries the accent border and role alert; the confirmation does not.
+    expect(bad).toContain("border-accent");
+    expect(bad).toContain('role="alert"');
+    expect(ok).not.toContain("border-accent");
+    expect(ok).toContain('role="status"');
   });
 
   // Hidden is hidden. A toast left interactive while invisible swallows

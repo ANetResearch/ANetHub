@@ -4,1212 +4,816 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <meta name="robots" content="noindex,nofollow"/>
-<title>ANetHub Admin</title>
+<title>Agent Network Hub 运维控制台</title>
+<!--
+Third-party notices. Icon geometry: Lucide (ISC License, Copyright (c) 2026 Lucide Icons and Contributors;
+portions derived from Feather, MIT License, Copyright (c) 2013-present Cole Bemis). Icon transitions: morphicons
+(MIT License, Copyright (c) 2026 Guillermo); the full text accompanies the inlined runtime below.
+Permission to use, copy, modify, and/or distribute the ISC-licensed geometry for any purpose with or without fee
+is granted, provided that the copyright notice and this permission notice appear in all copies.
+-->
 <style>
-/* ---- design tokens: shadcn-style, #165DFF on white; light + dark aware ---- */
+/* Design tokens: grey, black and white; red #E93024 is reserved for emphasis. Light and dark follow the
+   system and can be switched with the theme control (data-theme on <html>). */
 :root{
-  --primary:#165DFF; --primary-hover:#0E4FE0; --primary-soft:#EEF3FF; --primary-border:#C6D8FF;
-  --bg:#FFFFFF; --bg-muted:#F5F7FA; --bg-subtle:#FCFCFD;
-  --fg:#0F172A; --fg-muted:#64748B; --fg-faint:#94A3B8;
-  --border:#E2E8F0; --border-strong:#CBD5E1;
-  --ok:#16A34A; --ok-soft:#EAF7EF; --warn:#D97706; --warn-soft:#FEF6E7; --err:#DC2626; --err-soft:#FDECEC;
-  --radius:8px; --shadow:0 1px 2px rgba(15,23,42,.04);
+  --bg:#f4f4f5; --surface:#ffffff; --surface-2:#f4f4f5; --fg:#0b0b0c; --muted:#55575d; --line:#d6d7db;
+  --accent:#e93024; --accent-text:#c4231a; --accent-fg:#ffffff; --focus:#e93024;
+  --ok:#1f7a3d; --warn:#8a5a00; --err:#c4231a; --overlay:rgba(10,10,12,.55);
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:Inter,-apple-system,"PingFang SC","Noto Sans SC","Segoe UI",system-ui,sans-serif;
+  color-scheme:light;
 }
-@media (prefers-color-scheme: dark){
-  :root{
-    --primary:#4080FF; --primary-hover:#5C94FF; --primary-soft:#16233F; --primary-border:#274A80;
-    --bg:#0F1420; --bg-muted:#0A0E17; --bg-subtle:#131A28;
-    --fg:#E5E9F0; --fg-muted:#9AA7BD; --fg-faint:#6B7890;
-    --border:#232B3B; --border-strong:#33405A;
-    --ok:#3FB269; --ok-soft:#12251A; --warn:#E3922B; --warn-soft:#2A2113; --err:#E5544B; --err-soft:#2A1717;
-    --shadow:0 1px 2px rgba(0,0,0,.3);
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0b0b0c; --surface:#131316; --surface-2:#1b1b1f; --fg:#ececee; --muted:#a3a5ab; --line:#2d2e33;
+    --accent-text:#ff6b60; --ok:#52c27a; --warn:#e3a33b; --err:#ff6b60; --overlay:rgba(0,0,0,.65); color-scheme:dark;
   }
+}
+:root[data-theme="dark"]{
+  --bg:#0b0b0c; --surface:#131316; --surface-2:#1b1b1f; --fg:#ececee; --muted:#a3a5ab; --line:#2d2e33;
+  --accent-text:#ff6b60; --ok:#52c27a; --warn:#e3a33b; --err:#ff6b60; --overlay:rgba(0,0,0,.65); color-scheme:dark;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
-body{font:14px/1.55 -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,sans-serif;color:var(--fg);background:var(--bg-muted)}
-a{color:var(--primary);text-decoration:none}
-button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+body{font:14px/1.6 var(--sans);color:var(--fg);background:var(--bg);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:inherit}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:0}
 input,select,textarea{font:inherit;color:var(--fg)}
-svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
-::-webkit-scrollbar{width:8px;height:8px}::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+::selection{background:var(--accent);color:#fff}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.skip{position:absolute;left:8px;top:-48px;z-index:100;background:var(--surface);border:1px solid var(--line);padding:8px 12px;border-radius:6px}
+.skip:focus{top:8px}
+svg.i{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.mono,.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)}
+.row{display:flex;align-items:center;gap:8px}
+.wrap{display:flex;flex-wrap:wrap;gap:6px}
+.sp{flex:1}
+@media (prefers-reduced-motion:reduce){*{transition-duration:0s!important;animation:none!important}}
 
-/* ---- layout ---- */
-#app{display:none;height:100%}
-#topbar{position:fixed;top:0;left:0;right:0;height:52px;background:var(--bg);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;padding:0 16px;z-index:40}
-#brand{display:flex;align-items:center;gap:9px;font-weight:650;font-size:14.5px;white-space:nowrap}
-#brand .dot{width:22px;height:22px;border-radius:6px;background:var(--primary);display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:700}
-#topbar .sp{flex:1}
-#wsseg{display:inline-flex;background:var(--bg-muted);border:1px solid var(--border);border-radius:9px;padding:2px;gap:2px}
-#wsseg button{display:flex;align-items:center;gap:6px;padding:5px 11px;font-size:12.5px;color:var(--fg-muted);border-radius:7px;white-space:nowrap}
-#wsseg button.on{background:var(--bg);color:var(--primary);font-weight:600;box-shadow:var(--shadow)}
-#wsseg button:hover:not(.on){color:var(--fg)}
-#gsearch,.gsearch{display:flex;align-items:center;gap:6px;background:var(--bg-muted);border:1px solid var(--border);border-radius:8px;padding:0 10px;height:34px;min-width:200px;max-width:340px;flex:0 1 300px}
-#gsearch:focus-within,.gsearch:focus-within{border-color:var(--primary);box-shadow:0 0 0 3px rgba(22,93,255,.10)}
-#gsearch .gsic,.gsearch .gsic{color:var(--fg-faint);display:flex}
-#gsearch input,.gsearch input{border:none;background:none;outline:none;width:100%;font-size:13px}
-#sidebar{position:fixed;top:52px;left:0;bottom:0;width:232px;background:var(--bg);border-right:1px solid var(--border);padding:10px 12px;overflow:auto;z-index:30}
-#main{margin:52px 0 0 232px;padding:22px 26px 56px;min-height:calc(100% - 52px)}
-.nav{display:flex;align-items:center;gap:9px;width:100%;padding:7px 10px;border-radius:8px;color:var(--fg-muted);font-size:13.5px;margin-bottom:1px;text-align:left}
-.nav:hover{background:var(--bg-muted);color:var(--fg)}
-.nav.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
-.nav .ph{margin-left:auto;font-size:10px;color:var(--fg-faint);font-weight:400}
-.navsec{font-size:11px;color:var(--fg-faint);letter-spacing:.05em;padding:14px 10px 4px;font-weight:600}
+/* ---- shell: left navigation and content area ---- */
+#app{display:none;min-height:100%}
+#side{position:fixed;top:0;left:0;bottom:0;width:232px;background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;z-index:30}
+#side .brand{padding:16px 16px 12px;border-bottom:1px solid var(--line)}
+#side .brand svg.logo{display:block;width:100%;height:auto;max-width:176px}
+#side .brand small{display:block;margin-top:8px;font-size:12px;color:var(--muted)}
+#side nav{padding:8px;overflow:auto;flex:1}
+.nav{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;padding:0 12px;border-radius:6px;color:var(--muted);text-align:left;text-decoration:none;border-left:2px solid transparent}
+.nav:hover{background:var(--surface-2);color:var(--fg)}
+.nav[aria-current="page"]{background:var(--surface-2);color:var(--fg);font-weight:600;border-left-color:var(--accent)}
+#side .foot{padding:12px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+#content{margin-left:232px;min-height:100vh;display:flex;flex-direction:column}
+#top{position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:10px 24px;min-height:56px}
+#top h1{font-size:16px;font-weight:650;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#menuBtn{display:none}
+main{padding:24px;max-width:1280px;width:100%}
+#scrim{display:none;position:fixed;inset:0;background:var(--overlay);z-index:25}
+@media (max-width:900px){
+  #side{transform:translateX(-100%);transition:transform .18s ease-out;width:260px}
+  body.navopen #side{transform:none}
+  body.navopen #scrim{display:block}
+  #content{margin-left:0}
+  #menuBtn{display:inline-flex}
+  #top{padding:8px 12px}
+  main{padding:16px}
+}
 
 /* ---- primitives ---- */
-.card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
-.card .hd{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:9px;font-weight:600;font-size:13.5px}
-.card .bd{padding:14px 16px}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:8px;font-size:13px;font-weight:500;border:1px solid var(--border);background:var(--bg);color:var(--fg);transition:.15s ease-out}
-.btn:hover{border-color:var(--border-strong);background:var(--bg-subtle)}
-.btn.pri{background:var(--primary);border-color:var(--primary);color:#fff}
-.btn.pri:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
-.btn.danger{color:var(--err);border-color:var(--err-soft)}
-.btn.danger:hover{background:var(--err-soft)}
-.btn.sm{padding:4px 9px;font-size:12px;border-radius:7px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);font-size:13px;font-weight:500;white-space:nowrap;transition:border-color .15s}
+.btn:hover{border-color:var(--muted)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.btn.pri:hover{background:#c9281d;border-color:#c9281d}
+.btn.danger{color:var(--err)}
+.btn.sm{min-height:32px;padding:0 10px;font-size:12px}
+.btn.ic{width:36px;padding:0}
 .btn:disabled{opacity:.5;cursor:not-allowed}
-.inp{padding:7px 11px;border:1px solid var(--border);border-radius:8px;background:var(--bg);outline:none;min-width:0}
-.inp:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(22,93,255,.10)}
-.badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11.5px;font-weight:500;border:1px solid transparent;white-space:nowrap;height:22px}
-.badge.official{background:var(--primary-soft);color:var(--primary);border-color:var(--primary-border)}
-.badge.community{background:var(--bg-muted);color:var(--fg-muted);border-color:var(--border)}
-.badge.ok{background:var(--ok-soft);color:var(--ok)}
-.badge.warn{background:var(--warn-soft);color:var(--warn)}
-.badge.err{background:var(--err-soft);color:var(--err)}
-.badge.cap{background:var(--bg-subtle);color:var(--fg-muted);border-color:var(--border);font-weight:400}
-.dot8{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none}
-.dot8.g{background:var(--ok)}.dot8.r{background:var(--err)}.dot8.y{background:var(--warn)}.dot8.gr{background:var(--fg-faint)}
+.inp,select.inp,textarea.inp{min-height:36px;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);min-width:0}
+textarea.inp{padding:8px 10px;width:100%;font-family:var(--mono);font-size:12px;resize:vertical}
+.inp::placeholder{color:var(--muted);opacity:.8}
+label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.card>.hd{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+.card>.hd h2{font-size:14px;font-weight:650;flex:1}
+.card>.bd{padding:16px}
+.grid{display:grid;gap:16px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.kpis{grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+@media (max-width:900px){.g2{grid-template-columns:1fr}}
+.kpi{padding:14px 16px}
+.kpi .l{font-size:12px;color:var(--muted)}
+.kpi .v{font-size:24px;font-weight:650;margin-top:4px;line-height:1.2}
+.kpi .s{font-size:12px;color:var(--muted);margin-top:2px}
+.tag{display:inline-flex;align-items:center;gap:4px;height:22px;padding:0 8px;border:1px solid var(--line);border-radius:4px;font-size:12px;color:var(--muted);white-space:nowrap}
+.tag.red{border-color:var(--accent);color:var(--accent-text)}
+.tag.ok{color:var(--ok);border-color:var(--ok)}
+.tag.warn{color:var(--warn);border-color:var(--warn)}
+.pghd{margin-bottom:16px}
+.pghd p{color:var(--muted);max-width:760px;font-size:13px}
+.tools{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px;margin-bottom:12px}
+.sect{font-size:13px;font-weight:650;margin:24px 0 8px}
+.note{font-size:12px;color:var(--muted);margin-top:8px}
+.kv{display:grid;grid-template-columns:140px minmax(0,1fr);gap:8px 12px;font-size:13px}
+.kv dt{color:var(--muted)}
+.kv dd{overflow-wrap:anywhere}
+.empty{padding:32px 16px;text-align:center;color:var(--muted)}
+.empty b{display:block;color:var(--fg);margin-bottom:4px}
+.banner{display:flex;gap:8px;align-items:flex-start;padding:12px 16px;border:1px solid var(--accent);border-radius:8px;margin-bottom:16px}
+
+/* ---- data table: sortable headers, tabular figures ---- */
+.tbw{overflow-x:auto}
 table.tb{width:100%;border-collapse:collapse;font-size:13px}
-.tb th{color:var(--fg-muted);font-weight:500;text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);font-size:12px;white-space:nowrap}
-.tb td{padding:10px;border-bottom:1px solid var(--border);vertical-align:top}
-.tb tr:last-child td{border-bottom:none}
-.tb tr.click:hover td{background:var(--bg-subtle);cursor:pointer}
-.tbwrap{overflow-x:auto}
-.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
-.muted{color:var(--fg-muted)}.faint{color:var(--fg-faint)}
-.grid{display:grid;gap:14px}
-.sp{flex:1}.note{font-size:11.5px;color:var(--fg-faint);margin-top:10px}
-.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
-.g2b{grid-template-columns:1fr 1.4fr}.g2c{grid-template-columns:1.4fr 1fr}
-.mb16{margin-bottom:16px}.mt14{margin-top:14px}.mt12{margin-top:12px}.p0{padding:0}.tac{text-align:center}
-.tile{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow)}
-.tile .lb{font-size:12px;color:var(--fg-muted);display:flex;align-items:center;gap:6px}
-.tile .v{font-size:25px;font-weight:650;margin-top:5px;letter-spacing:-.01em}
-.tile .s{font-size:11.5px;color:var(--fg-faint);margin-top:3px}
-.row{display:flex;align-items:center;gap:10px}
-.wrap{display:flex;flex-wrap:wrap;gap:6px}
-pre.out{background:#0B1220;color:#D7E0EE;border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-all}
-pre.md{background:var(--bg-subtle);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-word;color:var(--fg)}
+.tb th,.tb td{padding:9px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.tb th{font-weight:500;color:var(--muted);font-size:12px;white-space:nowrap;background:var(--surface)}
+.tb th button{display:inline-flex;align-items:center;gap:4px;min-height:24px;color:inherit;font-weight:inherit}
+.tb th button:hover{color:var(--fg)}
+.tb th[aria-sort="ascending"] button,.tb th[aria-sort="descending"] button{color:var(--fg);font-weight:600}
+.tb td.r,.tb th.r{text-align:right}
+.tb tbody tr:hover td{background:var(--surface-2)}
+.tb tbody tr:last-child td{border-bottom:0}
+.tb a.rowlink{text-decoration:none;font-weight:600}
+.tb a.rowlink:hover{text-decoration:underline}
+.tbfoot{display:flex;align-items:center;gap:12px;padding:10px 12px;font-size:12px;color:var(--muted);border-top:1px solid var(--line)}
 
-/* ---- page shell ---- */
-.crumb{font-size:12px;color:var(--fg-faint);margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.crumb a{color:var(--fg-muted)}
-.pghd{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:16px;flex-wrap:wrap}
-h2.pg{font-size:19px;font-weight:650;margin-bottom:3px;letter-spacing:-.01em}
-p.pgsub{color:var(--fg-muted);font-size:12.5px;max-width:760px}
-.pgact{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.pgfilter{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-.sect{font-weight:600;font-size:13px;color:var(--fg-muted);margin:22px 0 10px;display:flex;align-items:center;gap:7px}
+/* ---- drawer ---- */
+#ovl{display:none;position:fixed;inset:0;background:var(--overlay);z-index:50}
+#drawer{display:none;position:fixed;top:0;right:0;bottom:0;width:min(640px,100vw);background:var(--surface);border-left:1px solid var(--line);z-index:51;flex-direction:column}
+#drawer .dh{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--line)}
+#drawer .dh h2{flex:1;font-size:15px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#drawer .db{flex:1;overflow:auto;padding:16px}
 
-/* ---- flywheel ---- */
-.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
-.flowstep{flex:1;min-width:130px;padding:14px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);margin:0 4px 8px}
-.flowstep.flag{border-color:var(--primary-border);background:var(--primary-soft)}
-.flowname{font-size:12px;color:var(--fg-muted);font-weight:500}
-.flowbig{font-size:23px;font-weight:650;margin:4px 0 4px;letter-spacing:-.01em}
-.flowsub{font-size:11.5px;color:var(--fg-faint);line-height:1.5}
-.flowarrow{display:flex;align-items:center;color:var(--fg-faint);padding:0 2px}
+/* ---- login ---- */
+#login{min-height:100%;display:flex;align-items:center;justify-content:center;padding:16px}
+#login .panel{width:100%;max-width:380px;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:24px}
+#login svg.logo{display:block;width:100%;max-width:220px;height:auto;margin-bottom:20px}
+#login h1{font-size:16px;font-weight:650;margin-bottom:4px}
+#login p{color:var(--muted);font-size:13px;margin-bottom:16px}
+#loginErr{color:var(--err);font-size:13px;margin-top:8px;min-height:20px}
 
-/* ---- horizontal bars ---- */
-.hbar{display:grid;grid-template-columns:150px 1fr auto;align-items:center;gap:12px;padding:7px 0;border-bottom:1px solid var(--border)}
-.hbar:last-child{border-bottom:none}
-.hbar-l{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.hbar-track{height:8px;background:var(--bg-muted);border-radius:5px;overflow:hidden}
-.hbar-fill{height:100%;background:var(--primary);border-radius:5px}
-.hbar-v{font-size:12.5px;font-weight:600;white-space:nowrap}
-
-/* ---- agent detail ---- */
-.ahead{display:flex;gap:14px;align-items:flex-start;margin-bottom:6px}
-.ava{width:46px;height:46px;border-radius:12px;background:var(--primary-soft);color:var(--primary);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;flex:none}
-.tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin:16px 0 18px;overflow-x:auto}
-.tabs button{padding:9px 14px;font-size:13px;color:var(--fg-muted);border-bottom:2px solid transparent;white-space:nowrap}
-.tabs button.on{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
-.tabs button:hover:not(.on){color:var(--fg)}
-.kv{display:grid;grid-template-columns:120px 1fr;gap:8px 12px;font-size:13px}
-.kv .k{color:var(--fg-muted)}
-
-/* drawer */
-#ovl{position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:50;display:none}
-#drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,94vw);background:var(--bg);z-index:51;display:none;flex-direction:column;box-shadow:-8px 0 32px rgba(15,23,42,.14);transition:transform .2s ease-out}
-#drawer .dh{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
-#drawer .dh .t{font-weight:650;font-size:15px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#drawer .db{flex:1;overflow:auto;padding:16px 18px}
-.sec{margin:18px 0 8px;font-weight:600;font-size:13px}
-
-/* login */
-#login{height:100%;display:flex;align-items:center;justify-content:center;background:
-  radial-gradient(1000px 500px at 20% -10%, rgba(22,93,255,.08), transparent),
-  radial-gradient(800px 400px at 90% 110%, rgba(22,93,255,.06), transparent), var(--bg-muted)}
-#login .panel{width:360px;background:var(--bg);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);padding:28px}
-#login h1{font-size:17px;margin:14px 0 4px}
-#login p{color:var(--fg-muted);font-size:13px;margin-bottom:18px}
-#loginErr{color:var(--err);font-size:12.5px;margin-top:10px;min-height:16px}
-
-.toast{position:fixed;bottom:20px;right:20px;z-index:80;background:#0B1220;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.2);opacity:0;transition:.25s;pointer-events:none;max-width:420px}
-.toast.show{opacity:1}
-.spin{animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
-.loading{padding:48px;text-align:center;color:var(--fg-faint)}
-.empty{padding:40px 24px;text-align:center}
-.empty .eic{width:44px;height:44px;border-radius:12px;background:var(--primary-soft);color:var(--primary);display:inline-flex;align-items:center;justify-content:center;margin-bottom:12px}
-.seg{display:inline-flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.seg button{padding:6px 12px;font-size:12.5px;color:var(--fg-muted);background:var(--bg)}
-.seg button.on{background:var(--primary-soft);color:var(--primary);font-weight:600}
+/* ---- toast, spinner, bars ---- */
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:80;background:var(--surface);color:var(--fg);border:1px solid var(--line);padding:10px 16px;border-radius:6px;font-size:13px;max-width:calc(100vw - 32px);opacity:0;pointer-events:none;transition:opacity .2s}
+#toast.show{opacity:1}
+#toast.err{border-color:var(--accent)}
+.loading{padding:40px;text-align:center;color:var(--muted)}
+.bar{height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden;border:1px solid var(--line)}
+.bar>i{display:block;height:100%;background:var(--muted)}
+.bar.red>i{background:var(--accent)}
+pre.out{background:#0a0a0b;color:#e6e7ea;border-radius:6px;padding:12px;font:12px/1.5 var(--mono);overflow:auto;white-space:pre-wrap;word-break:break-all}
 </style>
 </head>
 <body>
+<a class="skip" href="#main" id="skipLink">跳到内容</a>
 
 <div id="login">
-  <div class="panel">
-    <div class="row"><div style="width:34px;height:34px;border-radius:9px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px">A</div></div>
-    <h1>ANetHub Admin</h1>
-    <p>Hub 运营与监管控制台 · 请输入管理 token</p>
-    <input id="tokIn" class="inp" type="password" placeholder="管理 token" style="width:100%" autocomplete="current-password"/>
-    <div id="loginErr"></div>
-    <button id="loginBtn" class="btn pri" style="width:100%;justify-content:center;margin-top:6px">进入控制台</button>
-  </div>
+  <form class="panel" id="loginForm" autocomplete="off">
+    <svg class="logo" role="img" aria-label="Agent Network" viewBox="0 0 2846 493" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M224.735 23.7861H2702.73C2774.2 23.7861 2819.51 80.3288 2803.93 150.078L2751.39 385.281C2739.42 438.86 2685.21 482.294 2630.31 482.294H142.31C70.8424 482.294 25.537 425.751 41.118 356.002L91.479 130.559C104.652 71.5899 164.313 23.7861 224.735 23.7861Z" fill="black" stroke="black" stroke-width="21.1912"/>
+<path d="M1681.82 429.738H139.84C106.307 429.738 85.0487 403.207 92.3595 370.48L144.806 135.703C152.116 102.976 185.228 76.4453 218.761 76.4453H2706.31C2739.85 76.4453 2761.11 102.983 2753.79 135.715L2701.27 370.615C2693.95 403.337 2660.8 429.861 2627.27 429.861C2557.07 429.861 2536.51 429.861 2536.51 429.861" stroke="#E93024" stroke-width="42.5027"/>
+<mask id="mask_l" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="218" y="167" width="2423" height="166">
+<path d="M297.002 266.744L285.343 332.865H218.202L247.35 167.562H415.203L386.056 332.865H318.914L330.573 266.744H297.002ZM308.661 200.622L302.832 233.683H336.403L342.232 200.622H308.661ZM445.482 167.562H613.336L607.506 200.622H506.794L489.306 299.804H522.876L534.535 233.683H601.677L584.188 332.865H416.335L445.482 167.562ZM614.467 332.865L643.615 167.562H811.468L805.639 200.622H704.927L699.097 233.683H766.239L760.409 266.744H693.268L687.438 299.804H788.15L782.321 332.865H614.467ZM919.142 299.804L924.971 266.744H891.401L879.742 332.865H812.6L841.748 167.562H875.318L869.489 200.622H903.06L897.23 233.683H930.801L942.46 167.562H1009.6L980.454 332.865H946.883L952.712 299.804H919.142ZM1034.05 200.622L1039.88 167.562H1174.16L1168.33 200.622H1134.76L1111.44 332.865H1044.3L1067.62 200.622H1034.05ZM1171.8 272.695L1179.79 227.401H1281.85L1273.86 272.695H1171.8ZM1401.75 299.804L1407.58 266.744H1374.01L1362.35 332.865H1295.21L1324.35 167.562H1357.92L1352.09 200.622H1385.66L1379.84 233.683H1413.41L1425.06 167.562H1492.21L1463.06 332.865H1429.49L1435.32 299.804H1401.75ZM1493.34 332.865L1522.49 167.562H1690.34L1684.51 200.622H1583.8L1577.97 233.683H1645.11L1639.28 266.744H1572.14L1566.31 299.804H1667.02L1661.19 332.865H1493.34ZM1714.79 200.622L1720.62 167.562H1854.9L1849.07 200.622H1815.5L1792.18 332.865H1725.04L1748.36 200.622H1714.79ZM1950.03 332.865L1955.86 299.804H1922.29L1916.46 332.865H1849.32L1878.47 167.562H1945.61L1928.12 266.744H1961.69L1979.18 167.562H2046.32L2017.17 332.865H1950.03ZM2047.45 332.865L2076.6 167.562H2244.45L2215.3 332.865H2047.45ZM2137.91 200.622L2120.42 299.804H2153.99L2171.48 200.622H2137.91ZM2346.3 332.865L2357.95 266.744H2324.38L2312.73 332.865H2245.58L2274.73 167.562H2409.01L2403.18 200.622H2436.76L2430.93 233.683H2397.36L2391.53 266.744H2425.1L2413.44 332.865H2346.3ZM2336.04 200.622L2330.21 233.683H2363.78L2369.61 200.622H2336.04ZM2561.92 233.683L2573.58 167.562H2640.72L2629.06 233.683H2595.49L2589.66 266.744H2623.23L2611.57 332.865H2544.43L2556.09 266.744H2522.52L2510.86 332.865H2443.72L2472.86 167.562H2540.01L2528.35 233.683H2561.92Z" fill="#E93024"/>
+</mask>
+<g mask="url(#mask_l)">
+<rect width="3076.99" height="412.9" transform="matrix(1 0 -0.173648 0.984808 -110.353 98.375)" fill="#ED2D28"/>
+<path d="M-2.81738 214.955C1105.48 214.955 2213.77 214.955 3355.64 214.955C3355.64 263.767 3355.64 312.58 3355.64 362.871C2247.35 362.871 1139.06 362.871 -2.81738 362.871C-2.81738 314.059 -2.81738 265.247 -2.81738 214.955Z" fill="#EE342E"/>
+<path d="M-2.81738 214.955C1105.48 214.955 2213.77 214.955 3355.64 214.955C3355.64 229.599 3355.64 244.242 3355.64 259.33C2247.35 259.33 1139.06 259.33 -2.81738 259.33C-2.81738 244.686 -2.81738 230.043 -2.81738 214.955Z" fill="#EE342E"/>
+<path d="M-2.81738 331.096C1105.48 331.096 2213.77 331.096 3355.64 331.096C3355.64 341.581 3355.64 352.067 3355.64 362.87C2247.35 362.87 1139.06 362.87 -2.81738 362.87C-2.81738 352.385 -2.81738 341.899 -2.81738 331.096Z" fill="#EE342E"/>
+<path d="M-2.81738 259.332C1105.48 259.332 2213.77 259.332 3355.64 259.332C3355.64 269.275 3355.64 279.219 3355.64 289.463C2247.35 289.463 1139.06 289.463 -2.81738 289.463C-2.81738 279.52 -2.81738 269.577 -2.81738 259.332Z" fill="#EE342E"/>
+<path d="M-2.81738 245.086C1105.48 245.086 2213.77 245.086 3355.64 245.086C3355.64 249.786 3355.64 254.487 3355.64 259.33C2247.35 259.33 1139.06 259.33 -2.81738 259.33C-2.81738 254.629 -2.81738 249.929 -2.81738 245.086Z" fill="#EE342E"/>
+<path d="M-2.81738 319.398C1105.48 319.398 2213.77 319.398 3355.64 319.398C3355.64 323.737 3355.64 328.076 3355.64 332.547C2247.35 332.547 1139.06 332.547 -2.81738 332.547C-2.81738 328.208 -2.81738 323.869 -2.81738 319.398Z" fill="#EE342E"/>
+<path d="M-16.0146 331.096C1092.27 331.096 2200.58 331.096 3342.45 331.096C3342.45 334.566 3342.45 338.036 3342.45 341.611C2234.16 341.611 1125.86 341.611 -16.0146 341.611C-16.0146 338.141 -16.0146 334.671 -16.0146 331.096Z" fill="white"/>
+<path d="M-2.81738 308.086C1105.48 308.086 2213.77 308.086 3355.64 308.086C3355.64 311.34 3355.64 314.594 3355.64 317.947C2247.35 317.947 1139.06 317.947 -2.81738 317.947C-2.81738 314.693 -2.81738 311.439 -2.81738 308.086Z" fill="white"/>
+<path d="M-2.81738 281.242C1105.48 281.242 2213.77 281.242 3355.64 281.242C3355.64 283.954 3355.64 286.666 3355.64 289.46C2247.35 289.46 1139.06 289.46 -2.81738 289.46C-2.81738 286.748 -2.81738 284.036 -2.81738 281.242Z" fill="white"/>
+<path d="M-2.81738 259.332C1105.48 259.332 2213.77 259.332 3355.64 259.332C3355.64 261.682 3355.64 264.032 3355.64 266.454C2247.35 266.454 1139.06 266.454 -2.81738 266.454C-2.81738 264.104 -2.81738 261.753 -2.81738 259.332Z" fill="white"/>
+<path d="M-3.78711 240.102C1104.51 240.102 2212.8 240.102 3354.67 240.102C3354.67 242.09 3354.67 244.079 3354.67 246.128C2246.38 246.128 1138.09 246.128 -3.78711 246.128C-3.78711 244.139 -3.78711 242.15 -3.78711 240.102Z" fill="white"/>
+<path d="M-2.81738 214.955C1105.48 214.955 2213.77 214.955 3355.64 214.955C3355.64 216.763 3355.64 218.571 3355.64 220.433C2247.35 220.433 1139.06 220.433 -2.81738 220.433C-2.81738 218.626 -2.81738 216.818 -2.81738 214.955Z" fill="#EE342E"/>
+<path d="M-2.81738 220.436C1105.48 220.436 2213.77 220.436 3355.64 220.436C3355.64 221.701 3355.64 222.967 3355.64 224.27C2247.35 224.27 1139.06 224.27 -2.81738 224.27C-2.81738 223.005 -2.81738 221.739 -2.81738 220.436Z" fill="white"/>
+<path d="M-2.81738 278.504C1105.48 278.504 2213.77 278.504 3355.64 278.504C3355.64 279.408 3355.64 280.312 3355.64 281.243C2247.35 281.243 1139.06 281.243 -2.81738 281.243C-2.81738 280.339 -2.81738 279.435 -2.81738 278.504Z" fill="#EE342E"/>
+<path d="M-2.81738 305.895C1105.48 305.895 2213.77 305.895 3355.64 305.895C3355.64 306.618 3355.64 307.341 3355.64 308.086C2247.35 308.086 1139.06 308.086 -2.81738 308.086C-2.81738 307.363 -2.81738 306.64 -2.81738 305.895Z" fill="#EE342E"/>
+<path d="M-2.81738 289.463C1105.48 289.463 2213.77 289.463 3355.64 289.463C3355.64 290.186 3355.64 290.909 3355.64 291.654C2247.35 291.654 1139.06 291.654 -2.81738 291.654C-2.81738 290.931 -2.81738 290.208 -2.81738 289.463Z" fill="#EE342E"/>
+<path d="M-2.81738 245.086C1105.48 245.086 2213.77 245.086 3355.64 245.086C3355.64 245.809 3355.64 246.532 3355.64 247.277C2247.35 247.277 1139.06 247.277 -2.81738 247.277C-2.81738 246.554 -2.81738 245.831 -2.81738 245.086Z" fill="#EE342E"/>
+</g>
+<path d="M1724.64 450.309L1731.83 409.511H1749.44C1753.87 409.511 1757.01 409.882 1758.88 410.624C1760.77 411.348 1762.15 412.647 1763.02 414.52C1763.9 416.394 1764.12 418.537 1763.7 420.949C1763.16 424.01 1761.8 426.543 1759.62 428.546C1757.44 430.531 1754.49 431.784 1750.76 432.303C1752.39 433.342 1753.67 434.483 1754.62 435.726C1755.59 436.969 1756.79 439.177 1758.23 442.349L1761.89 450.309H1751.88L1747.4 441.431C1745.81 438.259 1744.69 436.264 1744.05 435.448C1743.4 434.613 1742.66 434.047 1741.83 433.75C1741 433.435 1739.63 433.277 1737.7 433.277H1736.01L1733.01 450.309H1724.64ZM1737.16 426.765H1743.35C1747.36 426.765 1749.89 426.598 1750.95 426.264C1752.01 425.93 1752.89 425.355 1753.6 424.539C1754.31 423.723 1754.77 422.702 1754.99 421.478C1755.23 420.105 1755.05 419.001 1754.44 418.166C1753.86 417.313 1752.91 416.775 1751.59 416.552C1750.93 416.459 1748.9 416.413 1745.51 416.413H1738.98L1737.16 426.765ZM1768.29 430.16C1769.03 426.005 1770.27 422.517 1772.03 419.697C1773.34 417.619 1774.95 415.754 1776.86 414.103C1778.79 412.452 1780.8 411.227 1782.88 410.43C1785.65 409.353 1788.72 408.815 1792.09 408.815C1798.19 408.815 1802.75 410.68 1805.74 414.409C1808.76 418.138 1809.68 423.324 1808.51 429.966C1807.35 436.552 1804.62 441.709 1800.33 445.438C1796.04 449.149 1790.85 451.004 1784.77 451.004C1778.6 451.004 1774.03 449.158 1771.05 445.466C1768.07 441.756 1767.15 436.654 1768.29 430.16ZM1776.96 429.882C1776.15 434.502 1776.61 438.008 1778.36 440.401C1780.1 442.776 1782.64 443.964 1785.98 443.964C1789.31 443.964 1792.25 442.785 1794.8 440.429C1797.36 438.054 1799.06 434.502 1799.9 429.771C1800.72 425.095 1800.29 421.608 1798.61 419.307C1796.94 417.006 1794.38 415.856 1790.93 415.856C1787.49 415.856 1784.5 417.025 1781.98 419.363C1779.46 421.682 1777.79 425.188 1776.96 429.882ZM1818.62 409.511H1826.98L1823.08 431.607C1822.47 435.114 1822.17 437.387 1822.19 438.426C1822.26 440.095 1822.87 441.44 1824.02 442.461C1825.2 443.463 1826.96 443.964 1829.3 443.964C1831.67 443.964 1833.55 443.49 1834.92 442.544C1836.29 441.579 1837.23 440.401 1837.72 439.01C1838.21 437.618 1838.74 435.309 1839.31 432.081L1843.29 409.511H1851.65L1847.87 430.94C1847.01 435.837 1846.17 439.298 1845.36 441.32C1844.55 443.342 1843.42 445.049 1841.95 446.44C1840.49 447.832 1838.68 448.945 1836.5 449.78C1834.32 450.596 1831.59 451.004 1828.31 451.004C1824.36 451.004 1821.43 450.559 1819.53 449.668C1817.66 448.759 1816.25 447.591 1815.32 446.162C1814.39 444.715 1813.87 443.203 1813.77 441.626C1813.64 439.288 1813.97 435.837 1814.78 431.273L1818.62 409.511ZM1862.63 450.309L1868.6 416.413H1856.31L1857.53 409.511H1890.45L1889.23 416.413H1876.97L1870.99 450.309H1862.63ZM1888.68 450.309L1895.87 409.511H1926.59L1925.37 416.413H1903.02L1901.43 425.457H1922.23L1921.01 432.331H1900.22L1898.26 443.435H1921.4L1920.19 450.309H1888.68ZM1961.3 430.16C1960.89 432.442 1959.73 434.39 1957.81 436.004C1955.91 437.6 1953.81 438.398 1951.51 438.398C1949.19 438.398 1947.36 437.591 1946 435.977C1944.67 434.362 1944.2 432.424 1944.6 430.16C1945 427.897 1946.15 425.967 1948.05 424.372C1949.97 422.758 1952.09 421.951 1954.41 421.951C1956.71 421.951 1958.53 422.749 1959.86 424.344C1961.22 425.94 1961.7 427.878 1961.3 430.16ZM1989.11 450.309L1995.09 416.413H1982.8L1984.01 409.511H2016.93L2015.72 416.413H2003.45L1997.48 450.309H1989.11ZM2015.19 450.309L2022.39 409.511H2039.99C2044.42 409.511 2047.57 409.882 2049.43 410.624C2051.32 411.348 2052.7 412.647 2053.58 414.52C2054.45 416.394 2054.68 418.537 2054.25 420.949C2053.71 424.01 2052.35 426.543 2050.17 428.546C2047.99 430.531 2045.04 431.784 2041.31 432.303C2042.94 433.342 2044.23 434.483 2045.18 435.726C2046.14 436.969 2047.35 439.177 2048.78 442.349L2052.44 450.309H2042.43L2037.95 441.431C2036.36 438.259 2035.25 436.264 2034.6 435.448C2033.96 434.613 2033.22 434.047 2032.38 433.75C2031.55 433.435 2030.18 433.277 2028.26 433.277H2026.56L2023.56 450.309H2015.19ZM2027.71 426.765H2033.9C2037.91 426.765 2040.45 426.598 2041.5 426.264C2042.56 425.93 2043.44 425.355 2044.15 424.539C2044.86 423.723 2045.32 422.702 2045.54 421.478C2045.78 420.105 2045.6 419.001 2044.99 418.166C2044.41 417.313 2043.46 416.775 2042.14 416.552C2041.48 416.459 2039.45 416.413 2036.06 416.413H2029.53L2027.71 426.765ZM2064.12 409.511H2072.49L2068.59 431.607C2067.97 435.114 2067.68 437.387 2067.7 438.426C2067.76 440.095 2068.38 441.44 2069.53 442.461C2070.71 443.463 2072.47 443.964 2074.81 443.964C2077.18 443.964 2079.05 443.49 2080.43 442.544C2081.8 441.579 2082.73 440.401 2083.23 439.01C2083.72 437.618 2084.25 435.309 2084.81 432.081L2088.79 409.511H2097.16L2093.38 430.94C2092.52 435.837 2091.68 439.298 2090.87 441.32C2090.06 443.342 2088.92 445.049 2087.45 446.44C2086 447.832 2084.19 448.945 2082 449.78C2079.83 450.596 2077.1 451.004 2073.82 451.004C2069.86 451.004 2066.94 450.559 2065.04 449.668C2063.17 448.759 2061.76 447.591 2060.83 446.162C2059.9 444.715 2059.38 443.203 2059.28 441.626C2059.15 439.288 2059.48 435.837 2060.29 431.273L2064.12 409.511ZM2099.03 437.034L2107.31 436.255C2107.32 438.945 2107.96 440.921 2109.23 442.182C2110.51 443.444 2112.43 444.075 2114.97 444.075C2117.66 444.075 2119.79 443.518 2121.34 442.405C2122.92 441.273 2123.84 439.956 2124.1 438.453C2124.27 437.489 2124.12 436.672 2123.66 436.004C2123.21 435.318 2122.32 434.724 2120.97 434.223C2120.05 433.889 2117.93 433.296 2114.59 432.442C2110.3 431.348 2107.39 430.003 2105.86 428.407C2103.72 426.162 2102.93 423.426 2103.5 420.198C2103.86 418.12 2104.8 416.181 2106.3 414.381C2107.83 412.563 2109.8 411.181 2112.21 410.235C2114.63 409.289 2117.44 408.815 2120.62 408.815C2125.82 408.815 2129.53 409.938 2131.76 412.183C2134 414.428 2134.85 417.424 2134.33 421.172L2125.9 421.533C2125.91 419.437 2125.4 417.934 2124.37 417.025C2123.37 416.097 2121.69 415.634 2119.34 415.634C2116.91 415.634 2114.92 416.125 2113.37 417.108C2112.37 417.739 2111.78 418.583 2111.59 419.641C2111.42 420.606 2111.69 421.431 2112.4 422.118C2113.3 422.99 2115.7 423.899 2119.6 424.845C2123.51 425.791 2126.34 426.774 2128.1 427.795C2129.88 428.797 2131.16 430.179 2131.95 431.941C2132.75 433.685 2132.92 435.847 2132.47 438.426C2132.06 440.763 2131.01 442.952 2129.33 444.993C2127.65 447.034 2125.52 448.555 2122.93 449.557C2120.35 450.54 2117.26 451.032 2113.66 451.032C2108.42 451.032 2104.61 449.845 2102.22 447.47C2099.84 445.077 2098.77 441.598 2099.03 437.034ZM2146.74 450.309L2152.71 416.413H2140.42L2141.64 409.511H2174.56L2173.34 416.413H2161.08L2155.1 450.309H2146.74ZM2206.81 430.16C2206.4 432.442 2205.24 434.39 2203.32 436.004C2201.41 437.6 2199.31 438.398 2197.02 438.398C2194.7 438.398 2192.86 437.591 2191.51 435.977C2190.17 434.362 2189.71 432.424 2190.1 430.16C2190.5 427.897 2191.65 425.967 2193.56 424.372C2195.48 422.758 2197.6 421.951 2199.92 421.951C2202.21 421.951 2204.03 422.749 2205.37 424.344C2206.73 425.94 2207.21 427.878 2206.81 430.16ZM2225.29 450.309L2232.49 409.511H2263.2L2261.99 416.413H2239.64L2238.04 425.457H2258.84L2257.63 432.331H2236.83L2234.87 443.435H2258.01L2256.8 450.309H2225.29ZM2259.68 450.309L2277.6 429.019L2268.21 409.511H2277.98L2283.98 422.619L2294.43 409.511H2304.12L2287.74 429.325L2298.2 450.309H2288.11L2281.42 436.199L2269.72 450.309H2259.68ZM2302.5 450.309L2309.69 409.511H2340.41L2339.19 416.413H2316.84L2315.24 425.457H2336.04L2334.83 432.331H2314.03L2312.07 443.435H2335.22L2334 450.309H2302.5ZM2370.25 435.309L2377.91 437.841C2375.88 442.294 2373.23 445.605 2369.94 447.776C2366.68 449.928 2362.83 451.004 2358.38 451.004C2352.88 451.004 2348.68 449.158 2345.79 445.466C2342.91 441.756 2342.03 436.691 2343.16 430.272C2344.36 423.481 2347.07 418.212 2351.29 414.465C2355.51 410.699 2360.53 408.815 2366.33 408.815C2371.4 408.815 2375.25 410.29 2377.9 413.24C2379.47 414.984 2380.45 417.489 2380.81 420.754L2372.19 422.702C2372.07 420.587 2371.34 418.917 2369.99 417.693C2368.66 416.468 2366.89 415.856 2364.66 415.856C2361.59 415.856 2358.91 416.942 2356.6 419.112C2354.32 421.283 2352.74 424.799 2351.89 429.659C2350.98 434.817 2351.27 438.49 2352.77 440.68C2354.27 442.869 2356.52 443.964 2359.54 443.964C2361.76 443.964 2363.8 443.268 2365.64 441.876C2367.49 440.485 2369.02 438.296 2370.25 435.309ZM2390.06 409.511H2398.42L2394.52 431.607C2393.91 435.114 2393.61 437.387 2393.63 438.426C2393.7 440.095 2394.31 441.44 2395.46 442.461C2396.64 443.463 2398.4 443.964 2400.74 443.964C2403.11 443.964 2404.99 443.49 2406.36 442.544C2407.73 441.579 2408.67 440.401 2409.16 439.01C2409.65 437.618 2410.18 435.309 2410.75 432.081L2414.73 409.511H2423.09L2419.31 430.94C2418.45 435.837 2417.61 439.298 2416.8 441.32C2415.99 443.342 2414.86 445.049 2413.39 446.44C2411.93 447.832 2410.12 448.945 2407.94 449.78C2405.76 450.596 2403.03 451.004 2399.75 451.004C2395.8 451.004 2392.87 450.559 2390.97 449.668C2389.1 448.759 2387.69 447.591 2386.76 446.162C2385.83 444.715 2385.31 443.203 2385.21 441.626C2385.08 439.288 2385.41 435.837 2386.22 431.273L2390.06 409.511ZM2434.07 450.309L2440.04 416.413H2427.75L2428.97 409.511H2461.89L2460.67 416.413H2448.41L2442.43 450.309H2434.07ZM2460.12 450.309L2467.31 409.511H2498.03L2496.81 416.413H2474.46L2472.87 425.457H2493.67L2492.45 432.331H2471.66L2469.7 443.435H2492.84L2491.63 450.309H2460.12Z" fill="white"/>
+</svg>
+
+    <h1 id="loginTitle"></h1>
+    <p id="loginSub"></p>
+    <label class="f"><span id="loginLabel"></span>
+      <input id="tokIn" class="inp" type="password" autocomplete="current-password" required/>
+    </label>
+    <div id="loginErr" role="alert"></div>
+    <button id="loginBtn" class="btn pri" type="submit" style="width:100%;margin-top:4px"></button>
+    <div class="row" style="margin-top:12px;justify-content:flex-end"><button type="button" class="btn sm" data-act="lang"></button></div>
+  </form>
 </div>
 
 <div id="app">
-  <div id="topbar">
-    <div id="brand"><div class="dot">A</div>ANetHub</div>
-    <div id="wsseg"></div>
-    <div class="sp"></div>
-    <div id="gsearch"><span class="gsic">${ic('search')}</span><input id="gq" placeholder="搜索 Agent / 名称 / 能力…"/></div>
-    <button class="btn sm" onclick="render(true)" title="刷新">${ic('refresh')} 刷新</button>
-    <button class="btn sm" onclick="logout()" title="退出">${ic('logout')} 退出</button>
+  <aside id="side" aria-label="Navigation">
+    <div class="brand"><svg class="logo" role="img" aria-label="Agent Network" viewBox="0 0 2846 493" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M224.735 23.7861H2702.73C2774.2 23.7861 2819.51 80.3288 2803.93 150.078L2751.39 385.281C2739.42 438.86 2685.21 482.294 2630.31 482.294H142.31C70.8424 482.294 25.537 425.751 41.118 356.002L91.479 130.559C104.652 71.5899 164.313 23.7861 224.735 23.7861Z" fill="black" stroke="black" stroke-width="21.1912"/>
+<path d="M1681.82 429.738H139.84C106.307 429.738 85.0487 403.207 92.3595 370.48L144.806 135.703C152.116 102.976 185.228 76.4453 218.761 76.4453H2706.31C2739.85 76.4453 2761.11 102.983 2753.79 135.715L2701.27 370.615C2693.95 403.337 2660.8 429.861 2627.27 429.861C2557.07 429.861 2536.51 429.861 2536.51 429.861" stroke="#E93024" stroke-width="42.5027"/>
+<mask id="mask_s" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="218" y="167" width="2423" height="166">
+<path d="M297.002 266.744L285.343 332.865H218.202L247.35 167.562H415.203L386.056 332.865H318.914L330.573 266.744H297.002ZM308.661 200.622L302.832 233.683H336.403L342.232 200.622H308.661ZM445.482 167.562H613.336L607.506 200.622H506.794L489.306 299.804H522.876L534.535 233.683H601.677L584.188 332.865H416.335L445.482 167.562ZM614.467 332.865L643.615 167.562H811.468L805.639 200.622H704.927L699.097 233.683H766.239L760.409 266.744H693.268L687.438 299.804H788.15L782.321 332.865H614.467ZM919.142 299.804L924.971 266.744H891.401L879.742 332.865H812.6L841.748 167.562H875.318L869.489 200.622H903.06L897.23 233.683H930.801L942.46 167.562H1009.6L980.454 332.865H946.883L952.712 299.804H919.142ZM1034.05 200.622L1039.88 167.562H1174.16L1168.33 200.622H1134.76L1111.44 332.865H1044.3L1067.62 200.622H1034.05ZM1171.8 272.695L1179.79 227.401H1281.85L1273.86 272.695H1171.8ZM1401.75 299.804L1407.58 266.744H1374.01L1362.35 332.865H1295.21L1324.35 167.562H1357.92L1352.09 200.622H1385.66L1379.84 233.683H1413.41L1425.06 167.562H1492.21L1463.06 332.865H1429.49L1435.32 299.804H1401.75ZM1493.34 332.865L1522.49 167.562H1690.34L1684.51 200.622H1583.8L1577.97 233.683H1645.11L1639.28 266.744H1572.14L1566.31 299.804H1667.02L1661.19 332.865H1493.34ZM1714.79 200.622L1720.62 167.562H1854.9L1849.07 200.622H1815.5L1792.18 332.865H1725.04L1748.36 200.622H1714.79ZM1950.03 332.865L1955.86 299.804H1922.29L1916.46 332.865H1849.32L1878.47 167.562H1945.61L1928.12 266.744H1961.69L1979.18 167.562H2046.32L2017.17 332.865H1950.03ZM2047.45 332.865L2076.6 167.562H2244.45L2215.3 332.865H2047.45ZM2137.91 200.622L2120.42 299.804H2153.99L2171.48 200.622H2137.91ZM2346.3 332.865L2357.95 266.744H2324.38L2312.73 332.865H2245.58L2274.73 167.562H2409.01L2403.18 200.622H2436.76L2430.93 233.683H2397.36L2391.53 266.744H2425.1L2413.44 332.865H2346.3ZM2336.04 200.622L2330.21 233.683H2363.78L2369.61 200.622H2336.04ZM2561.92 233.683L2573.58 167.562H2640.72L2629.06 233.683H2595.49L2589.66 266.744H2623.23L2611.57 332.865H2544.43L2556.09 266.744H2522.52L2510.86 332.865H2443.72L2472.86 167.562H2540.01L2528.35 233.683H2561.92Z" fill="#E93024"/>
+</mask>
+<g mask="url(#mask_s)">
+<rect width="3076.99" height="412.9" transform="matrix(1 0 -0.173648 0.984808 -110.353 98.375)" fill="#ED2D28"/>
+<path d="M-2.81738 214.955C1105.48 214.955 2213.77 214.955 3355.64 214.955C3355.64 263.767 3355.64 312.58 3355.64 362.871C2247.35 362.871 1139.06 362.871 -2.81738 362.871C-2.81738 314.059 -2.81738 265.247 -2.81738 214.955Z" fill="#EE342E"/>
+<path d="M-2.81738 214.955C1105.48 214.955 2213.77 214.955 3355.64 214.955C3355.64 229.599 3355.64 244.242 3355.64 259.33C2247.35 259.33 1139.06 259.33 -2.81738 259.33C-2.81738 244.686 -2.81738 230.043 -2.81738 214.955Z" fill="#EE342E"/>
+<path d="M-2.81738 331.096C1105.48 331.096 2213.77 331.096 3355.64 331.096C3355.64 341.581 3355.64 352.067 3355.64 362.87C2247.35 362.87 1139.06 362.87 -2.81738 362.87C-2.81738 352.385 -2.81738 341.899 -2.81738 331.096Z" fill="#EE342E"/>
+<path d="M-2.81738 259.332C1105.48 259.332 2213.77 259.332 3355.64 259.332C3355.64 269.275 3355.64 279.219 3355.64 289.463C2247.35 289.463 1139.06 289.463 -2.81738 289.463C-2.81738 279.52 -2.81738 269.577 -2.81738 259.332Z" fill="#EE342E"/>
+<path d="M-2.81738 245.086C1105.48 245.086 2213.77 245.086 3355.64 245.086C3355.64 249.786 3355.64 254.487 3355.64 259.33C2247.35 259.33 1139.06 259.33 -2.81738 259.33C-2.81738 254.629 -2.81738 249.929 -2.81738 245.086Z" fill="#EE342E"/>
+<path d="M-2.81738 319.398C1105.48 319.398 2213.77 319.398 3355.64 319.398C3355.64 323.737 3355.64 328.076 3355.64 332.547C2247.35 332.547 1139.06 332.547 -2.81738 332.547C-2.81738 328.208 -2.81738 323.869 -2.81738 319.398Z" fill="#EE342E"/>
+<path d="M-16.0146 331.096C1092.27 331.096 2200.58 331.096 3342.45 331.096C3342.45 334.566 3342.45 338.036 3342.45 341.611C2234.16 341.611 1125.86 341.611 -16.0146 341.611C-16.0146 338.141 -16.0146 334.671 -16.0146 331.096Z" fill="white"/>
+<path d="M-2.81738 308.086C1105.48 308.086 2213.77 308.086 3355.64 308.086C3355.64 311.34 3355.64 314.594 3355.64 317.947C2247.35 317.947 1139.06 317.947 -2.81738 317.947C-2.81738 314.693 -2.81738 311.439 -2.81738 308.086Z" fill="white"/>
+<path d="M-2.81738 281.242C1105.48 281.242 2213.77 281.242 3355.64 281.242C3355.64 283.954 3355.64 286.666 3355.64 289.46C2247.35 289.46 1139.06 289.46 -2.81738 289.46C-2.81738 286.748 -2.81738 284.036 -2.81738 281.242Z" fill="white"/>
+<path d="M-2.81738 259.332C1105.48 259.332 2213.77 259.332 3355.64 259.332C3355.64 261.682 3355.64 264.032 3355.64 266.454C2247.35 266.454 1139.06 266.454 -2.81738 266.454C-2.81738 264.104 -2.81738 261.753 -2.81738 259.332Z" fill="white"/>
+<path d="M-3.78711 240.102C1104.51 240.102 2212.8 240.102 3354.67 240.102C3354.67 242.09 3354.67 244.079 3354.67 246.128C2246.38 246.128 1138.09 246.128 -3.78711 246.128C-3.78711 244.139 -3.78711 242.15 -3.78711 240.102Z" fill="white"/>
+<path d="M-2.81738 214.955C1105.48 214.955 2213.77 214.955 3355.64 214.955C3355.64 216.763 3355.64 218.571 3355.64 220.433C2247.35 220.433 1139.06 220.433 -2.81738 220.433C-2.81738 218.626 -2.81738 216.818 -2.81738 214.955Z" fill="#EE342E"/>
+<path d="M-2.81738 220.436C1105.48 220.436 2213.77 220.436 3355.64 220.436C3355.64 221.701 3355.64 222.967 3355.64 224.27C2247.35 224.27 1139.06 224.27 -2.81738 224.27C-2.81738 223.005 -2.81738 221.739 -2.81738 220.436Z" fill="white"/>
+<path d="M-2.81738 278.504C1105.48 278.504 2213.77 278.504 3355.64 278.504C3355.64 279.408 3355.64 280.312 3355.64 281.243C2247.35 281.243 1139.06 281.243 -2.81738 281.243C-2.81738 280.339 -2.81738 279.435 -2.81738 278.504Z" fill="#EE342E"/>
+<path d="M-2.81738 305.895C1105.48 305.895 2213.77 305.895 3355.64 305.895C3355.64 306.618 3355.64 307.341 3355.64 308.086C2247.35 308.086 1139.06 308.086 -2.81738 308.086C-2.81738 307.363 -2.81738 306.64 -2.81738 305.895Z" fill="#EE342E"/>
+<path d="M-2.81738 289.463C1105.48 289.463 2213.77 289.463 3355.64 289.463C3355.64 290.186 3355.64 290.909 3355.64 291.654C2247.35 291.654 1139.06 291.654 -2.81738 291.654C-2.81738 290.931 -2.81738 290.208 -2.81738 289.463Z" fill="#EE342E"/>
+<path d="M-2.81738 245.086C1105.48 245.086 2213.77 245.086 3355.64 245.086C3355.64 245.809 3355.64 246.532 3355.64 247.277C2247.35 247.277 1139.06 247.277 -2.81738 247.277C-2.81738 246.554 -2.81738 245.831 -2.81738 245.086Z" fill="#EE342E"/>
+</g>
+<path d="M1724.64 450.309L1731.83 409.511H1749.44C1753.87 409.511 1757.01 409.882 1758.88 410.624C1760.77 411.348 1762.15 412.647 1763.02 414.52C1763.9 416.394 1764.12 418.537 1763.7 420.949C1763.16 424.01 1761.8 426.543 1759.62 428.546C1757.44 430.531 1754.49 431.784 1750.76 432.303C1752.39 433.342 1753.67 434.483 1754.62 435.726C1755.59 436.969 1756.79 439.177 1758.23 442.349L1761.89 450.309H1751.88L1747.4 441.431C1745.81 438.259 1744.69 436.264 1744.05 435.448C1743.4 434.613 1742.66 434.047 1741.83 433.75C1741 433.435 1739.63 433.277 1737.7 433.277H1736.01L1733.01 450.309H1724.64ZM1737.16 426.765H1743.35C1747.36 426.765 1749.89 426.598 1750.95 426.264C1752.01 425.93 1752.89 425.355 1753.6 424.539C1754.31 423.723 1754.77 422.702 1754.99 421.478C1755.23 420.105 1755.05 419.001 1754.44 418.166C1753.86 417.313 1752.91 416.775 1751.59 416.552C1750.93 416.459 1748.9 416.413 1745.51 416.413H1738.98L1737.16 426.765ZM1768.29 430.16C1769.03 426.005 1770.27 422.517 1772.03 419.697C1773.34 417.619 1774.95 415.754 1776.86 414.103C1778.79 412.452 1780.8 411.227 1782.88 410.43C1785.65 409.353 1788.72 408.815 1792.09 408.815C1798.19 408.815 1802.75 410.68 1805.74 414.409C1808.76 418.138 1809.68 423.324 1808.51 429.966C1807.35 436.552 1804.62 441.709 1800.33 445.438C1796.04 449.149 1790.85 451.004 1784.77 451.004C1778.6 451.004 1774.03 449.158 1771.05 445.466C1768.07 441.756 1767.15 436.654 1768.29 430.16ZM1776.96 429.882C1776.15 434.502 1776.61 438.008 1778.36 440.401C1780.1 442.776 1782.64 443.964 1785.98 443.964C1789.31 443.964 1792.25 442.785 1794.8 440.429C1797.36 438.054 1799.06 434.502 1799.9 429.771C1800.72 425.095 1800.29 421.608 1798.61 419.307C1796.94 417.006 1794.38 415.856 1790.93 415.856C1787.49 415.856 1784.5 417.025 1781.98 419.363C1779.46 421.682 1777.79 425.188 1776.96 429.882ZM1818.62 409.511H1826.98L1823.08 431.607C1822.47 435.114 1822.17 437.387 1822.19 438.426C1822.26 440.095 1822.87 441.44 1824.02 442.461C1825.2 443.463 1826.96 443.964 1829.3 443.964C1831.67 443.964 1833.55 443.49 1834.92 442.544C1836.29 441.579 1837.23 440.401 1837.72 439.01C1838.21 437.618 1838.74 435.309 1839.31 432.081L1843.29 409.511H1851.65L1847.87 430.94C1847.01 435.837 1846.17 439.298 1845.36 441.32C1844.55 443.342 1843.42 445.049 1841.95 446.44C1840.49 447.832 1838.68 448.945 1836.5 449.78C1834.32 450.596 1831.59 451.004 1828.31 451.004C1824.36 451.004 1821.43 450.559 1819.53 449.668C1817.66 448.759 1816.25 447.591 1815.32 446.162C1814.39 444.715 1813.87 443.203 1813.77 441.626C1813.64 439.288 1813.97 435.837 1814.78 431.273L1818.62 409.511ZM1862.63 450.309L1868.6 416.413H1856.31L1857.53 409.511H1890.45L1889.23 416.413H1876.97L1870.99 450.309H1862.63ZM1888.68 450.309L1895.87 409.511H1926.59L1925.37 416.413H1903.02L1901.43 425.457H1922.23L1921.01 432.331H1900.22L1898.26 443.435H1921.4L1920.19 450.309H1888.68ZM1961.3 430.16C1960.89 432.442 1959.73 434.39 1957.81 436.004C1955.91 437.6 1953.81 438.398 1951.51 438.398C1949.19 438.398 1947.36 437.591 1946 435.977C1944.67 434.362 1944.2 432.424 1944.6 430.16C1945 427.897 1946.15 425.967 1948.05 424.372C1949.97 422.758 1952.09 421.951 1954.41 421.951C1956.71 421.951 1958.53 422.749 1959.86 424.344C1961.22 425.94 1961.7 427.878 1961.3 430.16ZM1989.11 450.309L1995.09 416.413H1982.8L1984.01 409.511H2016.93L2015.72 416.413H2003.45L1997.48 450.309H1989.11ZM2015.19 450.309L2022.39 409.511H2039.99C2044.42 409.511 2047.57 409.882 2049.43 410.624C2051.32 411.348 2052.7 412.647 2053.58 414.52C2054.45 416.394 2054.68 418.537 2054.25 420.949C2053.71 424.01 2052.35 426.543 2050.17 428.546C2047.99 430.531 2045.04 431.784 2041.31 432.303C2042.94 433.342 2044.23 434.483 2045.18 435.726C2046.14 436.969 2047.35 439.177 2048.78 442.349L2052.44 450.309H2042.43L2037.95 441.431C2036.36 438.259 2035.25 436.264 2034.6 435.448C2033.96 434.613 2033.22 434.047 2032.38 433.75C2031.55 433.435 2030.18 433.277 2028.26 433.277H2026.56L2023.56 450.309H2015.19ZM2027.71 426.765H2033.9C2037.91 426.765 2040.45 426.598 2041.5 426.264C2042.56 425.93 2043.44 425.355 2044.15 424.539C2044.86 423.723 2045.32 422.702 2045.54 421.478C2045.78 420.105 2045.6 419.001 2044.99 418.166C2044.41 417.313 2043.46 416.775 2042.14 416.552C2041.48 416.459 2039.45 416.413 2036.06 416.413H2029.53L2027.71 426.765ZM2064.12 409.511H2072.49L2068.59 431.607C2067.97 435.114 2067.68 437.387 2067.7 438.426C2067.76 440.095 2068.38 441.44 2069.53 442.461C2070.71 443.463 2072.47 443.964 2074.81 443.964C2077.18 443.964 2079.05 443.49 2080.43 442.544C2081.8 441.579 2082.73 440.401 2083.23 439.01C2083.72 437.618 2084.25 435.309 2084.81 432.081L2088.79 409.511H2097.16L2093.38 430.94C2092.52 435.837 2091.68 439.298 2090.87 441.32C2090.06 443.342 2088.92 445.049 2087.45 446.44C2086 447.832 2084.19 448.945 2082 449.78C2079.83 450.596 2077.1 451.004 2073.82 451.004C2069.86 451.004 2066.94 450.559 2065.04 449.668C2063.17 448.759 2061.76 447.591 2060.83 446.162C2059.9 444.715 2059.38 443.203 2059.28 441.626C2059.15 439.288 2059.48 435.837 2060.29 431.273L2064.12 409.511ZM2099.03 437.034L2107.31 436.255C2107.32 438.945 2107.96 440.921 2109.23 442.182C2110.51 443.444 2112.43 444.075 2114.97 444.075C2117.66 444.075 2119.79 443.518 2121.34 442.405C2122.92 441.273 2123.84 439.956 2124.1 438.453C2124.27 437.489 2124.12 436.672 2123.66 436.004C2123.21 435.318 2122.32 434.724 2120.97 434.223C2120.05 433.889 2117.93 433.296 2114.59 432.442C2110.3 431.348 2107.39 430.003 2105.86 428.407C2103.72 426.162 2102.93 423.426 2103.5 420.198C2103.86 418.12 2104.8 416.181 2106.3 414.381C2107.83 412.563 2109.8 411.181 2112.21 410.235C2114.63 409.289 2117.44 408.815 2120.62 408.815C2125.82 408.815 2129.53 409.938 2131.76 412.183C2134 414.428 2134.85 417.424 2134.33 421.172L2125.9 421.533C2125.91 419.437 2125.4 417.934 2124.37 417.025C2123.37 416.097 2121.69 415.634 2119.34 415.634C2116.91 415.634 2114.92 416.125 2113.37 417.108C2112.37 417.739 2111.78 418.583 2111.59 419.641C2111.42 420.606 2111.69 421.431 2112.4 422.118C2113.3 422.99 2115.7 423.899 2119.6 424.845C2123.51 425.791 2126.34 426.774 2128.1 427.795C2129.88 428.797 2131.16 430.179 2131.95 431.941C2132.75 433.685 2132.92 435.847 2132.47 438.426C2132.06 440.763 2131.01 442.952 2129.33 444.993C2127.65 447.034 2125.52 448.555 2122.93 449.557C2120.35 450.54 2117.26 451.032 2113.66 451.032C2108.42 451.032 2104.61 449.845 2102.22 447.47C2099.84 445.077 2098.77 441.598 2099.03 437.034ZM2146.74 450.309L2152.71 416.413H2140.42L2141.64 409.511H2174.56L2173.34 416.413H2161.08L2155.1 450.309H2146.74ZM2206.81 430.16C2206.4 432.442 2205.24 434.39 2203.32 436.004C2201.41 437.6 2199.31 438.398 2197.02 438.398C2194.7 438.398 2192.86 437.591 2191.51 435.977C2190.17 434.362 2189.71 432.424 2190.1 430.16C2190.5 427.897 2191.65 425.967 2193.56 424.372C2195.48 422.758 2197.6 421.951 2199.92 421.951C2202.21 421.951 2204.03 422.749 2205.37 424.344C2206.73 425.94 2207.21 427.878 2206.81 430.16ZM2225.29 450.309L2232.49 409.511H2263.2L2261.99 416.413H2239.64L2238.04 425.457H2258.84L2257.63 432.331H2236.83L2234.87 443.435H2258.01L2256.8 450.309H2225.29ZM2259.68 450.309L2277.6 429.019L2268.21 409.511H2277.98L2283.98 422.619L2294.43 409.511H2304.12L2287.74 429.325L2298.2 450.309H2288.11L2281.42 436.199L2269.72 450.309H2259.68ZM2302.5 450.309L2309.69 409.511H2340.41L2339.19 416.413H2316.84L2315.24 425.457H2336.04L2334.83 432.331H2314.03L2312.07 443.435H2335.22L2334 450.309H2302.5ZM2370.25 435.309L2377.91 437.841C2375.88 442.294 2373.23 445.605 2369.94 447.776C2366.68 449.928 2362.83 451.004 2358.38 451.004C2352.88 451.004 2348.68 449.158 2345.79 445.466C2342.91 441.756 2342.03 436.691 2343.16 430.272C2344.36 423.481 2347.07 418.212 2351.29 414.465C2355.51 410.699 2360.53 408.815 2366.33 408.815C2371.4 408.815 2375.25 410.29 2377.9 413.24C2379.47 414.984 2380.45 417.489 2380.81 420.754L2372.19 422.702C2372.07 420.587 2371.34 418.917 2369.99 417.693C2368.66 416.468 2366.89 415.856 2364.66 415.856C2361.59 415.856 2358.91 416.942 2356.6 419.112C2354.32 421.283 2352.74 424.799 2351.89 429.659C2350.98 434.817 2351.27 438.49 2352.77 440.68C2354.27 442.869 2356.52 443.964 2359.54 443.964C2361.76 443.964 2363.8 443.268 2365.64 441.876C2367.49 440.485 2369.02 438.296 2370.25 435.309ZM2390.06 409.511H2398.42L2394.52 431.607C2393.91 435.114 2393.61 437.387 2393.63 438.426C2393.7 440.095 2394.31 441.44 2395.46 442.461C2396.64 443.463 2398.4 443.964 2400.74 443.964C2403.11 443.964 2404.99 443.49 2406.36 442.544C2407.73 441.579 2408.67 440.401 2409.16 439.01C2409.65 437.618 2410.18 435.309 2410.75 432.081L2414.73 409.511H2423.09L2419.31 430.94C2418.45 435.837 2417.61 439.298 2416.8 441.32C2415.99 443.342 2414.86 445.049 2413.39 446.44C2411.93 447.832 2410.12 448.945 2407.94 449.78C2405.76 450.596 2403.03 451.004 2399.75 451.004C2395.8 451.004 2392.87 450.559 2390.97 449.668C2389.1 448.759 2387.69 447.591 2386.76 446.162C2385.83 444.715 2385.31 443.203 2385.21 441.626C2385.08 439.288 2385.41 435.837 2386.22 431.273L2390.06 409.511ZM2434.07 450.309L2440.04 416.413H2427.75L2428.97 409.511H2461.89L2460.67 416.413H2448.41L2442.43 450.309H2434.07ZM2460.12 450.309L2467.31 409.511H2498.03L2496.81 416.413H2474.46L2472.87 425.457H2493.67L2492.45 432.331H2471.66L2469.7 443.435H2492.84L2491.63 450.309H2460.12Z" fill="white"/>
+</svg>
+<small id="brandSub"></small></div>
+    <nav id="nav"></nav>
+    <div class="foot" id="ver"></div>
+  </aside>
+  <div id="scrim" data-act="closeNav"></div>
+  <div id="content">
+    <header id="top">
+      <button class="btn ic" id="menuBtn" data-act="toggleNav" aria-controls="side" aria-expanded="false"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path id="menuPath" d=""/></svg><span class="sr" id="menuLbl"></span></button>
+      <h1 id="pageTitle"></h1>
+      <button class="btn sm" data-act="refresh" id="refreshBtn"></button>
+      <button class="btn sm" data-act="lang" id="langBtn"></button>
+      <button class="btn ic" data-act="theme" id="themeBtn"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path id="themePath" d=""/></svg><span class="sr" id="themeLbl"></span></button>
+      <button class="btn sm" data-act="logout" id="logoutBtn"></button>
+    </header>
+    <main id="main" tabindex="-1"></main>
   </div>
-  <div id="sidebar"></div>
-  <div id="main"></div>
 </div>
 
-<div id="ovl" onclick="closeDrawer()"></div>
-<div id="drawer">
-  <div class="dh"><div class="t" id="drawerTitle"></div><button class="btn sm" onclick="closeDrawer()">✕</button></div>
+<div id="ovl" data-act="closeDrawer"></div>
+<div id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle">
+  <div class="dh"><h2 id="drawerTitle"></h2><button class="btn sm" data-act="closeDrawer" id="drawerClose"></button></div>
   <div class="db" id="drawerBody"></div>
 </div>
-<div class="toast" id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
-"use strict";
-/* ---------------- icons (Lucide, inline) ---------------- */
-const IC = {
-  dash:'<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="12" rx="1"/>',
-  bot:'<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
-  shield:'<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
-  store:'<path d="m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/><path d="M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4"/><path d="M2 7h20"/>',
-  db:'<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/>',
-  scroll:'<path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/>',
-  activity:'<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
-  refresh:'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
-  play:'<polygon points="6 3 20 12 6 21 6 3"/>',
-  stop:'<rect width="14" height="14" x="5" y="5" rx="2"/>',
-  restart:'<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>',
-  search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
-  logout:'<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
-  term:'<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>',
-  file:'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
-  trash:'<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
-  star:'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
-  chev:'<path d="m9 18 6-6-6-6"/>',
-  up:'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
-  wrench:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
-  compass:'<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
-  layers:'<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>',
-  cpu:'<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/>',
-  coin:'<circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/><path d="m16.71 13.88.7.71-2.82 2.82"/>',
-  gauge:'<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
-  inbox:'<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
-  alert:'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
-  share:'<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
-  chart:'<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
-  flag:'<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" x2="4" y1="22" y2="15"/>',
-  users:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
-};
-function ic(n){return '<svg class="i" viewBox="0 0 24 24">'+ (IC[n]||'') +'</svg>'}
+/*! morphicons v1.7.1 (morphicons/dom) — https://github.com/guillermolg00/morphicons
+MIT License
 
-/* ---------------- state + helpers ---------------- */
-const BASE = location.pathname.replace(/\/$/,'') || '/admin';
-let TOKEN = localStorage.getItem('anethub_admin_token') || '';
-let CURRENT_WS = 'operations';
-let CRUMB = '';
-let CUR_AGENT = '';
+Copyright (c) 2026 Guillermo
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+var Morphicons=(()=>{var Y=Object.defineProperty;var Gt=Object.getOwnPropertyDescriptor;var Vt=Object.getOwnPropertyNames;var zt=Object.prototype.hasOwnProperty;var Wt=(t,s,o)=>s in t?Y(t,s,{enumerable:!0,configurable:!0,writable:!0,value:o}):t[s]=o;var Yt=(t,s)=>{for(var o in s)Y(t,o,{get:s[o],enumerable:!0})},Zt=(t,s,o,n)=>{if(s&&typeof s=="object"||typeof s=="function")for(let e of Vt(s))!zt.call(t,e)&&e!==o&&Y(t,e,{get:()=>s[e],enumerable:!(n=Gt(s,e))||n.enumerable});return t};var Ht=t=>Zt(Y({},"__esModule",{value:!0}),t);var D=(t,s,o)=>Wt(t,typeof s!="symbol"?s+"":s,o);var yn={};Yt(yn,{canonicalD:()=>J,createMorph:()=>qt});var Xt="MmLlHhVvCcSsQqTtAaZz";function dt(t){let s=[],o=t.length,n=0,e=0,r=0,c=0,f=0,u=null,l="",a=0,i=0,p="",g=!1,y=m=>{throw new Error(`morphicons: ${m} at d[${n}]`)},w=m=>m>=48&&m<=57,d=()=>{for(;n<o;){let m=t.charCodeAt(n);if(m===32||m===9||m===10||m===13||m===12||m===44)n++;else break}},N=()=>{d();let m=n;n<o&&(t[n]==="+"||t[n]==="-")&&n++;let M=!1;for(;n<o&&w(t.charCodeAt(n));)n++,M=!0;if(n<o&&t[n]===".")for(n++;n<o&&w(t.charCodeAt(n));)n++,M=!0;if(M||y("expected number"),n<o&&(t[n]==="e"||t[n]==="E")){let k=n;n++,n<o&&(t[n]==="+"||t[n]==="-")&&n++;let P=!1;for(;n<o&&w(t.charCodeAt(n));)n++,P=!0;P||(n=k)}return Number(t.slice(m,n))},x=()=>{d();let m=t[n];return m==="0"||m==="1"?(n++,m==="1"?1:0):y("expected arc flag (0|1)")},h=()=>(g||y("path must start with M/m"),u||(u={x0:e,y0:r,segs:[],closed:!1},s.push(u)),u),b=!1,A=()=>N()+(b?e:0),I=()=>N()+(b?r:0);for(;d(),!(n>=o);){let m=t[n];switch(Xt.includes(m)?(l=m,n++):l===""?y("path must start with M/m"):l==="M"?l="L":l==="m"?l="l":(l==="Z"||l==="z")&&y("stray data after Z"),b=l>="a",b?l.toUpperCase():l){case"M":{g=!0;let M=A(),k=I();e=M,r=k,c=M,f=k,u={x0:M,y0:k,segs:[],closed:!1},s.push(u),p="";break}case"L":{let M=A(),k=I();h().segs.push(["L",M,k]),e=M,r=k,p="";break}case"H":{let M=A();h().segs.push(["L",M,r]),e=M,p="";break}case"V":{let M=I();h().segs.push(["L",e,M]),r=M,p="";break}case"C":case"S":{let M,k;l==="C"||l==="c"?(M=A(),k=I()):(M=p==="C"?2*e-a:e,k=p==="C"?2*r-i:r);let P=A(),T=I(),C=A(),F=I();h().segs.push(["C",M,k,P,T,C,F]),a=P,i=T,e=C,r=F,p="C";break}case"Q":case"T":{let M,k;l==="Q"||l==="q"?(M=A(),k=I()):(M=p==="Q"?2*e-a:e,k=p==="Q"?2*r-i:r);let P=A(),T=I();h().segs.push(["Q",M,k,P,T]),a=M,i=k,e=P,r=T,p="Q";break}case"A":{let M=N(),k=N(),P=N(),T=x(),C=x(),F=A(),E=I();h().segs.push(["A",M,k,P,T,C,F,E]),e=F,r=E,p="";break}case"Z":u&&(u.closed=!0,u=null),e=c,r=f,p="";break;default:y(`unsupported command "${l}"`)}}return s.filter(m=>m.segs.length>0)}function Z(t){return String(Math.round(t*100)/100)}function Nt(t,s){let o="";for(let n=0;n<t.length;n++){let e=t[n],r=e.length/2;o+=`M${Z(e[0])} ${Z(e[1])}`;for(let c=1;c<r;c++)o+=`L${Z(e[2*c])} ${Z(e[2*c+1])}`;s!=null&&s[n]&&(o+="Z")}return o}function $(t){return String(Math.round(t*1e4)/1e4)}function It(t){let s="";for(let{pts:o,closed:n}of t){s+=`M${$(o[0])} ${$(o[1])}`;for(let e=2;e<o.length;e+=6)s+=`C${$(o[e])} ${$(o[e+1])} ${$(o[e+2])} ${$(o[e+3])} ${$(o[e+4])} ${$(o[e+5])}`;n&&(s+="Z")}return s}var H=4/3*Math.tan(Math.PI/8),xt=2*Math.PI;function Q(t,s){let o=[t,s],n=t,e=s,r=(a,i,p,g,y,w)=>{o.push(a,i,p,g,y,w),n=y,e=w},c=(a,i)=>{Math.abs(a-n)<1e-12&&Math.abs(i-e)<1e-12||r(n+(a-n)/3,e+(i-e)/3,n+2*(a-n)/3,e+2*(i-e)/3,a,i)};return[r,c,(a,i,p,g)=>{r(n+2/3*(a-n),e+2/3*(i-e),p+2/3*(a-p),g+2/3*(i-g),p,g)},(a,i,p,g,y,w,d)=>{let N=n,x=e;if(Math.abs(w-N)<1e-12&&Math.abs(d-x)<1e-12)return;let h=Math.abs(a),b=Math.abs(i);if(h<1e-12||b<1e-12){c(w,d);return}let A=p*Math.PI/180,I=Math.cos(A),m=Math.sin(A),M=(N-w)/2,k=(x-d)/2,P=I*M+m*k,T=-m*M+I*k,C=P*P/(h*h)+T*T/(b*b);if(C>1){let S=Math.sqrt(C);h*=S,b*=S}let F=h*h,E=b*b,ut=P*P,ht=T*T,K=(F*E-F*ht-E*ut)/(F*ht+E*ut);K<0&&(K=0);let mt=(g===y?-1:1)*Math.sqrt(K),G=mt*h*T/b,V=-mt*b*P/h,Rt=I*G-m*V+(N+w)/2,Dt=m*G+I*V+(x+d)/2,tt=Math.atan2((T-V)/b,(P-G)/h),O=Math.atan2((-T-V)/b,(-P-G)/h)-tt;y===0&&O>0?O-=xt:y===1&&O<0&&(O+=xt);let z=Math.max(1,Math.ceil(Math.abs(O)/(Math.PI/2)-1e-9)),pt=O/z,W=4/3*Math.tan(pt/4),Qt=S=>Rt+h*Math.cos(S)*I-b*Math.sin(S)*m,Bt=S=>Dt+h*Math.cos(S)*m+b*Math.sin(S)*I,gt=S=>-h*Math.sin(S)*I-b*Math.cos(S)*m,bt=S=>-h*Math.sin(S)*m+b*Math.cos(S)*I,nt=tt,Mt=N,yt=x;for(let S=1;S<=z;S++){let R=tt+pt*S,et=S===z?w:Qt(R),st=S===z?d:Bt(R);r(Mt+W*gt(nt),yt+W*bt(nt),et-W*gt(R),st-W*bt(R),et,st),nt=R,Mt=et,yt=st}},a=>(a&&c(o[0],o[1]),o.length<8?null:{pts:Float64Array.from(o),closed:a})]}function wt(t){let[s,o,n,e,r]=Q(t.x0,t.y0);for(let c of t.segs)switch(c[0]){case"L":o(c[1],c[2]);break;case"C":s(c[1],c[2],c[3],c[4],c[5],c[6]);break;case"Q":n(c[1],c[2],c[3],c[4]);break;case"A":e(c[1],c[2],c[3],c[4],c[5],c[6],c[7])}return r(t.closed)}function v(t,s,o=0){let n=t[s];if(n===void 0)return o;let e=typeof n=="number"?n:Number(n);return Number.isFinite(e)?e:o}function kt(t){let s=String(t!=null?t:"").trim();if(!s)return[];let o=s.split(/[\s,]+/).map(Number);if(o.some(n=>!Number.isFinite(n)))throw new Error(`morphicons: invalid points: "${s}"`);return o}function ot(t,s){if(t.length<4)return null;let[,o,,,n]=Q(t[0],t[1]);for(let e=2;e+1<t.length;e+=2)o(t[e],t[e+1]);return n(s)}function At(t,s,o,n){if(o<1e-12||n<1e-12)return null;let e=H*o,r=H*n,c=t+o,f=t-o,u=s+n,l=s-n,[a,,,,i]=Q(c,s);return a(c,s+r,t+e,u,t,u),a(t-e,u,f,s+r,f,s),a(f,s-r,t-e,l,t,l),a(t+e,l,c,s-r,c,s),i(!0)}function Ut(t){let s=v(t,"x"),o=v(t,"y"),n=v(t,"width"),e=v(t,"height");if(n<1e-12||e<1e-12)return null;let r=v(t,"rx",NaN),c=v(t,"ry",NaN);if(Number.isNaN(r)&&(r=Number.isNaN(c)?0:c),Number.isNaN(c)&&(c=r),r=Math.min(Math.max(r,0),n/2),c=Math.min(Math.max(c,0),e/2),r<1e-12||c<1e-12)return ot([s,o,s+n,o,s+n,o+e,s,o+e],!0);let f=s+r,u=s+n-r,l=s+n,a=o+c,i=o+e-c,p=o+e,g=H*r,y=H*c,[w,d,,,N]=Q(f,o);return d(u,o),w(u+g,o,l,a-y,l,a),d(l,i),w(l,i+y,u+g,p,u,p),d(f,p),w(f-g,p,s,i+y,s,i),d(s,a),w(s,a-y,f-g,o,f,o),N(!0)}function X(t){var n;let s=[],o=e=>{e&&s.push(e)};if(typeof t=="string"){for(let e of dt(t))o(wt(e));return s}for(let[e,r]of t)switch(e){case"path":for(let c of dt(String((n=r.d)!=null?n:"")))o(wt(c));break;case"line":{let[,c,,,f]=Q(v(r,"x1"),v(r,"y1"));c(v(r,"x2"),v(r,"y2")),o(f(!1));break}case"circle":{let c=v(r,"r");o(At(v(r,"cx"),v(r,"cy"),c,c));break}case"ellipse":o(At(v(r,"cx"),v(r,"cy"),v(r,"rx"),v(r,"ry")));break;case"rect":o(Ut(r));break;case"polyline":o(ot(kt(r.points),!1));break;case"polygon":o(ot(kt(r.points),!0));break;default:throw new Error(`morphicons: unsupported tag <${e}>`)}return s}function Ft(t){return t.items.map(()=>new Float64Array(2*t.n))}function Ct(t,s,o){for(let n=0;n<t.items.length;n++){let e=t.items[n],r=o[n],c=t.n,f=Math.exp(e.lnSigma*s),u=e.theta*s,l=Math.cos(u)*f,a=Math.sin(u)*f,i,p;if(e.block){let[g,y]=e.block.off,[w,d]=e.block.drift;i=e.ca[0]+w*s+(g*l-y*a-g),p=e.ca[1]+d*s+(g*a+y*l-y)}else i=e.ca[0]+(e.cb[0]-e.ca[0])*s,p=e.ca[1]+(e.cb[1]-e.ca[1])*s;for(let g=0;g<c;g++){let y=e.aC[2*g]+(e.bT[2*g]-e.aC[2*g])*s,w=e.aC[2*g+1]+(e.bT[2*g+1]-e.aC[2*g+1])*s;r[2*g]=i+y*l-w*a,r[2*g+1]=p+y*a+w*l}}}var Jt=.35,Kt=.05,tn=.005,nn=8,en=1e5;function j(t){let s=t.length/2,o=0,n=0;for(let e=0;e<s;e++)o+=t[2*e],n+=t[2*e+1];return[o/s,n/s]}function Pt(t){let s=t.length/2,o=0;for(let n=1;n<s;n++)o+=Math.hypot(t[2*n]-t[2*n-2],t[2*n+1]-t[2*n-1]);return o}function sn(t){let s=t.length/2,o=new Float64Array(2*s);for(let n=0;n<s;n++)o[2*n]=t[2*(s-1-n)],o[2*n+1]=t[2*(s-1-n)+1];return o}function on(t,s){let o=t.length/2,n=new Float64Array(2*o);for(let e=0;e<o;e++){let r=(e+s)%o;n[2*e]=t[2*r],n[2*e+1]=t[2*r+1]}return n}function rt(t,s,o,n){let e=t.length/2,r=0,c=0,f=0,u=0,l=0,a=0;for(let d=0;d<e;d++){let N=t[2*d]-o[0],x=t[2*d+1]-o[1],h=s[2*d]-n[0],b=s[2*d+1]-n[1];r+=N*h,u+=x*b,c+=N*b,f+=x*h,l+=N*N+x*x,a+=h*h+b*b}let i=Math.atan2(c-f,r+u),p=Math.cos(i)*(r+u)+Math.sin(i)*(c-f),g=l>1e-12?p/l:1;g>1e-6||(g=1e-6);let y=Math.max(0,g*g*l-2*g*p+a),w=a>1e-12?Math.sqrt(y/a):0;return{theta:i,sigma:g,res:w}}function cn(t,s,o=!1,n=!1){let e=j(t),r=j(s),c=o&&!n,f=c?t:s,u=o||n?f.length/2:1,l=Number.POSITIVE_INFINITY,a=f,i={theta:0,sigma:1,res:0};for(let p=0;p<2;p++){let g=p?sn(f):f;for(let y=0;y<u;y++){let w=y?on(g,y):g,d=c?rt(w,s,e,r):rt(t,w,e,r),N=d.res+Kt*Math.abs(d.theta)/Math.PI;N<l&&(l=N,a=w,i=d)}}return c?{ca:e,cb:r,a,b:s,...i}:{ca:e,cb:r,a:t,b:a,...i}}function ct(t,s){let o=s.map(j),n=s.map(Pt);return t.map(e=>{let r=j(e),c=Pt(e);return o.map((f,u)=>Math.hypot(r[0]-f[0],r[1]-f[1])+Jt*Math.abs(c-n[u]))})}function rn(t){let s=t.length;if(s>nn){let c=[];for(let l=0;l<s;l++)for(let a=0;a<s;a++)c.push([t[l][a],l,a]);c.sort((l,a)=>l[0]-a[0]);let f=new Array(s).fill(-1),u=new Array(s).fill(!1);for(let[,l,a]of c)f[l]<0&&!u[a]&&(f[l]=a,u[a]=!0);return f}let o=Array.from({length:s},(c,f)=>f),n=o.slice(),e=Number.POSITIVE_INFINITY,r=(c,f,u)=>{if(!(u>=e)){if(f===s){e=u,n=c.slice();return}for(let l=f;l<s;l++)[c[f],c[l]]=[c[l],c[f]],r(c,f+1,u+t[f][c[f]]),[c[f],c[l]]=[c[l],c[f]]}};return r(o,0,0),n}function St(t){let s=t.length,o=t[0].length;if(o**s>en){let u=t.map(a=>{let i=0;for(let p=1;p<a.length;p++)a[p]<a[i]&&(i=p);return i}),l=new Array(o).fill(0);for(let a of u)l[a]++;for(let a=0;a<o;a++){if(l[a]>0)continue;let i=-1,p=Number.POSITIVE_INFINITY;for(let g=0;g<s;g++){if(l[u[g]]<2)continue;let y=t[g][a]-t[g][u[g]];y<p&&(p=y,i=g)}l[u[i]]--,u[i]=a,l[a]++}return u}let n=null,e=Number.POSITIVE_INFINITY,r=new Array(s),c=new Array(o).fill(0),f=(u,l,a)=>{if(!(l>=e||o-a>s-u)){if(u===s){e=l,n=r.slice();return}for(let i=0;i<o;i++)r[u]=i,c[i]++,f(u+1,l+t[u][i],a+(c[i]===1?1:0)),c[i]--}};if(f(0,0,0),!n)throw new Error("morphicons: no valid surjection (B < S)");return n}function an(t,s){let o=t.length*s,n=new Float64Array(2*o),e=new Float64Array(2*o);t.forEach((i,p)=>{n.set(i.a,2*s*p),e.set(i.bO,2*s*p)});let r=j(n),c=rt(n,e,r,j(e));if(c.res>=tn)return;let f=Math.cos(-c.theta),u=Math.sin(-c.theta),l=Math.cos(c.theta),a=Math.sin(c.theta);for(let i of t){let p=0,g=0;for(let A=0;A<s;A++){let I=i.bO[2*A]-i.cb[0],m=i.bO[2*A+1]-i.cb[1];i.bT[2*A]=(I*f-m*u)/c.sigma,i.bT[2*A+1]=(I*u+m*f)/c.sigma;let M=c.sigma*(l*i.aC[2*A]-a*i.aC[2*A+1])-I,k=c.sigma*(a*i.aC[2*A]+l*i.aC[2*A+1])-m;p+=M*M+k*k,g+=I*I+m*m}i.theta=c.theta,i.lnSigma=Math.log(c.sigma),i.res=g>1e-12?Math.sqrt(p/g):0;let y=Math.exp(i.lnSigma),w=Math.cos(i.theta)*y,d=Math.sin(i.theta)*y,N=i.ca[0]-r[0],x=i.ca[1]-r[1],h=N*w-x*d-N,b=N*d+x*w-x;i.block={off:[N,x],drift:[i.cb[0]-i.ca[0]-h,i.cb[1]-i.ca[1]-b]}}}function U(t,s){let o=t.length,n=s.length;if(o===0||n===0)throw new Error("morphicons: icon has no subpaths");let e=t.map(l=>l.pts),r=s.map(l=>l.pts),c=[];if(o===n){let l=rn(ct(e,r));for(let a=0;a<o;a++)c.push([a,l[a]])}else if(o<n){let l=St(ct(r,e));for(let a=0;a<n;a++)c.push([l[a],a])}else{let l=St(ct(e,r));for(let a=0;a<o;a++)c.push([a,l[a]])}let f=e[0].length/2,u=c.map(([l,a])=>{let i=cn(e[l],r[a],t[l].closed,s[a].closed),p=i.a,g=new Float64Array(2*f),y=new Float64Array(2*f),w=new Float64Array(2*f),d=Math.cos(-i.theta),N=Math.sin(-i.theta);for(let x=0;x<f;x++){g[2*x]=p[2*x]-i.ca[0],g[2*x+1]=p[2*x+1]-i.ca[1];let h=i.b[2*x]-i.cb[0],b=i.b[2*x+1]-i.cb[1];y[2*x]=(h*d-b*N)/i.sigma,y[2*x+1]=(h*N+b*d)/i.sigma,w[2*x]=i.b[2*x],w[2*x+1]=i.b[2*x+1]}return{a:p,aC:g,bT:y,bO:w,ca:i.ca,cb:i.cb,theta:i.theta,lnSigma:Math.log(i.sigma),res:i.res,closed:t[l].closed&&s[a].closed,block:null}});return u.length>1&&an(u,f),{items:u,n:f}}var Et=Math.PI/8,Tt=[.18343464249564978,.525532409916329,.7966664774136267,.9602898564975363],ln=[.362683783378362,.31370664587788727,.22238103445337448,.10122853629037626];function at(t,s,o){let n=6*s,e=1-o,r=3*e*e,c=6*e*o,f=3*o*o,u=r*(t[n+2]-t[n])+c*(t[n+4]-t[n+2])+f*(t[n+6]-t[n+4]),l=r*(t[n+3]-t[n+1])+c*(t[n+5]-t[n+3])+f*(t[n+7]-t[n+5]);return Math.hypot(u,l)}function it(t,s,o=1){let n=o/2,e=0;for(let r=0;r<4;r++)e+=ln[r]*(at(t,s,n+n*Tt[r])+at(t,s,n-n*Tt[r]));return e*n}function fn(t,s,o,n,e){let r=6*s,c=1-o,f=c*c*c,u=3*c*c*o,l=3*c*o*o,a=o*o*o;n[e]=f*t[r]+u*t[r+2]+l*t[r+4]+a*t[r+6],n[e+1]=f*t[r+1]+u*t[r+3]+l*t[r+5]+a*t[r+7]}function vt(t,s,o){let n=6*s,e=o?n+6:n,r=o?-1:1;for(let c of o?[4,2,0]:[2,4,6]){let f=r*(t[n+c]-t[e]),u=r*(t[n+c+1]-t[e+1]);if(f*f+u*u>1e-18)return[f,u]}return null}function un(t,s=Et){let o=t.pts,n=(o.length/2-1)/3,e=[];for(let f=0;f<n;f++)it(o,f)>1e-9&&e.push(f);if(e.length===0)return[];let r=new Set,c=(f,u)=>{let l=vt(o,f,!0),a=vt(o,u,!1);!l||!a||Math.abs(Math.atan2(l[0]*a[1]-l[1]*a[0],l[0]*a[0]+l[1]*a[1]))>s&&r.add(u)};for(let f=0;f+1<e.length;f++)c(e[f],e[f+1]);return t.closed&&e.length>1&&c(e[e.length-1],e[0]),[...r].sort((f,u)=>f-u)}function hn(t,s,o,n){if(o<=0)return 0;if(o>=n)return 1;let e=0,r=1,c=o/n;for(let f=0;f<12;f++){let u=it(t,s,c)-o;if(Math.abs(u)<1e-10*n+1e-14)break;u>0?r=c:e=c;let l=at(t,s,c),a=l>1e-12?c-u/l:(e+r)/2;a>e&&a<r||(a=(e+r)/2),c=a}return c}function mn(t,s=64,o=Et){let n=t.pts,e=(n.length/2-1)/3,r=new Float64Array(2*s),c=()=>{for(let h=0;h<s;h++)r[2*h]=n[0],r[2*h+1]=n[1];return r};if(e<1)return c();let f=new Array(e),u=0;for(let h=0;h<e;h++)f[h]=it(n,h),u+=f[h];if(u<1e-12)return c();let l=un(t,o),a=t.closed?l.length>0?l:[0]:[...new Set([0,...l,e])].sort((h,b)=>h-b),i=[];if(t.closed)for(let h=0;h<a.length;h++){let b=a[h],A=h+1<a.length?a[h+1]:a[0]+e;i.push([b,A])}else for(let h=0;h+1<a.length;h++)i.push([a[h],a[h+1]]);let p=i.map(([h,b])=>{let A=0;for(let I=h;I<b;I++)A+=f[I%e];return A}),g=t.closed?s:s-1;if(i.length>g)throw new Error(`morphicons: N=${s} too small (${i.length} runs)`);let y=p.reduce((h,b)=>h+b,0)||1,w=p.map(h=>g*h/y),d=w.map(h=>Math.max(1,Math.floor(h))),N=g-d.reduce((h,b)=>h+b,0);if(N>0){let h=w.map((b,A)=>[Math.round((b-Math.floor(b))*1e9),A]).sort((b,A)=>A[0]-b[0]||b[1]-A[1]);for(let b=0;b<N;b++)d[h[b%d.length][1]]++}for(;N<0;){let h=0;for(let b=1;b<d.length;b++)d[b]>d[h]&&(h=b);if(d[h]<=1)break;d[h]--,N++}let x=0;for(let h=0;h<i.length;h++){let[b,A]=i[h],I=d[h],m=p[h],M=6*(b%e);r[2*x]=n[M],r[2*x+1]=n[M+1],x++;let k=b,P=0;for(let T=1;T<I;T++){let C=m*T/I;for(;k<A-1&&P+f[k%e]<C;)P+=f[k%e],k++;let F=k%e,E=f[F];fn(n,F,E>1e-12?hn(n,F,C-P,E):0,r,2*x),x++}}if(!t.closed){let h=6*e;r[2*x]=n[h],r[2*x+1]=n[h+1]}return r}function lt(t,s=64){return X(t).map(o=>({pts:mn(o,s),closed:o.closed}))}var $t=class{constructor(){D(this,"x",1);D(this,"v",0);D(this,"k",250);D(this,"c",24)}config(t,s){this.k=t,this.c=s}start(){this.x=0,this.v>14&&(this.v=14),this.v<-14&&(this.v=-14)}step(t){let s=Math.max(1,Math.min(16,Math.ceil(t/.004166666666666667))),o=t/s;for(let n=0;n<s;n++){let e=this.k*(1-this.x)-this.c*this.v;this.v+=e*o,this.x+=this.v*o}return Math.abs(1-this.x)<.001&&Math.abs(this.v)<.02}},ft={smooth:{k:170,c:26},snappy:{k:420,c:30},bouncy:{k:300,c:14}};var B=new Set,L=0,_=-1;function _t(t){let s=_<0?0:Math.min(Math.max((t-_)/1e3,0),.1);_=t;for(let o of[...B])o(s);B.size>0?L=requestAnimationFrame(_t):(L=0,_=-1)}function pn(t){B.add(t),L===0&&(_=-1,L=requestAnimationFrame(_t))}function gn(t){B.delete(t),B.size===0&&L!==0&&(cancelAnimationFrame(L),L=0,_=-1)}var Lt=new WeakMap,Ot=new WeakMap,jt=new WeakMap;function q(t){if(typeof t=="string")return lt(t);let s=Lt.get(t);return s||(s=lt(t),Lt.set(t,s)),s}function J(t){if(typeof t=="string")return t;let s=Ot.get(t);return s||(s=It(X(t)),Ot.set(t,s)),s}function bn(t,s){if(typeof t=="string"||typeof s=="string")return U(q(t),q(s));let o=jt.get(t);o||(o=new WeakMap,jt.set(t,o));let n=o.get(s);return n||(n=U(q(t),q(s)),o.set(s,n)),n}function Mn(t){var o,n;if(typeof t=="string")return ft[t];let s=ft.snappy;return{k:(o=t==null?void 0:t.stiffness)!=null?o:s.k,c:(n=t==null?void 0:t.damping)!=null?n:s.c}}function qt(t,s,o){var I;let n=new $t,e=(I=o==null?void 0:o.reducedMotion)!=null?I:"never",r=s,c=!0,f=null,u=null,l=null,a=1,i=!1,p=!1;t.setAttribute("d",J(s));let g=m=>{let M=f,k=u,P=l;!M||!k||!P||(a=m,Ct(M,m,k),t.setAttribute("d",Nt(k,P)))},y=()=>{i&&(i=!1,gn(w))},w=m=>{let M=n.step(m);g(n.x),M&&(y(),d())},d=()=>{c=!0,f=null,u=null,l=null,a=1,n.x=1,n.v=0,t.setAttribute("d",J(r))},N=()=>{let m=f,M=u;return c||!m||!M?q(r):M.map((k,P)=>({pts:Float64Array.from(k),closed:m.items[P].closed}))},x=m=>{f=c?bn(r,m):U(N(),q(m)),u=Ft(f),l=f.items.map(M=>M.closed),r=m,c=!1},h=m=>{y(),r=m,d()},b=()=>{var m;return e==="always"?!0:e!=="user"||typeof matchMedia=="undefined"?!1:(m=matchMedia==null?void 0:matchMedia("(prefers-reduced-motion: reduce)").matches)!=null?m:!1},A=(m,M)=>{if(p)return;let k=!c&&f!==null&&m===r;y(),n.v=0,k||x(m),g(M)};return{morphTo(m,M){if(p||m===r&&(c||i))return;if(b()){h(m);return}let{k,c:P}=Mn(M);n.config(k,P),x(m),n.start(),i||(i=!0,pn(w))},set(m){p||h(m)},seek:A,get progress(){return c?1:a},set progress(m){p||A(r,m)},get reducedMotion(){return e},set reducedMotion(m){e=m},destroy(){y(),p=!0,f=null,u=null,l=null}}}return Ht(yn);})();
+
+</script>
+<script>
+"use strict";
+/* ---------------- icons ---------------- */
+const IC = {"dash":"<rect width=\"7\" height=\"9\" x=\"3\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"14\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"9\" x=\"14\" y=\"12\" rx=\"1\"/><rect width=\"7\" height=\"5\" x=\"3\" y=\"16\" rx=\"1\"/>","nodes":"<rect width=\"20\" height=\"8\" x=\"2\" y=\"2\" rx=\"2\" ry=\"2\"/><rect width=\"20\" height=\"8\" x=\"2\" y=\"14\" rx=\"2\" ry=\"2\"/><line x1=\"6\" x2=\"6.01\" y1=\"6\" y2=\"6\"/><line x1=\"6\" x2=\"6.01\" y1=\"18\" y2=\"18\"/>","reg":"<rect width=\"8\" height=\"4\" x=\"8\" y=\"2\" rx=\"1\" ry=\"1\"/><path d=\"M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2\"/><path d=\"M12 11h4\"/><path d=\"M12 16h4\"/><path d=\"M8 11h.01\"/><path d=\"M8 16h.01\"/>","fed":"<rect x=\"16\" y=\"16\" width=\"6\" height=\"6\" rx=\"1\"/><rect x=\"2\" y=\"16\" width=\"6\" height=\"6\" rx=\"1\"/><rect x=\"9\" y=\"2\" width=\"6\" height=\"6\" rx=\"1\"/><path d=\"M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3\"/><path d=\"M12 12V8\"/>","settle":"<path d=\"M12 3v18\"/><path d=\"m19 8 3 8a5 5 0 0 1-6 0zV7\"/><path d=\"M3 7h1a17 17 0 0 0 8-2 17 17 0 0 0 8 2h1\"/><path d=\"m5 8 3 8a5 5 0 0 1-6 0zV7\"/><path d=\"M7 21h10\"/>","adm":"<path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"/><path d=\"m9 12 2 2 4-4\"/>","logs":"<path d=\"M15 12h-5\"/><path d=\"M15 8h-5\"/><path d=\"M19 17V5a2 2 0 0 0-2-2H4\"/><path d=\"M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3\"/>","refresh":"<path d=\"M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8\"/><path d=\"M21 3v5h-5\"/><path d=\"M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16\"/><path d=\"M8 16H3v5\"/>","search":"<path d=\"m21 21-4.34-4.34\"/><circle cx=\"11\" cy=\"11\" r=\"8\"/>","logout":"<path d=\"m16 17 5-5-5-5\"/><path d=\"M21 12H9\"/><path d=\"M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4\"/>","sort":"<path d=\"m21 16-4 4-4-4\"/><path d=\"M17 20V4\"/><path d=\"m3 8 4-4 4 4\"/><path d=\"M7 4v16\"/>","up":"<path d=\"m5 12 7-7 7 7\"/><path d=\"M12 19V5\"/>","down":"<path d=\"M12 5v14\"/><path d=\"m19 12-7 7-7-7\"/>","trash":"<path d=\"M10 11v6\"/><path d=\"M14 11v6\"/><path d=\"M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6\"/><path d=\"M3 6h18\"/><path d=\"M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\"/>","dl":"<path d=\"M12 15V3\"/><path d=\"M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4\"/><path d=\"m7 10 5 5 5-5\"/>","alert":"<circle cx=\"12\" cy=\"12\" r=\"10\"/><line x1=\"12\" x2=\"12\" y1=\"8\" y2=\"12\"/><line x1=\"12\" x2=\"12.01\" y1=\"16\" y2=\"16\"/>","inbox":"<polyline points=\"22 12 16 12 14 15 10 15 8 12 2 12\"/><path d=\"M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z\"/>","receipt":"<path d=\"M18 6 7 17l-5-5\"/><path d=\"m22 10-7.5 7.5L13 16\"/>"};
+const MORPH = {"theme-light": "M16 12C16 14.2091 14.2091 16 12 16C9.7909 16 8 14.2091 8 12C8 9.7909 9.7909 8 12 8C14.2091 8 16 9.7909 16 12ZM12 2C12 2.6667 12 3.3333 12 4M12 20C12 20.6667 12 21.3333 12 22M4.93 4.93C5.4 5.4 5.87 5.87 6.34 6.34M17.66 17.66C18.13 18.13 18.6 18.6 19.07 19.07M2 12C2.6667 12 3.3333 12 4 12M20 12C20.6667 12 21.3333 12 22 12M6.34 17.66C5.87 18.13 5.4 18.6 4.93 19.07M19.07 4.93C18.6 5.4 18.13 5.87 17.66 6.34", "theme-dark": "M20.985 12.486C20.7239 17.3235 16.6804 21.0863 11.8366 20.9994C6.9929 20.9125 3.087 17.007 2.9996 12.1633C2.9121 7.3195 6.6745 3.2757 11.512 3.014C11.917 2.992 12.129 3.474 11.914 3.817C10.4332 6.1863 10.7837 9.2641 12.7593 11.2397C14.7349 13.2153 17.8127 13.5658 20.182 12.085C20.526 11.87 21.007 12.081 20.985 12.486", "menu": "M4 5C9.3333 5 14.6667 5 20 5M4 12C9.3333 12 14.6667 12 20 12M4 19C9.3333 19 14.6667 19 20 19", "close": "M18 6C14 10 10 14 6 18M6 6C10 10 14 14 18 18"};
+function ic(n){ return '<svg class="i" viewBox="0 0 24 24" aria-hidden="true">' + (IC[n] || '') + '</svg>'; }
+
+/* ---------------- language, theme ---------------- */
+let L = 'zh';
+try { const s = localStorage.getItem('anet-lang'); L = (s === 'en' || s === 'zh') ? s : ((navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en'); } catch (e) { L = 'zh'; }
+const t = (zh, en) => L === 'zh' ? zh : en;
+function setLang(l){ L = l; try { localStorage.setItem('anet-lang', l); } catch (e) {} document.documentElement.lang = l === 'zh' ? 'zh-CN' : 'en'; chrome(); if (TOKEN) render(); }
+let THEME = '';
+try { THEME = localStorage.getItem('anet-theme') || ''; } catch (e) {}
+function curTheme(){ return THEME || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
+const morphs = {};
+function morphTo(id, d){
+  const el = document.getElementById(id); if (!el) return;
+  if (!window.Morphicons || !d) { el.setAttribute('d', d || ''); return; }
+  if (!morphs[id]) { el.setAttribute('d', d); morphs[id] = Morphicons.createMorph(el, d, { reducedMotion: 'user' }); return; }
+  morphs[id].morphTo(d);
+}
+function applyTheme(){
+  document.documentElement.dataset.theme = curTheme();
+  morphTo('themePath', curTheme() === 'dark' ? MORPH['theme-light'] : MORPH['theme-dark']);
+  $('#themeLbl').textContent = curTheme() === 'dark' ? t('切换为浅色主题', 'Switch to light theme') : t('切换为深色主题', 'Switch to dark theme');
+  $('#themeBtn').title = $('#themeLbl').textContent;
+}
+function toggleTheme(){ THEME = curTheme() === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('anet-theme', THEME); } catch (e) {} applyTheme(); }
+
+/* ---------------- helpers ---------------- */
+const BASE = location.pathname.replace(/\/$/, '') || '/admin';
+let TOKEN = ''; try { TOKEN = localStorage.getItem('anethub_admin_token') || ''; } catch (e) {}
 const $ = s => document.querySelector(s);
-const esc = s => String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function toast(msg, ms=2600){const t=$('#toast');t.textContent=msg;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove('show'),ms)}
-function fmtBytes(n){if(!n)return'0 B';const u=['B','KB','MB','GB','TB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return n.toFixed(n>=100||i===0?0:1)+' '+u[i]}
-function fmtTime(s){if(!s)return'-';const d=new Date(s);if(isNaN(d))return esc(s);const p=n=>String(n).padStart(2,'0');return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`}
-function shortAid(a){return a? (a.length>18? a.slice(0,10)+'…'+a.slice(-6):a):'-'}
-function num(n){n=n||0;return n>=10000? (n/10000).toFixed(n>=100000?0:1)+'万' : String(n)}
-function pct(x){return x==null?'-':(x*100).toFixed(1)+'%'}
-function initial(name,aid){const s=(name||aid||'?').trim();return esc(s.slice(0,1).toUpperCase())}
-async function api(path, opts={}){
-  const r = await fetch(BASE+'/api'+path, {...opts, headers:{'Content-Type':'application/json','Authorization':'Bearer '+TOKEN, ...(opts.headers||{})}});
-  if(r.status===401 && path!=='/login'){logout();throw new Error('登录已失效')}
-  const j = await r.json().catch(()=>({}));
-  if(!r.ok) throw new Error(j.error||('HTTP '+r.status));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let toastTimer;
+function toast(msg, isErr){ const el = $('#toast'); el.textContent = msg; el.classList.toggle('err', !!isErr); el.setAttribute('role', isErr ? 'alert' : 'status'); el.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('show'), 3600); }
+function fmtBytes(n){ if (!n) return '0 B'; const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return n.toFixed(n >= 100 || i === 0 ? 0 : 1) + ' ' + u[i]; }
+function fmtTime(s){ if (!s) return '–'; const d = new Date(s); if (isNaN(d)) return esc(s); return d.toISOString().replace(/\.\d+Z$/, 'Z'); }
+function fmtDay(s){ if (!s) return '–'; const d = new Date(s); return isNaN(d) ? esc(s) : d.toISOString().slice(0, 10); }
+function fmtDayNo(n){ return n ? new Date(n * 86400000).toISOString().slice(0, 10) : '–'; }
+function shortAid(a){ return a ? (a.length > 20 ? a.slice(0, 10) + '…' + a.slice(-6) : a) : '–'; }
+const nf = n => (n ?? 0).toLocaleString('en-US');
+const pct = x => x == null ? '–' : (x * 100).toFixed(1) + '%';
+const dash = v => (v === '' || v == null) ? '–' : v;
+async function api(path, opts = {}){
+  const r = await fetch(BASE + '/api' + path, { ...opts, headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + TOKEN, ...(opts.headers || {}) } });
+  if (r.status === 401 && path !== '/login') { logout(); throw new Error(t('登录已失效，请重新登录。', 'The session has expired. Sign in again.')); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
   return j;
 }
-const loadingHTML = (msg='加载中…')=>`<div class="loading">${ic('refresh')} ${esc(msg)}</div>`;
-const errCard = m=>`<div class="card"><div class="bd" style="color:var(--err);display:flex;gap:8px;align-items:center">${ic('alert')} 加载失败：${esc(m)}</div></div>`;
-function empty(title, note, actions){
-  return `<div class="card"><div class="bd empty"><div class="eic">${ic('inbox')}</div>
-    <div style="font-weight:600;margin-bottom:6px">${esc(title)}</div>
-    <div class="muted" style="max-width:480px;margin:0 auto 12px">${note||''}</div>
-    ${actions?`<div class="row" style="justify-content:center">${actions}</div>`:''}</div></div>`;
-}
-function shell(o){
-  return `${o.crumb!==false?`<div class="crumb">${o.crumb||CRUMB}</div>`:''}
-  <div class="pghd"><div><h2 class="pg">${esc(o.title)}</h2>${o.sub?`<p class="pgsub">${o.sub}</p>`:''}</div>
-    ${o.actions?`<div class="pgact">${o.actions}</div>`:''}</div>
-  ${o.filters?`<div class="pgfilter">${o.filters}</div>`:''}
-  ${o.body||''}`;
-}
-function spark(vals, w=140, h=36, color='var(--primary)'){
-  if(!vals || vals.length<2) return '<span class="faint">数据不足</span>';
-  const min=Math.min(...vals), max=Math.max(...vals), rng=(max-min)||1;
-  const pts=vals.map((v,i)=>`${(i/(vals.length-1)*w).toFixed(1)},${(h-3-(v-min)/rng*(h-6)).toFixed(1)}`).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round"/></svg>`;
-}
-function modChip(mod){ const map={image:'图像',video:'视频',audio:'音频',text:'文本',mixed:'多模态'}; return map[mod]||mod; }
-function kpi(label,value,sub,iconName){
-  return `<div class="tile"><div class="lb">${iconName?ic(iconName):''}${esc(label)}</div><div class="v">${value}</div>${sub?`<div class="s">${sub}</div>`:''}</div>`;
-}
-function hbars(rows){
-  if(!rows.length) return '<div class="faint" style="padding:12px">暂无数据</div>';
-  const max=Math.max(1,...rows.map(r=>r.value));
-  return rows.map(r=>`<div class="hbar" ${r.hash?`onclick="location.hash='${r.hash}'" style="cursor:pointer"`:''}>
-    <div class="hbar-l">${esc(r.label)}</div>
-    <div class="hbar-track"><div class="hbar-fill" style="width:${(r.value/max*100).toFixed(1)}%"></div></div>
-    <div class="hbar-v">${num(r.value)}${r.sub?` <span class="faint" style="font-weight:400">${r.sub}</span>`:''}</div></div>`).join('');
-}
-function flywheel(stages){
-  return `<div class="flow">`+stages.map((s,i)=>`
-    <div class="flowstep${s.flag?' flag':''}">
-      <div class="flowname">${esc(s.name)}</div>
-      <div class="flowbig">${s.big}</div>
-      ${(s.lines||[]).map(l=>`<div class="flowsub">${l}</div>`).join('')}
-    </div>${i<stages.length-1?`<div class="flowarrow">${ic('chev')}</div>`:''}`).join('')+`</div>`;
-}
-/* ---------------- login ---------------- */
-async function doLogin(){
-  const tok = $('#tokIn').value.trim();
-  if(!tok) return;
-  $('#loginBtn').disabled = true; $('#loginErr').textContent='';
-  try{
-    const r = await fetch(BASE+'/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:tok})});
-    const j = await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(j.error||'登录失败');
-    TOKEN = tok; localStorage.setItem('anethub_admin_token', tok);
-    boot();
-  }catch(e){ $('#loginErr').textContent = e.message }
-  $('#loginBtn').disabled = false;
-}
-function logout(){TOKEN='';localStorage.removeItem('anethub_admin_token');$('#app').style.display='none';$('#login').style.display='flex';closeDrawer()}
-$('#loginBtn').onclick = doLogin;
-$('#tokIn').addEventListener('keydown', e=>{if(e.key==='Enter')doLogin()});
-
-/* ---------------- workspaces + nav ---------------- */
-const WS = [
-  {id:'operations', name:'运营中心', icon:'dash', def:'overview', sections:[
-    {items:[{id:'overview', name:'运营总览', icon:'dash'}]},
-    {label:'Agent 资产', items:[
-      {id:'agents', name:'全部 Agent', icon:'bot'},
-      {id:'onboarding', name:'接入队列', icon:'inbox', ph:1},
-      {id:'reviews', name:'审核认证', icon:'shield', ph:1}]},
-    {label:'发布与分发', items:[
-      {id:'store', name:'商店目录', icon:'store'},
-      {id:'capabilities', name:'能力包', icon:'layers'},
-      {id:'channels', name:'产品渠道', icon:'compass', ph:1}]},
-    {label:'官方与可靠性', items:[
-      {id:'officials', name:'官方 Agent 登记', icon:'cpu'},
-      {id:'incidents', name:'告警事故', icon:'alert', ph:1}]},
-    {label:'安全治理', items:[
-      {id:'risk', name:'风险处置', icon:'shield'},
-      {id:'enforcement', name:'违规下架', icon:'trash'},
-      {id:'recycle', name:'已删除', icon:'inbox'}]},
-  ]},
-  {id:'data', name:'数据智能', icon:'db', def:'overview', sections:[
-    {items:[{id:'overview', name:'数据总览', icon:'db'}]},
-    {label:'历史采收（只读，待清理）', items:[
-      {id:'sessions', name:'历史会话', icon:'db'},
-      {id:'anomalies', name:'异常会话', icon:'alert'}]},
-    {label:'能力运营', items:[
-      {id:'caps', name:'能力总览', icon:'chart'},
-      {id:'grounding', name:'Intent Grounding', icon:'compass'},
-      {id:'collab', name:'共脑协同', icon:'share'}]},
-    {label:'数据治理', items:[
-      {id:'governance', name:'授权与用途', icon:'shield', ph:1}]},
-  ]},
-  {id:'ecosystem', name:'生态全景', icon:'compass', def:'overview', sections:[
-    {items:[{id:'overview', name:'生态概览', icon:'compass'}]},
-    {items:[
-      {id:'matrix', name:'产品矩阵', icon:'store'},
-      {id:'network', name:'Agent 网络', icon:'share'},
-      {id:'vision', name:'能力跃升', icon:'up'}]},
-  ]},
-  {id:'platform', name:'平台管理', icon:'wrench', def:'status', sections:[
-    {items:[{id:'status', name:'系统状态', icon:'activity'}]},
-    {items:[
-      {id:'audit', name:'审计日志', icon:'scroll'},
-      {id:'connections', name:'连接与集成', icon:'compass', ph:1}]},
-  ]},
-];
-const WS_BY_ID = Object.fromEntries(WS.map(w=>[w.id,w]));
-function wsDef(id){return (WS_BY_ID[id]||WS[0]).def}
-function itemName(ws,item){
-  const w=WS_BY_ID[ws]; if(!w) return item;
-  for(const s of w.sections) for(const it of s.items) if(it.id===item) return it.name;
-  return item;
-}
-function renderTop(){
-  $('#wsseg').innerHTML = WS.map(w=>
-    `<button class="${w.id===CURRENT_WS?'on':''}" onclick="location.hash='#/${w.id}/${w.def}'">${ic(w.icon)}${w.name}</button>`).join('');
-}
-function renderNav(activeItem){
-  const w = WS_BY_ID[CURRENT_WS]||WS[0];
-  $('#sidebar').innerHTML = w.sections.map(sec=>
-    (sec.label?`<div class="navsec">${sec.label}</div>`:'<div style="height:6px"></div>') +
-    sec.items.map(it=>`<button class="nav ${it.id===activeItem?'on':''}" onclick="location.hash='#/${w.id}/${it.id}'">${ic(it.icon)}<span>${it.name}</span>${it.ph?'<span class="ph">规划</span>':''}</button>`).join('')
-  ).join('');
+const loadingHTML = () => `<div class="loading" role="status">${esc(t('正在加载。', 'Loading.'))}</div>`;
+const errHTML = m => `<div class="banner" role="alert">${ic('alert')}<div><b>${esc(t('加载失败', 'Loading failed'))}</b><div class="muted">${esc(m)}</div></div></div>`;
+const emptyHTML = (title, note) => `<div class="empty"><b>${esc(title)}</b>${note ? esc(note) : ''}</div>`;
+function kpi(label, value, sub){ return `<div class="card kpi"><div class="l">${esc(label)}</div><div class="v num">${value}</div>${sub ? `<div class="s">${sub}</div>` : ''}</div>`; }
+function spark(vals, w = 220, h = 44){
+  if (!vals || vals.length < 2) return `<span class="muted">${esc(t('数据不足', 'Insufficient data'))}</span>`;
+  const mn = Math.min(...vals), mx = Math.max(...vals), rg = (mx - mn) || 1;
+  const pts = vals.map((v, i) => [(i / (vals.length - 1) * (w - 6) + 3), (h - 4 - (v - mn) / rg * (h - 8))]);
+  const last = pts[pts.length - 1];
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(t('最近值', 'Latest value'))} ${vals[vals.length - 1]}, ${esc(t('最小', 'min'))} ${mn}, ${esc(t('最大', 'max'))} ${mx}"><polyline points="${pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" style="color:var(--muted)"/><circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="var(--accent)"/></svg>`;
 }
 
-/* ---------------- routing ---------------- */
-function parseHash(){ return (location.hash||'').replace(/^#\/?/,'').split('/').filter(Boolean); }
-function goAgent(aid, tab){ location.hash='#/agents/'+encodeURIComponent(aid)+(tab?'/'+tab:''); }
-window.addEventListener('hashchange', ()=>render());
-
-const ROUTES = {}; // filled after view fns defined
-
-async function render(force){
-  if(!TOKEN) return;
-  const parts = parseHash();
-  // unified agent detail
-  if(parts[0]==='agents' && parts[1]){
-    renderTop(); renderNav('agents');
-    return renderAgent(decodeURIComponent(parts[1]), parts[2]||'overview');
+/* ---------------- sortable, filterable table ---------------- */
+// cols: [{k, label, num, get(row) -> sort value, html(row) -> cell html}]
+const TBL = {};
+function tableHTML(id, cols, rows, o = {}){
+  const st = TBL[id] || (TBL[id] = { key: o.sort, dir: o.dir || 'desc', limit: 100 });
+  let data = rows.slice();
+  const col = cols.find(c => c.k === st.key);
+  if (col) {
+    const g = col.get || (r => r[col.k]);
+    data.sort((a, b) => {
+      let x = g(a), y = g(b);
+      if (col.num) { x = +x || 0; y = +y || 0; return st.dir === 'asc' ? x - y : y - x; }
+      x = String(x ?? '').toLowerCase(); y = String(y ?? '').toLowerCase();
+      return st.dir === 'asc' ? x.localeCompare(y) : y.localeCompare(x);
+    });
   }
-  const ws = WS_BY_ID[parts[0]] ? parts[0] : 'operations';
-  CURRENT_WS = ws;
-  const item = parts[1] || wsDef(ws);
-  CRUMB = `${WS_BY_ID[ws].name} <span>›</span> ${esc(itemName(ws,item))}`;
-  renderTop(); renderNav(item);
-  const fn = ROUTES[ws+'/'+item];
-  $('#main').innerHTML = loadingHTML();
-  try{ await (fn?fn(force):notFoundView(ws,item)); }
-  catch(e){ $('#main').innerHTML = shell({title:itemName(ws,item), body:errCard(e.message)}); }
-}
-async function notFoundView(ws,item){ $('#main').innerHTML = shell({title:itemName(ws,item), body:empty('未找到该页面','路由 '+esc(ws+'/'+item)+' 未注册。')}); }
-async function boot(){
-  $('#login').style.display='none'; $('#app').style.display='block';
-  try{ await api('/overview') }catch(e){ return; }
-  if(!location.hash || parseHash().length===0) location.hash = '#/operations/overview';
-  render();
-}
-function refreshCurrent(){
-  const parts=parseHash();
-  if(parts[0]==='agents'&&parts[1]) renderAgent(decodeURIComponent(parts[1]), parts[2]||'overview');
-  else render();
-}
-// global search → agents (wired in init, after the topbar icon-replace rebuilds #gq)
-function wireGlobalSearch(){
-  const g=$('#gq'); if(!g) return;
-  g.addEventListener('keydown', e=>{
-    if(e.key==='Enter'){ agentsQ=e.target.value.trim(); agentsTier=''; if(location.hash==='#/operations/agents') vAgents(); else location.hash='#/operations/agents'; }
-  });
-}
-
-/* ---------------- drawer ---------------- */
-function openDrawer(title, html){$('#drawerTitle').textContent=title;$('#drawerBody').innerHTML=html;$('#ovl').style.display='block';$('#drawer').style.display='flex'}
-function closeDrawer(){$('#ovl').style.display='none';$('#drawer').style.display='none'}
-
-/* ================= OPERATIONS ================= */
-
-/* ---- 运营总览 (dashboard) ---- */
-async function vOpsOverview(){
-  const [ov, ags, st] = await Promise.all([
-    api('/overview').catch(e=>({_err:e.message})),
-    api('/agents').then(r=>r.agents||[]).catch(()=>null),
-    api('/store').catch(()=>null),
-  ]);
-  if(ov._err){ $('#main').innerHTML = shell({title:'运营总览', body:errCard(ov._err)}); return; }
-  const t = ov.totals||{}, harvest = ov.harvest||[], ds = ov.datasets||{};
-  const offCount = ov.officials||0;
-  const sessTotal = Object.values(ds).reduce((s,c)=>s+(c.sessions||0),0);
-  const recTotal = harvest.reduce((s,h)=>s+(h.records||0),0);
-  const srcCount = Object.keys(ds).length;
-  const harvestErrs = harvest.filter(h=>h.note).length;
-  const prodLines = st? Object.keys(st.product_lines||{}).filter(k=>(st.product_lines[k]||[]).length) : [];
-  const flagged = ags? ags.filter(a=>a.moderation==='flagged') : [];
-  const delisted = ags? ags.filter(a=>a.moderation==='delisted') : [];
-  const capCount = st? Object.keys(st.capabilities||{}).length : 0;
-
-  // flywheel
-  const stages = [
-    {name:'Agent 供给', big:num(t.agents||0), lines:[`官方 ${offCount} · 社区 ${(t.agents||0)-offCount}`,'注册身份总量']},
-    {name:'审核发布', big:flagged.length, lines:[`待处理监管 ${flagged.length}`,'审核流水线：数据待接入']},
-    {name:'产品分发', big:num(t.listed||0), lines:[`覆盖产品 ${prodLines.length}`,`已下架 ${delisted.length}`]},
-    {name:'官方登记', big:num(offCount), lines:['只登记 id/aid/hub/caps','不经 hub 观测运行']},
-    {name:'已公开回执', big:num(t.tasks_completed||0), lines:['经评价公开的有效回执','可由第三方核验']},
-    {name:'历史采收', big:num(sessTotal), lines:[`采收已删除 · ${srcCount} 个旧来源`,'待生产清理'], flag:sessTotal>0},
-  ];
-
-  // action items
-  const items=[];
-  flagged.forEach(a=>items.push({sev:1,label:'高', txt:`${esc(a.name||shortAid(a.aid))} 已标记关注`, aid:a.aid}));
-  if(sessTotal>0) items.push({sev:2,label:'中', txt:`admin 数据目录仍有 ${num(sessTotal)} 条历史采收会话，待生产清理（deploy/cleanup-content-v0.2.sh）`, act:'data/sessions'});
-  items.sort((a,b)=>a.sev-b.sev);
-  const sevBadge = s => s===0?'<span class="badge err">严重</span>':s===1?'<span class="badge warn">高</span>':'<span class="badge cap">中</span>';
-  const actionRows = items.length? items.slice(0,10).map(it=>`
-    <tr class="click" onclick="${it.aid?`goAgent('${esc(it.aid)}')`:`location.hash='#/${it.act||'operations/overview'}'`}">
-      <td>${sevBadge(it.sev)}</td><td>${it.txt}</td><td class="faint" style="text-align:right">${ic('chev')}</td></tr>`).join('')
-    : `<tr><td colspan="3" class="faint tac" style="padding:20px">当前无待处理项 — 平台运行正常</td></tr>`;
-
-  // health snapshot from snapshots
-  const snaps = ov.snapshots||[];
-  const tasksSeries = snaps.map(s=>s.tasks_completed), backlogSeries = snaps.map(s=>s.relay_backlog);
-
-  $('#main').innerHTML = shell({
-    title:'运营总览',
-    sub:'接入与治理 Agent，将其分发到 ANet 产品。hub 与运营面不持有任务内容：不采收中继流量，不接入官方 agent 的运行数据。',
-    actions:`<button class="btn pri" onclick="location.hash='#/operations/agents'">${ic('bot')} 全部 Agent</button>`,
-    body:`
-    <div class="sect">${ic('activity')} Agent 运营与数据飞轮</div>
-    ${flywheel(stages)}
-    <div class="grid mt14" style="grid-template-columns:1.6fr 1fr">
-      <div class="card"><div class="hd">${ic('gauge')} 运行健康趋势 <span class="sp"></span><span class="faint" style="font-weight:400;font-size:11.5px">按 5 分钟快照</span></div>
-        <div class="bd">
-          <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:14px">
-            ${kpi('注册 Agent', num(t.agents||0), `官方 ${offCount} · 社区 ${(t.agents||0)-offCount}`)}
-            ${kpi('已公开回执', num(t.tasks_completed||0), spark(tasksSeries,120,26))}
-            ${kpi('可信评价', num(t.reviews||0), `均分 ${(t.avg_rating||0).toFixed(2)}`)}
-            ${kpi('Relay 积压', num(t.relay_backlog||0), spark(backlogSeries,120,26, (backlogSeries.at(-1)>backlogSeries[0])?'var(--warn)':'var(--ok)'))}
-          </div>
-          <div class="faint" style="font-size:12px">「已公开回执」= 经评价公开到本 hub 的有效回执数（去重），低于网络实际完成的任务数；升级前的快照统计的是中继结果消息，曲线在升级处有台阶。</div>
-        </div></div>
-      <div class="card"><div class="hd">${ic('alert')} 需要处理 <span class="sp"></span><span class="badge ${items.length?'warn':'ok'}">${items.length}</span></div>
-        <div class="bd p0"><div class="tbwrap"><table class="tb">${actionRows}</table></div></div></div>
-    </div>
-
-    <div class="grid g2b mt14">
-      <div class="card"><div class="hd">${ic('bot')} Agent 生命周期</div><div class="bd">
-        ${hbars([
-          {label:'注册在册', value:t.agents||0, sub:'总量'},
-          {label:'已上架', value:t.listed||0, sub:'有资料/能力', hash:'#/operations/store'},
-          {label:'官方登记', value:offCount, sub:'仅登记', hash:'#/operations/officials'},
-          {label:'标记关注', value:flagged.length, sub:'待处置', hash:'#/operations/risk'},
-          {label:'已下架', value:delisted.length, sub:'监管移除', hash:'#/operations/enforcement'},
-        ])}
-        <div class="note">生命周期状态机（接入→审核→认证→上架）尚未接入，当前以在册/上架/登记/处置四类近似。</div>
-      </div></div>
-      <div class="card"><div class="hd">${ic('store')} 产品与渠道</div><div class="bd">
-        ${st? hbars(prodLines.map(k=>({label:LINE_NAMES[k]||k, value:(st.product_lines[k]||[]).length, sub:`官方 ${(st.product_lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'}))) : '<div class="faint">商店数据不可用</div>'}
-      </div></div>
-    </div>
-
-    <div class="grid g2c mt14">
-      <div class="card"><div class="hd">${ic('db')} 历史采收（采收已删除，待清理）</div>
-        <div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>旧来源</th><th>会话</th><th>累计记录</th><th>最后运行</th></tr>
-        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td></tr>`).join('')||'<tr><td colspan="4" class="faint" style="padding:16px;text-align:center">无历史采收数据</td></tr>'}
-        </table></div></div></div>
-      <div class="card"><div class="hd">${ic('layers')} 核心能力供给</div><div class="bd">
-        ${kpi('能力包总数', capCount, '官方登记 + 社区，见「能力包」', 'layers')}
-        <div style="height:10px"></div>
-        <div class="wrap">
-          <a class="badge cap" href="#/data/grounding">Intent Grounding ›</a>
-          <a class="badge cap" href="#/data/collab">共脑协同 ›</a>
-        </div>
-        <div class="note">运营面不再采收交互内容；这两页只读展示历史采收数据与公开评价。</div>
-      </div></div>
-    </div>`,
-  });
-}
-/* ---- 全部 Agent ---- */
-let agentsQ = '', agentsTier = '';
-async function vAgents(){
-  const d = await api('/agents?q='+encodeURIComponent(agentsQ)+(agentsTier?'&tier='+agentsTier:''));
-  const list = d.agents||[];
-  const rows = list.map(a=>{
-    const caps = (a.caps||[]).slice(0,4).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')+((a.caps||[]).length>4?`<span class="badge cap">+${a.caps.length-4}</span>`:'');
-    return `<tr class="click" onclick="goAgent('${esc(a.aid)}')">
-      <td><div style="font-weight:550">${esc(a.name||'(未命名)')} ${a.tier==='official'?'<span class="badge official">官方</span>':''} ${a.moderation?`<span class="badge err">${esc(a.moderation)}</span>`:''} ${!a.listed?'<span class="badge community">未上架</span>':''}</div>
-          <div class="mono faint">${shortAid(a.aid)}</div></td>
-      <td>${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</td>
-      <td><div class="wrap">${caps||'<span class="faint">-</span>'}</div></td>
-      <td>${a.review_count?`${a.avg_rating.toFixed(1)} <span class="faint">(${a.review_count})</span>`:'<span class="faint">-</span>'}</td>
-      <td>${a.review_count||0}</td>
-      <td class="muted" style="white-space:nowrap">${fmtTime(a.registered_at)}</td></tr>`;
+  const shown = data.slice(0, st.limit);
+  const head = cols.map(c => {
+    const on = c.k === st.key;
+    return `<th scope="col" class="${c.num ? 'r' : ''}" aria-sort="${on ? (st.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button type="button" data-sort="${esc(id)}:${esc(c.k)}">${esc(c.label)}${on ? ic(st.dir === 'asc' ? 'up' : 'down') : ic('sort')}</button></th>`;
   }).join('');
-  $('#main').innerHTML = shell({
-    title:'全部 Agent', sub:'全网注册身份（含未上架）· 官方/社区与生命周期统一入口 · 点击进入 Agent 详情',
-    body:`
-    <div class="pgfilter">
-      <div class="gsearch" style="flex:0 1 300px"><span class="gsic">${ic('search')}</span><input id="agq" placeholder="搜索 AID / 名称 / 能力…" value="${esc(agentsQ)}"/></div>
-      <div class="seg">
-        <button class="${agentsTier===''?'on':''}" onclick="agentsTier='';vAgents()">全部</button>
-        <button class="${agentsTier==='official'?'on':''}" onclick="agentsTier='official';vAgents()">官方</button>
-        <button class="${agentsTier==='community'?'on':''}" onclick="agentsTier='community';vAgents()">社区</button>
-      </div>
-      <span class="sp"></span><span class="muted" style="font-size:12.5px">${list.length} 个</span></div>
-    <div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>Agent</th><th>所有权</th><th>能力</th><th>评分</th><th>收到的评价</th><th>注册日</th></tr>
-      ${rows||'<tr><td colspan="6" class="faint" style="padding:24px;text-align:center">无结果</td></tr>'}</table></div></div>`,
-  });
-  const inp=$('#agq'); inp.addEventListener('keydown',e=>{if(e.key==='Enter'){agentsQ=inp.value;vAgents()}});
+  const body = shown.map(r => `<tr>${cols.map(c => `<td class="${c.num ? 'r num' : ''}">${c.html ? c.html(r) : esc(dash(r[c.k]))}</td>`).join('')}</tr>`).join('');
+  const more = data.length > shown.length ? `<button class="btn sm" data-more="${esc(id)}">${esc(t('显示更多', 'Show more'))}</button>` : '';
+  return `<div class="tbw"><table class="tb"><caption class="sr">${esc(o.caption || '')}</caption><thead><tr>${head}</tr></thead><tbody>${body || `<tr><td colspan="${cols.length}">${emptyHTML(o.emptyTitle || t('无记录', 'No records'), o.emptyNote || '')}</td></tr>`}</tbody></table></div>
+  <div class="tbfoot"><span>${esc(t(`共 ${nf(data.length)} 条，显示 ${nf(shown.length)} 条`, `${nf(data.length)} records, ${nf(shown.length)} shown`))}</span>${more}</div>`;
 }
-
-/* ---- 官方 Agent 登记 (registry only) ----
-   官方 agent 在运营面只登记 id / aid / hub / caps（A2A-DESIGN §9、§15）。运行探活、日志、
-   ops 命令、monitor 代理、调用洞察与 ACL 均已删除：hub 主机不持有读取官方 agent 内容或操作其
-   主机的通道，这些运维由 hub 之外的独立工具完成。 */
-async function vOfficials(){
-  const d = await api('/official');
-  const rows = (d.officials||[]).map(o=>{ const m=o.manifest||{}; return `<tr>
-    <td><div style="font-weight:550">${esc(m.name||m.id)}</div><div class="mono faint">${esc(m.id)}</div></td>
-    <td class="mono">${m.aid?`<a href="javascript:goAgent('${esc(m.aid)}')">${shortAid(m.aid)}</a>`:'-'}</td>
-    <td class="mono" style="word-break:break-all">${esc(m.hub||'-')}</td>
-    <td><div class="wrap">${(m.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">-</span>'}</div></td>
-    <td><span class="badge cap">${esc(m.product_line||'-')}</span></td>
-    <td><button class="btn sm danger" onclick="delOfficial('${esc(m.id)}')">${ic('trash')} 删除登记</button></td></tr>`; }).join('');
-  $('#main').innerHTML = shell({
-    title:'官方 Agent 登记', sub:'官方 agent 在运营面只登记 id / AID / hub / 能力。运行、监控、日志与授权不经 hub 主机，由 hub 之外的独立运维工具完成。',
-    body: rows? `<div class="card"><div class="tbwrap"><table class="tb"><tr><th>官方 Agent</th><th>AID</th><th>Hub</th><th>能力</th><th>产品线</th><th>操作</th></tr>${rows}</table></div></div>
-      <div class="note">登记经 POST /admin/api/official 或数据目录下的 officials.json 提交；含 runtime / monitor / ops / datasets 字段的清单会被拒绝。</div>`
-      : empty('尚无官方 agent 登记','经 POST /admin/api/official 提交只含 id / aid / hub / caps 的清单。'),
-  });
+// A mounted table re-renders itself on sort, filter or "show more".
+const MOUNT = {};
+function mountTable(host, id, cols, getRows, o){
+  const draw = () => { host.innerHTML = tableHTML(id, cols, getRows(), o); };
+  MOUNT[id] = draw; draw(); return draw;
 }
-async function delOfficial(id){
-  if(!confirm('确认删除该官方 agent 登记？只删除运营面的登记，不影响 hub 注册表。')) return;
-  try{ await api('/official/'+encodeURIComponent(id),{method:'DELETE'}); toast('已删除登记'); refreshCurrent() }catch(e){toast(e.message)}
-}
-
-/* ---- 风险处置 (moderation queue) ---- */
-async function vRisk(){
-  const d = await api('/agents');
-  const list = (d.agents||[]).filter(a=>a.moderation==='flagged');
-  const rows = list.map(a=>`<tr>
-    <td><div style="font-weight:550">${esc(a.name||shortAid(a.aid))}</div><div class="mono faint">${shortAid(a.aid)}</div></td>
-    <td>${a.moderation?`<span class="badge err">${esc(a.moderation)}</span>`:'<span class="badge cap">-</span>'}</td>
-    <td>${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</td>
-    <td><div class="row">
-      <button class="btn sm" onclick="moderate('${esc(a.aid)}','ok')">恢复正常</button>
-      <button class="btn sm" onclick="goAgent('${esc(a.aid)}','gov')">${ic('shield')} 治理</button>
-    </div></td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'风险处置', sub:'统一风险队列：被标记关注的 Agent — 处置动作全部落审计',
-    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>Agent</th><th>监管状态</th><th>所有权</th><th>操作</th></tr>${rows}</table></div></div>
-      <div class="note">内容违规/权限过大/异常调用等风险类型需要更细的信号接入，当前以监管标记近似。运营面不给出单个 Agent 的信箱积压，全 hub 的积压见总览。</div>`
-      : empty('当前无风险项','没有被标记关注的 Agent。', `<button class="btn" onclick="location.hash='#/operations/agents'">查看全部 Agent</button>`),
-  });
-}
-
-/* ---- 违规下架 (enforcement) ---- */
-async function vEnforcement(){
-  const d = await api('/agents');
-  const list = (d.agents||[]).filter(a=>a.moderation==='delisted' || a.moderation==='flagged');
-  const rows = list.map(a=>`<tr>
-    <td><div style="font-weight:550">${esc(a.name||shortAid(a.aid))}</div><div class="mono faint">${shortAid(a.aid)}</div></td>
-    <td>${a.moderation==='delisted'?'<span class="badge err">已下架</span>':'<span class="badge warn">关注</span>'}</td>
-    <td class="muted">${esc(a.moderation_note||'-')}</td>
-    <td><div class="row">
-      <button class="btn sm" onclick="moderate('${esc(a.aid)}','ok')">恢复正常</button>
-      <button class="btn sm danger" onclick="delAgent('${esc(a.aid)}')">${ic('trash')} 移除注册</button>
-    </div></td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'违规与下架', sub:'监管闭环：标记 → 下架 → 移除注册（需二次确认 + 审计）。移除即撤销准入并注销，与 anet-hub admissions revoke 相同；撤销误删运行 anet-hub admit &lt;AID&gt;。',
-    actions:`<button class="btn" onclick="location.hash='#/operations/recycle'">${ic('inbox')} 已删除</button>`,
-    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>Agent</th><th>状态</th><th>原因</th><th>操作</th></tr>${rows}</table></div></div>`
-      : empty('暂无处置对象','没有处于关注或下架状态的 Agent。'),
-  });
-}
-async function moderate(aid,status){
-  try{ await api('/agents/'+encodeURIComponent(aid)+'/moderate',{method:'POST',body:JSON.stringify({status,note:$('#mNote')?.value||''})}); toast('已更新监管状态'); refreshCurrent() }catch(e){toast(e.message)}
-}
-async function delAgent(aid){
-  if(!confirm('确认移除该 agent？\n\n移除即撤销它的准入并注销：它的余额仍记在账上，它收到的评价保留。\n要撤销，运行 anet-hub admit '+aid+'，对方的 anet 下次重新注册时就会回来。')) return;
-  try{ const r = await api('/agents/'+encodeURIComponent(aid),{method:'DELETE'}); toast(r.message||'已移除'); location.hash='#/operations/recycle'; }catch(e){toast(e.message)}
-}
-
-/* ---- 已删除 (deleted agents) ----
-   运营面删除即撤销准入并注销（与 anet-hub admissions revoke 相同）。这里只记谁、何时、由谁删除；
-   没有“恢复旧记录”：撤销误删是运行 anet-hub admit <AID>，对方的 anet 下次重新注册时以自己当前的
-   密钥历史回来。批量误删：导出 admit 文件，交给 anet-hub admit --file。 */
-async function vRecycle(){
-  const d = await api('/deleted');
-  const list = d.deleted||[];
-  const rows = list.map(x=>`<tr>
-      <td class="mono" style="word-break:break-all">${esc(x.aid)}</td>
-      <td class="muted" style="white-space:nowrap">${fmtTime(x.deleted_at)}</td>
-      <td class="muted">${esc(x.actor||'-')}</td>
-      <td class="mono faint" style="word-break:break-all">anet-hub admit ${esc(x.aid)}</td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'已删除', sub:'被运营者删除（撤销准入并注销）的 Agent。要撤销一次误删，在 hub 主机上运行 anet-hub admit &lt;AID&gt;，对方的 anet 下次重新注册时就会回来。',
-    actions: list.length? `<button class="btn" onclick="exportAdmitFile()">${ic('file')} 导出 admit 文件</button>`:'',
-    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>AID</th><th>删除时间</th><th>操作者</th><th>撤销命令</th></tr>${rows}</table></div></div>
-      <div class="note">批量误删：导出的文件（GET /admin/api/deleted?format=admit，每行一个 AID）可直接作为 anet-hub admit --file 的输入。本 hub 开放注册时，被删除的身份仍可重新注册：删除不等于封禁。</div>`
-      : empty('没有已删除的 Agent','运营面删除的 Agent 会列在这里，并给出撤销命令。'),
-  });
-}
-async function exportAdmitFile(){
-  try{
-    const r = await fetch(BASE+'/api/deleted?format=admit&limit=500', {headers:{'Authorization':'Bearer '+TOKEN}});
-    if(r.status===401){logout();throw new Error('登录已失效')}
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const blob = new Blob([await r.text()], {type:'text/plain'});
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'deleted-aids.txt';
-    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
-    toast('已导出：在 hub 主机上运行 anet-hub admit --file deleted-aids.txt');
-  }catch(e){toast(e.message)}
-}
-
-/* ---- 商店目录 ---- */
-const LINE_NAMES = {anetos:'ANetOS 智能相框', anetscreen:'ANetScreen', anetpin:'ANetPIN', anetcraft:'ANetCraft 竞技场', agentnetwork:'AgentNetwork 网络', community:'社区接入'};
-async function vStore(){
-  const d = await api('/store');
-  const lines = d.product_lines||{};
-  const order = ['anetos','anetscreen','anetpin','anetcraft','agentnetwork','community'];
-  const secs = order.filter(k=>lines[k]&&lines[k].length).map(k=>{
-    const cards = lines[k].map(a=>`
-      <div class="card" style="min-width:250px;flex:1;max-width:340px">
-        <div class="bd">
-          <div class="row"><div style="font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(a.name||'(未命名)')}</div>
-            ${a.tier==='official'?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}</div>
-          <div class="muted" style="font-size:12.5px;margin:6px 0;min-height:34px">${esc((a.summary||'').slice(0,80))||'<span class="faint">无简介</span>'}</div>
-          <div class="wrap" style="margin-bottom:8px">${(a.caps||[]).slice(0,5).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')}</div>
-          <div class="row" style="font-size:12px;color:var(--fg-muted)">
-            <span>${a.review_count?a.avg_rating.toFixed(1)+'★ ('+a.review_count+')':'暂无评价'}</span>
-            <span class="sp"></span><a href="javascript:goAgent('${esc(a.aid)}')">详情 ›</a>
-          </div>
-        </div></div>`).join('');
-    return `<div style="margin-bottom:22px"><div class="row" style="margin-bottom:10px"><div style="font-weight:650;font-size:14.5px">${LINE_NAMES[k]||k}</div><span class="badge cap">${lines[k].length}</span></div><div style="display:flex;flex-wrap:wrap;gap:12px">${cards}</div></div>`;
-  }).join('');
-  const caps = Object.entries(d.capabilities||{}).sort((a,b)=>b[1]-a[1]).slice(0,30)
-    .map(([c,n])=>`<span class="badge cap">${esc(c)} · ${n}</span>`).join(' ');
-  $('#main').innerHTML = shell({
-    title:'商店目录', sub:'按产品线组织的公网服务目录 · 官方/社区分层（结算体系后续接入，当前定价仅展示）',
-    body:`${secs||empty('暂无上架 agent','agent 需登记能力或资料后才会进入商店目录。')}
-    <div class="card" style="margin-top:6px"><div class="hd">${ic('layers')} 能力分布</div><div class="bd wrap">${caps||'<span class="faint">-</span>'}</div></div>`,
-  });
-}
-
-/* ---- 能力包 ---- */
-let capsQ='';
-async function vCapabilities(){
-  const d = await api('/capabilities');
-  render_caps(d.capsules||[], `${d.count} 个能力包`);
-  const inp=$('#capq'); if(inp) inp.addEventListener('keydown',async e=>{ if(e.key==='Enter'){ capsQ=inp.value.trim();
-    if(!capsQ){ vCapabilities(); return; }
-    try{ const r=await api('/discover?task='+encodeURIComponent(capsQ));
-      render_caps(r.matches||[], `任务「${esc(capsQ)}」匹配到 ${(r.matches||[]).length} 个能力包`, true, r.method);
-    }catch(err){ toast('发现失败：'+err.message); }
-  }});
-}
-function render_caps(caps, subtitle, isSearch, method){
-  const cards = caps.map(c=>`
-    <div class="card" style="min-width:230px;flex:1;max-width:320px">
-      <div class="bd">
-        <div class="row"><div style="font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</div>
-          ${c.tier==='official'?'<span class="badge official">官方登记</span>':'<span class="badge community">社区</span>'}</div>
-        <div class="wrap" style="margin:6px 0"><span class="badge cap">${modChip(c.modality)}</span>${c.line?`<span class="badge cap">${esc(c.line)}</span>`:''}${c.provider_id?`<span class="badge official">${esc(c.provider_id)}</span>`:''}</div>
-        <div class="muted" style="font-size:12px;min-height:32px">${esc((c.desc||'').slice(0,90))}</div>
-        ${(c.models&&c.models.length)?`<div class="wrap" style="margin-top:6px">${c.models.slice(0,3).map(m=>`<span class="badge cap" style="font-family:ui-monospace">${esc(m)}</span>`).join('')}</div>`:''}
-        <div class="row faint" style="font-size:11px;margin-top:8px"><span class="sp"></span>${c.provider_aid?`<a class="mono" href="javascript:goAgent('${esc(c.provider_aid)}')">${shortAid(c.provider_aid)}</a>`:''}</div>
-      </div></div>`).join('');
-  const methodBadge = method? `<span class="badge ${method==='semantic'?'official':'cap'}">${method==='semantic'?'语义检索':'词法检索'}</span>` : '';
-  $('#main').innerHTML = shell({
-    title:'能力包仓库', sub:'愿景「全球能力仓库」— 官方登记能力与社区能力抽象为可发现的能力包（来源：注册表与官方登记，不含调用数据）',
-    body:`
-    <div class="pgfilter">
-      <div class="gsearch" style="flex:1;max-width:520px"><span class="gsic">${ic('search')}</span><input id="capq" placeholder="按任务描述发现能力（例：把这段语音转成文字 / 生成一段风景视频）…" value="${esc(capsQ)}"/></div>
-      ${isSearch?`<button class="btn sm" onclick="capsQ='';vCapabilities()">清除</button>`:''}
-      ${methodBadge}
-      <span class="sp"></span><span class="muted" style="font-size:12.5px">${esc(subtitle||'')} · 官方 ${caps.filter(c=>c.tier==='official').length} · 社区 ${caps.filter(c=>c.tier!=='official').length}</span></div>
-    <div style="display:flex;flex-wrap:wrap;gap:12px">${cards||empty('无匹配能力包','换一种任务描述再试，或查看全部能力包。')}</div>`,
-  });
-}
-
-/* ================= DATA INTELLIGENCE ================= */
-
-/* ---- 数据总览 ---- */
-async function vDataOverview(){
-  const [ov, ss] = await Promise.all([
-    api('/overview').catch(e=>({_err:e.message})),
-    api('/sessions?limit=400').catch(()=>null),
-  ]);
-  if(ov._err){ $('#main').innerHTML = shell({title:'数据总览', body:errCard(ov._err)}); return; }
-  const ds=ov.datasets||{}, harvest=ov.harvest||[];
-  const sessTotal=Object.values(ds).reduce((s,c)=>s+(c.sessions||0),0);
-  const eventTotal=Object.values(ds).reduce((s,c)=>s+(c.events||0),0);
-  const byteTotal=Object.values(ds).reduce((s,c)=>s+(c.bytes||0),0);
-  const recTotal=harvest.reduce((s,h)=>s+(h.records||0),0);
-  // intent distribution
-  let intents={}, labeled=0, unlabeled=0;
-  (ss&&ss.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;}else unlabeled++; });
-  const topIntents = Object.entries(intents).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>({label:k,value:v,hash:'#/data/grounding'}));
-  $('#main').innerHTML = shell({
-    title:'数据总览', sub:'采收已删除（A2A-DESIGN §9）：hub 与运营面不再从中继或官方 agent 复制任何交互。此处只读展示旧版本留在 admin/datasets/ 的数据，生产清理后为空。',
-    body:`
-    <div class="grid g4 mb16">
-      ${kpi('历史会话', num(sessTotal), `${Object.keys(ds).length} 个旧来源`, 'db')}
-      ${kpi('历史交互记录', num(recTotal), `${num(eventTotal)} 事件`, 'activity')}
-      ${kpi('历史原始载荷', fmtBytes(byteTotal), '待清理', 'layers')}
-      ${kpi('已标注意图', num(labeled), `未标注 ${num(unlabeled)}`, 'compass')}
-    </div>
-    <div class="grid g2c">
-      <div class="card"><div class="hd">${ic('db')} 旧采收游标（待清理）</div><div class="bd p0"><div class="tbwrap"><table class="tb">
-        <tr><th>旧来源</th><th>会话</th><th>累计记录</th><th>最后运行</th></tr>
-        ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td></tr>`).join('')||'<tr><td colspan="4" class="faint" style="padding:16px;text-align:center">无</td></tr>'}
-      </table></div></div></div>
-      <div class="card"><div class="hd">${ic('compass')} 意图分布 <span class="sp"></span><a href="#/data/grounding" style="font-size:12px">Intent Grounding ›</a></div><div class="bd">
-        ${hbars(topIntents)}</div></div>
-    </div>
-    <div class="note">这些数据由旧版本采收，含任务内容；删除步骤见 deploy/cleanup-content-v0.2.sh（执行前须经产品负责人同意）。</div>`,
-  });
-}
-
-/* ---- OKF 会话浏览 ---- */
-let dsSource='', dsQ='';
-async function vSessions(){
-  const d = await api('/sessions?source='+encodeURIComponent(dsSource)+'&q='+encodeURIComponent(dsQ)+'&limit=200');
-  const counts = d.counts||{};
-  const tiles = Object.entries(counts).map(([src,c])=>`
-    <div class="tile"><div class="lb">${ic('db')}${esc(src)}</div><div class="v">${num(c.sessions)}</div>
-    <div class="s">${num(c.events)} 事件 · ${fmtBytes(c.bytes)} 原始载荷</div></div>`).join('');
-  const rows = (d.sessions||[]).map(s=>`
-    <tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
-      <td class="mono">${esc(s.session_id.slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
-      <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
-      <td>${s.status==='done'?'<span class="badge ok">done</span>':s.status?'<span class="badge warn">'+esc(s.status)+'</span>':'-'}</td>
-      <td>${s.events}</td><td class="muted" style="white-space:nowrap">${fmtTime(s.updated_at)}</td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'历史会话', sub:'旧版本采收的会话（只读）。采收已删除，生产清理后此处为空。',
-    body:`
-    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:14px">${tiles||'<div class="tile"><div class="lb">暂无数据</div><div class="s">没有历史采收会话</div></div>'}</div>
-    <div class="pgfilter">
-      <div class="gsearch" style="flex:0 1 260px"><span class="gsic">${ic('search')}</span><input id="dsq" placeholder="搜索会话 / AID / 意图…" value="${esc(dsQ)}"/></div>
-      <select id="dss" class="inp" onchange="dsSource=this.value;vSessions()">
-        <option value="">全部来源</option>
-        ${Object.keys(counts).map(s=>`<option ${dsSource===s?'selected':''} value="${esc(s)}">${esc(s)}</option>`).join('')}
-      </select>
-      <span class="sp"></span></div>
-    <div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>事件</th><th>更新</th></tr>
-      ${rows||'<tr><td colspan="6" class="faint" style="padding:24px;text-align:center">无会话</td></tr>'}</table></div></div>`,
-  });
-  const inp=$('#dsq'); inp.addEventListener('keydown',e=>{if(e.key==='Enter'){dsQ=inp.value;vSessions()}});
-}
-async function openSession(source,id){
-  const d = await api('/sessions/'+encodeURIComponent(source)+'/'+encodeURIComponent(id));
-  const s=d.session||{};
-  openDrawer(`${source} / ${id}`, `
-    <div class="kv">
-      <div class="k">意图</div><div>${esc(s.intent||'-')}</div>
-      <div class="k">状态</div><div>${esc(s.status||'-')}</div>
-      <div class="k">供给方</div><div class="mono" style="word-break:break-all">${s.provider_aid?`<a href="javascript:goAgent('${esc(s.provider_aid)}')">${esc(s.provider_aid)}</a>`:'-'}</div>
-      <div class="k">需求方</div><div class="mono" style="word-break:break-all">${s.requester_aid?`<a href="javascript:goAgent('${esc(s.requester_aid)}')">${esc(s.requester_aid)}</a>`:'-'}</div>
-      <div class="k">时间窗</div><div>${fmtTime(s.started_at)} → ${fmtTime(s.ended_at)}</div>
-      <div class="k">体量</div><div>${s.events} 事件 · ${fmtBytes(s.bytes)}</div>
-    </div>
-    <div class="note">${esc(d.note||'')}</div>`);
-}
-
-/* ---- 异常会话 ---- */
-async function vAnomalies(){
-  const d = await api('/sessions?limit=400');
-  const list = (d.sessions||[]).filter(s=>s.status && s.status!=='done');
-  const rows = list.map(s=>`
-    <tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
-      <td class="mono">${esc(s.session_id.slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
-      <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
-      <td><span class="badge warn">${esc(s.status)}</span></td>
-      <td class="muted">${fmtTime(s.updated_at)}</td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'异常会话', sub:'状态非 done 的会话（未完成 / 失败）— grounding 失败、协同冲突、工具调用失败等的初筛入口',
-    body: list.length? `<div class="card"><div class="tbwrap"><table class="tb">
-      <tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>更新</th></tr>${rows}</table></div></div>
-      <div class="note">失败类型细分（歧义/预判错误/协同冲突/敏感命中）需要 OKF Schema 扩展字段，当前以会话状态近似。</div>`
-      : empty('未发现异常会话','采样范围内所有会话状态均为 done 或未标注。'),
-  });
-}
-
-/* ---- 能力总览 (differentiator overview) ---- */
-async function vCapOps(){
-  const [ss, ov] = await Promise.all([
-    api('/sessions?limit=400').catch(()=>null),
-    api('/overview').catch(()=>null),
-  ]);
-  // grounding: intents
-  let intents={}, labeled=0;
-  (ss&&ss.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;} });
-  const intentKinds = Object.keys(intents).length;
-  // collab
-  const tc=(ov&&ov.totals&&ov.totals.tasks_completed)||0, rv=(ov&&ov.totals&&ov.totals.reviews)||0, ar=(ov&&ov.totals&&ov.totals.avg_rating)||0;
-  const capCard=(title,icn,metric,note,hash,tag)=>`
-    <div class="card"><div class="hd">${ic(icn)} ${title} <span class="sp"></span><span class="badge cap">${tag}</span></div>
-      <div class="bd">
-        <div style="font-size:22px;font-weight:650;letter-spacing:-.01em">${metric}</div>
-        <div class="muted" style="font-size:12.5px;margin:8px 0 12px;min-height:34px">${note}</div>
-        <a class="btn sm" href="${hash}">进入工作台 ›</a>
-      </div></div>`;
-  $('#main').innerHTML = shell({
-    title:'能力总览', sub:'运营面不采收交互内容；以下只读展示历史采收数据与公开评价，口径如实标注',
-    body:`
-    <div class="grid g2">
-      ${capCard('Intent Grounding','compass', `${num(labeled)} 条已标注 · ${intentKinds} 类意图`, '旧版本采收会话的 intent 字段分布（历史数据，待清理）。', '#/data/grounding', '历史数据')}
-      ${capCard('共脑协同','share', `${num(tc)} 已公开回执 · ${num(rv)} 评价`, '来自经评价公开的回执与可信评价，不含交互内容。', '#/data/collab', '公开评价')}
-    </div>
-    <div class="faint" style="font-size:11.5px;margin-top:14px">诚实口径：以上为聚合计数，未接入评测集与人工标签。</div>`,
-  });
-}
-
-/* ---- Intent Grounding ---- */
-async function vGrounding(){
-  const d = await api('/sessions?limit=500');
-  let intents={}, labeled=0, unlabeled=0;
-  (d.sessions||[]).forEach(s=>{ if(s.intent){intents[s.intent]=(intents[s.intent]||0)+1;labeled++;}else unlabeled++; });
-  const sorted = Object.entries(intents).sort((a,b)=>b[1]-a[1]);
-  const rows = sorted.map(([k,v])=>`<tr class="click" onclick="dsQ='${esc(k)}';dsSource='';location.hash='#/data/sessions'">
-    <td><span class="badge official">${esc(k)}</span></td><td>${v}</td>
-    <td><div class="hbar-track" style="width:180px"><div class="hbar-fill" style="width:${(v/(sorted[0][1]||1)*100).toFixed(1)}%"></div></div></td>
-    <td class="faint">${ic('chev')}</td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'Intent Grounding', sub:'意图对齐数据底座 —— 按 OKF 会话 intent 字段统计意图分布，下钻到对应会话',
-    body:`
-    <div class="grid g3 mb16">
-      ${kpi('已标注意图会话', num(labeled), '含 intent 字段', 'compass')}
-      ${kpi('意图种类', sorted.length, '去重后', 'layers')}
-      ${kpi('未标注会话', num(unlabeled), '待补充意图', 'inbox')}
-    </div>
-    <div class="card"><div class="hd">${ic('chart')} 意图分布（点击下钻到会话）</div>
-      <div class="bd p0"><div class="tbwrap"><table class="tb">
-        <tr><th>意图</th><th>会话数</th><th>占比</th><th></th></tr>
-        ${rows||'<tr><td colspan="4" class="faint tac" style="padding:20px">采样范围内暂无带 intent 的会话</td></tr>'}</table></div></div></div>
-    <div class="note">口径：线上观测。意图混淆矩阵、槽位与澄清轮数、意图→能力包映射为后续阶段（需 OKF grounding.* 字段）。</div>`,
-  });
-}
-
-/* ---- 共脑协同 ---- */
-async function vCollab(){
-  const [ov, rv] = await Promise.all([ api('/overview'), api('/reviews?limit=50').catch(()=>({reviews:[]})) ]);
-  const t=ov.totals||{};
-  const reviews=(rv.reviews||[]).map(r=>`<tr>
-    <td>${'★'.repeat(Math.max(0,Math.min(5,r.rating)))}<span class="faint">${'☆'.repeat(5-Math.max(0,Math.min(5,r.rating)))}</span></td>
-    <td class="mono">${r.subject_aid?`<a href="javascript:goAgent('${esc(r.subject_aid)}')">${shortAid(r.subject_aid)}</a>`:'-'}</td>
-    <td class="muted" style="max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.comment||'-')}</td>
-    <td class="muted">${new Date((r.created_day||0)*86400000).toISOString().slice(0,10)}</td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'共脑协同', sub:'多 Agent 协同的公开信号 —— 已公开回执、可信评价与在途积压（不含交互内容）',
-    body:`
-    <div class="grid g4 mb16">
-      ${kpi('已公开回执', num(t.tasks_completed||0), '经评价公开', 'activity')}
-      ${kpi('可信评价', num(t.reviews||0), '交付后评价', 'star')}
-      ${kpi('平均评分', (t.avg_rating||0).toFixed(2), '满分 5', 'gauge')}
-      ${kpi('在途积压', num(t.relay_backlog||0), '未投递 relay', 'inbox')}
-    </div>
-    <div class="card"><div class="hd">${ic('star')} 最近协同交付评价</div>
-      <div class="bd p0"><div class="tbwrap"><table class="tb">
-        <tr><th>评分</th><th>对象</th><th>评论</th><th>时间</th></tr>
-        ${reviews||'<tr><td colspan="4" class="faint tac" style="padding:20px">暂无评价</td></tr>'}</table></div></div></div>
-    <div class="note">口径：线上观测。协同 DAG 回放、贡献归因、冲突矩阵、相对单 Agent 提升需要 OKF collaboration.* 字段，为后续阶段。</div>`,
-  });
-}
-
-/* ================= ECOSYSTEM ================= */
-
-/* ---- 生态概览 ---- */
-async function vEcoOverview(){
-  const [ov, st] = await Promise.all([ api('/overview'), api('/store').catch(()=>null) ]);
-  const t=ov.totals||{}, off=ov.officials||0;
-  const ds=ov.datasets||{}; const sessTotal=Object.values(ds).reduce((s,c)=>s+(c.sessions||0),0);
-  const prodLines = st? Object.keys(st.product_lines||{}).filter(k=>(st.product_lines[k]||[]).length) : [];
-  const capCount = st? Object.keys(st.capabilities||{}).length : 0;
-  $('#main').innerHTML = shell({
-    title:'生态概览', sub:'ANet 智能体互联网的整体规模与构成 —— 面向理解与叙事',
-    body:`
-    <div class="grid g4 mb16">
-      ${kpi('注册 Agent', num(t.agents||0), `官方 ${off} · 社区 ${(t.agents||0)-off}`, 'bot')}
-      ${kpi('已上架', num(t.listed||0), `覆盖 ${prodLines.length} 条产品线`, 'store')}
-      ${kpi('能力包供给', capCount, '官方登记 + 社区', 'layers')}
-      ${kpi('已公开回执', num(t.tasks_completed||0), `历史采收会话 ${num(sessTotal)}（待清理）`, 'db')}
-    </div>
-    <div class="grid g2">
-      <div class="card"><div class="hd">${ic('store')} 产品线覆盖</div><div class="bd">
-        ${st? hbars(prodLines.map(k=>({label:LINE_NAMES[k]||k, value:(st.product_lines[k]||[]).length, sub:`官方 ${(st.product_lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'}))) : '<div class="faint">商店数据不可用</div>'}
-      </div></div>
-      <div class="card"><div class="hd">${ic('share')} 生态构成</div><div class="bd">
-        ${hbars([
-          {label:'官方登记 Agent', value:off, sub:'仅登记', hash:'#/operations/officials'},
-          {label:'社区 Agent', value:(t.agents||0)-off, sub:'注册表', hash:'#/operations/agents'},
-          {label:'可信评价', value:t.reviews||0, sub:`均分 ${(t.avg_rating||0).toFixed(2)}`},
-        ])}
-        <div class="row" style="margin-top:12px"><a class="btn sm" href="#/ecosystem/network">${ic('share')} Agent 网络</a><a class="btn sm" href="#/ecosystem/vision">${ic('up')} 能力跃升</a></div>
-      </div></div>
-    </div>`,
-  });
-}
-
-/* ---- 产品矩阵 ---- */
-async function vMatrix(){
-  const d = await api('/store'); const lines=d.product_lines||{};
-  const order=['anetos','anetscreen','anetpin','anetcraft','agentnetwork','community'];
-  const present=order.filter(k=>lines[k]&&lines[k].length);
-  const rows=present.map(k=>{
-    const arr=lines[k]; const official=arr.filter(a=>a.tier==='official').length;
-    const rev=arr.reduce((s,a)=>s+(a.review_count||0),0);
-    return `<tr><td style="font-weight:550">${LINE_NAMES[k]||k}</td><td>${arr.length}</td><td>${official}</td><td>${arr.length-official}</td><td>${rev}</td></tr>`;
-  }).join('');
-  $('#main').innerHTML = shell({
-    title:'产品矩阵', sub:'按 ANet 产品线组织的 Agent 供给与活跃度',
-    body:`
-    <div class="card"><div class="bd">${hbars(present.map(k=>({label:LINE_NAMES[k]||k, value:(lines[k]||[]).length, sub:`官方 ${(lines[k]||[]).filter(a=>a.tier==='official').length}`, hash:'#/ecosystem/matrix'})))}</div></div>
-    <div class="card mt14"><div class="tbwrap"><table class="tb">
-      <tr><th>产品线</th><th>上架 Agent</th><th>官方</th><th>社区</th><th>评价</th></tr>
-      ${rows||'<tr><td colspan="5" class="faint tac" style="padding:20px">暂无上架 agent</td></tr>'}</table></div></div>`,
-  });
-}
-
-/* ---- Agent 网络 ---- */
-async function vNetwork(){
-  const d = await api('/agents');
-  const agents = (d.agents||[]).slice().sort((a,b)=>((b.review_count||0)-(a.review_count||0))).slice(0,40);
-  $('#main').innerHTML = shell({
-    title:'Agent 网络', sub:'注册在册 Agent 与 Hub 的连接关系 —— 节点大小按收到的评价数，颜色区分官方/社区/风险；点击进入详情',
-    body:`
-    <div class="card"><div class="bd">${networkSVG(agents)}</div></div>
-    <div class="wrap" style="margin-top:10px;font-size:12px">
-      <span class="badge official">官方</span><span class="badge community">社区</span><span class="badge err">风险</span>
-      <span class="muted">节点大小 = 收到的评价数</span></div>
-    <div class="note">当前边表示与 Hub 的注册/中继关系；Agent↔Agent 协同边需要 OKF collaboration.* 数据，为后续阶段。</div>`,
-  });
-}
-function networkSVG(agents){
-  if(!agents.length) return '<div class="faint" style="padding:24px;text-align:center">暂无 Agent</div>';
-  const W=780,H=440,cx=W/2,cy=H/2,R=Math.min(cx,cy)-46,n=agents.length;
-  let edges='',nodes='';
-  agents.forEach((a,i)=>{
-    const ang=(i/n)*Math.PI*2 - Math.PI/2;
-    const x=cx+R*Math.cos(ang), y=cy+R*Math.sin(ang);
-    const tk=a.review_count||0;
-    const r=Math.max(5,Math.min(16,5+Math.sqrt(tk)*1.6));
-    const col=a.moderation?'var(--err)':a.tier==='official'?'var(--primary)':'var(--fg-faint)';
-    edges+=`<line x1="${cx}" y1="${cy}" x2="${x.toFixed(1)}" y2="${y.toFixed(1)}" stroke="var(--border)" stroke-width="1"/>`;
-    nodes+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${col}" opacity=".85" style="cursor:pointer" onclick="goAgent('${esc(a.aid)}')"><title>${esc(a.name||a.aid)} · ${tk} 条评价</title></circle>`;
-  });
-  const hub=`<circle cx="${cx}" cy="${cy}" r="22" fill="var(--primary-soft)" stroke="var(--primary)" stroke-width="2"/><text x="${cx}" y="${cy+4}" text-anchor="middle" font-size="11" fill="var(--primary)" font-weight="700">Hub</text>`;
-  return `<svg width="100%" viewBox="0 0 ${W} ${H}" style="max-width:100%">${edges}${hub}${nodes}</svg>`;
-}
-
-/* ---- 能力跃升 (vision map) ---- */
-const LEAP_STATUS = {live:['ok','已运行'], partial:['warn','建设中'], planned:['community','规划中']};
-const LEAP_DRILL = {backbone:'#/operations/agents', discovery:'#/operations/capabilities', access:'#/operations/officials', regulation:'#/platform/audit', evolution:'#/data/sessions', demonstration:'#/ecosystem/matrix'};
-async function vVision(){
-  const d = await api('/vision');
-  const cards = (d.leaps||[]).map((l,i)=>{
-    const [cls,txt] = LEAP_STATUS[l.status]||['community',l.status];
-    const metrics = Object.entries(l.metrics||{}).map(([k,v])=>
-      `<div class="tile" style="padding:10px 12px;box-shadow:none;background:var(--bg-subtle)"><div class="lb" style="font-size:11px">${esc(k)}</div><div style="font-size:18px;font-weight:650;margin-top:2px">${esc(String(v))}</div></div>`).join('');
-    const drill = LEAP_DRILL[l.key];
-    return `<div class="card">
-      <div class="hd"><span style="width:24px;height:24px;border-radius:7px;background:var(--primary-soft);color:var(--primary);display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:12px">${i+1}</span>
-        ${esc(l.title)} <span class="badge ${cls}">${esc(txt)}</span>
-        <span class="sp"></span>${drill?`<a class="btn sm" href="${drill}">下钻 ›</a>`:''}</div>
-      <div class="bd">
-        <div class="muted" style="font-size:13px;margin-bottom:4px">${esc(l.leap)}</div>
-        <div style="font-size:12px;color:var(--primary);margin-bottom:12px">${ic('layers')} 承载：${esc(l.component)}</div>
-        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr))">${metrics}</div>
-      </div></div>`;
-  }).join('');
-  $('#main').innerHTML = shell({
-    title:'能力跃升', sub:esc(d.headline||''),
-    body:`<div class="grid" style="grid-template-columns:1fr">${cards}</div>`,
-  });
-}
-
-/* ================= PLATFORM ================= */
-
-/* ---- 系统状态 ---- */
-async function vPlatformStatus(){
-  const d = await api('/overview');
-  const harvest=d.harvest||[], snaps=d.snapshots||[];
-  $('#main').innerHTML = shell({
-    title:'系统状态', sub:'anet-hub-admin 服务与公网 hub.db 读取的健康快照。运营面不连接任何官方 agent 主机。',
-    body:`
-    <div class="grid g4 mb16">
-      ${kpi('hub.db', fmtBytes(d.hub_db_bytes), '公网存储（只读）', 'db')}
-      ${kpi('官方 agent 登记', d.officials||0, '仅登记', 'shield')}
-      ${kpi('采收源', 0, `旧游标 ${harvest.length} 条（待清理）`, 'activity')}
-      ${kpi('快照点', snaps.length, '每 5 分钟采样', 'chart')}
-    </div>
-    <div class="card"><div class="hd">${ic('db')} 旧采收游标（采收已删除，待清理）</div><div class="bd p0"><div class="tbwrap"><table class="tb">
-      <tr><th>旧来源</th><th>会话</th><th>累计记录</th><th>最后运行</th></tr>
-      ${harvest.map(h=>`<tr><td class="mono">${esc(h.source)}</td><td>${h.sessions}</td><td>${num(h.records)}</td><td class="muted">${fmtTime(h.last_run)}</td></tr>`).join('')||'<tr><td colspan="4" class="faint" style="padding:16px;text-align:center">无</td></tr>'}
-    </table></div></div></div>`,
-  });
-}
-
-/* ---- 审计日志 ---- */
-async function vAudit(){
-  const d = await api('/audit?limit=500');
-  const rows=(d.audit||[]).map(a=>`
-    <tr><td class="muted" style="white-space:nowrap">${fmtTime(a.ts)}</td><td>${esc(a.actor)}</td>
-    <td class="mono">${esc(a.action)}</td><td class="mono">${a.target?`<a href="javascript:goAgent('${esc(a.target)}')">${shortAid(a.target)}</a>`:'-'}</td>
-    <td class="muted" style="max-width:420px;word-break:break-all">${esc((a.detail||'').slice(0,300))}</td></tr>`).join('');
-  $('#main').innerHTML = shell({
-    title:'审计日志', sub:'全部管理操作留痕（监管动作 / 注册表删除 / 官方登记）— 亦嵌入各 Agent 详情的「审计」页',
-    body:`<div class="card"><div class="tbwrap"><table class="tb"><tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th></tr>
-    ${rows||'<tr><td colspan="5" class="faint" style="padding:24px;text-align:center">暂无</td></tr>'}</table></div></div>`,
-  });
-}
-
-/* ================= UNIFIED AGENT DETAIL ================= */
-async function renderAgent(aid, tab){
-  CUR_AGENT = aid;
-  $('#main').innerHTML = loadingHTML('加载 Agent…');
-  let d, officials=[];
-  try{
-    [d, officials] = await Promise.all([
-      api('/agents/'+encodeURIComponent(aid)),
-      api('/official').then(r=>r.officials||[]).catch(()=>[]),
-    ]);
-  }catch(e){ $('#main').innerHTML = shell({crumb:`<a href="#/operations/agents">全部 Agent</a> <span>›</span> ${esc(shortAid(aid))}`, title:shortAid(aid), body:errCard('加载 Agent 失败：'+e.message)}); return; }
-  const a=d.agent||{};
-  const mrow = officials.find(o=>o.manifest && o.manifest.aid===aid);
-  const isOff = !!mrow;
-  const man = mrow&&mrow.manifest;
-  const mod = d.moderation;
-  const tabs = [['overview','概览'],['caps','能力'],['data','数据'],['gov','治理'],['audit','审计']];
-  if(!tabs.find(t=>t[0]===tab)) tab='overview';
-  CRUMB = `<a href="#/operations/agents">全部 Agent</a> <span>›</span> ${esc(a.name||shortAid(aid))}`;
-
-  const actions = `<button class="btn" onclick="goAgent('${esc(aid)}','gov')">${ic('shield')} 治理</button>`;
-
-  $('#main').innerHTML = `
-    <div class="crumb">${CRUMB}</div>
-    <div class="ahead">
-      <div class="ava">${initial(a.name,aid)}</div>
-      <div style="flex:1;min-width:0">
-        <div class="row" style="flex-wrap:wrap"><div style="font-size:19px;font-weight:650">${esc(a.name||'(未命名)')}</div>
-          ${isOff?'<span class="badge official">官方</span>':'<span class="badge community">社区</span>'}
-          ${a.listed?'<span class="badge cap">已上架</span>':'<span class="badge community">未上架</span>'}
-          ${mod&&mod.status&&mod.status!=='ok'?`<span class="badge err">${esc(mod.status)}</span>`:''}</div>
-        <div class="mono faint" style="margin-top:5px;word-break:break-all">${esc(aid)}</div>
-      </div>
-      <div class="pgact">${actions}</div>
-    </div>
-    <div class="tabs">${tabs.map(t=>`<button class="${t[0]===tab?'on':''}" onclick="goAgent('${esc(aid)}','${t[0]}')">${t[1]}</button>`).join('')}</div>
-    <div id="atab"></div>`;
-  renderAgentTab(tab, {aid, d, a, isOff, man, mod});
-}
-
-function renderAgentTab(tab, ctx){
-  const el=$('#atab'); if(!el) return;
-  const {aid, d, a, isOff, man, mod} = ctx;
-  if(tab==='overview'){
-    el.innerHTML = `
-      <div class="grid g4 mb16">
-        ${kpi('评分', a.review_count?a.avg_rating.toFixed(2):'-', a.review_count?`${a.review_count} 条评价`:'暂无评价', 'star')}
-        ${kpi('收到的评价', a.review_count||0, '评价不记评价人', 'activity')}
-        ${kpi('上架', a.listed?'是':'否', '有能力或简介，且已发布密钥', 'inbox')}
-        ${kpi('所有权', isOff?'官方':'社区', isOff?'运营面登记':'注册表', 'users')}
-      </div>
-      <div class="card"><div class="hd">${ic('bot')} 基本信息</div><div class="bd"><div class="kv">
-        <div class="k">简介</div><div>${esc(a.summary||'-')}</div>
-        <div class="k">能力</div><div class="wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'-'}</div>
-        <div class="k">所有权</div><div>${isOff?`官方 · ${esc(man.product_line||'-')} · 维护者 ${esc(man.maintainer||'-')}`:'社区'}</div>
-        ${isOff?`<div class="k">登记 hub</div><div class="mono">${esc(man.hub||'-')}</div>`:''}
-        <div class="k">注册时间</div><div>${fmtTime(a.registered_at)}</div>
-      </div></div></div>
-      ${a.readme?`<div class="card mt14"><div class="hd">${ic('file')} README</div><div class="bd"><pre class="md">${esc(a.readme.slice(0,6000))}</pre></div></div>`:''}`;
-  }
-  else if(tab==='caps'){
-    el.innerHTML=`
-      <div class="card"><div class="hd">${ic('layers')} 注册声明的能力</div><div class="bd wrap">${(a.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">未声明能力</span>'}</div></div>
-      ${isOff?`<div class="card mt14"><div class="hd">${ic('store')} 官方登记的能力</div><div class="bd wrap">${(man.caps||[]).map(c=>`<span class="badge cap">${esc(c)}</span>`).join('')||'<span class="faint">登记未列能力</span>'}</div></div>`:''}`;
-  }
-  else if(tab==='data'){
-    const sessions=(d.sessions||[]).map(s=>`<tr class="click" onclick="openSession('${esc(s.source)}','${esc(s.session_id)}')">
-      <td class="mono">${esc((s.session_id||'').slice(0,22))}</td><td><span class="badge cap">${esc(s.source)}</span></td>
-      <td>${s.intent?`<span class="badge official">${esc(s.intent)}</span>`:'<span class="faint">-</span>'}</td>
-      <td>${s.status==='done'?'<span class="badge ok">done</span>':s.status?'<span class="badge warn">'+esc(s.status)+'</span>':'-'}</td>
-      <td class="muted">${fmtTime(s.updated_at)}</td></tr>`).join('');
-    el.innerHTML=`<div class="card"><div class="hd">${ic('db')} 本 Agent 的历史采收会话（只读，待清理）</div>
-      <div class="bd p0"><div class="tbwrap"><table class="tb"><tr><th>会话</th><th>来源</th><th>意图</th><th>状态</th><th>更新</th></tr>
-      ${sessions||'<tr><td colspan="5" class="faint tac" style="padding:20px">无历史采收会话</td></tr>'}</table></div></div></div>`;
-  }
-  else if(tab==='gov'){
-    el.innerHTML=`
-      <div class="card"><div class="hd">${ic('shield')} 监管</div><div class="bd">
-        <div class="kv" style="margin-bottom:14px">
-          <div class="k">监管状态</div><div>${mod&&mod.status&&mod.status!=='ok'?`<span class="badge err">${esc(mod.status)}</span> ${esc(mod.note||'')}`:'<span class="badge ok">正常</span>'}</div>
-        </div>
-        <div class="row" style="flex-wrap:wrap">
-          <input id="mNote" class="inp" placeholder="处置备注" style="width:180px"/>
-          <button class="btn sm" onclick="moderate('${esc(aid)}','flagged')">标记关注</button>
-          <button class="btn sm" onclick="moderate('${esc(aid)}','ok')">恢复正常</button>
-          <button class="btn sm danger" onclick="delAgent('${esc(aid)}')">${ic('trash')} 移除注册</button>
-        </div>
-        <div class="faint" style="font-size:12px;margin-top:8px">移除即撤销准入并注销，余额仍记在账上；撤销误删运行 anet-hub admit ${esc(aid)}。本 hub 开放注册时它仍可重新注册：删除不等于封禁。运营面不管理任何 agent 的授权名单：谁可以委派给一个 agent 由该 agent 自己的 daemon 决定。</div>
-      </div></div>`;
-  }
-  else if(tab==='audit'){
-    el.innerHTML=`<div id="audbox">${loadingHTML()}</div>`;
-    api('/audit?limit=500').then(r=>{
-      const rows=(r.audit||[]).filter(x=>x.target===aid).map(x=>`<tr><td class="muted" style="white-space:nowrap">${fmtTime(x.ts)}</td><td>${esc(x.actor)}</td><td class="mono">${esc(x.action)}</td><td class="muted" style="max-width:420px;word-break:break-all">${esc((x.detail||'').slice(0,300))}</td></tr>`).join('');
-      $('#audbox').innerHTML=`<div class="card"><div class="tbwrap"><table class="tb"><tr><th>时间</th><th>操作者</th><th>动作</th><th>详情</th></tr>${rows||'<tr><td colspan="4" class="faint tac" style="padding:20px">该 Agent 暂无审计记录</td></tr>'}</table></div></div>`;
-    }).catch(e=>{ $('#audbox').innerHTML=errCard(e.message); });
-  }
-}
-/* ---- placeholder views ---- */
-function placeholderView(title, note){
-  return async ()=>{ $('#main').innerHTML = shell({title, body: empty('模块建设中', note)}); };
-}
-
-/* ---------------- route table ---------------- */
-Object.assign(ROUTES, {
-  'operations/overview': vOpsOverview,
-  'operations/agents': vAgents,
-  'operations/onboarding': placeholderView('接入队列','将展示待验证/验证失败/接入测试中的 Agent 及协议、健康检查与签名状态。需接入接入流水线数据。'),
-  'operations/reviews': placeholderView('审核认证','首次发布/官方认证/版本更新审核工作台（资料·能力·权限·版本差异 + 自动检测）。需接入审核流水线。'),
-  'operations/store': vStore,
-  'operations/capabilities': vCapabilities,
-  'operations/channels': placeholderView('产品渠道','配置 Agent 在各 ANet 产品中的分发策略、曝光范围与灰度比例。需接入渠道配置。'),
-  'operations/officials': vOfficials,
-  'operations/incidents': placeholderView('告警与事故','将区分告警（信号）与事故（需跟踪处置的事件），带状态机与影响面。需接入事故管理。'),
-  'operations/risk': vRisk,
-  'operations/enforcement': vEnforcement,
-  'operations/recycle': vRecycle,
-  'data/overview': vDataOverview,
-  'data/sessions': vSessions,
-  'data/anomalies': vAnomalies,
-  'data/caps': vCapOps,
-  'data/grounding': vGrounding,
-  'data/collab': vCollab,
-  'data/governance': placeholderView('数据治理','授权与用途、脱敏与保留、数据血缘与删除。需 OKF 扩展授权/脱敏/血缘字段。'),
-  'ecosystem/overview': vEcoOverview,
-  'ecosystem/matrix': vMatrix,
-  'ecosystem/network': vNetwork,
-  'ecosystem/vision': vVision,
-  'platform/status': vPlatformStatus,
-  'platform/audit': vAudit,
-  'platform/connections': placeholderView('连接与集成','Agent 接入协议与 Webhook/API 配置总览。'),
+document.addEventListener('click', e => {
+  const s = e.target.closest('[data-sort]');
+  if (s) { const [id, k] = s.dataset.sort.split(':'); const st = TBL[id]; const c = k; st.dir = (st.key === c && st.dir === 'desc') ? 'asc' : 'desc'; st.key = c; MOUNT[id] && MOUNT[id](); const again = document.querySelector(`[data-sort="${id}:${c}"]`); again && again.focus(); return; }
+  const m = e.target.closest('[data-more]');
+  if (m) { const id = m.dataset.more; TBL[id].limit += 200; MOUNT[id] && MOUNT[id](); }
 });
 
-/* ---------------- init ---------------- */
-$('#topbar').innerHTML = $('#topbar').innerHTML.replace(/\$\{ic\('(\w+)'\)\}/g,(_,n)=>ic(n));
-wireGlobalSearch();
-if(TOKEN){ boot() } else { $('#login').style.display='flex' }
+/* ---------------- login, session ---------------- */
+async function doLogin(ev){
+  ev.preventDefault();
+  const tok = $('#tokIn').value.trim(); if (!tok) return;
+  $('#loginBtn').disabled = true; $('#loginErr').textContent = '';
+  try {
+    const r = await fetch(BASE + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: tok }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || t('令牌校验未通过。', 'The token was not accepted.'));
+    TOKEN = tok; try { localStorage.setItem('anethub_admin_token', tok); } catch (e) {}
+    $('#tokIn').value = ''; boot();
+  } catch (e) { $('#loginErr').textContent = e.message; }
+  $('#loginBtn').disabled = false;
+}
+function logout(){ TOKEN = ''; try { localStorage.removeItem('anethub_admin_token'); } catch (e) {} $('#app').style.display = 'none'; $('#login').style.display = 'flex'; closeDrawer(true); }
+$('#loginForm').addEventListener('submit', doLogin);
+
+/* ---------------- pages and navigation ---------------- */
+const PAGES = [
+  { id: 'overview',   icon: 'dash',   zh: '概览',       en: 'Overview' },
+  { id: 'nodes',      icon: 'nodes',  zh: '节点',       en: 'Nodes' },
+  { id: 'registry',   icon: 'reg',    zh: '注册',       en: 'Registrations' },
+  { id: 'federation', icon: 'fed',    zh: '联邦',       en: 'Federation' },
+  { id: 'settlement', icon: 'settle', zh: '结算与审计', en: 'Settlement and audit' },
+  { id: 'admission',  icon: 'adm',    zh: '准入与配额', en: 'Admission and quotas' },
+  { id: 'logs',       icon: 'logs',   zh: '日志',       en: 'Logs' },
+];
+const pname = p => L === 'zh' ? p.zh : p.en;
+function parseHash(){ return (location.hash || '').replace(/^#\/?/, '').split('/').filter(Boolean); }
+function curPage(){ const p = parseHash()[0]; return PAGES.find(x => x.id === p) || PAGES[0]; }
+function chrome(){
+  document.title = t('Agent Network Hub 运维控制台', 'Agent Network Hub Console');
+  $('#skipLink').textContent = t('跳到内容', 'Skip to content');
+  $('#loginTitle').textContent = t('运维控制台', 'Operations console');
+  $('#loginSub').textContent = t('输入管理令牌后进入。', 'Enter the administration token to continue.');
+  $('#loginLabel').textContent = t('管理令牌', 'Administration token');
+  $('#loginBtn').textContent = t('登录', 'Sign in');
+  document.querySelectorAll('[data-act="lang"]').forEach(b => b.textContent = L === 'zh' ? 'English' : '中文');
+  $('#brandSub').textContent = t('运维控制台', 'Operations console');
+  $('#refreshBtn').innerHTML = ic('refresh') + esc(t('刷新', 'Refresh'));
+  $('#logoutBtn').innerHTML = ic('logout') + esc(t('退出', 'Sign out'));
+  $('#drawerClose').textContent = t('关闭', 'Close');
+  $('#menuLbl').textContent = t('导航', 'Navigation');
+  $('#nav').setAttribute('aria-label', t('主导航', 'Main navigation'));
+  const cur = curPage();
+  $('#nav').innerHTML = PAGES.map(p => `<a class="nav" href="#/${p.id}" ${p.id === cur.id ? 'aria-current="page"' : ''}>${ic(p.icon)}<span>${esc(pname(p))}</span></a>`).join('');
+  $('#pageTitle').textContent = pname(cur);
+  applyTheme();
+}
+function setNav(open){ document.body.classList.toggle('navopen', open); $('#menuBtn').setAttribute('aria-expanded', String(open)); morphTo('menuPath', open ? MORPH.close : MORPH.menu); }
+
+/* ---------------- data loading with a shared cache per render ---------------- */
+let CACHE = {};
+const load = (k, path) => (CACHE[k] ||= api(path));
+let SEQ = 0;
+async function render(force){
+  if (!TOKEN) return;
+  if (force) CACHE = {};
+  chrome();
+  const seq = ++SEQ;
+  const parts = parseHash(); const cur = curPage();
+  const main = $('#main');
+  main.innerHTML = loadingHTML();
+  try {
+    const html = await VIEWS[cur.id](parts);
+    if (seq !== SEQ) return;
+    main.innerHTML = html.html; if (html.after) html.after(main);
+    if (cur.id === 'nodes' && parts[1]) openAgent(decodeURIComponent(parts[1]));
+    else if (!parts[1]) closeDrawer(true);
+  } catch (e) { if (seq === SEQ) main.innerHTML = errHTML(e.message); }
+}
+window.addEventListener('hashchange', () => { setNav(false); render(); });
+
+function head(title, sub){ return `<div class="pghd"><p>${esc(sub || '')}</p></div>`; }
+
+/* ---------------- overview ---------------- */
+const VIEWS = {};
+VIEWS.overview = async () => {
+  const [ov, adm, dl] = await Promise.all([load('overview', '/overview'), load('admission', '/admission'), load('delivery', '/delivery')]);
+  const tt = ov.totals || {}; const sn = ov.snapshots || [];
+  const modeTag = adm.mode === 'open' ? `<span class="tag red">${esc(t('开放注册', 'Open registration'))}</span>` : `<span class="tag">${esc(t('仅限名单', 'Admission list only'))}</span>`;
+  const audit = (ov.audit || []).map(a => `<tr><td class="num">${fmtTime(a.ts)}</td><td>${esc(actionLabel(a.action))}</td><td class="mono">${esc(shortAid(a.target))}</td></tr>`).join('');
+  return { html: `
+  ${head('', t('节点规模、消息队列、送达确认与准入状态的当前读数。时间一律为 UTC。', 'Current figures for node population, mail queue, delivery confirmations and admission. All times are UTC.'))}
+  <div class="grid kpis">
+    ${kpi(t('已注册节点', 'Registered nodes'), nf(tt.agents), t(`其中已列入目录 ${nf(tt.listed)}`, `${nf(tt.listed)} listed in the directory`))}
+    ${kpi(t('已核验评价', 'Verified reviews'), nf(tt.reviews), t(`平均评分 ${(tt.avg_rating || 0).toFixed(2)}`, `Mean rating ${(tt.avg_rating || 0).toFixed(2)}`))}
+    ${kpi(t('已公开的有效回执', 'Published valid receipts'), nf(tt.tasks_completed), '')}
+    ${kpi(t('待取邮件', 'Queued mail'), nf(dl.mailbox_queued), t('全 Hub 合计，不含逐节点数据', 'Hub total; no per-node figure'))}
+    ${kpi(t('已存送达确认', 'Stored delivery confirmations'), nf(dl.confirmations_held), t(`保存 ${dl.confirmation_ttl_hours} 小时`, `Kept ${dl.confirmation_ttl_hours} hours`))}
+    ${kpi(t('Hub 数据库', 'Hub database'), esc(fmtBytes(ov.hub_db_bytes)), '')}
+    ${kpi(t('准入模式', 'Admission mode'), modeTag, t(`名单 ${nf(adm.admission_list)} 个 AID`, `${nf(adm.admission_list)} AIDs on the list`))}
+    ${kpi(t('官方登记', 'Official registrations'), nf(ov.officials), '')}
+  </div>
+  <div class="grid g2" style="margin-top:16px">
+    <section class="card"><div class="hd"><h2>${esc(t('节点数量趋势', 'Node population'))}</h2><span class="muted num">${esc(t('最近 24 小时', 'Last 24 hours'))}</span></div><div class="bd">${spark(sn.map(s => s.agents))}</div></section>
+    <section class="card"><div class="hd"><h2>${esc(t('邮件队列趋势', 'Mail queue'))}</h2><span class="muted num">${esc(t('最近 24 小时', 'Last 24 hours'))}</span></div><div class="bd">${spark(sn.map(s => s.relay_backlog))}</div></section>
+  </div>
+  <section class="card" style="margin-top:16px"><div class="hd"><h2>${esc(t('送达确认', 'Delivery confirmations'))}</h2></div><div class="bd">
+    <dl class="kv">
+      <dt>${esc(t('已存确认', 'Stored'))}</dt><dd class="num">${nf(dl.confirmations_held)} / ${nf(dl.confirmation_capacity)}</dd>
+      <dt>${esc(t('保存期限', 'Retention'))}</dt><dd>${esc(t(`${dl.confirmation_ttl_hours} 小时；发送方查询得到“已完成”后缩短为 ${dl.confirmation_fetched_ttl_minutes} 分钟`, `${dl.confirmation_ttl_hours} hours; shortened to ${dl.confirmation_fetched_ttl_minutes} minutes after a sender receives the done answer`))}</dd>
+      <dt>${esc(t('重投跟踪', 'Redelivery tracking'))}</dt><dd class="num">${nf(dl.redelivery_tracked)}</dd>
+    </dl>
+    <p class="note">${esc(t('Hub 仅保存句柄与密文确认，不记录收件人、发送方与时间；此处只显示总量。', 'The Hub stores a handle and a sealed confirmation only, with no recipient, sender or time. Only totals are shown.'))}</p>
+  </div></section>
+  <section class="card" style="margin-top:16px"><div class="hd"><h2>${esc(t('最近的运维操作', 'Recent operator actions'))}</h2><a class="btn sm" href="#/logs">${esc(t('查看日志', 'Open logs'))}</a></div>
+    <div class="tbw"><table class="tb"><caption class="sr">${esc(t('最近的运维操作', 'Recent operator actions'))}</caption><thead><tr><th scope="col">${esc(t('时间 (UTC)', 'Time (UTC)'))}</th><th scope="col">${esc(t('操作', 'Action'))}</th><th scope="col">${esc(t('对象', 'Target'))}</th></tr></thead><tbody>${audit || `<tr><td colspan="3">${emptyHTML(t('暂无操作记录', 'No operator actions'), '')}</td></tr>`}</tbody></table></div></section>` };
+};
+
+/* ---------------- nodes ---------------- */
+const MOD = { ok: ['正常', 'Normal'], flagged: ['已标记', 'Flagged'], delisted: ['已下架', 'Delisted'] };
+const modLabel = s => MOD[s] ? t(MOD[s][0], MOD[s][1]) : s;
+const NF = { q: '', tier: '', listed: '', mod: '' };
+VIEWS.nodes = async () => {
+  const d = await load('agents', '/agents');
+  const rows = d.agents || [];
+  const cols = [
+    { k: 'name', label: t('名称', 'Name'), get: r => r.name || r.aid, html: r => `<a class="rowlink" href="#/nodes/${encodeURIComponent(r.aid)}">${esc(r.name || t('未命名', 'Unnamed'))}</a><div class="mono muted" style="font-size:12px">${esc(shortAid(r.aid))}</div>` },
+    { k: 'caps', label: t('能力', 'Capabilities'), get: r => (r.caps || []).join(','), html: r => `<div class="wrap">${(r.caps || []).slice(0, 4).map(c => `<span class="tag">${esc(c)}</span>`).join('')}${(r.caps || []).length > 4 ? `<span class="tag">+${(r.caps || []).length - 4}</span>` : ''}</div>` },
+    { k: 'tier', label: t('类别', 'Tier'), html: r => r.tier === 'official' ? `<span class="tag red">${esc(t('官方', 'Official'))}</span>` : `<span class="tag">${esc(t('社区', 'Community'))}</span>` },
+    { k: 'listed', label: t('目录', 'Directory'), get: r => r.listed ? 1 : 0, html: r => r.listed ? `<span class="tag ok">${esc(t('已列入', 'Listed'))}</span>` : `<span class="tag">${esc(t('未列入', 'Unlisted'))}</span>` },
+    { k: 'moderation', label: t('监管状态', 'Moderation'), get: r => r.moderation || 'ok', html: r => r.moderation ? `<span class="tag warn">${esc(modLabel(r.moderation))}</span>` : `<span class="muted">${esc(modLabel('ok'))}</span>` },
+    { k: 'avg_rating', label: t('评分', 'Rating'), num: 1, html: r => r.review_count ? (+r.avg_rating).toFixed(1) : '–' },
+    { k: 'review_count', label: t('评价数', 'Reviews'), num: 1, html: r => nf(r.review_count) },
+    { k: 'registered_at', label: t('注册日期', 'Registered'), html: r => fmtDay(r.registered_at) },
+  ];
+  const filtered = () => rows.filter(r => {
+    const q = NF.q.trim().toLowerCase();
+    if (q && !(r.aid + ' ' + r.name + ' ' + (r.caps || []).join(' ') + ' ' + (r.summary || '')).toLowerCase().includes(q)) return false;
+    if (NF.tier && r.tier !== NF.tier) return false;
+    if (NF.listed && String(!!r.listed) !== NF.listed) return false;
+    if (NF.mod && (r.moderation || 'ok') !== NF.mod) return false;
+    return true;
+  });
+  const sel = (id, key, opts) => `<label class="f">${esc(opts.label)}<select class="inp" id="${id}">${opts.items.map(([v, l]) => `<option value="${v}" ${NF[key] === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
+  return { html: `
+  ${head('', t('已注册节点（含未列入目录的节点）。点击列标题排序，使用筛选条件缩小范围。', 'Registered nodes, including those not listed in the directory. Select a column header to sort; use the filters to narrow the list.'))}
+  <div class="tools">
+    <label class="f" style="flex:1;min-width:220px">${esc(t('搜索', 'Search'))}<input id="fq" class="inp" type="search" value="${esc(NF.q)}" placeholder="${esc(t('名称、AID、能力', 'Name, AID or capability'))}"/></label>
+    ${sel('ftier', 'tier', { label: t('类别', 'Tier'), items: [['', t('全部', 'All')], ['official', t('官方', 'Official')], ['community', t('社区', 'Community')]] })}
+    ${sel('flisted', 'listed', { label: t('目录', 'Directory'), items: [['', t('全部', 'All')], ['true', t('已列入', 'Listed')], ['false', t('未列入', 'Unlisted')]] })}
+    ${sel('fmod', 'mod', { label: t('监管状态', 'Moderation'), items: [['', t('全部', 'All')], ['ok', modLabel('ok')], ['flagged', modLabel('flagged')], ['delisted', modLabel('delisted')]] })}
+  </div>
+  <section class="card" id="nodesCard"></section>`,
+    after: m => {
+      const redraw = mountTable($('#nodesCard'), 'nodes', cols, filtered, { sort: 'registered_at', dir: 'desc', caption: t('节点列表', 'Node list'), emptyTitle: t('没有符合条件的节点', 'No node matches'), emptyNote: t('调整筛选条件后重试。', 'Adjust the filters and try again.') });
+      const bind = (id, key) => $('#' + id).addEventListener('input', e => { NF[key] = e.target.value; TBL.nodes.limit = 100; redraw(); });
+      bind('fq', 'q'); bind('ftier', 'tier'); bind('flisted', 'listed'); bind('fmod', 'mod');
+    } };
+};
+
+async function openAgent(aid){
+  const dr = $('#drawer'); const body = $('#drawerBody');
+  if (!OPENER) OPENER = document.activeElement;
+  $('#ovl').style.display = 'block'; dr.style.display = 'flex';
+  $('#drawerTitle').textContent = shortAid(aid);
+  body.innerHTML = loadingHTML();
+  $('#drawerClose').focus();
+  try {
+    const [d, off] = await Promise.all([api('/agents/' + encodeURIComponent(aid)), api('/official').then(r => r.officials || []).catch(() => [])]);
+    const a = d.agent; const mod = d.moderation; const reviews = d.reviews || [];
+    const official = off.map(o => o.manifest).find(m => m && m.aid === aid);
+    $('#drawerTitle').textContent = a.name || shortAid(aid);
+    body.innerHTML = `
+    <dl class="kv">
+      <dt>AID</dt><dd class="mono">${esc(a.aid)}</dd>
+      <dt>${esc(t('名称', 'Name'))}</dt><dd>${esc(dash(a.name))}</dd>
+      <dt>${esc(t('简介', 'Summary'))}</dt><dd>${esc(dash(a.summary))}</dd>
+      <dt>${esc(t('能力', 'Capabilities'))}</dt><dd><div class="wrap">${(a.caps || []).map(c => `<span class="tag">${esc(c)}</span>`).join('') || '–'}</div></dd>
+      <dt>${esc(t('类别', 'Tier'))}</dt><dd>${official ? esc(t('官方（', 'Official (') + official.id + ')') : esc(t('社区', 'Community'))}</dd>
+      <dt>${esc(t('目录', 'Directory'))}</dt><dd>${a.listed ? esc(t('已列入', 'Listed')) : esc(t('未列入（未发布密钥集或无能力描述）', 'Unlisted (no key set or no capability description)'))}</dd>
+      <dt>${esc(t('注册日期', 'Registered'))}</dt><dd class="num">${fmtDay(a.registered_at)}</dd>
+      <dt>${esc(t('评价', 'Reviews'))}</dt><dd class="num">${a.review_count ? (+a.avg_rating).toFixed(2) + ' / 5 · ' + nf(a.review_count) : '–'}</dd>
+    </dl>
+    <h3 class="sect">${esc(t('监管状态', 'Moderation'))}</h3>
+    <form id="modForm" class="tools" style="align-items:flex-end">
+      <label class="f">${esc(t('状态', 'Status'))}<select id="mStatus" class="inp">${['ok', 'flagged', 'delisted'].map(s => `<option value="${s}" ${(mod ? mod.status : 'ok') === s ? 'selected' : ''}>${esc(modLabel(s))}</option>`).join('')}</select></label>
+      <label class="f" style="flex:1;min-width:180px">${esc(t('备注', 'Note'))}<input id="mNote" class="inp" maxlength="500" value="${esc(mod ? mod.note : '')}"/></label>
+      <button class="btn pri" type="submit">${esc(t('保存', 'Save'))}</button>
+    </form>
+    <h3 class="sect">${esc(t('已收到的评价', 'Reviews received'))}</h3>
+    ${reviews.length ? `<div class="card tbw"><table class="tb"><caption class="sr">${esc(t('已收到的评价', 'Reviews received'))}</caption><thead><tr><th scope="col">${esc(t('日期', 'Date'))}</th><th scope="col" class="r">${esc(t('评分', 'Rating'))}</th><th scope="col">${esc(t('评语', 'Comment'))}</th><th scope="col">${esc(t('回执', 'Receipt'))}</th></tr></thead><tbody>${reviews.map(r => `<tr><td class="num">${fmtDayNo(r.created_day)}</td><td class="r num">${r.rating}</td><td>${esc(dash(r.comment))}</td><td class="mono">${esc(shortAid(r.receipt_cid))}</td></tr>`).join('')}</tbody></table></div>` : `<p class="muted">${esc(t('暂无评价。评价不记录评价人。', 'No reviews. A review does not record its author.'))}</p>`}
+    <h3 class="sect">${esc(t('注销', 'Deregistration'))}</h3>
+    <p class="note" style="margin:0 0 8px">${esc(t('撤销准入并注销该节点。余额保留在账本中，可使用 anet-hub admit <AID> 恢复。', 'Revokes the admission and deregisters the node. Its balance stays on the ledger and anet-hub admit <AID> restores it.'))}</p>
+    <button class="btn danger" id="delBtn">${ic('trash')}${esc(t('撤销准入并注销', 'Revoke admission and deregister'))}</button>`;
+    $('#modForm').addEventListener('submit', async ev => {
+      ev.preventDefault();
+      try { await api('/agents/' + encodeURIComponent(aid) + '/moderate', { method: 'POST', body: JSON.stringify({ status: $('#mStatus').value, note: $('#mNote').value }) }); toast(t('监管状态已更新。', 'Moderation status updated.')); CACHE = {}; }
+      catch (e) { toast(e.message, true); }
+    });
+    $('#delBtn').addEventListener('click', async () => {
+      if (!confirm(t(`撤销 ${a.name || shortAid(aid)} 的准入并注销该节点。余额保留在账本中；可使用 anet-hub admit ${aid} 恢复。是否继续？`, `Revoke the admission of ${a.name || shortAid(aid)} and deregister the node. The balance stays on the ledger; anet-hub admit ${aid} restores it. Continue?`))) return;
+      try { const r = await api('/agents/' + encodeURIComponent(aid), { method: 'DELETE' }); toast(r.message || t('已注销。', 'Deregistered.')); CACHE = {}; location.hash = '#/registry'; }
+      catch (e) { toast(e.message, true); }
+    });
+  } catch (e) { body.innerHTML = errHTML(e.message); }
+}
+let OPENER = null;
+function closeDrawer(silent){
+  if ($('#drawer').style.display !== 'flex') return;
+  $('#drawer').style.display = 'none'; $('#ovl').style.display = 'none';
+  if (!silent && /^#\/nodes\/./.test(location.hash)) { history.replaceState(null, '', '#/nodes'); }
+  if (OPENER && OPENER.focus && document.contains(OPENER)) OPENER.focus();
+  OPENER = null;
+}
+document.addEventListener('keydown', e => {
+  if ($('#drawer').style.display === 'flex') {
+    if (e.key === 'Escape') { closeDrawer(); return; }
+    if (e.key === 'Tab') {
+      const items = Array.from($('#drawer').querySelectorAll('a[href],button:not([disabled]),input,select,textarea')).filter(x => x.offsetParent !== null);
+      if (!items.length) return;
+      const f = items[0], l = items[items.length - 1];
+      if (e.shiftKey && document.activeElement === f) { e.preventDefault(); l.focus(); }
+      else if (!e.shiftKey && document.activeElement === l) { e.preventDefault(); f.focus(); }
+    }
+  } else if (e.key === 'Escape' && document.body.classList.contains('navopen')) setNav(false);
+});
+
+/* ---------------- registrations: official registry and deletions ---------------- */
+VIEWS.registry = async () => {
+  const [off, del] = await Promise.all([load('official', '/official'), load('deleted', '/deleted')]);
+  const officials = (off.officials || []).map(o => o.manifest).filter(Boolean);
+  const deleted = del.deleted || [];
+  const ocols = [
+    { k: 'id', label: 'ID', html: r => `<span class="mono">${esc(r.id)}</span>` },
+    { k: 'name', label: t('名称', 'Name') },
+    { k: 'product_line', label: t('产品线', 'Product line') },
+    { k: 'aid', label: 'AID', html: r => `<span class="mono">${esc(shortAid(r.aid))}</span>` },
+    { k: 'caps', label: t('能力', 'Capabilities'), get: r => (r.caps || []).join(','), html: r => `<div class="wrap">${(r.caps || []).map(c => `<span class="tag">${esc(c)}</span>`).join('') || '–'}</div>` },
+    { k: 'act', label: t('操作', 'Action'), get: () => '', html: r => `<button class="btn sm danger" data-delofficial="${esc(r.id)}">${esc(t('删除登记', 'Remove'))}</button>` },
+  ];
+  const dcols = [
+    { k: 'deleted_at', label: t('注销时间 (UTC)', 'Deregistered (UTC)'), html: r => `<span class="num">${fmtTime(r.deleted_at)}</span>` },
+    { k: 'aid', label: 'AID', html: r => `<span class="mono">${esc(r.aid)}</span>` },
+    { k: 'actor', label: t('操作人', 'Actor') },
+  ];
+  return { html: `
+  ${head('', t('官方 Agent 登记与已注销节点。注销通过撤销准入实现，可由 anet-hub admit 恢复。', 'Official agent registrations and deregistered nodes. A deregistration revokes admission and can be undone with anet-hub admit.'))}
+  <h2 class="sect" style="margin-top:0">${esc(t('官方 Agent 登记', 'Official agent registrations'))}</h2>
+  <section class="card" id="offCard"></section>
+  <details class="card" style="margin-top:12px"><summary class="btn" style="border:0;width:100%;justify-content:flex-start;min-height:44px">${esc(t('新增或更新登记', 'Add or update a registration'))}</summary>
+    <form id="offForm" class="bd">
+      <label class="f">${esc(t('登记清单（JSON）', 'Registration manifest (JSON)'))}<textarea id="offJson" class="inp" rows="8" spellcheck="false">{\n  "id": "",\n  "name": "",\n  "tier": "official",\n  "product_line": "agentnetwork",\n  "aid": "",\n  "caps": []\n}</textarea></label>
+      <div class="row" style="margin-top:8px"><button class="btn pri" type="submit">${esc(t('保存登记', 'Save registration'))}</button></div>
+    </form></details>
+  <h2 class="sect">${esc(t('已注销的节点', 'Deregistered nodes'))}</h2>
+  <section class="card"><div class="hd"><h2>${esc(t('注销记录', 'Deregistration record'))}</h2><button class="btn sm" id="dlAdmit">${ic('dl')}${esc(t('导出恢复清单', 'Export admit file'))}</button></div><div id="delCard"></div></section>
+  <p class="note">${esc(t('恢复清单是每行一个 AID 的文本，可作为 anet-hub admit --file 的输入。', 'The admit file lists one AID per line and is the input of anet-hub admit --file.'))}</p>`,
+    after: m => {
+      mountTable($('#offCard'), 'official', ocols, () => officials, { sort: 'id', dir: 'asc', caption: t('官方登记', 'Official registrations'), emptyTitle: t('暂无官方登记', 'No official registrations') });
+      mountTable($('#delCard'), 'deleted', dcols, () => deleted, { sort: 'deleted_at', dir: 'desc', caption: t('注销记录', 'Deregistration record'), emptyTitle: t('暂无注销记录', 'No deregistrations') });
+      $('#offForm').addEventListener('submit', async ev => {
+        ev.preventDefault();
+        try { await api('/official', { method: 'POST', body: $('#offJson').value }); toast(t('登记已保存。', 'Registration saved.')); render(true); } catch (e) { toast(e.message, true); }
+      });
+      $('#dlAdmit').addEventListener('click', async () => {
+        try {
+          const r = await fetch(BASE + '/api/deleted?format=admit', { headers: { 'Authorization': 'Bearer ' + TOKEN } });
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const blob = await r.blob(); const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob); a.download = 'admit.txt'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        } catch (e) { toast(e.message, true); }
+      });
+    } };
+};
+
+/* ---------------- federation ---------------- */
+VIEWS.federation = async () => {
+  const d = await load('federation', '/federation');
+  const peers = d.peers || [];
+  const cols = [
+    { k: 'peer_aid', label: t('对端 Hub (AID)', 'Peer hub (AID)'), html: r => `<span class="mono" title="${esc(r.peer_aid)}">${esc(shortAid(r.peer_aid))}</span>` },
+    { k: 'agents', label: t('已学习节点', 'Learned nodes'), num: 1, html: r => nf(r.agents) },
+    { k: 'withdrawn', label: t('已撤回', 'Withdrawn'), num: 1, html: r => nf(r.withdrawn) },
+    { k: 'last_stored_at', label: t('最近更新 (UTC)', 'Last update (UTC)'), html: r => `<span class="num">${fmtTime(r.last_stored_at)}</span>` },
+  ];
+  return { html: `
+  ${head('', t('本 Hub 从对端 Hub 学习到的节点。联邦为可选模块；未启用时此表为空。', 'Nodes this Hub has learned from peer hubs. Federation is an optional module; the table is empty when it is not enabled.'))}
+  <div class="grid kpis" style="margin-bottom:16px">
+    ${kpi(t('对端 Hub', 'Peer hubs'), nf(peers.length), '')}
+    ${kpi(t('已学习节点', 'Learned nodes'), nf(peers.reduce((n, p) => n + p.agents, 0)), '')}
+    ${kpi(t('已撤回', 'Withdrawn'), nf(peers.reduce((n, p) => n + p.withdrawn, 0)), '')}
+  </div>
+  <section class="card" id="fedCard"></section>
+  <p class="note">${esc(t('对端的密钥历史冲突与线协议不一致计数位于 Hub 进程内，尚未在本控制台显示。', 'Peer key-history conflicts and wire-version mismatches are counted inside the Hub process and are not yet shown in this console.'))}</p>`,
+    after: () => mountTable($('#fedCard'), 'fed', cols, () => peers, { sort: 'agents', dir: 'desc', caption: t('对端 Hub', 'Peer hubs'), emptyTitle: t('未发现对端 Hub', 'No peer hubs'), emptyNote: t('联邦模块未启用，或尚未与对端同步。', 'The federation module is not enabled, or no peer has synchronised yet.') }) };
+};
+
+/* ---------------- settlement and audit ---------------- */
+VIEWS.settlement = async () => {
+  const [fed, rv] = await Promise.all([load('federation', '/federation'), load('reviews', '/reviews?limit=200')]);
+  const peers = (fed.peers || []).filter(p => p.owed_to_us || p.owed_by_us).map(p => ({ ...p, net: (p.owed_to_us || 0) - (p.owed_by_us || 0) }));
+  const reviews = rv.reviews || [];
+  const pcols = [
+    { k: 'peer_aid', label: t('对端 Hub (AID)', 'Peer hub (AID)'), html: r => `<span class="mono" title="${esc(r.peer_aid)}">${esc(shortAid(r.peer_aid))}</span>` },
+    { k: 'owed_to_us', label: t('对端欠本 Hub', 'Owed to this hub'), num: 1, html: r => nf(r.owed_to_us) },
+    { k: 'owed_by_us', label: t('本 Hub 欠对端', 'Owed by this hub'), num: 1, html: r => nf(r.owed_by_us) },
+    { k: 'net', label: t('净额', 'Net'), num: 1, html: r => nf(r.net) },
+  ];
+  const rcols = [
+    { k: 'created_day', label: t('日期', 'Date'), num: 1, html: r => fmtDayNo(r.created_day) },
+    { k: 'subject_aid', label: t('被评价节点', 'Subject'), html: r => `<span class="mono">${esc(shortAid(r.subject_aid))}</span>` },
+    { k: 'rating', label: t('评分', 'Rating'), num: 1, html: r => r.rating },
+    { k: 'comment', label: t('评语', 'Comment'), html: r => esc(dash(r.comment)) },
+    { k: 'receipt_cid', label: t('回执', 'Receipt'), html: r => `<span class="mono" title="${esc(r.receipt_cid)}">${esc(shortAid(r.receipt_cid))}</span>` },
+  ];
+  return { html: `
+  ${head('', t('对端 Hub 之间的结算余额，以及作为评价依据的回执记录。节点账本与余额不在本控制台读取；兑付记录使用 anet-hub redemptions 查询。', 'Balances between peer hubs and the receipts that back each review. Node ledgers and balances are not read here; query redemptions with anet-hub redemptions.'))}
+  <h2 class="sect" style="margin-top:0">${esc(t('对端结算', 'Peer settlement'))}</h2>
+  <section class="card" id="setCard"></section>
+  <h2 class="sect">${esc(t('评价与回执', 'Reviews and receipts'))}</h2>
+  <section class="card" id="rvCard"></section>
+  <p class="note">${esc(t('每条评价锚定一份双方签名的回执，Hub 保存签名与回执标识，不保存交互内容与评价人。', 'Each review is anchored on a receipt signed by both parties. The Hub keeps the signatures and the receipt identifier, and neither the interaction content nor the reviewer.'))}</p>`,
+    after: () => {
+      mountTable($('#setCard'), 'settle', pcols, () => peers, { sort: 'net', dir: 'desc', caption: t('对端结算', 'Peer settlement'), emptyTitle: t('暂无未结清的往来', 'No open balances') });
+      mountTable($('#rvCard'), 'reviews', rcols, () => reviews, { sort: 'created_day', dir: 'desc', caption: t('评价与回执', 'Reviews and receipts'), emptyTitle: t('暂无评价', 'No reviews') });
+    } };
+};
+
+/* ---------------- admission and quotas ---------------- */
+VIEWS.admission = async () => {
+  const a = await load('admission', '/admission');
+  const r = a.rules || {};
+  const route = { list: t('名单', 'List'), window: t('报名窗口', 'Sign-up window'), open: t('开放注册', 'Open registration') };
+  const trial = { none: t('未触发', 'Not started'), pending: t('待发放', 'Pending'), granted: t('已发放', 'Granted') };
+  const lim = l => `${l.ipv6 ? 'IPv6' : 'IPv4'} /${l.prefix}`;
+  const w = a.window;
+  const limTable = (rows, cap) => `<div class="tbw"><table class="tb"><caption class="sr">${esc(cap)}</caption><thead><tr><th scope="col">${esc(t('网络前缀', 'Network prefix'))}</th><th scope="col" class="r">${esc(t('每日上限', 'Daily limit'))}</th></tr></thead><tbody>${(rows || []).map(l => `<tr><td class="mono">${lim(l)}</td><td class="r num">${nf(l.max)}</td></tr>`).join('')}</tbody></table></div>`;
+  const total = Object.values(a.accounts_by_route || {}).reduce((n, v) => n + v, 0) || 1;
+  const bars = Object.entries(a.accounts_by_route || {}).map(([k, v]) => `<div style="margin-bottom:10px"><div class="row"><span>${esc(route[k] || k)}</span><span class="sp"></span><span class="num">${nf(v)}</span></div><div class="bar"><i style="width:${(v / total * 100).toFixed(1)}%"></i></div></div>`).join('') || `<p class="muted">–</p>`;
+  const qcols = [
+    { k: 'aid', label: 'AID', html: r => `<span class="mono">${esc(shortAid(r.aid))}</span>` },
+    { k: 'first_contacts_per_min', label: t('首次联系 / 分钟', 'First contacts / min'), num: 1, html: r => nf(r.first_contacts_per_min) },
+    { k: 'non_contact_msgs', label: t('非联系人消息', 'Non-contact messages'), num: 1, html: r => nf(r.non_contact_msgs) },
+    { k: 'non_contact_bytes', label: t('非联系人字节', 'Non-contact bytes'), num: 1, html: r => esc(fmtBytes(r.non_contact_bytes)) },
+  ];
+  return { html: `
+  ${head('', t('注册准入的当前状态与固定规则。规则对所有 Hub 相同，不可配置；调整名单或窗口使用 anet-hub admit 与 anet-hub admission。', 'Current admission state and the fixed rules. The rules are the same on every hub and are not configurable; change the list or the window with anet-hub admit and anet-hub admission.'))}
+  <div class="grid kpis">
+    ${kpi(t('准入模式', 'Admission mode'), a.mode === 'open' ? `<span class="tag red">${esc(t('开放注册', 'Open'))}</span>` : `<span class="tag">${esc(t('仅限名单', 'List only'))}</span>`, a.mode === 'open' ? esc(t('任何 AID 完成工作量证明后可注册', 'Any AID may register after a proof of work')) : esc(t('仅名单内的 AID 可注册', 'Only listed AIDs may register')))}
+    ${kpi(t('准入名单', 'Admission list'), nf(a.admission_list), t('免工作量证明、免配额、免试用期', 'No proof of work, quota or probation'))}
+    ${kpi(t('试用期中的账户', 'Accounts on probation'), nf(a.on_probation), t(`试用期 ${r.probation_hours} 小时`, `${r.probation_hours}-hour probation`))}
+    ${kpi(t('报名窗口', 'Sign-up window'), w ? (w.active ? `<span class="tag ok">${esc(t('开放中', 'Open'))}</span>` : `<span class="tag">${esc(t('已关闭', 'Closed'))}</span>`) : `<span class="tag">${esc(t('未设置', 'None'))}</span>`, w ? `<span class="num">${nf(w.used)} / ${nf(w.max)}</span> · ${fmtTime(w.closes_at)}` : '')}
+  </div>
+  <div class="grid g2" style="margin-top:16px">
+    <section class="card"><div class="hd"><h2>${esc(t('账户来源', 'Accounts by route'))}</h2></div><div class="bd">${bars}</div></section>
+    <section class="card"><div class="hd"><h2>${esc(t('试用额度', 'Trial credit'))}</h2></div><div class="bd"><dl class="kv">
+      ${['none', 'pending', 'granted'].map(k => `<dt>${esc(trial[k])}</dt><dd class="num">${nf((a.accounts_by_trial || {})[k] || 0)}</dd>`).join('')}
+    </dl><p class="note">${esc(t(`试用期结束后，账户的第一次签名请求获得 ${r.trial_credits} 点试用额度；该网络与全 Hub 当日预算用尽时不发放。`, `When probation ends, the first signed request of the account earns ${r.trial_credits} trial credits, unless the daily budget of its network or of the hub is spent.`))}</p></div></section>
+  </div>
+  <h2 class="sect">${esc(t('固定规则', 'Fixed rules'))}</h2>
+  <div class="grid g2">
+    <section class="card"><div class="hd"><h2>${esc(t('工作量证明', 'Proof of work'))}</h2></div><div class="bd"><dl class="kv">
+      <dt>${esc(t('难度', 'Difficulty'))}</dt><dd class="num">${nf(r.pow_bits)} ${esc(t('位前导零', 'leading zero bits'))}</dd>
+      <dt>${esc(t('适用', 'Applies to'))}</dt><dd>${esc(t('报名窗口与开放注册中的新 AID', 'New AIDs in a sign-up window or open registration'))}</dd>
+      <dt>${esc(t('不活跃清理', 'Inactive removal'))}</dt><dd>${esc(t(`注册后 ${r.inactive_days} 天未取信的账户由系统注销`, `Accounts that never collect mail within ${r.inactive_days} days are deregistered`))}</dd>
+    </dl></div></section>
+    <section class="card"><div class="hd"><h2>${esc(t('收件配额（缺省）', 'Recipient quota (default)'))}</h2></div><div class="bd"><dl class="kv">
+      <dt>${esc(t('首次联系', 'First contacts'))}</dt><dd class="num">${nf(r.default_first_contacts_per_min)} / ${esc(t('分钟', 'min'))}</dd>
+      <dt>${esc(t('非联系人消息', 'Non-contact messages'))}</dt><dd class="num">${nf(r.default_non_contact_msgs)}</dd>
+      <dt>${esc(t('非联系人字节', 'Non-contact bytes'))}</dt><dd class="num">${esc(fmtBytes(r.default_non_contact_bytes))}</dd>
+    </dl></div></section>
+    <section class="card"><div class="hd"><h2>${esc(t('每日开放注册上限', 'Open registrations per day'))}</h2></div><div class="bd">${limTable(r.signup_per_day, t('每日开放注册上限', 'Open registrations per day'))}</div></section>
+    <section class="card"><div class="hd"><h2>${esc(t('每日试用额度上限', 'Trial grants per day'))}</h2></div><div class="bd">${limTable(r.trial_per_day, t('每日试用额度上限', 'Trial grants per day'))}<p class="note">${esc(t(`全 Hub 每日合计不超过 ${nf(r.trial_budget_hub_per_day)} 次。`, `At most ${nf(r.trial_budget_hub_per_day)} grants per day across the hub.`))}</p></div></section>
+  </div>
+  <h2 class="sect">${esc(t('已上调配额的收件人', 'Recipients with a raised quota'))}</h2>
+  <section class="card" id="quotaCard"></section>
+  <p class="note">${esc(t('配额只能高于缺省值，使用 anet-hub quota <AID> 调整；变更在一分钟内生效。', 'A quota can only be raised above the default, with anet-hub quota <AID>; a change takes effect within a minute.'))}</p>`,
+    after: () => mountTable($('#quotaCard'), 'quota', qcols, () => a.quota_raised || [], { sort: 'aid', dir: 'asc', caption: t('已上调配额的收件人', 'Recipients with a raised quota'), emptyTitle: t('无上调记录', 'No raised quotas'), emptyNote: t('所有收件人使用缺省配额。', 'Every recipient uses the default quota.') }) };
+};
+
+/* ---------------- logs ---------------- */
+const ACTIONS = { 'agent.moderate': ['更新监管状态', 'Moderation updated'], 'agent.delete': ['撤销准入并注销', 'Admission revoked and deregistered'], 'agent.delete.throttled': ['注销被限流', 'Deregistration throttled'], 'official.put': ['保存官方登记', 'Official registration saved'], 'official.delete': ['删除官方登记', 'Official registration removed'] };
+function actionLabel(a){ return ACTIONS[a] ? t(ACTIONS[a][0], ACTIONS[a][1]) : a; }
+const LF = { q: '' };
+VIEWS.logs = async () => {
+  const d = await load('audit', '/audit?limit=500');
+  const rows = d.audit || [];
+  const cols = [
+    { k: 'ts', label: t('时间 (UTC)', 'Time (UTC)'), html: r => `<span class="num">${fmtTime(r.ts)}</span>` },
+    { k: 'actor', label: t('操作人', 'Actor') },
+    { k: 'action', label: t('操作', 'Action'), html: r => `${esc(actionLabel(r.action))}<div class="mono muted" style="font-size:12px">${esc(r.action)}</div>` },
+    { k: 'target', label: t('对象', 'Target'), html: r => `<span class="mono">${esc(shortAid(r.target))}</span>` },
+    { k: 'detail', label: t('说明', 'Detail'), html: r => esc(dash(r.detail)) },
+  ];
+  const filtered = () => { const q = LF.q.trim().toLowerCase(); return q ? rows.filter(r => (r.actor + ' ' + r.action + ' ' + r.target + ' ' + r.detail).toLowerCase().includes(q)) : rows; };
+  return { html: `
+  ${head('', t('运维操作的审计日志，每条记录操作人、对象与时间。显示最近 500 条。', 'Audit log of operator actions with actor, target and time. The latest 500 entries are shown.'))}
+  <div class="tools"><label class="f" style="flex:1;min-width:220px">${esc(t('筛选', 'Filter'))}<input id="lq" class="inp" type="search" value="${esc(LF.q)}" placeholder="${esc(t('操作人、操作、对象或说明', 'Actor, action, target or detail'))}"/></label></div>
+  <section class="card" id="logCard"></section>`,
+    after: () => { const redraw = mountTable($('#logCard'), 'logs', cols, filtered, { sort: 'ts', dir: 'desc', caption: t('审计日志', 'Audit log'), emptyTitle: t('暂无日志', 'No log entries') }); $('#lq').addEventListener('input', e => { LF.q = e.target.value; TBL.logs.limit = 100; redraw(); }); } };
+};
+
+/* ---------------- actions, boot ---------------- */
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-delofficial]'); if (!b) return;
+  const id = b.dataset.delofficial;
+  if (!confirm(t(`删除官方登记 ${id}。该操作不影响节点本身的注册。是否继续？`, `Remove the official registration ${id}. The node's own registration is not affected. Continue?`))) return;
+  try { await api('/official/' + encodeURIComponent(id), { method: 'DELETE' }); toast(t('登记已删除。', 'Registration removed.')); render(true); } catch (err) { toast(err.message, true); }
+});
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const a = b.dataset.act;
+  if (a === 'refresh') { render(true); }
+  else if (a === 'lang') setLang(L === 'zh' ? 'en' : 'zh');
+  else if (a === 'theme') toggleTheme();
+  else if (a === 'logout') logout();
+  else if (a === 'toggleNav') setNav(!document.body.classList.contains('navopen'));
+  else if (a === 'closeNav') setNav(false);
+  else if (a === 'closeDrawer') closeDrawer();
+});
+async function boot(){
+  try { await api('/overview'); } catch (e) { return; }
+  $('#login').style.display = 'none'; $('#app').style.display = 'block';
+  if (!location.hash) history.replaceState(null, '', '#/overview');
+  fetch(BASE + '/healthz').then(r => r.json()).then(j => { $('#ver').textContent = 'anet-hub-admin ' + (j.version || ''); }).catch(() => {});
+  morphTo('menuPath', MORPH.menu);
+  render();
+}
+document.documentElement.lang = L === 'zh' ? 'zh-CN' : 'en';
+chrome();
+if (TOKEN) boot();
 </script>
 </body>
 </html>

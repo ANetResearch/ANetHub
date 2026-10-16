@@ -57,7 +57,7 @@ describe("Column", () => {
   // column that failed to load.
   it("marks an empty column", () => {
     const html = renderToStaticMarkup(<Column col={col({ cards: [] })} lang="zh" />);
-    expect(html).toContain("—");
+    expect(html).toContain("–");
     expect(html).toContain("0");
   });
 

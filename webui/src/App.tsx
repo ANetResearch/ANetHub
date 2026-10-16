@@ -43,12 +43,23 @@ export default function App() {
     };
   }, [q]);
 
+  // A link of the form /#agent/<aid> (the researcher directory uses it) opens that agent's profile.
+  useEffect(() => {
+    const open = () => {
+      const m = /^#agent\/(.+)$/.exec(location.hash);
+      if (m) setDetailAid(decodeURIComponent(m[1]));
+    };
+    open();
+    window.addEventListener("hashchange", open);
+    return () => window.removeEventListener("hashchange", open);
+  }, []);
+
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
   };
 
   return (
-    <div className="min-h-screen bg-white text-black">
+    <div className="min-h-screen bg-bg text-fg">
       <Header onJoin={() => scrollTo("join")} showTasks={hasTaskboard(stats)} />
       <Hero stats={stats} onExplore={() => scrollTo("agents")} onJoin={() => scrollTo("join")} />
       <AgentsSection agents={agents} q={q} onQ={setQ} onOpen={setDetailAid} />
@@ -57,7 +68,10 @@ export default function App() {
       <JoinSection toast={toast} />
       <Footer />
 
-      <AgentDetailDialog aid={detailAid} onClose={() => setDetailAid(null)} toast={toast} />
+      <AgentDetailDialog aid={detailAid} onClose={() => {
+          setDetailAid(null);
+          if (location.hash.startsWith("#agent/")) history.replaceState(null, "", location.pathname + location.search);
+        }} toast={toast} />
       <Toast state={toastState} />
     </div>
   );
