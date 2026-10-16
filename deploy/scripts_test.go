@@ -55,7 +55,15 @@ func needSQLite3(t *testing.T) {
 func runScript(t *testing.T, env []string, script string, args ...string) (string, int) {
 	t.Helper()
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
-	cmd.Env = append(os.Environ(), env...)
+	// The scripts ask systemctl whether the hub is running; a test must not
+	// depend on whether the host it runs on has one. A stub that says "not
+	// active" stands in, unless the test brings its own PATH.
+	stub := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stub, "systemctl"), []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Env = append(os.Environ(), "PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env, env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
