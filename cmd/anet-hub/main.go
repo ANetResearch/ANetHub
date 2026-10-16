@@ -294,6 +294,8 @@ func main() {
 	go store.RunLedgerJanitor(ctx)
 	// Envelopes nobody collects are deleted after the undelivered TTL.
 	go srv0.RunRelayJanitor(ctx, 10*time.Minute)
+	// Envelopes past their outer expiry are deleted every minute.
+	go srv0.RunExpirySweep(ctx, time.Minute)
 	// This process is the hub: it drops what it holds in memory for an AID
 	// deregistered by another process (anet-hub admissions revoke, the
 	// admin tool) within a second (hub-payment-privacy PAY-O2).

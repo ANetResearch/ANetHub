@@ -654,8 +654,7 @@ func TestRelaySendOrder_Step10(t *testing.T) {
 
 // An outer exp the relay table cannot hold (2^63 ms or later) is refused as
 // a bad envelope, taking and writing nothing, and is not answered as an
-// error of this hub. v030-todo(UX-7): step 4 refuses it first, as bad_exp
-// (CUX-H1).
+// error of this hub. Step 4 refuses it first, as bad_exp (CUX-H1).
 func TestAnOuterExpiryBeyondTheTableIsRefused(t *testing.T) {
 	far := func(sc *relayScene) []byte {
 		v := uint64(math.MaxUint64)
@@ -669,9 +668,9 @@ func TestAnOuterExpiryBeyondTheTableIsRefused(t *testing.T) {
 		return b
 	}
 	runSteps(t, []stepCase{
-		{name: "a first contact", status: 400, reason: "bad_envelope",
+		{name: "a first contact", status: 400, reason: "bad_exp",
 			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.h.send0(sc.ss, far(sc), kind0Opts{}) }},
-		{name: "under a credential", status: 400, reason: "bad_envelope",
+		{name: "under a credential", status: 400, reason: "bad_exp",
 			send: func(sc *relayScene) *httptest.ResponseRecorder { return sc.send1(far(sc), sc.contact) }},
 	})
 }

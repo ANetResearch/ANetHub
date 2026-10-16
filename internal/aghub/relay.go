@@ -657,6 +657,19 @@ func (s *Store) PurgeExpiredRelay(ttl time.Duration, now time.Time) (int, error)
 	return int(n), nil
 }
 
+// PurgeExpiredByExp deletes the envelopes whose outer exp has passed
+// (exp <= now) and returns how many. A row without an exp is not touched.
+func (s *Store) PurgeExpiredByExp(now time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`DELETE FROM relay_message WHERE exp IS NOT NULL AND exp <= ?`, now.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // relayTables are the wire-3 relay tables (core §2.16). The small columns
 // of relay_message come before payload on purpose: SQLite stores the tail
 // of a large record in overflow pages, and a column placed after a
