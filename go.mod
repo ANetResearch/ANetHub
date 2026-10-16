@@ -3,7 +3,7 @@ module github.com/ANetResearch/ANetHub
 go 1.26.6
 
 require (
-	github.com/ANetResearch/ANetCore v0.16.0-rc.3
+	github.com/ANetResearch/ANetCore v0.15.1-0.20261016164039-82f5c9a4b1d4
 	github.com/fxamacker/cbor/v2 v2.9.2
 	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.56.0
