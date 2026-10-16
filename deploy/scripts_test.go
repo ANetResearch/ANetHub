@@ -855,7 +855,7 @@ func containsPath(list []string, p string) bool {
 func TestTheCleanupScriptRefusesToApplyWhileAServiceRuns(t *testing.T) {
 	needSQLite3(t)
 	f := newCleanupFixture(t)
-	out, code := runScript(t, []string{"FAKE_SERVICES_ACTIVE=1"}, "cleanup-content-v0.2.sh", f.args()...)
+	out, code := runScript(t, []string{"FAKE_SERVICES_ACTIVE=1"}, "cleanup-content-v0.2.sh", f.args("--apply")...)
 	if code == 0 || !strings.Contains(out, "is running") {
 		t.Fatalf("exit %d, output %q; want a refusal naming the running service", code, out)
 	}
