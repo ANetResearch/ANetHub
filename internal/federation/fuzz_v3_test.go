@@ -162,7 +162,7 @@ func FuzzFedCardsPage(f *testing.F) {
 		sink.mu.Unlock()
 		b.round = 0
 		b.setPeerA2ACursor(peer.id.AID, 3)
-		admitted, refused := b.SyncOnce(context.Background())
+		admitted, refused := b.SyncOnce(tick(context.Background()))
 		var wire FedA2ACardPage
 		// Read the page as the client does (getStream: json.Decoder.Decode); a page
 		// it cannot decode is skipped whole, so nothing of it is expected.

@@ -80,7 +80,7 @@ func TestAPeerReviewUnderANewKeyFetchesTheKeyHistoryAgain(t *testing.T) {
 	time.Sleep(2 * time.Millisecond) // the rotation's time comes after the inception's
 	rotate()
 	k1 := attest("ix-after-a-rotation")
-	admitted, refused := fedA.SyncOnce(context.Background())
+	admitted, refused := fedA.SyncOnce(relayTickCtx(context.Background()))
 	if admitted != 1 || refused != 0 || !held(k1) {
 		t.Fatalf("one pass of B's stream: admitted %d, refused %d; want the review attested under B's new key", admitted, refused)
 	}
@@ -88,7 +88,7 @@ func TestAPeerReviewUnderANewKeyFetchesTheKeyHistoryAgain(t *testing.T) {
 	time.Sleep(2 * time.Millisecond)
 	rotate()
 	k2 := attest("ix-after-a-second-rotation")
-	admitted, refused = fedA.SyncOnce(context.Background())
+	admitted, refused = fedA.SyncOnce(relayTickCtx(context.Background()))
 	if admitted != 0 || refused != 1 || held(k2) {
 		t.Fatalf("a second rotation within the minute: admitted %d, refused %d; want it held for now", admitted, refused)
 	}

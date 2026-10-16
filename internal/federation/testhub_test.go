@@ -382,3 +382,11 @@ func pageOf(t *testing.T, a *testHub, b *hubid.Identity, cursor int64) (int, Fed
 }
 
 var _ = context.Background
+
+// tick lets the wall clock pass the millisecond of the last request a test signed by hand, and returns ctx.
+// The hub under test signs its own requests with the wall clock, and RC1 takes each of a signer's times
+// once: on a fast machine a sync that follows hand-signed requests at once would be refused as replayed.
+func tick(ctx context.Context) context.Context {
+	time.Sleep(2 * time.Millisecond)
+	return ctx
+}

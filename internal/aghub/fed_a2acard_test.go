@@ -171,13 +171,13 @@ func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
 	ctx := context.Background()
 
 	// hub-local by default: the card does not travel.
-	a.fed.SyncOnce(ctx)
+	a.fed.SyncOnce(relayTickCtx(ctx))
 	if _, listed := fedRegistry(t, a.store, aghub.RegistryQuery{})[agent.AID()]; listed {
 		t.Fatal("a hub-local agent's A2A card reached the peer")
 	}
 
 	setVisibility(t, b.srv, agent, aghub.VisibilityFederated)
-	a.fed.SyncOnce(ctx)
+	a.fed.SyncOnce(relayTickCtx(ctx))
 	l := registry(t, a.srv, "?skill=echo")
 	var entry *aghub.A2AAgentEntry
 	for i := range l.Agents {
@@ -223,7 +223,7 @@ func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
 	if code, body := publishKeys(t, b.srv, agent, ks); code != http.StatusOK {
 		t.Fatalf("publish keys: %d %s", code, body)
 	}
-	a.fed.SyncOnce(ctx)
+	a.fed.SyncOnce(relayTickCtx(ctx))
 	entry = nil
 	for _, e := range registry(t, a.srv, "?skill=echo").Agents {
 		if e.AID == agent.AID() {
@@ -852,4 +852,11 @@ func TestAFederatedA2ACardWithAnOversizedKELIsRefused(t *testing.T) {
 	if err := peer.AdmitFedA2ACard(homePeerAID, e); err == nil || !strings.Contains(err.Error(), "at most") {
 		t.Fatalf("an oversized KEL: %v, want refused on size", err)
 	}
+}
+
+// relayTickCtx lets the wall clock pass the millisecond of the last request a test signed by hand for the
+// same hub identity, and returns ctx: RC1 takes each of a signer's times once.
+func relayTickCtx(ctx context.Context) context.Context {
+	time.Sleep(2 * time.Millisecond)
+	return ctx
 }

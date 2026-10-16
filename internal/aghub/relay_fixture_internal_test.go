@@ -7,6 +7,7 @@ package aghub
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -224,6 +225,9 @@ var relaySigned atomic.Int64
 // the same signer: RC1 takes each of a signer's times once, and on a fast
 // machine the two would otherwise share a millisecond.
 func relayTick() { time.Sleep(2 * time.Millisecond) }
+
+// relayTickCtx is relayTick, and returns ctx: for a federation sync that follows requests signed by hand.
+func relayTickCtx(ctx context.Context) context.Context { relayTick(); return ctx }
 
 func relaySignTS() uint64 {
 	for {

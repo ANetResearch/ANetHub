@@ -71,7 +71,7 @@ func TestAPermanentRefusalStillAdvances(t *testing.T) {
 	}}
 	sink := &fakeDirectory{a2aRejectForever: map[int64]bool{1: true}}
 	a, svcB := discoveryPair(t, source, sink)
-	if admitted, refused := svcB.SyncOnce(context.Background()); admitted != 1 || refused != 1 {
+	if admitted, refused := svcB.SyncOnce(tick(context.Background())); admitted != 1 || refused != 1 {
 		t.Errorf("a permanently bad card stopped the stream: admitted %d refused %d, want 1 and 1",
 			admitted, refused)
 	}
@@ -94,7 +94,7 @@ func TestTheDirectoryHealsWhatTheCursorSkipped(t *testing.T) {
 	sink := &fakeDirectory{}
 	a, svcB := discoveryPair(t, source, sink)
 
-	svcB.SyncOnce(context.Background())
+	svcB.SyncOnce(tick(context.Background()))
 	if len(sink.gotA2A) != 1 {
 		t.Fatalf("setup: admitted %d", len(sink.gotA2A))
 	}
@@ -102,13 +102,13 @@ func TestTheDirectoryHealsWhatTheCursorSkipped(t *testing.T) {
 	// cursor is past it, so ordinary rounds will never ask again.
 	sink.gotA2A = nil
 	for i := 0; i < fullResyncEvery-2; i++ {
-		svcB.SyncOnce(context.Background())
+		svcB.SyncOnce(tick(context.Background()))
 	}
 	if len(sink.gotA2A) != 0 {
 		t.Fatalf("re-read too eagerly: a full pass every round would make the cursor pointless")
 	}
 	// The scheduled full pass brings it back.
-	svcB.SyncOnce(context.Background())
+	svcB.SyncOnce(tick(context.Background()))
 	if len(sink.gotA2A) != 1 {
 		t.Errorf("the directory did not heal: admitted %d after a full resync round", len(sink.gotA2A))
 	}
@@ -136,7 +136,7 @@ func TestTheReviewStreamIsSignedV3(t *testing.T) {
 			t.Fatalf("%s, not one non-negative integer in canonical decimal: %d %s", q, code, body)
 		}
 	}
-	if admitted, refused := svcB.SyncOnce(context.Background()); admitted != 2 || refused != 0 {
+	if admitted, refused := svcB.SyncOnce(tick(context.Background())); admitted != 2 || refused != 0 {
 		t.Fatalf("admitted %d refused %d", admitted, refused)
 	}
 	if len(sink.gotRevs) != 2 || sink.gotRevs[0].peer != a.id.AID || string(sink.gotRevs[1].raw) != `{"r":2}` {
@@ -157,7 +157,7 @@ func TestTheReviewCursorWaitsForAReviewRefusedForNow(t *testing.T) {
 	source := &fakeDirectory{reviews: []json.RawMessage{entry(1), entry(2), entry(3), entry(4)}}
 	sink := &fakeDirectory{revRejectForever: map[int64]bool{2: true}, revRefuseForNow: map[int64]bool{3: true}}
 	a, svcB := discoveryPair(t, source, sink)
-	if admitted, refused := svcB.SyncOnce(context.Background()); admitted != 1 || refused != 2 {
+	if admitted, refused := svcB.SyncOnce(tick(context.Background())); admitted != 1 || refused != 2 {
 		t.Fatalf("admitted %d refused %d, want 1 and 2", admitted, refused)
 	}
 	if c := svcB.peerReviewCursor(a.id.AID); c != 2 {
@@ -168,7 +168,7 @@ func TestTheReviewCursorWaitsForAReviewRefusedForNow(t *testing.T) {
 	sink.mu.Lock()
 	sink.revRefuseForNow = nil
 	sink.mu.Unlock()
-	if admitted, _ := svcB.SyncOnce(context.Background()); admitted != 2 {
+	if admitted, _ := svcB.SyncOnce(tick(context.Background())); admitted != 2 {
 		t.Fatalf("the second round admitted %d, want entries 3 and 4", admitted)
 	}
 	if c := svcB.peerReviewCursor(a.id.AID); c != 4 {

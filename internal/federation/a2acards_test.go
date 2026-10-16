@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ANetResearch/ANetCore/relayauth"
 
@@ -74,10 +73,8 @@ func TestFedCardsV3(t *testing.T) {
 		t.Errorf("an entry without keys carries keys: %v", page.Cards[1])
 	}
 
-	// The pulling hub. The requests above were signed by hand for b's identity; RC1 takes each of a
-	// signer's times once, so let the clock pass the last of them before b signs its own.
-	time.Sleep(2 * time.Millisecond)
-	if admitted, refused := b.SyncOnce(context.Background()); admitted != 2 || refused != 0 {
+	// The pulling hub.
+	if admitted, refused := b.SyncOnce(tick(context.Background())); admitted != 2 || refused != 0 {
 		t.Fatalf("admitted %d refused %d", admitted, refused)
 	}
 	got := sink.gotA2A[0]
@@ -108,7 +105,7 @@ func TestFedCardsV3ReadsOnlyBase64URL(t *testing.T) {
 	peer.mu.Unlock()
 	sink := &fakeDirectory{}
 	b := newTestHub(t).start(Config{Discovery: "allowlist", Home: "https://b.example", Peers: []Peer{peer.peer()}}, sink)
-	if admitted, refused := b.SyncOnce(context.Background()); admitted != 1 || refused != 1 {
+	if admitted, refused := b.SyncOnce(tick(context.Background())); admitted != 1 || refused != 1 {
 		t.Fatalf("admitted %d refused %d, want 1 and 1", admitted, refused)
 	}
 	if got := sink.gotA2A[0]; got.FedSeq != 2 || got.Keys != nil || got.Notice != nil || string(got.KEL) != "kel" {
@@ -147,7 +144,7 @@ func TestTheA2ACardStreamDispatchesByFormat(t *testing.T) {
 		t.Errorf("a withdrawal carries a kel: %+v", page.Cards[2])
 	}
 
-	admitted, refused := b.SyncOnce(context.Background())
+	admitted, refused := b.SyncOnce(tick(context.Background()))
 	if admitted != 2 || refused != 0 {
 		t.Fatalf("admitted %d refused %d, want 2 and 0", admitted, refused)
 	}
@@ -173,7 +170,7 @@ func TestTheA2ACardStreamStallsOnARefusalForNow(t *testing.T) {
 	}}
 	sink := &fakeDirectory{a2aRefuseForNow: map[int64]bool{7: true}}
 	a, b := discoveryPair(t, source, sink)
-	if admitted, refused := b.SyncOnce(context.Background()); admitted != 1 || refused != 1 {
+	if admitted, refused := b.SyncOnce(tick(context.Background())); admitted != 1 || refused != 1 {
 		t.Fatalf("admitted %d refused %d", admitted, refused)
 	}
 	if c := b.peerA2ACursor(a.id.AID); c != 6 {
@@ -182,7 +179,7 @@ func TestTheA2ACardStreamStallsOnARefusalForNow(t *testing.T) {
 	sink.mu.Lock()
 	delete(sink.a2aRefuseForNow, 7)
 	sink.mu.Unlock()
-	if admitted, _ := b.SyncOnce(context.Background()); admitted != 2 {
+	if admitted, _ := b.SyncOnce(tick(context.Background())); admitted != 2 {
 		t.Fatalf("the entry that stopped being refused was not admitted: %d", admitted)
 	}
 	if c := b.peerA2ACursor(a.id.AID); c != 9 {
@@ -219,7 +216,7 @@ func TestAPeerWithoutTheCardStreamIsNotARefusal(t *testing.T) {
 			sink := &fakeDirectory{}
 			c := hc.start(Config{Discovery: "allowlist", Home: "https://hub-c.example", Peers: []Peer{old.peer()}}, sink)
 			for i := 0; i < 2; i++ {
-				if admitted, refused := c.SyncOnce(context.Background()); admitted != 0 || refused != 0 {
+				if admitted, refused := c.SyncOnce(tick(context.Background())); admitted != 0 || refused != 0 {
 					t.Fatalf("round %d: admitted %d refused %d", i, admitted, refused)
 				}
 			}
@@ -283,7 +280,7 @@ func TestAnA2ACardEntrysHomeMustBeAHubURL(t *testing.T) {
 	peer.mu.Unlock()
 	sink := &fakeDirectory{}
 	b := newTestHub(t).start(Config{Discovery: "allowlist", Home: "https://hub-b.example", Peers: []Peer{peer.peer()}}, sink)
-	b.SyncOnce(context.Background())
+	b.SyncOnce(tick(context.Background()))
 	if len(sink.gotA2A) != len(homes) {
 		t.Fatalf("admitted %d entries, want %d", len(sink.gotA2A), len(homes))
 	}
