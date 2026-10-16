@@ -76,6 +76,9 @@ type Redemption struct {
 	StoredAmount int64 `json:"stored_amount,omitempty"`
 }
 
+// maxRedeemReference bounds a redemption's reference, in bytes.
+const maxRedeemReference = 256
+
 // Redeem destroys credit an agent signed away, and says so under
 // signature.
 //
@@ -111,6 +114,17 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	if auth.Payer == hubAID {
 		return Redemption{}, fmt.Errorf("the hub cannot redeem its own liability into itself")
 	}
+	// The reference is stored and listed for 14 days, so it is the one the
+	// payer signed (not whatever the request body says) and it is short.
+	if len(reference) > maxRedeemReference {
+		return Redemption{}, refuse(payment.ReasonMalformed, "the reference is longer than %d bytes", maxRedeemReference)
+	}
+	// A payer that signed no interaction id signed nothing about the
+	// reference; one that did (every redemption the daemon makes) is held to it.
+	if auth.InteractionID != "" && auth.InteractionID != "redeem:"+reference {
+		return Redemption{}, refuse(payment.ReasonMalformed,
+			"the reference is not the one the authorization was signed for (redeem:<reference>)")
+	}
 	// A redemption already recorded for this authorization is answered with
 	// that record and its receipt, whether or not the window has closed:
 	// the agent resending the authorization is asking what became of it,
@@ -126,7 +140,16 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	if rf := s.keyAtFirstVerify(auth, id, kel, s.now().UnixMilli()); rf != nil {
 		return Redemption{}, rf
 	}
-	settled := s.settleAuth(hubAID, auth, id, "")
+	// A redemption is not a task: its interaction id names the reference
+	// (redeem:<reference>) and nothing else, and one reference may be
+	// redeemed against again (a payout number, an invoice with part
+	// payments). The binding guard that limits a task to one payment would
+	// refuse the second redemption of a reference for 30 days, so the
+	// settlement is made without it; the authorization's own id still
+	// settles once.
+	unbound := *auth
+	unbound.InteractionID = ""
+	settled := s.settleAuth(hubAID, &unbound, id, "")
 	if !settled.Success {
 		detail, _ := settled.Extensions[payment.ExtErrorDetail].(string)
 		return Redemption{}, &Refusal{Reason: settled.ErrorReason, Detail: detail}
@@ -445,6 +468,9 @@ func (s *Store) IssueOwedSettlement(hubAID, peerAID string, amount uint64,
 
 // hRedeem takes credit out of circulation.
 func (s *Server) hRedeem(w http.ResponseWriter, r *http.Request) {
+	if rateLimited(w, r, s.payLimiter) {
+		return
+	}
 	var req struct {
 		X402Version    int                     `json:"x402Version"`
 		PaymentPayload *payment.PaymentPayload `json:"paymentPayload"`

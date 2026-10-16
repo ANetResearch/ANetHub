@@ -49,6 +49,11 @@ type Server struct {
 	// /agents/kel:push (kelpush.go; KEL §2.12 KELPushRate).
 	dirLimiter     *rateLimiter
 	kelPushLimiter *rateLimiter
+	// payLimiter bounds /x402/verify, /x402/settle and /x402/redeem, and
+	// witnessLimiter /x402/witness, per client address: none of them is
+	// authenticated, and each writes (facilitator.go, witness.go).
+	payLimiter     *rateLimiter
+	witnessLimiter *rateLimiter
 	// relay is what /relay/session and /relay/send keep in memory: the
 	// sessions and the send buckets (session.go, hRelaySend).
 	relay *relayState
@@ -157,6 +162,8 @@ func NewServer(store *Store) *Server {
 		jwks:           newJWKSCache(jwksCacheBytes, a2acard.JWKS),
 		dirLimiter:     newRateLimiter(DirBucketPerMinute/60.0, DirBucketBurst),
 		kelPushLimiter: newRateLimiter(KELPushPerMinute/60.0, KELPushBurst),
+		payLimiter:     newRateLimiter(PayPerMinute/60.0, PayBurst),
+		witnessLimiter: newRateLimiter(WitnessPerMinute/60.0, WitnessBurst),
 		relay:          newRelayState(store.now), fedState: newFedState(), delivery: newDeliveryState(store.now)}
 	if err := s.SetLimits(DefaultLimits()); err != nil {
 		panic(err) // the defaults are constants and valid

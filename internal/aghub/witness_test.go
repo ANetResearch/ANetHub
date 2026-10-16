@@ -45,10 +45,11 @@ func TestAWitnessAttestationDetectsARewrittenSupplyChain(t *testing.T) {
 	if !ok {
 		t.Fatal("no head to witness")
 	}
-	witness, err := identitytest.Hub()
+	witness, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
+	register(t, srv, witness, "witness", nil)
 	a := &ael.HeadAttestation{
 		ChainDID: hubAID, Seq: seq, HeadID: head, ObservedAt: time.Now().UnixMilli(),
 	}
@@ -120,10 +121,11 @@ func TestAHubServesTheAttestationsMadeAboutIt(t *testing.T) {
 		t.Fatalf("head = %+v", h)
 	}
 
-	witness, err := identitytest.Hub()
+	witness, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
+	register(t, srv, witness, "witness", nil)
 	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: h.Seq, HeadID: h.ID,
 		ObservedAt: time.Now().UnixMilli()}
 	if err := a.Sign(witness); err != nil {
@@ -674,10 +676,11 @@ func TestRolledBackIsPublishedWithTheHealth(t *testing.T) {
 		t.Fatalf("an unwitnessed chain is published as rolled back: %+v", h)
 	}
 
-	witness, err := identitytest.Hub()
+	witness, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
+	register(t, srv, witness, "witness", nil)
 	a := &ael.HeadAttestation{ChainDID: hubAID, Seq: seq + 3, HeadID: "bafy-gone",
 		ObservedAt: time.Now().UnixMilli()}
 	if err := a.Sign(witness); err != nil {

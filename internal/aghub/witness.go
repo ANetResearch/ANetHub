@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/ael"
+	"github.com/ANetResearch/ANetCore/identity"
 
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
@@ -357,6 +358,9 @@ func noteRollback(chainDID string, headSeq, witnessedSeq uint64, rolledBack bool
 // check it themselves, which is the only way it could ever be worth
 // anything to them.
 func (s *Server) hWitnessSubmit(w http.ResponseWriter, r *http.Request) {
+	if rateLimited(w, r, s.witnessLimiter) {
+		return
+	}
 	var req WitnessRequest
 	if !wire3.ReadStrict(w, r, witnessBodyLimit, &req) {
 		return
@@ -380,6 +384,25 @@ func (s *Server) hWitnessSubmit(w http.ResponseWriter, r *http.Request) {
 	if a.Envelope == nil {
 		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
 			Error: "The attestation is not signed; send the attestation as your witness signed it."})
+		return
+	}
+	// Signed by whom? Stored as evidence about this hub and counted in its
+	// health, so it is verified against the witness's own key history, which
+	// this hub holds only for an agent registered here, one that left, or a
+	// peer hub.
+	kel, err := s.witnessKEL(a.WitnessAID())
+	if err != nil {
+		wire3.Internal(w, err)
+		return
+	}
+	if kel == nil {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "This hub does not know the witness that signed this attestation; register it or federate first."})
+		return
+	}
+	if err := a.Verify(kel, "", s.store.now().UnixMilli()); err != nil {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The attestation's signature does not verify under its witness's key history: " + err.Error()})
 		return
 	}
 	// Signed and about this hub: what is left to fail is this hub's own
@@ -445,3 +468,21 @@ type WitnessRequest struct {
 // witnessBodyLimit bounds POST /x402/witness. An attestation is a few
 // hundred bytes.
 const witnessBodyLimit = 16 << 10
+
+// witnessKEL is the key history of a witness, from what this hub holds of
+// agents and peer cards, or from the peer table; nil when it knows none.
+func (s *Server) witnessKEL(aid string) ([]identity.SignedEvent, error) {
+	raw, err := s.store.anyKEL(aid)
+	if err != nil {
+		return nil, err
+	}
+	if raw != nil {
+		return identity.UnmarshalKEL(raw)
+	}
+	if s.peerKELs != nil {
+		if kel, perr := s.peerKELs(aid); perr == nil && len(kel) > 0 {
+			return kel, nil
+		}
+	}
+	return nil, nil
+}

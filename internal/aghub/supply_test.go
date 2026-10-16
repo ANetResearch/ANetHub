@@ -84,7 +84,7 @@ func redeemVia(t *testing.T, store *aghub.Store, hubAID string, c *identity.Cont
 	opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
 		Amount: payment.Amount(amount), Asset: payment.AssetCredit, PayTo: hubAID}
 	var pp payment.PaymentPayload
-	if err := json.Unmarshal(mustPayload(t, c, opt, ref), &pp); err != nil {
+	if err := json.Unmarshal(mustPayload(t, c, opt, "redeem:"+ref), &pp); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Redeem(hubAID, &pp, ref); err != nil {
@@ -214,7 +214,7 @@ func TestASupplyTotalThatCannotTakeTheEventRefusesIt(t *testing.T) {
 			opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(hubAID),
 				Amount: "10", Asset: payment.AssetCredit, PayTo: hubAID}
 			var pp payment.PaymentPayload
-			if err := json.Unmarshal(mustPayload(t, a, opt, "past-the-bound"), &pp); err != nil {
+			if err := json.Unmarshal(mustPayload(t, a, opt, "redeem:past-the-bound"), &pp); err != nil {
 				t.Fatal(err)
 			}
 			_, err := store.Redeem(hubAID, &pp, "past-the-bound")

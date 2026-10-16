@@ -469,7 +469,7 @@ func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
 	}
 	if code, b := post(t, srv.URL+"/x402/redeem", map[string]any{
 		"x402Version":    payment.Version,
-		"paymentPayload": json.RawMessage(mustPayload(t, agent, opt, "once")),
+		"paymentPayload": json.RawMessage(mustPayload(t, agent, opt, "redeem:once")),
 		"reference":      "once",
 	}); code != 200 {
 		t.Fatalf("redeem: %d %s", code, b)

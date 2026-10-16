@@ -51,3 +51,13 @@ func NewAgentWitnessedBy(hubAID string, at time.Time) (*identity.Controller, err
 	}
 	return c, nil
 }
+
+// LiabBuildsForTest is how many liability trees this store rebuilt from its leaves.
+func (s *Store) LiabBuildsForTest() int64 { return s.liabBuilds.Load() }
+
+// DropLiabTreesForTest empties the cache of liability trees, as a restart does.
+func (s *Store) DropLiabTreesForTest() {
+	s.liabTrees.mu.Lock()
+	s.liabTrees.trees = nil
+	s.liabTrees.mu.Unlock()
+}
