@@ -14,7 +14,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -698,23 +697,10 @@ func wire3Incept(t *testing.T) *identity.Controller {
 	return c
 }
 
-// wire3LastSigned is the X-ANet-TS of the last request a fixture signed. RC1 takes each of a
-// signer's times once, so two requests signed in the same millisecond would be refused as replayed.
-var wire3LastSigned atomic.Int64
-
-// wire3SigningNow is now, at least one millisecond after the previous signature.
-func wire3SigningNow() time.Time {
-	for {
-		last := wire3LastSigned.Load()
-		now := time.Now().UnixMilli()
-		if now <= last {
-			now = last + 1
-		}
-		if wire3LastSigned.CompareAndSwap(last, now) {
-			return time.UnixMilli(now)
-		}
-	}
-}
+// wire3SigningNow is now, at least one millisecond after the previous signature of any test in this
+// package: RC1 takes each of a signer's times once, so two requests signed in the same millisecond
+// (by this fixture and by the relay fixtures, which share the counter) would be refused as replayed.
+func wire3SigningNow() time.Time { return time.UnixMilli(int64(relaySignTS())) }
 
 // wire3ErrorSamples are the extra members the error-body fixtures carry, for the codes that have
 // some. Public, made-up values.

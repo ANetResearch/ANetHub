@@ -853,6 +853,9 @@ func TestAdminDeleteBesideABusyHub(t *testing.T) {
 				}
 				close(writing)
 			}
+			// SQLite does not queue writers fairly: a writer that never pauses can keep another out for
+			// longer than any busy timeout on a machine with few cores. A hub pauses between writes.
+			time.Sleep(time.Millisecond)
 		}
 	}()
 	<-writing
