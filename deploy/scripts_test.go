@@ -55,15 +55,14 @@ func needSQLite3(t *testing.T) {
 func runScript(t *testing.T, env []string, script string, args ...string) (string, int) {
 	t.Helper()
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
-	// The scripts ask systemctl whether the hub is running; a test must not
-	// depend on whether the host it runs on has one. A stub that says "not
-	// active" stands in, unless the test brings its own PATH.
+	// systemctl is stubbed: the scripts ask whether the hub services run, and a test must not depend
+	// on the answer on the machine it happens to run on. FAKE_SERVICES_ACTIVE=1 makes every unit active.
 	stub := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stub, "systemctl"), []byte("#!/bin/sh\nexit 3\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(stub, "systemctl"),
+		[]byte("#!/bin/sh\n[ \"$FAKE_SERVICES_ACTIVE\" = 1 ] && exit 0\nexit 3\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd.Env = append(os.Environ(), "PATH="+stub+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cmd.Env = append(cmd.Env, env...)
+	cmd.Env = append(append(os.Environ(), "PATH="+stub+":"+os.Getenv("PATH")), env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	out, err := cmd.CombinedOutput()
 	var ee *exec.ExitError
@@ -851,4 +850,13 @@ func containsPath(list []string, p string) bool {
 		}
 	}
 	return false
+}
+
+func TestTheCleanupScriptRefusesToApplyWhileAServiceRuns(t *testing.T) {
+	needSQLite3(t)
+	f := newCleanupFixture(t)
+	out, code := runScript(t, []string{"FAKE_SERVICES_ACTIVE=1"}, "cleanup-content-v0.2.sh", f.args()...)
+	if code == 0 || !strings.Contains(out, "is running") {
+		t.Fatalf("exit %d, output %q; want a refusal naming the running service", code, out)
+	}
 }

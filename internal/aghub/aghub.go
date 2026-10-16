@@ -37,6 +37,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/seal"
+	"github.com/ANetResearch/ANetHub/internal/private"
 	"github.com/ANetResearch/ANetHub/internal/version"
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
@@ -243,6 +244,9 @@ func Open(dir string) (*Store, error) {
 	// busy_timeout (waiting could deadlock). The send failed with "database
 	// is locked" (ANet an internal note F2). A lock taken at BEGIN waits
 	// under busy_timeout like any single statement.
+	if err := private.File(filepath.Join(dir, dataFile)); err != nil {
+		return nil, fmt.Errorf("hub: create db: %w", err)
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dir, dataFile)+
 		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)&_pragma=secure_delete(ON)"+
 		"&_txlock=immediate")

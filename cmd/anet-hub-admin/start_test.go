@@ -140,3 +140,14 @@ func TestTheDeployScriptChecksTheTokenBeforeTheRestart(t *testing.T) {
 		t.Error("deploy-admin.sh still compares the token with the literal CHANGE_ME")
 	}
 }
+
+func TestAShortAdminTokenIsRefused(t *testing.T) {
+	for _, tok := range []string{"a1b2c3", "hunter2-hunter"} {
+		if msg := tokenRefusal(tok); !strings.Contains(msg, "too short") {
+			t.Errorf("tokenRefusal(%q) = %q, want a too-short refusal", tok, msg)
+		}
+	}
+	if msg := tokenRefusal("k3Jd92hfQp0xLz7Wm4Vb"); msg != "" {
+		t.Errorf("a 20-character token was refused: %q", msg)
+	}
+}

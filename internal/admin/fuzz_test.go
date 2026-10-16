@@ -127,6 +127,7 @@ func FuzzAdminAPI(f *testing.F) {
 			req.Header.Set("Authorization", authz)
 		}
 		if ip != "" {
+			req.RemoteAddr = "127.0.0.1:40000"
 			req.Header.Set("X-Real-Ip", ip)
 		}
 		rec := httptest.NewRecorder()
