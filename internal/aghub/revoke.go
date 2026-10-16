@@ -53,6 +53,14 @@ const (
 	MaxRevokeBatch = 1000
 )
 
+// rateRevoke is an agent's bucket of /mailbox/revoke, in units: a request
+// costs revokeCost(ids). A full batch of MaxRevokeBatch costs 11, so an agent
+// may send a few at once and then about one every five seconds.
+var rateRevoke = relayRate{2, 60}
+
+// revokeCost is the units a /mailbox/revoke of n ids takes from rateRevoke.
+func revokeCost(n int) float64 { return 1 + float64((n+99)/100) }
+
 // revokeBodyLimit bounds a /mailbox/revoke body: a thousand 22-character ids
 // in JSON are about 25 KiB.
 const revokeBodyLimit = 64 << 10
@@ -106,19 +114,49 @@ func (s *Store) RevokeCaps(owner string, ids [][]byte) (revoked, total int, err 
 		owner, cutoff).Scan(&total); err != nil {
 		return 0, 0, err
 	}
+	// One query for the whole batch (not one per id): which of the ids are
+	// revoked already and not expired (RT-SSRC-3).
 	seen := map[string]bool{}
-	var fresh [][]byte
+	var uniq [][]byte
 	for _, id := range ids {
-		if seen[string(id)] {
-			continue
+		if !seen[string(id)] {
+			seen[string(id)] = true
+			uniq = append(uniq, id)
 		}
-		seen[string(id)] = true
-		var live int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM cap_revocation WHERE owner=? AND cap_id=? AND revoked_at>?`,
-			owner, id, cutoff).Scan(&live); err != nil {
+	}
+	live := map[string]bool{}
+	if len(uniq) > 0 {
+		args := make([]any, 0, len(uniq)+2)
+		args = append(args, owner, cutoff)
+		marks := make([]byte, 0, 2*len(uniq))
+		for i, id := range uniq {
+			if i > 0 {
+				marks = append(marks, ',')
+			}
+			marks = append(marks, '?')
+			args = append(args, id)
+		}
+		rows, err := tx.Query(`SELECT cap_id FROM cap_revocation WHERE owner=? AND revoked_at>? AND cap_id IN (`+string(marks)+`)`, args...)
+		if err != nil {
 			return 0, 0, err
 		}
-		if live == 0 {
+		for rows.Next() {
+			var id []byte
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return 0, 0, err
+			}
+			live[string(id)] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		rows.Close()
+	}
+	var fresh [][]byte
+	for _, id := range uniq {
+		if !live[string(id)] {
 			fresh = append(fresh, id)
 		}
 	}
@@ -216,6 +254,13 @@ func (s *Server) hMailboxRevoke(w http.ResponseWriter, r *http.Request) {
 	var req MailboxRevokeRequest
 	if err := wire3.DecodeStrict(a.Body, &req); err != nil {
 		wire3.RefuseDecode(w, err)
+		return
+	}
+	// A per-agent bucket, charged by the number of ids: a batch holds the
+	// store's write lock for as long as it has ids (RT-SSRC-3).
+	if ok, wait := s.delivery.revoke.takeN(a.AID, rateRevoke, revokeCost(len(req.CapIDs))); !ok {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonRateLimited, RetryAfter: wait,
+			Error: "Too many revocations from this agent; retry after the given seconds."})
 		return
 	}
 	if len(req.CapIDs) == 0 || len(req.CapIDs) > MaxRevokeBatch {
