@@ -219,6 +219,12 @@ func fixtureKID(to string) []byte {
 // millisecond (RC1 takes each of a signer's times once).
 var relaySigned atomic.Int64
 
+// relayTick lets the wall clock pass the millisecond in which the hub under
+// test last signed a request of its own, before a test signs one by hand for
+// the same signer: RC1 takes each of a signer's times once, and on a fast
+// machine the two would otherwise share a millisecond.
+func relayTick() { time.Sleep(2 * time.Millisecond) }
+
 func relaySignTS() uint64 {
 	for {
 		last := relaySigned.Load()

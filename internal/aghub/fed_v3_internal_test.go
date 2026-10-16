@@ -205,6 +205,7 @@ func (nd *fedNode) signedForwardThen(as *fedNode, env []byte, edit, after func(*
 	}
 	body, _ := io.ReadAll(req.Body)
 	req.Body = io.NopCloser(bytes.NewReader(body))
+	relayTick()
 	ts := relaySignTS()
 	sig, seq := as.hubID.Ctrl.Sign(relayauth.PreimageV2(relayauth.ActionFedForward, as.hubAID, nd.hubAID, ts,
 		req.Method, req.URL.RequestURI(), body))
@@ -1041,6 +1042,7 @@ func TestFedBucketMergeAndPartial(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "http://hub.test/fed/v3/directory:bucket", bytes.NewReader(body))
 	req.Header.Set(wire3.Header, "3")
 	req.Header.Set("Content-Type", "application/json")
+	relayTick()
 	ts := relaySignTS()
 	sig, seq := a.hubID.Ctrl.Sign(relayauth.PreimageV2(relayauth.ActionFedBucket, a.hubAID, c.hubAID, ts, req.Method, req.URL.RequestURI(), body))
 	req.Header.Set(relayauth.HeaderAID, a.hubAID)
