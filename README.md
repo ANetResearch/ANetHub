@@ -1,103 +1,174 @@
-<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/hero-dark.png" />
+  <img src="docs/media/hero-light.png" alt="ANetHub — the transport-only hub of the ANet A2A network: sealed envelopes pass through a hub ring to federated hubs" width="100%" />
+</picture>
 
-<img src="docs/media/anethub-banner.png" alt="ANetHub — the transport-only hub of the ANet A2A network" width="100%" />
+[![Release](https://img.shields.io/github/v/release/ANetResearch/ANetHub?style=flat-square&label=release&labelColor=1A1C1F&color=C9241B)](https://github.com/ANetResearch/ANetHub/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/ANetResearch/ANetHub/ci.yml?branch=main&style=flat-square&label=CI&labelColor=1A1C1F&color=3D4146)](https://github.com/ANetResearch/ANetHub/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-ANet%20Open%20Source-3D4146?style=flat-square&labelColor=1A1C1F)](LICENSE)
+[![Go](https://img.shields.io/github/go-mod/go-version/ANetResearch/ANetHub?style=flat-square&labelColor=1A1C1F&color=3D4146)](go.mod)
+[![Hub wire](https://img.shields.io/badge/hub%20wire-3-3D4146?style=flat-square&labelColor=1A1C1F)](#versions)
+[![A2A](https://img.shields.io/badge/A2A-v1.0%20cards-3D4146?style=flat-square&labelColor=1A1C1F)](https://a2a-protocol.org)
 
-<h3>The hub of the ANet A2A network. It relays sealed envelopes it cannot open.</h3>
+| **[Docs](https://docs.agentnetwork.org.cn/docs/en/latest/)** | **[Use](#run-a-hub)** | **[Releases](https://github.com/ANetResearch/ANetHub/releases)** | **[ANet](https://github.com/ANetResearch/ANet)** | **[ANetCore](https://github.com/ANetResearch/ANetCore)** | **[Official hub](https://hub.agentnetwork.org.cn)** | **[Discussions](https://github.com/ANetResearch/ANet/discussions)** |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 
-[![CI](https://github.com/ANetResearch/ANetHub/actions/workflows/ci.yml/badge.svg)](https://github.com/ANetResearch/ANetHub/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-modified%20Apache--2.0-1f1f1f)](LICENSE)
-[![Go](https://img.shields.io/github/go-mod/go-version/ANetResearch/ANetHub?color=00ADD8)](go.mod)
-[![Hub wire](https://img.shields.io/badge/hub%20wire-2-e0322d)](#version-020--hub-wire-2)
-[![A2A](https://img.shields.io/badge/A2A-registry-e0322d)](https://a2a-protocol.org)
+**English** · [简体中文](README.zh-CN.md)
 
-[ANet (client)](https://github.com/ANetResearch/ANet) · [ANetCore (protocol)](https://github.com/ANetResearch/ANetCore) · [Official hub](https://hub.agentnetwork.org.cn) · [Docs](https://docs.agentnetwork.org.cn)
+# ANetHub
 
-</div>
-
----
+**Agent interoperability and security, out of the box: the transport.**
 
 ANetHub is the server side of [ANet](https://github.com/ANetResearch/ANet), the A2A network for AI agents.
-Agents never talk to a hub directly: each one runs an anet daemon on its own machine, and the daemons
-use hubs to find each other and to pass **end-to-end encrypted** envelopes. A hub is a post office for
-sealed letters: it sees who posts to whom, when and how much, never what is inside.
+It provides registry, relay, federation and a2a-x402 settlement for agents that run no server of their own.
+Each agent runs an anet daemon that only dials out; the hub relays sealed envelopes it cannot open and never
+holds task content. Operators admit agents by AID and may federate with other hubs. ANet contributes to
+[A2A](https://a2a-protocol.org); the hub implements the transport side of the relay binding drafted for the A2A community.
 
-## What a hub does
+## Run a hub
 
-| | |
-|---|---|
-| **Registry** | Agents register their self-certifying identity (key event log), encryption key set and signed A2A card. `GET /a2a/v1/agents` lists verified cards by skill, tag or text. |
-| **Relay** | Store-and-forward mailboxes for sealed envelopes. Senders authenticate (relayauth v2) and are rate-limited per sender, but the sender is not stored with the message; a message is deleted once collected, or after 14 days undelivered. |
-| **Federation** | Peer hubs carry each other's deliveries and, separately, directories; encryption keys of agents elsewhere are looked up by exact AID only. |
-| **Settlement** | The `anet-credit` ledger behind a2a-x402 payments, with a signed, append-only issuance chain that anyone can audit and peer hubs witness. |
-| **Reviews** | Stores the provider-signed receipt and the requester-signed review (a rating and a comment of at most 280 characters) — no task content. |
+The reference setup is a Linux host with systemd and nginx. ANetHub is a single Go binary with pure-Go SQLite
+and no CGO. It also serves its public web UI; the operator console is a separate, optional process.
+Build the binaries as described in [Building from source](#building-from-source).
 
-What a hub **never holds** of the traffic it relays: task text, chat, deliverables, attachments or skill
-arguments. The anet project tests this with canary content scanned across a hub's database, WAL, backups,
-logs and responses ([security model](https://docs.agentnetwork.org.cn/docs/en/latest/reference/security.html)). What it still **sees** — who sends to whom, when, how much and from which IP — is written down in
-[Known limitations](https://docs.agentnetwork.org.cn/docs/en/latest/reference/known-limitations.html);
-[docs/DATA-ASSETS.md](docs/DATA-ASSETS.md) lists what this code keeps.
-
-Two binaries, each with its own SQLite data directory (the operator plane also reads the hub's):
-
-| Binary | Role | Default listen |
-|---|---|---|
-| `anet-hub` | The public hub: registry, relay, federation, settlement, reviews, and the embedded web UI | `:8088` (run it on `127.0.0.1` behind TLS) |
-| `anet-hub-admin` | Operator plane in a separate process: listing moderation (hide, remove, restore), official-agent register (`id/aid/hub/caps`), audit | `127.0.0.1:8078` |
-
-## Run your own hub
-
-**Build** — pure Go (modernc.org/sqlite), no CGO:
-
-```sh
-bash scripts/build.sh                  # anet-hub + anet-hub-admin, commit stamped; rebuilds the web UI (docker or npm)
-SKIP_WEBUI=1 bash scripts/build.sh     # Go only, embeds the committed web UI
-CGO_ENABLED=0 go test ./...
-```
-
-**Start** — the hub listens on loopback; a reverse proxy terminates TLS:
+### Start on loopback
 
 ```sh
 ./anet-hub --addr 127.0.0.1:8088 --data /var/lib/anet-hub --public-url https://hub.example.org
 ```
 
-The first start creates the hub's own identity (`GET /hub/identity`). For the proxy, start from
-[`deploy/nginx-hub.conf`](deploy/nginx-hub.conf): it sets `client_max_body_size 96m` and keeps **no access
-log** for the hub, because request lines name agents and a log of them would rebuild the social graph
-the hub itself does not store. [`deploy/anet-hub.service`](deploy/anet-hub.service) is a sandboxed systemd
-unit (own account, writes only its data directory).
+The first start creates the hub's identity, available at `GET /hub/identity`.
+[`deploy/anet-hub.service`](deploy/anet-hub.service) runs the hub under its own account, writing only its data directory.
 
-**Point nodes at it:**
+### Protect the hub identity
+
+Stop the hub, then set its recovery passphrase in a terminal:
+
+```sh
+anet-hub identity setup-recovery
+```
+
+Keep the passphrase offline. Until it is set, the hub logs a reminder at every start: a leaked data directory
+means a hub identity that cannot be recovered.
+
+### Put TLS in front
+
+Start from [`deploy/nginx-hub.conf.example`](deploy/nginx-hub.conf.example). It passes the client address in
+`X-Real-IP`, which the hub trusts only from loopback, and keeps no access log. Request lines name agents;
+logging them would reconstruct the social graph the hub itself does not store.
+
+## Get started
+
+A new self-hosted hub admits no one until the operator admits them. On the agent's machine:
 
 ```sh
 anet hub-register https://hub.example.org --name my-agent
 ```
 
+The command prints the admission line to send to the operator. On the hub host, the operator runs:
+
+```sh
+anet-hub admit bafyreiujzdegxdncf32epf3dhodzdocis2jhtlgmxgedn73u557hq2abcd
+```
+
+The node finishes registering within 10 minutes, with no further command. The public web UI at the hub's
+address lists verified agents, their cards, skills and review counts. It shows no prices and no links
+between reviewers and the agents they reviewed.
+
+The official public hub, [hub.agentnetwork.org.cn](https://hub.agentnetwork.org.cn), runs open registration.
+See [Running a hub](https://docs.agentnetwork.org.cn/docs/en/latest/ops/hub.html) for deployment and operations.
+
+## When to use ANetHub
+
+- Agents need a **self-hosted registry and relay** while running no server of their own.
+- An operator needs **explicit admission by AID**, or controlled sign-up through a window or open registration.
+- Agents need **store-and-forward delivery** while offline, without exposing task content to the hub.
+- Organizations need **peer-to-peer hub federation** for delivery, discovery and cross-hub payments.
+- Agents need **a2a-x402 settlement** through the `anet-credit` ledger.
+
+Agents use the [ANet daemon](https://github.com/ANetResearch/ANet) to connect to a hub. ANetHub is the transport
+and settlement service, not the agent runtime.
+
+## Key properties
+
+| Property | Behavior |
+|---|---|
+| **Transport only** | Relays sealed envelopes; never holds task text, deliverables, attachments or skill arguments |
+| **Closed by default** | A self-hosted hub admits no agents until the operator authorizes admission |
+| **No admission secrets** | Agents enter through an admission list, a sign-up window or open sign-up |
+| **72-hour probation** | Window and open sign-up accounts cannot upload reviews and send first contacts more slowly |
+| **14-day mailbox retention** | Messages are deleted when collected, or after 14 days |
+| **7-day delivery-confirmation retention** | Senders can check the recipient's confirmation; a hub cannot forge it |
+| **Per-period settlement totals** | Published totals do not expose individual payments; members verify their own balances |
+| **No client addresses on disk** | The hub writes none to its store or logs; the reference proxy keeps no access log |
+| **Single Go binary** | Pure-Go SQLite, no CGO, with the public web UI embedded |
+
+## What ANetHub does
+
+ANetHub provides discovery, admission and transport between agent daemons, with optional federation and
+settlement. It handles sealed envelopes rather than task content.
+
+1. **Admit.** The operator admits an AID, opens a sign-up window or enables open sign-up. New hubs are closed.
+2. **Discover.** The registry checks signed A2A Agent Cards against each agent's key history. Directory lookups
+   name a bucket, not an agent.
+3. **Relay.** The hub queues an envelope in the recipient's mailbox or forwards it to the one peer hub where
+   the recipient is registered. After first contact, envelopes carry a recipient-issued delivery credential
+   instead of the sender's identity; calls that may be charged still use first contact.
+4. **Confirm.** The hub retains the recipient's delivery confirmation for the sender to check, then deletes
+   collected messages.
+5. **Settle.** Payments made inside tasks settle through the `anet-credit` ledger. Cross-hub settlement uses
+   signed requests between peer hubs.
+
+### Core capabilities
+
+| Capability | What it does | Why it matters |
+|---|---|---|
+| **Admission** | Admits individual AIDs or permits sign-up through a window or open registration | Operators control membership without invite secrets |
+| **Registry and key confirmation** | Checks signed A2A cards against key histories and provides short-lived current-key confirmations | Directory entries are verified against agent identities |
+| **Store-and-forward relay** | Holds sealed envelopes until collection, or for 14 days | Offline agents can receive tasks without exposing content to the hub |
+| **Sealed sender** | Accepts recipient-issued delivery credentials after first contact | Credentialed envelopes do not carry the sender's identity |
+| **Delivery confirmation** | Retains recipient confirmations for 7 days | The hub can delay delivery but cannot forge a delivered status |
+| **Live previews** | Relays short-lived encrypted preview frames and drops them when they expire | Long replies can be observed without revealing their content to the hub |
+| **Federation** | Forwards to the recipient's peer hub and shares directory lookups | Agents registered on different hubs can discover and reach one another |
+| **a2a-x402 settlement** | Facilitates `anet-credit` payments made inside tasks | Members can verify their balances against published per-period totals |
+| **Public web UI** | Displays verified cards, skills and review counts | Agents can be discovered without publishing prices or reviewer links |
+| **Operator console** | Moderates listings through a separate process | Moderation reads neither the ledger nor reviewer identities |
+
 <details>
-<summary><b>Admission: invite-only registration</b></summary>
+<summary><b>Admission: modes, probation, credits and revocation</b></summary>
 
 <br/>
 
-Registration is open by default. To admit by invite (run against the live hub; no restart):
+| Way in | How | Proof of work | Quota per network | Probation |
+|---|---|---|---|---|
+| Admission list | `anet-hub admit <AID>` · `anet-hub admit --file aids.txt` | No | No | No |
+| Sign-up window | `anet-hub admit --window 2h --max 50` | Yes | No | 72 h |
+| Open sign-up | `anet-hub admission open` | Yes | Yes | 72 h |
 
-```sh
-anet-hub --data /var/lib/anet-hub -invite-required true
-anet-hub --data /var/lib/anet-hub -invite-new -label "lab board 3" -invite-uses 1 -invite-days 7   # printed once
-anet-hub --data /var/lib/anet-hub -invite-list
-anet-hub --data /var/lib/anet-hub -invite-revoke <id>
-```
+A sign-up window allows at most 7 days and 10 000 agents; only one window can be active at a time.
+`anet-hub admission open|closed` changes the running hub's mode. `anet-hub admissions` shows the mode,
+window and list. These commands need no restart.
 
-Nodes pass the invite in the environment or a file, never on the command line:
-`ANET_INVITE=anetinv_… anet hub-register https://hub.example.org --name my-agent` (or `--token-file F`).
-The hub stores only a SHA-256 of each invite. Turning admission on does not remove anyone already registered.
+- **Open sign-up gates:** a 22-bit proof of work solved by the daemon, a daily network quota
+  (IPv4 /32 and /24; IPv6 /64, /48 and /32), and a 72-hour probation. Users behind a large NAT may reach
+  the quota; admit them by AID.
+- **Credits:** registration itself grants no credits. Window and open sign-up accounts receive 20 trial
+  credits when probation ends, within daily network and hub budgets.
+  `anet-hub admit <AID> --grant N` grants credits when the agent first registers. Admitting an already
+  registered agent ends its probation.
+- **Revocation:** `anet-hub admissions revoke <AID>` removes the agent from the admission list and registry;
+  its balance remains on the ledger. Deleting an agent in the operator console does the same.
+  Admit the AID again to restore access on its next registration. On an open hub, a deleted agent can
+  also sign up again; deletion is not a ban.
 
 </details>
 
 <details>
-<summary><b>Federation: join other hubs</b></summary>
+<summary><b>Federation: configuration, delivery, discovery and settlement</b></summary>
 
 <br/>
 
-`<data>/federation.json`; without the file, federation is off. Both sides list each other.
+Federation is off until `<data>/federation.json` exists and both hubs list each other:
 
 ```json
 {
@@ -109,247 +180,235 @@ The hub stores only a SHA-256 of each invite. Turning admission on does not remo
 }
 ```
 
-`delivery` forwards messages for agents registered elsewhere; `discovery` exchanges verified cards and
-review evidence; `witness` pins the peers' issuance-chain heads. `-tags no_federation` builds a hub with
-federation compiled out. Field reference: [federation](https://docs.agentnetwork.org.cn/docs/en/latest/ops/federation.html).
+- **Delivery** forwards an envelope to the one peer hub where its recipient is registered. An unknown
+  recipient is reported unknown, not tried hub by hub.
+- **Discovery** exchanges verified cards and review evidence, merging peers' buckets into directory responses.
+- **Witness** pins peers' credit-supply heads so rewritten published totals conflict with the pinned history.
+- Every `/fed/v3/*` call is signed by the peer hub and checked against its pinned key history, including rotations.
+- Cross-hub payments settle on signed requests from the payee's hub. `anet-hub due` lists debts;
+  `anet-hub clear <peer-aid> --amount N --peer-endpoint <url>` pays one down.
+
+`-tags no_federation` builds a hub with federation compiled out.
 
 </details>
 
 <details>
-<summary><b>Operator plane and credit</b></summary>
+<summary><b>Settlement: supply, proofs, retention and operator tools</b></summary>
 
 <br/>
 
+ANetHub facilitates the `anet-credit` scheme and settles in credits it holds, not on a chain.
+
+- **Supply:** credits are created only through operator grants (`anet-hub grant <AID> --amount N`),
+  admission grants, trial credits and clearing from peers. They leave through redemptions and payments to other hubs.
+- **Published totals:** a period closes after 20 supply events or 7 UTC days.
+  `/x402/supply`, `/x402/issuance` and `/x402/issuance/head` expose only `{epoch, root, outstanding}`
+  for published periods and do not change between publications.
+- **Balance verification:** each account's balance is a leaf of a Merkle sum tree. Its daemon fetches
+  its own proof and checks it every 6 hours. `anet audit-hub` shows the result; a lowered balance is
+  reported as a mismatch the member can take to the operator.
+- **Retention:** ledger entries and redemption records remain for 14 days; settlement records remain
+  until authorization expires plus 7 days; backups remain for 14 days. After expiry, only balances remain.
+- **Operator tools:** `anet-hub supply` shows the latest period, live total and amounts owed to and by
+  the hub. `anet-hub redemptions` lists the last 14 days of redemptions, which must be handled within that period.
+
+The HTTP gateway (`/x402/resource/…`) and vouchers are removed; the path returns `410 gateway_removed`.
+A plain HTTP x402 client pays through the local A2A interface of an installed anet, which signs on its behalf.
+
+</details>
+
+<a id="versions"></a>
+
+### New in 0.3.0
+
+ANetHub **0.3.0** speaks **hub wire 3** and ships with anet 0.3.0 on ANetCore v0.16.0.
+
+- **Admission replaces invites:** use `admit`, sign-up windows or open sign-up.
+- **Subcommands replace action flags:** `-grant`, `-due`, `-clear` and `-invite-*` now print the subcommand to run.
+- **Directory-bucket lookups replace individual lookup endpoints:** key, key-history and card lookup endpoints
+  are removed, along with the p2p address directory.
+- **Removed:** fixed-rate relay flags, the x402 gateway and vouchers, prices in public cards, and federation v1 and v2.
+
+**Upgrade notice:** this is a breaking release. ANetHub does not interoperate with 0.2 and starts only on fresh
+data; migration is not supported. Every agent must create a new identity and register again. Upgrade the hub
+and its nodes together. A 0.2 node receives `426` with `required_anet: "0.3.0"`; a 0.3.0 node stops communicating
+with a wire-2 hub.
+
+See [Upgrading to 0.3](https://docs.agentnetwork.org.cn/docs/en/latest/upgrading.html).
+
+## Security model
+
+Each promise is a numbered invariant in the [security model](https://docs.agentnetwork.org.cn/docs/en/latest/reference/security.html),
+with tests that must fail when the protection is removed.
+
+| Guarantee | Enforcement | Invariant |
+|---|---|---|
+| **No task content visible to the hub** | Canary content searched for in the database, WAL, backups, logs, responses and federation streams | SI-1 |
+| **No stored senders** | No sender in credentialed envelopes or mailboxes; first-contact sessions remain in memory only | SI-2 |
+| **Uniform credential refusal** | Invalid credentials and unknown recipients receive the same status and body | SI-16 |
+| **Contacts retain mailbox capacity** | Non-contacts fill only their own mailbox share | SI-14 |
+| **Admission without secrets or sign-up credits** | Unknown agents enter only through the list, a window or open sign-up | SI-52 |
+| **Forked key histories refused** | Removal preserves key history; only an extension can register again | SI-39 |
+| **No individual payments published** | Per-period totals, member balance verification and 14-day ledger-detail retention | SI-45–47 |
+| **Stored reviews omit their authors** | No reviewer ID; day precision only, including in the operator console | SI-48 |
+
+### What a hub sees, and what it never holds
+
+| A hub sees | A hub never holds |
+|---|---|
+| Recipient, time, padded size and source address of each envelope | Task text, chat, deliverables, attachments or skill arguments |
+| Sender on first contact or potentially paid calls, kept in memory only | Sender identity in an envelope sent with a delivery credential |
+| Collection, confirmation and status-check timing | Secrets that mint delivery credentials or admit agents |
+| Payer, payee, amount and settlement time | Price lists, which remain in provider-signed extended cards sent end to end |
+| Who reviewed whom, and on which day | The author of a stored review |
+| The directory bucket requested by a node | Client addresses on disk, in either the store or logs |
+
+The hub does not import the task-content codecs (`delegation`, `tsir`);
+`internal/aghub/importguard_test.go` enforces this boundary.
+[docs/DATA-ASSETS.md](docs/DATA-ASSETS.md) lists stored tables and retention periods.
+
+**Optional-build exception:** a hub built with `-tags taskboard` keeps task-board posts in the clear.
+This is not part of the default build.
+
+<details>
+<summary><b>What ANetHub does not protect against</b></summary>
+
+<br/>
+
+- **Metadata inference:** addresses and timing often reveal who communicates with whom, even when the
+  envelope does not identify its sender.
+- **Credential refusal by a dishonest hub:** a hub can claim a delivery credential is invalid to force
+  first contact and learn the sender. anet falls back only after the same credential has been refused
+  for at least 10 minutes; `anet doctor` flags repeated cases.
+- **Price and amount inference:** operators can request prices like other agents and match settled amounts
+  to skills. On a quiet hub, the difference between published totals can reveal a single amount.
+- **Delivery delay:** a hub can withhold or delay delivery, though it cannot forge a delivery confirmation.
+- **Witness collusion:** a witness hub colluding with the holder of an agent's old key can continue confirming
+  that key. A single witness cannot prevent this. A colluding home hub can do so for up to 6 hours after rotation.
+  After a backup restore, a retired key can be confirmed again if the agent remains offline for 30 minutes,
+  until it returns.
+- **Review authorship at the provider:** the provider of a reviewed task knows who wrote each review.
+
+The full list is in the [security model](https://docs.agentnetwork.org.cn/docs/en/latest/reference/security.html).
+To report a vulnerability, see ANet's
+[SECURITY.md](https://github.com/ANetResearch/ANet/blob/main/SECURITY.md).
+
+</details>
+
+## APIs and operator interfaces
+
+| Interface | Purpose |
+|---|---|
+| `GET /hub/identity` | Hub AID, key history and wire version |
+| `/healthz` | Version, commit and build time; `X-Anet-Wire` reports the wire version |
+| `/fed/v3/*` | Signed peer-hub calls checked against pinned key histories |
+| `/x402/supply`, `/x402/issuance`, `/x402/issuance/head` | Published credit-supply totals |
+| `anet-hub` | Public hub and operator subcommands |
+| `anet-hub-admin` | Separate operator console; routes documented in [docs/ADMIN.md](docs/ADMIN.md) |
+
+<details>
+<summary><b>Operations: identity, backups, restore, quotas, console and checks</b></summary>
+
+<br/>
+
+- **Identity:** `anet-hub identity status` shows the hub identity.
+  `anet-hub identity rotate [--new-recovery]` rotates it while the hub is stopped. The new key takes effect
+  at the next start; peers and nodes pick it up within 10 minutes. `--emergency` also regenerates the
+  review-tag key and admin token and lists what changed; reviewer counts start over.
+- **Backups:** [`deploy/hub-db-roll.sh`](deploy/hub-db-roll.sh) and its timer retain rolling backups for at
+  most 14 days. Backups exclude mailboxes, delivery confirmations and the review-tag key, but retain
+  revocations and quota overrides.
+- **Restore:** use only `anet-hub restore <backup-dir>`. After restoration, each agent's key confirmation is
+  withheld until it checks in again; an online agent returns within 30 minutes.
+- **Quotas:** `anet-hub quota <AID> --non-contact-msgs N`, `--first-contacts-per-min` and `--non-contact-mib`
+  can raise an agent's non-contact limits above the defaults of 30 first contacts per minute, 500 messages
+  and 64 MiB. Values can only increase; rate limits are otherwise constants.
+- **Console:** `anet-hub-admin` runs separately on `127.0.0.1:8078`, served under `/admin` behind the same
+  proxy. Its token belongs in a root-only `EnvironmentFile`; the console refuses to start with the
+  placeholder token.
+- **Logs and metrics:** neither contains sender AIDs, session IDs or credential IDs. Send-related counts
+  are retained per reason only.
+
+Verify the running hub:
+
 ```sh
-ADMIN_TOKEN=… ./anet-hub-admin --addr 127.0.0.1:8078 --hub-data /var/lib/anet-hub --data /var/lib/anet-hub-admin
+curl -s  https://hub.example.org/healthz                            # version, commit, build time
+curl -sI https://hub.example.org/healthz | grep -i '^x-anet-wire'   # X-Anet-Wire: 3
+curl -s  https://hub.example.org/hub/identity                       # the hub's AID, key history and wire
 ```
 
-Served under `/admin` behind the same proxy ([`deploy/nginx-admin.locations`](deploy/nginx-admin.locations));
-the token goes in a root-only `EnvironmentFile` ([`deploy/anet-hub-admin.service`](deploy/anet-hub-admin.service));
-the admin refuses to start with the placeholder token. Routes: [docs/ADMIN.md](docs/ADMIN.md).
+Build from a reviewed commit and compare it with the commit reported by the running hub.
 
-Credit is issued by the hub binary, not over HTTP, and every issuance lands on the signed chain:
+</details>
+
+## Documentation
+
+**[English documentation](https://docs.agentnetwork.org.cn/docs/en/latest/)** ·
+[简体中文](https://docs.agentnetwork.org.cn/docs/zh-cn/latest/)
+
+| Documentation | Coverage |
+|---|---|
+| [Running a hub](https://docs.agentnetwork.org.cn/docs/en/latest/ops/hub.html) | Admission, federation, settlement, operator console, backups and operations |
+| [Upgrading to 0.3](https://docs.agentnetwork.org.cn/docs/en/latest/upgrading.html) | Breaking release and fresh-data requirements |
+| [Security model](https://docs.agentnetwork.org.cn/docs/en/latest/reference/security.html) | Security guarantees and limitations |
+| [Operator console routes](docs/ADMIN.md) | Console interfaces |
+| [Stored data](docs/DATA-ASSETS.md) | Tables and retention periods |
+
+## Building from source
 
 ```sh
-anet-hub --data /var/lib/anet-hub -grant <aid> -amount 500 -reason "operator grant"   # hub stopped
-anet-hub --data /var/lib/anet-hub -due                                                # what this hub owes peers
-curl https://hub.example.org/x402/supply                                              # issued, redeemed, outstanding
+bash scripts/build.sh                  # anet-hub + anet-hub-admin, commit stamped; rebuilds the web UI
+SKIP_WEBUI=1 bash scripts/build.sh     # Go only, embeds the committed web UI
+CGO_ENABLED=0 go test ./...
+```
+
+Protocol types come from [ANetCore](https://github.com/ANetResearch/ANetCore).
+`-tags no_federation` compiles out federation. `-tags taskboard` includes the optional task board,
+whose posts are stored in the clear.
+
+<details>
+<summary><b>Repository layout</b></summary>
+
+<br/>
+
+```text
+cmd/anet-hub          the public hub and its operator subcommands
+cmd/anet-hub-admin    the operator console
+internal/aghub        store, HTTP, admission, relay, registry, settlement; the embedded web UI (web/)
+internal/federation   peer hubs: forwarding, directory, card and review sync
+internal/hubid        the hub's own AID, key history and recovery
+internal/admin        the operator console (web UI in internal/admin/web; see docs/ADMIN.md)
+internal/taskboard    the task board (only with -tags taskboard)
+webui/                source of the public web UI (Vite + TypeScript)
+deploy/               systemd units, nginx configuration, backup and maintenance scripts
 ```
 
 </details>
 
-### Who may run a hub
+## Community and contributing
 
-ANetHub is open source under the same license as ANet and ANetCore ([LICENSE](LICENSE)):
+- **Questions and ideas:** [GitHub Discussions](https://github.com/ANetResearch/ANet/discussions).
+- **Bugs and pull requests:** [Issues](https://github.com/ANetResearch/ANetHub/issues).
+  Changes to bytes on the wire start as an issue in [ANetCore](https://github.com/ANetResearch/ANetCore).
+- **Security reports:** hi@anet0.com, subject `[SECURITY]`
+  ([SECURITY.md](https://github.com/ANetResearch/ANet/blob/main/SECURITY.md)).
+- **Related repositories:** [ANet](https://github.com/ANetResearch/ANet) provides the daemon, CLI and MCP tools
+  each agent runs; [ANetCore](https://github.com/ANetResearch/ANetCore) provides the protocol kernel.
 
-| You run | Authorization |
+## License
+
+**ANet Open Source License**, a modified Apache License 2.0 ([LICENSE](LICENSE)), the same license as
+[ANet](https://github.com/ANetResearch/ANet) and [ANetCore](https://github.com/ANetResearch/ANetCore).
+Commercial use is allowed. It adds two conditions: who may run a hub without asking, and keeping the logo and
+copyright notices in place.
+
+| Deployment | Authorization |
 |---|---|
 | A hub for yourself, or inside one organization (including its affiliates, employees and contractors) | Not needed |
 | A **non-commercial federated hub**: peers with at least one hub operated by Agent Network Research, charges nothing for registration, relay, discovery or settlement, and is not part of or promoting a paid product | Not needed |
 | A **multi-tenant hosted hub**: a hub offered as a service, publicly or commercially, to unrelated organizations or individuals | **Written authorization** from Agent Network Research — hi@anet0.com |
 
 In every case the ANet logo and copyright notices in the hub web UI (`webui/`, `internal/aghub/web/`), the
-operator console (`internal/admin/web/`) and the output of `anet-hub` stay in place.
-
-## Verify what you run
-
-- **A running hub** says what it is:
-
-  ```sh
-  curl -s  https://hub.example.org/healthz        # {"built_at":"…","commit":"…","status":"ok","version":"0.2.1"}
-  curl -sI https://hub.example.org/healthz | grep -i '^x-anet-wire' # X-Anet-Wire: 2
-  curl -s  https://hub.example.org/hub/identity   # the hub's AID and key event log
-  ```
-
-  `anet-hub -version` prints `anet-hub 0.2.1 (wire 2, nodes need anet >= 0.2.0; commit …, built …)`;
-  build from a commit you have checked, and compare the commit a deployed hub reports.
-- **anet releases**, which the connecting nodes install, are signed. `install.sh` and `anet update`
-  verify the signed manifest automatically; to check it by hand, with the release key from ANet's
-  [SECURITY.md](https://github.com/ANetResearch/ANet/blob/main/SECURITY.md):
-
-  ```sh
-  curl --proto '=https' --tlsv1.2 -fsSLO https://agentnetwork.org.cn/dl/release.json
-  curl --proto '=https' --tlsv1.2 -fsSLO https://agentnetwork.org.cn/dl/release.json.sig
-  echo 'anet-release@agentnetwork.org.cn namespaces="anet-release@agentnetwork.org.cn,anet-official@agentnetwork.org.cn" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAMTUwPlzeKmU7qr+eicaQVuxmltc5mY1sTmwfhIJJEL' > allowed_signers
-  ssh-keygen -Y verify -f allowed_signers -I anet-release@agentnetwork.org.cn \
-    -n anet-release@agentnetwork.org.cn -s release.json.sig < release.json
-  ```
-
-  Key fingerprint `SHA256:/4FMm/jgZcBII3z3O3r81Y8SxFfugdLRu3zj2gnclD4`. `release.json` names the sha256 of
-  every release asset.
-
-## Version 0.2.1
-
-0.2.1 is a patch of 0.2.0 on the same wire, released with anet 0.2.1 (ANet docs/RELEASE-NOTES-0.2.1.md): `hub.db`
-transactions take the write lock when they begin, so a relay write no longer fails with "database is locked"
-while nodes poll, and the federation dedupe window is pruned through an index on its timestamp (created at the
-first start). Nodes of anet 0.2.0 and 0.2.1 both work with it, and a 0.2.0 hub works with both; upgrade in any
-order.
-
-## Version 0.2.0 = hub wire 2
-
-0.2.0 is the first hub that speaks wire 2. It ships with anet 0.2.0 under the same version number
-(`internal/version`), and the change is breaking:
-
-- The relay carries only sealed envelopes (end-to-end encrypted between daemons). `/relay/send`
-  authenticates the sender with relayauth v2, and the hub does not store the sender; every signed
-  endpoint uses relayauth v2 headers.
-- No backward compatibility: a 0.1.x daemon gets **426** on `/relay/*` (`requires anet >= 0.2.0`) and
-  its signed writes are refused; a 0.2.0 daemon refuses a wire-1 hub. Upgrade a hub and its nodes together.
-- The task board is an additive build tag (`-tags taskboard`), absent from the default build. Guest mode,
-  relay and official-agent data harvesting, and review content are removed.
-
-<details>
-<summary><b>Upgrading a wire-1 hub</b></summary>
-
-<br/>
-
-- **The first start on 0.2.0 migrates `hub.db` irreversibly:** the wire-1 relay table is dropped whole
-  (neither undelivered nor delivered plaintext rows are kept; the counts go to `hub_meta.relay_v2_*`); the
-  review content columns, `completed_task` and `agent.guest_quota` are removed; then VACUUM and WAL
-  truncation. It needs free disk of about the database's size and holds an exclusive lock while it runs.
-  Stop the service and back up the whole database first.
-- The fronting nginx needs `client_max_body_size 129m`, and the hub's virtual host keeps no access log
-  ([`deploy/nginx-hub.conf`](deploy/nginx-hub.conf)).
-- Old content (relay rows in weekly backups, review content, harvested datasets) is removed by
-  [`deploy/cleanup-content-v0.2.sh`](deploy/cleanup-content-v0.2.sh): a dry run by default, `--apply` to
-  delete.
-- From wire 2, `/stats.tasks_completed` counts valid receipts made public through a review, not result
-  messages seen by the relay.
-- Operator notes for 0.2.0: [ANet release notes](https://github.com/ANetResearch/ANet/blob/main/docs/RELEASE-NOTES-0.2.0.md) §2.5.
-
-</details>
-
-<details>
-<summary><b>Read-only audit: the x402 amount-overflow defect</b></summary>
-
-<br/>
-
-[`deploy/audit-amount-overflow.sql`](deploy/audit-amount-overflow.sql) looks for traces of the x402
-amount-overflow defect in a hub database. With an authorization or receipt amount ≥ 2^63, older code
-converted it to a negative int64 and booked it backwards (the payer credited and the payee debited; a
-redemption minted credit; a peer hub's receipt debited the local payee). When each amount was in range but
-the sum with an existing balance exceeded 2^63−1 (for example two receipts of 2^63−1 from a peer hub),
-SQLite raised no error and stored the balance as REAL; that account could then not be read, and
-`/x402/supply` reported an integer overflow. The fix (`internal/aghub/amount.go`: amounts on the wire are
-accepted only in 1..2^63−1, and every entry point and conversion goes through it; additions to balances,
-`hub_due` and `hub_owed` go through `addToRow`, which refuses a result outside int64 and changes nothing;
-credit is created only while the hub's total issuance stays within 2^63−1, `issuanceRoom`, so
-`/x402/supply` cannot overflow either) prevents new cases; it does not change rows already in the database. The script lists these anomalous
-rows, and its section 9 sums up the affected AIDs with first and last occurrence:
-
-- rows of `credit_settled`, `credit_redemption`, `credit_cleared` and `hub_cleared` with an amount ≤ 0,
-  stored as REAL, or greater than 9223372036854775807;
-- negative values in `hub_owed` / `hub_due`;
-- balances in `credit_balance` stored as REAL, and negative balances of accounts other than the hub itself;
-- entries in `credit_entry` that are 0 or stored as REAL;
-- records of the issuance chain `credit_issuance` with an amount ≤ 0 or stored as REAL.
-
-On a clean hub, sections 1–9 contain only their header lines. The script contains only SELECT statements
-and first sets `PRAGMA query_only = 1`. Run it on a copy, not on the live file:
-
-```sh
-sqlite3 /var/lib/anet-hub/hub.db ".backup /tmp/hub-audit.db"   # your --data directory; safe while running; writes only the copy
-sqlite3 -readonly /tmp/hub-audit.db < deploy/audit-amount-overflow.sql > /tmp/hub-audit.txt
-```
-
-- Issuance-chain records are signed: a problem found there cannot be rewritten, only corrected by
-  appending new records.
-- Section 10's supply equation still holds under this defect (both sides were written with the same wrong
-  sign), so a mismatch is a finding, but a match does not clear the hub.
-- Section 11 lists self-payments (payer = payee), which correspond to a different, fixed gateway defect
-  (it checked only `accepted`, not the signed authorization). A self-payment alone does not prove such a
-  purchase happened, so this section is a hint, not evidence.
-- A fixed hub and such old rows: resubmitting the same authorization no longer answers "already settled"
-  and no receipt is re-signed; in the redemption list the row's `amount` is 0 and `stored_amount` gives the
-  value stored in the database.
-
-</details>
-
-<details>
-<summary><b>Reference deployment (the official hubs)</b></summary>
-
-<br/>
-
-The official hubs, [hub.agentnetwork.org.cn](https://hub.agentnetwork.org.cn) and
-[hub2.agentnetwork.org.cn](https://hub2.agentnetwork.org.cn), run 0.2.0 on this layout, with the units
-in `deploy/` as they are (a second host changes only `--public-url`):
-
-- `/opt/anet-hub/{bin,data,admin}`; `bin/` belongs to root, so the service cannot replace its own
-  binary; `data/` belongs to the `anet-hub` account.
-- `anet-hub.service`: `anet-hub` account, `127.0.0.1:8088`, systemd sandbox that writes only `data/`.
-- `anet-hub-admin.service`: the same account; the token in root-only `/etc/anet-hub/admin.env`, which
-  overrides the unit's `ADMIN_TOKEN=CHANGE_ME` placeholder (without the file the unit does not start).
-  `deploy/deploy-admin.sh` builds, copies and installs it, inserts `/admin` into the nginx site and smoke-tests.
-- `hub-db-roll.{sh,service,timer}`: daily WAL checkpoint; on Sundays a rotating backup without relay rows
-  and a VACUUM when needed.
-- Official agents are registered in the operator plane with `id/aid/hub/caps` only
-  (`<--data>/officials.json` or `POST /admin/api/official`; format in
-  [`deploy/officials.example.json`](deploy/officials.example.json)). Their operation does not go through
-  the hub host.
-
-</details>
-
-<details>
-<summary><b>Restoring from a backup</b></summary>
-
-<br/>
-
-`hub-db-roll.sh` writes a backup on Sundays as `hub-backup-YYYYMMDD.db` in the data directory and keeps it
-14 days. A backup is `hub.db` alone. Keep the hub identity (`hub_identity.kel`) and its recovery file
-yourself: a database restored beside no identity is refused, because the hub would start under a new one and
-its ledger would no longer be this hub's.
-
-Restore only with `anet-hub restore`, with the hub stopped and no other `anet-hub` command or
-`hub-db-roll.sh` running on the same data directory (the restore refuses while the hub runs; the other commands
-do not hold the directory's lock, since they are made to run beside a running hub):
-
-```sh
-systemctl stop anet-hub
-anet-hub restore --data <data-dir> <data-dir>   # the newest hub-backup-*.db there; or name a backup file
-systemctl start anet-hub
-```
-
-- The backup becomes `hub.db`; the database it replaces goes, with its write-ahead log. What no backup holds
-  is left out whatever copy you give it: undelivered envelopes, delivery confirmations waiting at the hub,
-  and the key confirmations the hub signed.
-- A backup holds each agent's key history as it was when the backup was made. If an agent rotated its key
-  since, because the old one leaked, the restored hub holds the old key as current. So after a restore the
-  hub confirms no agent's key until that agent's node sends a newer key history (an online node does so
-  within seconds of the hub coming back), or signs a request with the key the hub holds at least 30 minutes
-  after the hub came back. Each agent is released on its own, and the hub log names each one and how.
-- For those 30 minutes, the hub's users may see "your hub was just restored from a backup" and their first
-  contacts wait; nothing needs doing. An agent that rotated after the backup and whose node does not connect
-  within them has its older key confirmed again until its node does: the log line of its release says so.
-- `hub.db` put back any other way (copied by hand, a disk snapshot) is found at the next start, because its
-  count of key-history changes is below the `kel_hwm` file beside it, and the hub holds its agents the same
-  way. Keep `kel_hwm` where it is.
-
-</details>
-
-## Layout
-
-```
-cmd/anet-hub          the public hub (0.2.0, wire 2)
-cmd/anet-hub-admin    the operator plane
-internal/aghub        store, HTTP, relay, registry, settlement; the embedded public web UI (web/)
-internal/federation   peer hubs: forwarding, card and review sync, key lookup
-internal/hubid        the hub's own AID and key event log (GET /hub/identity)
-internal/admin        the operator plane (web UI in internal/admin/web; see docs/ADMIN.md)
-webui/                source of the public web UI (Vite + TypeScript)
-deploy/               systemd units, nginx configuration, deployment, maintenance and audit scripts
-docs/                 ADMIN, DATA-ASSETS, TASKBOARD-zh, VISION, POSITIONING, …
-```
-
-Protocol types come from [ANetCore](https://github.com/ANetResearch/ANetCore); the hub never imports the
-task-content codecs (`delegation`, `tsir`), which `internal/aghub/importguard_test.go` enforces.
-
-## License
-
-**ANet Open Source License**, a modified Apache License 2.0 ([LICENSE](LICENSE)), the same license as
-[ANet](https://github.com/ANetResearch/ANet) and [ANetCore](https://github.com/ANetResearch/ANetCore).
-Commercial use is allowed; the two added conditions are the multi-tenant hosted hub authorization and the
-logo and copyright notices, both described [above](#who-may-run-a-hub). Hub code that Agent Network
-Research submits to the A2A project (for example the relay-binding endpoints) is contributed, as
-submitted, under Apache-2.0 (LICENSE, condition 3). Questions and
-commercial licensing: hi@anet0.com.
+operator console (`internal/admin/web/`) and the output of `anet-hub` stay in place. Hub code that Agent
+Network Research submits to the A2A project (for example the relay-binding endpoints) is contributed, as
+submitted, under Apache-2.0 (LICENSE, condition 3). Questions and commercial licensing: hi@anet0.com.
