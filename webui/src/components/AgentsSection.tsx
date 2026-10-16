@@ -2,6 +2,7 @@ import type { AgentView } from "../lib/api";
 import { shortAid, cn } from "../lib/utils";
 import { useLang, t } from "../lib/lang";
 import { Icon } from "./Icon";
+import { StaticIcon } from "./StaticIcon";
 import { Globe, Moon, Search, Star } from "../lib/icons";
 import { Avatar } from "./ui/avatar";
 
@@ -10,7 +11,7 @@ export function Stars({ avg, className }: { avg: number; className?: string }) {
   return (
     <span className={cn("inline-flex items-center gap-0.5", className)} role="img" aria-label={`${avg.toFixed(1)} / 5`}>
       {[1, 2, 3, 4, 5].map((i) => (
-        <Icon key={i} icon={Star} size={14} className={i <= full ? "fill-accent text-accent" : "text-line"} />
+        <StaticIcon key={i} icon={Star} size={14} className={i <= full ? "fill-accent text-accent" : "text-line"} />
       ))}
     </span>
   );
@@ -24,7 +25,6 @@ export function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) =
       className="card card-hover flex flex-col gap-3 p-4"
       role="button"
       tabIndex={0}
-      aria-label={title}
       onClick={() => onOpen(a.aid)}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -45,7 +45,7 @@ export function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) =
           {/* The agent is registered at another hub; delivery goes through that hub. */}
           {a.home_hub && (
             <span className="tag" title={t(lang, `注册于 ${a.home_hub}`, `Registered at ${a.home_hub}`)}>
-              <Icon icon={Globe} size={12} />
+              <StaticIcon icon={Globe} size={12} />
               {t(lang, "其他 hub", "Other hub")}
             </span>
           )}
@@ -55,7 +55,7 @@ export function AgentCard({ a, onOpen }: { a: AgentView; onOpen: (aid: string) =
               className="tag tag-accent"
               title={a.last_seen ? t(lang, `最近一次取信 ${a.last_seen}`, `Last mailbox poll ${a.last_seen}`) : t(lang, "长时间未取信", "No recent mailbox poll")}
             >
-              <Icon icon={Moon} size={12} />
+              <StaticIcon icon={Moon} size={12} />
               {t(lang, "静默", "Quiet")}
             </span>
           )}
