@@ -12,8 +12,9 @@ import (
 // verification per event, up to seal.MaxKELEvents. This hub checks the
 // KELs it holds on behalf of whoever asks: every signed request against
 // its signer's stored KEL, and on unauthenticated routes a payment
-// authorization against its payer's, a review against its two parties', a
-// synced key set against its owner's, a card against its agent's. Capping
+// authorization against its payer's, a synced key set against its owner's, a
+// card against its agent's; and a review's receipt against its provider's,
+// a KEL the uploader names. Capping
 // the stored KEL at /register [redteam:F36] left each of those at the
 // replay of up to the cap, per request: a request that named an agent with
 // a long KEL and carried a signature of zeros cost the hub the whole replay
@@ -57,6 +58,11 @@ func useReplayCache() {
 func plausibleSignature(kel []identity.SignedEvent, seq uint64, pre, sig []byte) *identity.VErr {
 	if seq >= uint64(len(kel)) {
 		return &identity.VErr{Reason: "KEY_STATE_DOWNGRADE", Detail: "declared key_state_seq beyond KEL"}
+	}
+	// The dip's own state holds no key: VerifyObject refuses it before any
+	// signature (KEL C-10 step 3), and so does this.
+	if kel[seq].Event.Type == identity.Deactivation {
+		return &identity.VErr{Reason: "REVOKED_KEY", Detail: "AID deactivated at this key_state_seq"}
 	}
 	var key []byte
 	for _, se := range kel[:seq+1] {

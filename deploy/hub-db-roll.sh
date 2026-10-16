@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hub-db-roll.sh — maintenance for the hub's hub.db (hub wire 2)
+# hub-db-roll.sh — maintenance for the hub's hub.db (hub wire 3)
 #
 # Policy:
 #   - Relay retention is not done here. Since wire 2 a relay_message row
@@ -10,14 +10,48 @@
 #     this script records is the current backlog, for the log.
 #   - PRAGMA wal_checkpoint(TRUNCATE) on every run, so page images of
 #     deleted rows do not stay in hub.db-wal.
-#   - On Sundays: a rotating backup (keep newest 2) WITHOUT relay_message
-#     rows, and VACUUM of the main db if the freelist exceeds 20% of pages.
+#   - On Sundays: a rotating backup (keep newest 2) WITHOUT the rows of the
+#     tables in EXCLUDED_TABLES, and VACUUM of the main db if the freelist
+#     exceeds 20% of pages.
+#   - On every run: a backup 14 days old or older is deleted (the date in its
+#     name), whatever day it is. The ledger window (hub-payment-privacy
+#     PAY-L1, PAY-L2) keeps who paid whom on the hub for 14 days, so it is
+#     on disk at most 14 days on the hub plus 14 days in a backup. A run
+#     that was missed on a Sunday does not leave an old backup longer.
 #
-# Backups exclude relay content (A2A-DESIGN §9 row "relay 存储", [C38]).
+# Backups exclude relay content (A2A-DESIGN §9 row "relay 存储", [C38]) and
+# what only matters while the hub runs: EXCLUDED_TABLES below. relay_message
+# holds the envelopes; relay_redelivery counts how often an envelope was
+# queued in the last 24 hours, by its digest (sealed-sender SSR-H1). A hub
+# restored from a backup has an empty mailbox; senders learn it and send
+# again (/relay/status answers unknown).
+# The other excluded tables matter only to the hub process that holds them:
+# dereg_event (a deregistration another process made, for the hub to drop the
+# AID's sessions; emptied at start, PAY-O2), relay_dack (delivery confirmations
+# waiting to be collected, hub-side, kept 7 days) and notice_cache (the witness
+# notices this hub signed, refreshed from the KELs every 10 minutes).
+# Backups keep everything else, in particular cap_revocation (the delivery
+# credentials owners revoked, so a restored hub still refuses them),
+# quota_override (the quotas the operator raised with anet-hub quota), and
+# liab_leaf and liab_meta (the balance leaves of the supply epochs of the last
+# 14 days, so a restored hub can still give an account the proof of an epoch
+# it was on; their balances are in the backup's ledger anyway).
+# Backups keep the restore quarantine's own tables (restore_state,
+# restore_released, kel_hwm) and the first verifications of payments
+# (x402_first_verify), like the ledger window's tables.
+# A backup is hub.db alone: nothing else of the data directory is copied, in
+# particular not keys/review_tag.key, the hub's review tag key, which a backup
+# must never hold (hub-payment-privacy PAY-L1), nor the kel_hwm file beside
+# hub.db, which is how a start tells an older copy of hub.db.
+# Restoring: only with `anet-hub restore <backup>`, the hub stopped. It puts
+# the backup in place as hub.db and holds every agent's key confirmation
+# until its node sends a newer key history, or for 30 minutes after the hub
+# is back (KEL H-20, H-23). A hub.db copied back by hand is found at the next
+# start (kel_hwm) and held the same way.
 # Method: VACUUM INTO a temporary copy in the data directory, delete every
-# relay_message row in that copy with secure_delete=ON (the copy's pages
-# holding them are overwritten), then VACUUM INTO the final backup from the
-# copy, which writes only live pages, and remove the copy. The temporary
+# row of the excluded tables in that copy with secure_delete=ON (the copy's
+# pages holding them are overwritten), then VACUUM INTO the final backup from
+# the copy, which writes only live pages, and remove the copy. The temporary
 # copy exists only for the duration of the backup, in the same directory
 # and under the same account as hub.db, which already holds those rows; one
 # left by a run killed outright is removed at the start of the next run.
@@ -46,6 +80,13 @@ LOG="$DATA_DIR/roll.log"
 command -v sqlite3 >/dev/null || { echo "hub-db-roll: sqlite3 is required" >&2; exit 1; }
 [ -f "$DB" ] || { echo "hub-db-roll: $DB not found (set HUB_DATA_DIR)" >&2; exit 1; }
 
+# The tables whose rows no backup holds. A table that this hub's version
+# does not have yet is skipped.
+EXCLUDED_TABLES="relay_message relay_redelivery dereg_event relay_dack notice_cache"
+
+# How long a backup is kept, in days (hub-payment-privacy PAY-L1).
+KEEP_DAYS=14
+
 SQL() { sqlite3 "$DB" ".timeout 5000" "$@"; }
 log() { echo "[$(date -Is)] $*" >>"$LOG"; }
 # sqlstr quotes a path as an SQL string literal (HUB_DATA_DIR comes from the caller).
@@ -67,6 +108,22 @@ for stale in "$DATA_DIR"/.hub-backup-*.tmp.db; do
     log "removed a temporary copy left by an interrupted run: $stale"
 done
 
+# Every run: a backup KEEP_DAYS days old or older goes, by the date in its name.
+oldest=$(date -d "-$KEEP_DAYS days" +%Y%m%d)
+for old in "$DATA_DIR"/hub-backup-*.db; do
+    [ -e "$old" ] || continue
+    day=${old##*/hub-backup-}
+    day=${day%.db}
+    case "$day" in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+        *) continue ;;
+    esac
+    if [ "$day" -le "$oldest" ]; then
+        rm -f -- "$old" "$old-wal" "$old-shm" "$old-journal"
+        log "pruned a backup $KEEP_DAYS days old or older: $old"
+    fi
+done
+
 # Sunday: rotating backup without relay rows (keep 2) + conditional VACUUM
 if [ "$(date +%u)" = "7" ] || [ "${FORCE_WEEKLY:-0}" = 1 ]; then
     backup="$DATA_DIR/hub-backup-$(date +%Y%m%d).db"
@@ -78,18 +135,29 @@ if [ "$(date +%u)" = "7" ] || [ "${FORCE_WEEKLY:-0}" = 1 ]; then
         # statement under set -e, so that it does not outlive this run.
         trap 'rm -f -- "$tmp" "$tmp-journal" "$tmp-wal" "$tmp-shm"' EXIT
         SQL "VACUUM INTO $(sqlstr "$tmp");"
-        sqlite3 "$tmp" ".timeout 5000" \
-            "PRAGMA secure_delete=ON;" \
-            "DELETE FROM relay_message;" >/dev/null
+        excluded=()
+        for table in $EXCLUDED_TABLES; do
+            have=$(sqlite3 "$tmp" ".timeout 5000" \
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$table';")
+            [ "$have" = "1" ] && excluded+=("$table")
+        done
+        for table in ${excluded[@]+"${excluded[@]}"}; do
+            sqlite3 "$tmp" ".timeout 5000" \
+                "PRAGMA secure_delete=ON;" \
+                "DELETE FROM $table;" >/dev/null
+        done
         sqlite3 "$tmp" ".timeout 5000" "VACUUM INTO $(sqlstr "$backup");"
         rm -f -- "$tmp" "$tmp-journal" "$tmp-wal" "$tmp-shm"
-        left=$(sqlite3 "$backup" "SELECT COUNT(*) FROM relay_message;")
-        if [ "$left" != "0" ]; then
-            log "ERROR: backup $backup holds $left relay rows; removing it"
-            rm -f -- "$backup"
-            exit 1
-        fi
-        log "weekly backup: $backup ($(stat -c %s "$backup" | awk '{printf "%dMB", $1/1024/1024}'), relay rows excluded)"
+        for table in ${excluded[@]+"${excluded[@]}"}; do
+            left=$(sqlite3 "$backup" "SELECT COUNT(*) FROM $table;")
+            if [ "$left" != "0" ]; then
+                log "ERROR: backup $backup holds $left rows of $table; removing it"
+                rm -f -- "$backup"
+                exit 1
+            fi
+        done
+        kept=$(sqlite3 "$backup" "SELECT (SELECT COUNT(*) FROM cap_revocation) || ' revocations, ' || (SELECT COUNT(*) FROM quota_override) || ' raised quotas';" 2>/dev/null || echo "no revocation or quota tables")
+        log "weekly backup: $backup ($(stat -c %s "$backup" | awk '{printf "%dMB", $1/1024/1024}'), rows of ${excluded[*]} excluded; kept $kept)"
     fi
     # Keep the newest 2 backups. Not `ls | tail | while`: with pipefail an
     # ls that matches nothing fails the pipeline, and set -e then ended the

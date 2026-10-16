@@ -2,7 +2,6 @@ package aghub
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,38 +16,40 @@ import (
 	"github.com/ANetResearch/ANetHub/internal/federation"
 )
 
-// Federation of A2A cards: GET /fed/v2/cards (A2A-DESIGN §10.6).
+// Federation of A2A cards: GET /fed/v3/cards (A2A-DESIGN §10.6; core
+// §2.12.2).
 //
 // Publishing side: the stream serves, in fed_seq order, the A2A cards of
 // agents registered here that passed admission (a2acard.go), are still
 // listed (verified_at set) and opted into federation (visibility
-// federated or public), each with the agent's KEL and encryption key set;
-// and a withdrawal for every card this hub stopped publishing. A
+// federated or public), each with the agent's KEL, encryption key set and
+// the witness notice of its KEL's tip when this hub holds one; and a
+// withdrawal for every card this hub stopped publishing. A
 // withdrawal is a row of a2a_card_withdrawal, written when the agent
 // leaves, narrows its visibility, or its card stops verifying against its
 // KEL. agent_a2a_card and a2a_card_withdrawal share one fed_seq sequence
 // (nextA2AFedSeq), so one cursor orders both.
 //
-// The same invariant as v1 (card.go) keeps the stream truthful: a card
-// becomes publishable again only with a new fed_seq, above any withdrawal
-// of it, so a peer reading in order ends with the card. The withdrawal is
-// then deleted, because the card entry supersedes it for every peer
-// whatever its cursor.
+// One invariant keeps the stream truthful: a card becomes publishable
+// again only with a new fed_seq, above any withdrawal of it, so a peer
+// reading in order ends with the card. The withdrawal is then deleted,
+// because the card entry supersedes it for every peer whatever its cursor.
 //
 // Receiving side: fed_a2a_card holds the cards learned from peers, kept
-// apart from the local registry like fed_card. Admission is the local
-// admission (verifyA2ACardFor, a2acard.CheckHighWater) with the entry's
-// KEL as the resolver, after the KEL extension rule of §3.8. A withdrawal
+// apart from the local registry. Admission is the local admission
+// (verifyA2ACardFor, a2acard.CheckHighWater, the refusal of a card with
+// prices) with the entry's KEL as the resolver, after the KEL extension
+// rule of §3.8. A withdrawal
 // does not delete the row: it delists it and keeps the high-water mark and
 // the KEL, so that the peer that withdrew a card cannot then republish an
 // older one, or one over a shorter KEL, as though it were new.
 
-// Why a card stopped being published, beyond the two reasons card.go has.
+// Why a card stopped being published, beyond the two reasons of fedstream.go.
 const withdrawDelisted = "card-no-longer-verifies"
 
-// migrateFedA2ACard creates the tables of the A2A card stream.
-func (s *Store) migrateFedA2ACard() error {
-	for _, q := range []string{
+// fedA2ACardSchema is the tables of the A2A card stream.
+func fedA2ACardSchema() []string {
+	return []string{
 		// Cards this hub stopped publishing, one row per agent, on the
 		// agent_a2a_card fed_seq sequence.
 		`CREATE TABLE IF NOT EXISTS a2a_card_withdrawal (
@@ -62,8 +63,9 @@ func (s *Store) migrateFedA2ACard() error {
 		// the peer that taught it; the row is then the high-water mark
 		// and the KEL, and is not listed. home is where the agent lives:
 		// the card's relay interface when it names one, else the entry's
-		// home. name and caps are the card's name and skill ids, for
-		// /agents.
+		// home. notice is the witness notice the entry carried for the
+		// KEL's tip, if any. name and caps are the card's name and skill
+		// ids, for /agents.
 		`CREATE TABLE IF NOT EXISTS fed_a2a_card (
 		   aid TEXT PRIMARY KEY,
 		   seq INTEGER NOT NULL,
@@ -71,6 +73,7 @@ func (s *Store) migrateFedA2ACard() error {
 		   card BLOB NOT NULL,
 		   kel BLOB NOT NULL,
 		   keys BLOB,
+		   notice BLOB,
 		   home TEXT NOT NULL,
 		   peer_aid TEXT NOT NULL,
 		   name TEXT NOT NULL DEFAULT '',
@@ -91,24 +94,21 @@ func (s *Store) migrateFedA2ACard() error {
 		   PRIMARY KEY (aid, tag)
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_fed_a2a_tag ON fed_a2a_tag(tag)`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate federated a2a card: %w", err)
-		}
 	}
-	return nil
 }
 
 // ---- publishing ----
 
 // FedA2ACard is one entry of the A2A card stream as the store serves it.
 // Card is the agent's card bytes, or for FormatWithdrawal the withdrawal
-// (fedWithdrawal without a card); KEL and Keys are empty on a withdrawal.
+// (fedWithdrawal without a card); KEL, Keys and Notice are empty on a
+// withdrawal. Notice is the witness notice (NoticeWire) of the KEL's tip.
 type FedA2ACard struct {
 	Format string
 	Card   json.RawMessage
 	KEL    []byte
 	Keys   []byte
+	Notice []byte
 	Home   string
 	FedSeq int64
 }
@@ -116,8 +116,9 @@ type FedA2ACard struct {
 // A2ACardsSince serves the A2A card stream after cursor: at most limit
 // entries, and the cursor to ask after next.
 //
-// One hop, as CardsSince: only cards registered here, never cards learned
-// from a peer.
+// One hop (K208 §5.2): only cards registered here, never cards learned
+// from a peer. A directory that forwarded what it heard would let one
+// hub's policy decision propagate as everyone's.
 func (s *Store) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACard, int64, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -139,6 +140,7 @@ func (s *Store) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACar
 	}
 	defer rows.Close()
 	out := []FedA2ACard{}
+	var aids []string
 	next := cursor
 	for rows.Next() {
 		var kind int
@@ -159,11 +161,27 @@ func (s *Store) A2ACardsSince(cursor int64, limit int, home string) ([]FedA2ACar
 		}
 		out = append(out, FedA2ACard{Format: federation.FormatA2ACard, Card: json.RawMessage(card),
 			KEL: kel, Keys: keys, Home: home, FedSeq: seq})
+		aids = append(aids, aid)
 	}
-	return out, next, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, cursor, err
+	}
+	rows.Close()
+	// The witness notice of each card's KEL tip, the one the agent's
+	// directory entry carries (directory.go), read once the stream's rows
+	// are done with.
+	for i, j := 0, 0; i < len(out); i++ {
+		if out[i].Format != federation.FormatA2ACard {
+			continue
+		}
+		n, err := s.dirNoticeOf(s.db, aids[j])
+		if err != nil {
+			return nil, cursor, err
+		}
+		out[i].Notice, j = n, j+1
+	}
+	return out, next, nil
 }
-
-// cardStore is satisfied by *sql.DB and *sql.Tx (card.go).
 
 // withdrawA2ACard records that this hub stopped publishing aid's A2A card,
 // at the head of the stream. Called only for an agent whose visibility
@@ -264,9 +282,9 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 	default:
 		return fmt.Errorf("federated A2A card entry in unknown format %q", e.Format)
 	}
-	// A peer's limits are not ours (as for AdmitFedCard): nothing larger
-	// than a registration here could carry is decoded or stored. The key
-	// set is advisory and is dropped; the card is refused.
+	// A peer's limits are not ours: nothing larger than a registration
+	// here could carry is decoded or stored. The key set is advisory and is
+	// dropped; the card is refused.
 	if len(e.KEL) > maxRegisterBody {
 		return fmt.Errorf("federated A2A card refused: kel is %d bytes, at most %d are accepted",
 			len(e.KEL), maxRegisterBody)
@@ -304,8 +322,10 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 		return err
 	}
 	defer tx.Rollback()
-	// An agent registered HERE speaks for itself, as for AdmitFedCard;
-	// and the refusal is for now, so the sync holds its cursor.
+	// An agent registered HERE speaks for itself: a peer's copy must never
+	// overwrite it, or a peer could redirect our own agents' work to
+	// itself by claiming to be their home. The refusal is for now (the
+	// agent may leave), so the sync holds its cursor.
 	var local int
 	if err := tx.QueryRow(`SELECT COUNT(1) FROM agent WHERE aid=?`, aid).Scan(&local); err != nil {
 		return err
@@ -354,15 +374,16 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 	// a relisted card starts from the one its entry carries. On the same
 	// statement in other bytes (re-signed under a rotated key) the new
 	// bytes replace the stored ones, which may no longer verify.
-	keys := fedKeysToStore(aid, b64(e.Keys), storedKeys, kel)
+	keys := fedKeysToStore(aid, e.Keys, storedKeys, kel)
 	card := e.Card
 	if _, err := tx.Exec(
-		`INSERT INTO fed_a2a_card(aid, seq, payload_hash, card, kel, keys, home, peer_aid, name, caps, search, verified_at, stored_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO fed_a2a_card(aid, seq, payload_hash, card, kel, keys, notice, home, peer_aid, name, caps, search, verified_at, stored_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(aid) DO UPDATE SET seq=excluded.seq, payload_hash=excluded.payload_hash, card=excluded.card,
-		   kel=excluded.kel, keys=excluded.keys, home=excluded.home, peer_aid=excluded.peer_aid, name=excluded.name,
-		   caps=excluded.caps, search=excluded.search, verified_at=excluded.verified_at, stored_at=excluded.stored_at`,
-		aid, v.Seq, v.PayloadHash[:], []byte(card), e.KEL, keys, home, peerAID, v.Name, string(caps),
+		   kel=excluded.kel, keys=excluded.keys, notice=excluded.notice, home=excluded.home, peer_aid=excluded.peer_aid,
+		   name=excluded.name, caps=excluded.caps, search=excluded.search, verified_at=excluded.verified_at,
+		   stored_at=excluded.stored_at`,
+		aid, v.Seq, v.PayloadHash[:], []byte(card), e.KEL, keys, fedNoticeToStore(states[len(states)-1], e.Notice), home, peerAID, v.Name, string(caps),
 		cardSearchText(card, v), verifiedStamp(now), nowStamp()); err != nil {
 		return err
 	}
@@ -373,9 +394,11 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 }
 
 // retireFedA2ACard applies a withdrawal from peerAID: the card it taught is
-// delisted, its key set and index rows removed, and the high-water mark
-// and KEL kept. Scoped to the peer that taught the card, as
-// retireFedCard: a hub may retract what it published and nothing else.
+// delisted, its key set, notice and index rows removed, and the high-water mark
+// and KEL kept. Scoped to the peer that taught the card: a hub may retract
+// what it published and nothing else, so no peer can clear another peer's
+// agents out of this directory, and a withdrawal can never reach the local
+// registry.
 func (s *Store) retireFedA2ACard(peerAID string, raw []byte) error {
 	var w fedWithdrawal
 	if err := json.Unmarshal(raw, &w); err != nil || w.Action != withdrawAction || w.AgentID == "" {
@@ -388,7 +411,7 @@ func (s *Store) retireFedA2ACard(peerAID string, raw []byte) error {
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.Exec(`UPDATE fed_a2a_card SET verified_at=NULL, keys=NULL, stored_at=?
+	res, err := tx.Exec(`UPDATE fed_a2a_card SET verified_at=NULL, keys=NULL, notice=NULL, stored_at=?
 	                      WHERE aid=? AND peer_aid=? AND verified_at IS NOT NULL`,
 		nowStamp(), w.AgentID, peerAID)
 	if err != nil {
@@ -491,11 +514,40 @@ func hubKey(s string) string {
 	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.EscapedPath(), "/")
 }
 
-func b64(b []byte) string {
-	if len(b) == 0 {
+// fedNoticeToStore is the witness notice a peer-learned card's row keeps:
+// the entry's, when it decodes as a notice about the tip of the key history
+// the entry carries (tip, the last state it replays to; identity.DecodeNotice)
+// and is no larger than a notice is; else none. It is advisory, like the key
+// set: a reader verifies it against the KEL itself (sealed-sender SSR-W22),
+// so this hub only keeps out what cannot be one. The row's key history and
+// notice are written together, so the notice a row keeps states its tip and
+// the listings serve it without decoding the history again.
+func fedNoticeToStore(tip identity.KeyState, notice []byte) any {
+	if len(notice) == 0 || len(notice) > maxFedNotice {
+		return nil
+	}
+	body, _, err := identity.DecodeNotice(notice)
+	if err != nil || body.AID != tip.AID || body.Seq != tip.KeyStateSeq || body.Head != tip.LastEventID {
+		return nil
+	}
+	return notice
+}
+
+// maxFedNotice bounds a notice a peer's card stream carries; a notice is a
+// few hundred bytes.
+const maxFedNotice = 4 << 10
+
+// HomeHubOf is where an agent this hub knows only from a peer actually
+// banks, or empty if this hub holds no such card.
+//
+// Published so a caller holding an AID can be told where to ask. This hub
+// does not proxy the question.
+func (s *Store) HomeHubOf(aid string) string {
+	var home string
+	if err := s.db.QueryRow(`SELECT home FROM fed_a2a_card WHERE aid=? AND verified_at IS NOT NULL`, aid).Scan(&home); err != nil {
 		return ""
 	}
-	return base64.StdEncoding.EncodeToString(b)
+	return home
 }
 
 // FedA2ACardKeys returns the key set and KEL of a listed A2A card learned
@@ -509,9 +561,13 @@ func (s *Store) FedA2ACardKeys(aid string) (keyset, kel []byte, err error) {
 }
 
 // federatedA2AAgents is the /agents view of the listed A2A cards learned
-// from peers: the card's name and skill ids, and its home.
+// from peers: the card's name and skill ids, its home, and the key history,
+// key set and witness notice the card arrived with (sealed-sender SSR-H18).
+// A card that came without a key set is not listed, as a local agent
+// without one is not.
 func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
-	rows, err := s.db.Query(`SELECT aid, name, caps, home FROM fed_a2a_card WHERE verified_at IS NOT NULL`)
+	rows, err := s.db.Query(`SELECT aid, name, caps, home, kel, keys, notice FROM fed_a2a_card
+	    WHERE verified_at IS NOT NULL AND keys IS NOT NULL AND length(keys) > 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +575,8 @@ func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
 	var out []AgentView
 	for rows.Next() {
 		var aid, name, capsJSON, home string
-		if err := rows.Scan(&aid, &name, &capsJSON, &home); err != nil {
+		var kel, keys, notice []byte
+		if err := rows.Scan(&aid, &name, &capsJSON, &home, &kel, &keys, &notice); err != nil {
 			return nil, err
 		}
 		var caps []string
@@ -529,7 +586,8 @@ func (s *Store) federatedA2AAgents(capFilter string) ([]AgentView, error) {
 		if capFilter != "" && !capsServe(caps, capFilter) {
 			continue
 		}
-		out = append(out, AgentView{AID: aid, Name: name, Caps: caps, Listed: len(caps) > 0, HomeHub: home})
+		out = append(out, AgentView{AID: aid, Name: name, Caps: caps, Listed: len(caps) > 0, HomeHub: home,
+			KEL: b64url(kel), Keys: b64url(keys), KeyStateNotice: b64url(notice)})
 	}
 	return out, rows.Err()
 }
@@ -545,7 +603,7 @@ func (d FedDirectory) A2ACardsSince(cursor int64, limit int, home string) ([]fed
 	out := make([]federation.FedA2ACardView, 0, len(cards))
 	for _, c := range cards {
 		out = append(out, federation.FedA2ACardView{Format: c.Format, Card: []byte(c.Card), KEL: c.KEL,
-			Keys: c.Keys, Home: c.Home, FedSeq: c.FedSeq})
+			Keys: c.Keys, Notice: c.Notice, Home: c.Home, FedSeq: c.FedSeq})
 	}
 	return out, next, nil
 }
@@ -553,5 +611,5 @@ func (d FedDirectory) A2ACardsSince(cursor int64, limit int, home string) ([]fed
 // AdmitFedA2ACard implements federation.Directory.
 func (d FedDirectory) AdmitFedA2ACard(peerAID string, e federation.FedA2ACardView) error {
 	return d.S.AdmitFedA2ACard(peerAID, FedA2ACard{Format: e.Format, Card: json.RawMessage(e.Card),
-		KEL: e.KEL, Keys: e.Keys, Home: e.Home, FedSeq: e.FedSeq})
+		KEL: e.KEL, Keys: e.Keys, Notice: e.Notice, Home: e.Home, FedSeq: e.FedSeq})
 }

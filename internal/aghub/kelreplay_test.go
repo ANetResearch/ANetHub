@@ -8,19 +8,19 @@ package aghub_test
 // agent with a KEL at the cap and carrying a signature of zeros cost the
 // hub the whole replay (some 40 ms, twenty-odd times a one-event agent's)
 // and was answered 401; so did /x402/verify, /reviews and the taskboard
-// challenge. The process now replays each KEL once (identity.ReplayCache,
+// challenge. (/reviews is signed by its uploader since evidence v2; the
+// provider's KEL it checks the receipt against is still one the request
+// names.) The process now replays each KEL once (identity.ReplayCache,
 // installed by Open), and a signature is checked against the key the KEL
 // names before the KEL is replayed (kelreplay.go).
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"net/http"
 	"strconv"
 	"testing"
-	"time"
 
-	"github.com/ANetResearch/ANetCore/anetcid"
-	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
@@ -73,7 +73,7 @@ func TestABadSignatureDoesNotReplayTheKELItNames(t *testing.T) {
 	hub := hubAIDOf(t, srv)
 	long := bigKELController(t, seal.MaxKELBytes/2)
 	long2 := bigKELController(t, seal.MaxKELBytes/2)
-	payee, err := identity.Incept()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,57 +118,45 @@ func TestABadSignatureDoesNotReplayTheKELItNames(t *testing.T) {
 		}
 	})
 
+	// The receipt is checked against the provider's KEL (long) and the
+	// review against the receipt's one-time key; the upload is signed by
+	// the requester (long2), whose KEL is replayed to check that signature
+	// whatever the body. A bad signature on either object replays nothing
+	// more than an upload refused before either is looked at.
 	t.Run("review upload", func(t *testing.T) {
-		reqCID, _ := anetcid.Sum([]byte("request"))
-		resCID, _ := anetcid.Sum([]byte("result"))
-		for i, bad := range []string{"receipt", "review"} {
-			ix := "ix-bad-" + strconv.Itoa(i)
-			rc := &evidence.Receipt{InteractionID: ix, RequesterAID: long2.AID(), ProviderAID: long.AID(),
-				RequestCID: reqCID, ResultCID: resCID, CompletedAt: 1000}
-			if err := rc.Sign(long); err != nil {
-				t.Fatal(err)
-			}
-			rcid, _ := rc.CID()
-			rv := &evidence.Review{InteractionID: ix, SubjectAID: long.AID(), ReviewerAID: long2.AID(),
-				Rating: 5, ReceiptCID: rcid, CreatedAt: 2000}
-			if err := rv.Sign(long2); err != nil {
-				t.Fatal(err)
-			}
-			if bad == "receipt" {
-				rc.Envelope.Sig = flipped(rc.Envelope.Sig)
-			} else {
-				rv.Envelope.Sig = flipped(rv.Envelope.Sig)
-			}
-			rcB, _ := rc.Marshal()
-			rvB, _ := rv.Marshal()
+		upload := func(k *aghub.ReviewKit, body map[string]string) (int, []byte, uint64) {
 			before := replays(counter)
-			code, b := post(t, srv.URL+"/reviews", map[string]string{
-				"receipt": base64.StdEncoding.EncodeToString(rcB), "review": base64.StdEncoding.EncodeToString(rvB)})
+			code, b := signedDo(t, srv, k.Requester, relayauth.ActionReview, http.MethodPost, "/reviews", body)
+			return code, b, replays(counter) - before
+		}
+		k := aghub.NewReviewKitForTest(t, long, long2, "ix-control", 5)
+		control := k.Body(t)
+		control["receipt"] = "AAAA" // not CBOR: refused at step 3
+		code, b, base := upload(k, control)
+		if code != http.StatusBadRequest {
+			t.Fatalf("the control upload: %d %s", code, b)
+		}
+		for i, bad := range []string{"receipt", "review"} {
+			k := aghub.NewReviewKitForTest(t, long, long2, "ix-bad-"+strconv.Itoa(i), 5)
+			if bad == "review" {
+				_, k.ReviewSignedBy, _ = ed25519.GenerateKey(nil)
+			}
+			body := k.Body(t)
+			if bad == "receipt" {
+				rcB, _ := k.Wires(t)
+				rcB[len(rcB)-1] ^= 1 // the last byte of the provider's signature
+				body["receipt"] = base64.RawURLEncoding.EncodeToString(rcB)
+			}
+			code, b, n := upload(k, body)
 			if code != http.StatusBadRequest {
 				t.Fatalf("a review whose %s signature is bad: %d %s", bad, code, b)
 			}
-			if n := replays(counter) - before; n != 0 {
-				t.Fatalf("a review whose %s signature is bad replayed %d KELs", bad, n)
+			if n != base {
+				t.Fatalf("a review whose %s signature is bad replayed %d KELs, an upload refused at once %d", bad, n, base)
 			}
 		}
 	})
 
-	t.Run("taskboard challenge", func(t *testing.T) {
-		ts := uint64(time.Now().UnixMilli())
-		sig, seq := long.Sign(relayauth.Preimage("task.create", long.AID(), ts))
-		before := replays(counter)
-		if err := store.VerifyAgentChallenge("task.create", long.AID(), ts, seq,
-			base64.StdEncoding.EncodeToString(flipped(sig))); err == nil {
-			t.Fatal("a challenge with a bad signature verified")
-		}
-		if n := replays(counter) - before; n != 0 {
-			t.Fatalf("a challenge with a bad signature replayed %d KELs", n)
-		}
-		if err := store.VerifyAgentChallenge("task.create", long.AID(), ts, seq,
-			base64.StdEncoding.EncodeToString(sig)); err != nil {
-			t.Fatalf("a good challenge: %v", err)
-		}
-	})
 }
 
 // A process with a hub store replays each KEL once: Open installs a replay

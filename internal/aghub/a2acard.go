@@ -47,32 +47,85 @@ const (
 // hub lists only cards that verified (A2A-DESIGN §10.5).
 const CardVerificationOK = "ok"
 
+// CardErrorPriceInPublicCard is the card_error of a public card refused for
+// carrying prices (with card_status invalid).
+const CardErrorPriceInPublicCard = "price_in_public_card"
+
+// ErrPriceInPublicCard refuses an A2A card that carries a price extension.
+// Its text is CardErrorPriceInPublicCard, which /register reports as the
+// card_error.
+var ErrPriceInPublicCard = errors.New(CardErrorPriceInPublicCard)
+
+// The price extensions a public card must not carry.
+//
+// Prices are not public: a provider states them in the extended card it
+// signs and sends end to end to the requester that asks, and nowhere else.
+// A public card is stored and served by hubs and copied by every peer that
+// federates it, so a price in it is a price published to everyone, which
+// is what moving prices into the extended card set out to end. The hub
+// refuses both forms a daemon has written: the v0.2 public price list, and
+// the extended card's own price extension put on the public card.
+const (
+	extPricingV1URI = "https://agentnetwork.org.cn/a2a/ext/anet-pricing/v1"
+	extPriceV1URI   = "https://agentnetwork.org.cn/a2a/ext/anet-price/v1"
+)
+
+// carriesPrices reports whether a card's capabilities.extensions names a
+// price extension. The card has passed a2acard.Verify, which reads it as
+// strict I-JSON; the members are read here by their exact names, as Verify
+// reads them, so a member spelled in another case is not mistaken for one.
+func carriesPrices(card []byte) bool {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(card, &top) != nil {
+		return false
+	}
+	var caps map[string]json.RawMessage
+	if json.Unmarshal(top["capabilities"], &caps) != nil {
+		return false
+	}
+	var exts []json.RawMessage
+	if json.Unmarshal(caps["extensions"], &exts) != nil {
+		return false
+	}
+	for _, raw := range exts {
+		var e map[string]json.RawMessage
+		var uri string
+		if json.Unmarshal(raw, &e) != nil || json.Unmarshal(e["uri"], &uri) != nil {
+			continue
+		}
+		if uri == extPricingV1URI || uri == extPriceV1URI {
+			return true
+		}
+	}
+	return false
+}
+
 // maxA2ACardBytes bounds an A2A card (A2A-DESIGN §10.3); a2acard.Verify
 // refuses a larger one before parsing it.
 const maxA2ACardBytes = a2acard.MaxCardBytes
 
-// migrateA2ACard brings agent_a2a_card to the admission schema and adds
-// the skill and tag indexes.
+// a2aCardSchema is the A2A card an agent submitted at registration, stored
+// as the raw bytes it sent once it passed admission (A2A-DESIGN §10.3), and
+// the skill and tag indexes of the admitted cards.
 //
 // seq and payload_hash are the high-water mark (a2acard.Mark). verified_at
 // is when the card last verified against the agent's KEL; NULL means the
-// row is not listed, either because the KEL moved past the key that signed
-// it or because it predates admission. search is the lowercased text the
-// registry's q parameter matches. fed_seq orders the rows for the
-// federation stream (§10.6), like agent_card.fed_seq.
-func (s *Store) migrateA2ACard() error {
-	for _, q := range []string{
-		`ALTER TABLE agent_a2a_card ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN payload_hash BLOB`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN verified_at TEXT`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN search TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agent_a2a_card ADD COLUMN fed_seq INTEGER NOT NULL DEFAULT 0`,
-	} {
-		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("hub: migrate a2a card: %w", err)
-		}
-	}
-	for _, q := range []string{
+// row is not listed, because the KEL moved past the key that signed it.
+// search is the lowercased text the registry's q parameter matches. fed_seq
+// orders the rows for the federation stream (§10.6).
+func a2aCardSchema() []string {
+	return []string{
+		`CREATE TABLE IF NOT EXISTS agent_a2a_card (
+		   aid TEXT PRIMARY KEY,
+		   card BLOB NOT NULL,
+		   stored_at TEXT NOT NULL,
+		   seq INTEGER NOT NULL DEFAULT 0,
+		   payload_hash BLOB,
+		   verified_at TEXT,
+		   search TEXT NOT NULL DEFAULT '',
+		   fed_seq INTEGER NOT NULL DEFAULT 0
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_a2a_card_fedseq ON agent_a2a_card(fed_seq)`,
 		// One row per skill of an admitted card. Written only by
 		// admission, so a skill id here is one the agent signed.
 		`CREATE TABLE IF NOT EXISTS agent_skill (
@@ -89,86 +142,7 @@ func (s *Store) migrateA2ACard() error {
 		   PRIMARY KEY (aid, tag)
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_tag ON agent_tag(tag)`,
-		`CREATE INDEX IF NOT EXISTS idx_a2a_card_fedseq ON agent_a2a_card(fed_seq)`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate a2a card: %w", err)
-		}
 	}
-	// The federation stream's withdrawals share fed_seq with the cards,
-	// so they exist before any card is stored (fed_a2acard.go).
-	if err := s.migrateFedA2ACard(); err != nil {
-		return err
-	}
-	if err := s.migrateA2AFedSeqHead(); err != nil {
-		return err
-	}
-	return s.readmitLegacyA2ACards()
-}
-
-// readmitLegacyA2ACards verifies the rows stored before admission existed
-// (no payload_hash): a card that verifies against its agent's stored KEL is
-// admitted, anything else is deleted. Such rows exist only in development
-// databases, since no wire-2 hub stored cards unverified in production.
-func (s *Store) readmitLegacyA2ACards() error {
-	rows, err := s.db.Query(
-		`SELECT c.aid, c.card, a.kel FROM agent_a2a_card c LEFT JOIN agent a ON a.aid = c.aid
-		  WHERE c.payload_hash IS NULL`)
-	if err != nil {
-		return fmt.Errorf("hub: migrate a2a card: %w", err)
-	}
-	type legacy struct {
-		aid       string
-		card, kel []byte
-	}
-	var pending []legacy
-	for rows.Next() {
-		var l legacy
-		if err := rows.Scan(&l.aid, &l.card, &l.kel); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, l)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	now := time.Now()
-	verify := func(aid string, card, kelBytes []byte) *a2acard.Verified {
-		if len(kelBytes) == 0 {
-			return nil // no agent row: nobody to speak for
-		}
-		kel, err := identity.UnmarshalKEL(kelBytes)
-		if err != nil {
-			return nil
-		}
-		v, err := verifyA2ACardFor(aid, card, kel, now)
-		if err != nil {
-			return nil
-		}
-		return v
-	}
-	for _, l := range pending {
-		v := verify(l.aid, l.card, l.kel)
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		if v == nil {
-			_, err = tx.Exec(`DELETE FROM agent_a2a_card WHERE aid=?`, l.aid)
-		} else {
-			err = storeAdmittedA2ACard(tx, l.aid, l.card, v, now)
-		}
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("hub: migrate a2a card of %s: %w", l.aid, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // registrantResolver is the a2acard.Resolver for a card submitted by aid:
@@ -196,7 +170,8 @@ func (e *notTheRegistrant) Error() string {
 
 // verifyA2ACardFor is the admission check of an A2A card that speaks for
 // aid, whose KEL is kel: a2acard.Verify with a resolver that answers only
-// for aid, and the capability index bounds on the card's skill ids. It is
+// for aid, the capability index bounds on the card's skill ids, and no
+// price extension (ErrPriceInPublicCard). It is
 // the check for a card an agent registers here (AdmitA2ACard, the
 // re-verification after a KEL change) and for one a peer hub federates
 // (AdmitFedA2ACard), where aid is the AID the entry's KEL replays to. The
@@ -222,6 +197,11 @@ func verifyA2ACardFor(aid string, raw []byte, kel []identity.SignedEvent, now ti
 	// bounds apply to them as to ids declared at registration.
 	if err := validateCaps(skillIDs(v)); err != nil {
 		return nil, fmt.Errorf("skill ids: %w", err)
+	}
+	// After the signature: a card that does not verify is refused for
+	// that, whatever it says about prices.
+	if carriesPrices(raw) {
+		return nil, ErrPriceInPublicCard
 	}
 	return v, nil
 }
@@ -321,6 +301,10 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 			if err := clearA2AWithdrawal(tx, aid); err != nil {
 				return CardStatusInvalid, "not stored: " + err.Error()
 			}
+			// A delisted card listed again is back in the directory entry.
+			if err := s.refreshDirTx(tx, aid); err != nil {
+				return CardStatusInvalid, "not stored: " + err.Error()
+			}
 			if err := tx.Commit(); err != nil {
 				return CardStatusInvalid, "not stored: " + err.Error()
 			}
@@ -331,6 +315,10 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 		// the new bytes replace it. Same rule as keys.go.
 	}
 	if err := storeAdmittedA2ACard(tx, aid, raw, v, now); err != nil {
+		return CardStatusInvalid, "not stored: " + err.Error()
+	}
+	// The directory entry carries the card (sealed-sender SSR-H17).
+	if err := s.refreshDirTx(tx, aid); err != nil {
 		return CardStatusInvalid, "not stored: " + err.Error()
 	}
 	if err := tx.Commit(); err != nil {
@@ -400,6 +388,10 @@ func (s *Store) recheckA2ACard(aid string, kel []identity.SignedEvent, now time.
 				return err
 			}
 		}
+		// The directory entry no longer carries it (sealed-sender SSR-H17).
+		if err := s.refreshDirTx(tx, aid); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	// Verified again: verifiedAt says so (registry.go), as it does after
@@ -428,8 +420,8 @@ func a2aMark(tx *sql.Tx, aid string) (*a2acard.Mark, []byte, error) {
 		return nil, nil, err
 	}
 	if len(hash) != 32 {
-		// A row with no mark is not a card this hub admitted (migration
-		// readmits or deletes such rows); the next card replaces it.
+		// A row with no mark is not a card this hub admitted (every
+		// admitted card is stored with its mark); the next card replaces it.
 		return nil, raw, nil
 	}
 	m := &a2acard.Mark{Seq: seq}

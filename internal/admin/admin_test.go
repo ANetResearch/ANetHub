@@ -3,7 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
-	"database/sql"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -38,8 +38,8 @@ func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 	}
 	defer hs.Close()
 
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := identitytest.Hub()
+	req, _ := identitytest.Hub()
 	provKEL, _ := identity.MarshalKEL(prov.KEL())
 	reqKEL, _ := identity.MarshalKEL(req.KEL())
 	if err := hs.PutAgent(prov.AID(), "测试供给方", []string{"echo", "translate"}, provKEL); err != nil {
@@ -51,17 +51,23 @@ func buildHubDB(t *testing.T) (dir string, providerAID, requesterAID string) {
 
 	// Since hub wire 2 the relay holds sealed envelopes only: the
 	// delegate, the reply and the result below are opaque to the hub and
-	// to this admin plane, which is the property these tests pin.
+	// to this admin plane, which is the property these tests pin. The hub
+	// queues an envelope only for a key its recipient publishes (the kid
+	// check), so both agents publish one.
+	kids := map[string][]byte{prov.AID(): publishTestKeys(t, hs, prov), req.AID(): publishTestKeys(t, hs, req)}
 	for i, to := range []string{prov.AID(), req.AID(), req.AID()} {
-		if _, err := hs.RelayEnqueue(to, sealedForTest(t, to, fmt.Sprintf("%s %d", testCanary, i))); err != nil {
+		if _, err := hs.QueueEnvelope(to, sealedForTest(t, to, kids[to], fmt.Sprintf("%s %d", testCanary, i))); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// One review, stored as the hub stores it: rating, comment and the
-	// receipt anchors, no content.
-	rv := &evidence.Review{InteractionID: "ix-admin-1", SubjectAID: prov.AID(), ReviewerAID: req.AID(),
-		Rating: 4, Comment: "fine", ReceiptCID: "bafy-receipt-admin-1", CreatedAt: 2000}
-	if err := hs.PutReview(rv, aghub.ReviewDetail{RequestCID: "bafy-req", ResultCID: "bafy-res", CompletedAt: 1000}); err != nil {
+	// One review, stored as the hub stores it (evidence v2): the subject,
+	// a tag in place of the reviewer, rating, comment, the receipt and
+	// days; no content and no reviewer. The objects are placeholders: the
+	// admin plane reads the row, not the evidence.
+	if err := hs.StoreReview(aghub.StoredReview{IXCommit: bytes.Repeat([]byte{0x1c}, 32), Subject: prov.AID(),
+		Tag: bytes.Repeat([]byte{0x7a}, 16), TagKeyID: 1, Rating: 4, Comment: "fine",
+		ReceiptCID: "bafy-receipt-admin-1", CompletedDay: 20000, CreatedDay: 20001, StoredDay: 20001},
+		[]byte{0xa0}, []byte{0xa0}, []byte{0xa0}); err != nil {
 		t.Fatal(err)
 	}
 	return dir, prov.AID(), req.AID()
@@ -86,14 +92,43 @@ func newTestServer(t *testing.T) (*Server, *Store, *Harvester, string, string) {
 	return srv, store, hv, provAID, reqAID
 }
 
-// sealedForTest is a structurally valid sealed envelope for "to" whose
-// ciphertext is the given text. A real one is encrypted; the point here
-// is that even a ciphertext holding plaintext bytes is not decoded or
-// copied by the admin plane.
-func sealedForTest(t *testing.T, to, ct string) []byte {
+// publishTestKeys stores a key set for c at hs and returns the kid of its
+// one key.
+func publishTestKeys(t *testing.T, hs *aghub.Store, c *identity.Controller) []byte {
+	t.Helper()
+	now := uint64(time.Now().UnixMilli())
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mbox, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := seal.SignEncKeySet(&seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: now,
+		Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: seal.Mbox{Epoch: 1, Pub: mbox}}, c.Sign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := signed.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hs.PublishKeys(c.AID(), raw, 0, c.KEL(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	return kp.Public.KID
+}
+
+// sealedForTest is a structurally valid sealed envelope for "to", sealed
+// to kid, whose ciphertext is the given text. A real one is encrypted; the
+// point here is that even a ciphertext holding plaintext bytes is not
+// decoded or copied by the admin plane.
+func sealedForTest(t *testing.T, to string, kid []byte, ct string) []byte {
 	t.Helper()
 	env := &seal.SealedEnvelope{V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct)}
+		KID: kid, Enc: bytes.Repeat([]byte{9}, 32), CT: []byte(ct),
+		Access: &seal.Access{Kind: seal.AccessKindSession}}
 	b, err := env.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -214,6 +249,9 @@ func TestOfficialAgentOperationsAreGone(t *testing.T) {
 		{"POST", "/admin/api/official/qa-official/acl"},
 		{"POST", "/admin/api/agents/did:anet:x/quota"},
 		{"GET", "/admin/api/tasks"},
+		// The restore path wrote an archived key history back into the
+		// registry (hub-payment-privacy PAY-O4).
+		{"POST", "/admin/api/deleted/did:anet:x/restore"},
 	} {
 		w, _ := doReq(t, h, rt.method, rt.path, "test-token", map[string]string{"op": "status"})
 		if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "no such admin API route") {
@@ -391,16 +429,41 @@ func TestDestructiveLimiter(t *testing.T) {
 	}
 }
 
-func TestDeleteArchivesAndLimits(t *testing.T) {
-	srv, store, _, provAID, _ := newTestServer(t)
+// A delete is recorded as whom, when and by whom, and nothing more: no row,
+// no key history, no profile text (hub-payment-privacy PAY-O4); and the
+// destructive-operation limit still applies.
+func TestDeleteRecordsWhoAndLimits(t *testing.T) {
+	srv, store, hv, provAID, _ := newTestServer(t)
 	h := srv.Handler()
-	// A single delete archives the full row (recoverable) and applies moderation.
 	if w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+provAID, "test-token", nil); w.Code != http.StatusOK {
 		t.Fatalf("delete: %d", w.Code)
 	}
 	var n int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM deleted_agent WHERE aid=?`, provAID).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("delete not archived: n=%d err=%v", n, err)
+		t.Fatalf("delete not recorded: n=%d err=%v", n, err)
+	}
+	var cols []string
+	rows, err := store.db.Query(`SELECT name FROM pragma_table_info('deleted_agent') ORDER BY cid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var c string
+		_ = rows.Scan(&c)
+		cols = append(cols, c)
+	}
+	rows.Close()
+	if strings.Join(cols, ",") != "aid,deleted_at,actor" {
+		t.Errorf("deleted_agent has the columns %v, want aid, deleted_at, actor", cols)
+	}
+	// What the delete wrote to admin.db names the agent and nothing it
+	// registered with.
+	_ = store.db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(new(int), new(int), new(int))
+	for _, f := range []string{"admin.db", "admin.db-wal"} {
+		b, _ := os.ReadFile(filepath.Join(filepath.Dir(hv.Root()), f))
+		if bytes.Contains(b, []byte("测试供给方")) {
+			t.Errorf("%s holds the deleted agent's name", f)
+		}
 	}
 	// Exhaust the limiter (5/min) → further deletes are throttled, not executed.
 	throttled := false
@@ -495,14 +558,13 @@ func TestEveryAPIRouteRefusesAnUnauthenticatedCall(t *testing.T) {
 		{"GET", "/admin/api/reviews"},
 		{"GET", "/admin/api/audit"},
 		{"GET", "/admin/api/deleted"},
-		{"POST", "/admin/api/deleted/" + provAID + "/restore"},
 	}
 	// The count is asserted so a route added without a line here fails
 	// loudly. A new route is the one most likely to be missing its auth
 	// wrapper, and a list that quietly falls behind covers everything
 	// except the thing that needs covering.
-	if len(routes) != 19 {
-		t.Fatalf("this check lists %d routes; the surface has 19. "+
+	if len(routes) != 18 {
+		t.Fatalf("this check lists %d routes; the surface has 18. "+
 			"A route missing from this list is a route nobody checks.", len(routes))
 	}
 	for i, rt := range routes {
@@ -522,47 +584,6 @@ func TestEveryAPIRouteRefusesAnUnauthenticatedCall(t *testing.T) {
 				t.Errorf("a wrong credential returned %d, want 401", w.Code)
 			}
 		})
-	}
-}
-
-// Deleting an agent archives it first, and the archive is enough to
-// restore from.
-//
-// A delete that cannot be undone is a delete an operator will hesitate to
-// use and will eventually use wrongly. The archive has to carry the KEL:
-// an agent restored without its key history is a row, not an identity,
-// and every receipt it ever signed stays uncheckable.
-func TestDeletingAnAgentIsReversible(t *testing.T) {
-	srv, store, _, provAID, _ := newTestServer(t)
-	h := srv.Handler()
-
-	if w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+provAID, "test-token", nil); w.Code != http.StatusOK {
-		t.Fatalf("delete: %d", w.Code)
-	}
-	// Gone from the registry.
-	_, out := doReq(t, h, "GET", "/admin/api/agents", "test-token", nil)
-	for _, a := range out["agents"].([]any) {
-		if m, ok := a.(map[string]any); ok && m["aid"] == provAID {
-			t.Error("the agent is still listed after being deleted")
-		}
-	}
-	// And archived, with its key history.
-	rows, err := store.DeletedAgents(10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var found string
-	for _, r := range rows {
-		if r.AID == provAID {
-			found = r.RowJSON
-		}
-	}
-	if found == "" {
-		t.Fatal("the delete was not archived — it cannot be undone")
-	}
-	if !strings.Contains(found, "kel") {
-		t.Error("the archive carries no key history; restoring it would " +
-			"produce a row, not an identity")
 	}
 }
 
@@ -639,53 +660,6 @@ func TestModerationIsRecorded(t *testing.T) {
 	}
 }
 
-// An archived delete can actually be undone, from the surface.
-//
-// The archive had a writer and no reader: "any delete is reversible" was
-// true of the bytes and false of the operator, who could only reverse one
-// by opening the SQLite file by hand. A recovery path only an author can
-// walk is not a recovery path — and the moment it is needed is the moment
-// nobody wants to be reading source.
-func TestADeletedAgentCanBeRestored(t *testing.T) {
-	srv, _, _, provAID, _ := newTestServer(t)
-	h := srv.Handler()
-
-	if w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+provAID, "test-token", nil); w.Code != http.StatusOK {
-		t.Fatalf("delete: %d", w.Code)
-	}
-	// The operator can see what was removed.
-	w, out := doReq(t, h, "GET", "/admin/api/deleted", "test-token", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("list deleted: %d", w.Code)
-	}
-	list, _ := out["deleted"].([]any)
-	if len(list) == 0 {
-		t.Fatal("the archive lists nothing after a delete")
-	}
-
-	if w, _ := doReq(t, h, "POST", "/admin/api/deleted/"+provAID+"/restore",
-		"test-token", nil); w.Code != http.StatusOK {
-		t.Fatalf("restore: %d %s", w.Code, w.Body.String())
-	}
-	// Back in the registry.
-	_, out = doReq(t, h, "GET", "/admin/api/agents", "test-token", nil)
-	var back bool
-	for _, a := range out["agents"].([]any) {
-		if m, ok := a.(map[string]any); ok && m["aid"] == provAID {
-			back = true
-		}
-	}
-	if !back {
-		t.Error("the agent did not come back")
-	}
-	// And restoring one that was never archived says so rather than
-	// reporting success.
-	if w, _ := doReq(t, h, "POST", "/admin/api/deleted/did:anet:never/restore",
-		"test-token", nil); w.Code != http.StatusNotFound {
-		t.Errorf("restoring an unarchived agent returned %d, want 404", w.Code)
-	}
-}
-
 // The operator surface has to say which build is answering.
 //
 // It is a separate binary from the hub, and healthz reported only
@@ -722,8 +696,9 @@ func TestHealthzNamesTheBuild(t *testing.T) {
 }
 
 // The admin readers work against a hub.db created by the current aghub.Open
-// (no completed_task, no guest_quota, no review content) and report what
-// that store can state [C38].
+// and report what that store can state (hub-payment-privacy PAY-O5): reviews
+// received, listing by the registry's rule, the whole hub's mail backlog and
+// no per-agent one, no reviews written.
 func TestAdminReadersOfTheCurrentHubSchema(t *testing.T) {
 	hubDir, provAID, reqAID := buildHubDB(t)
 	hub, err := OpenHubDB(hubDir)
@@ -739,11 +714,11 @@ func TestAdminReadersOfTheCurrentHubSchema(t *testing.T) {
 	for _, a := range agents {
 		byAID[a.AID] = a
 	}
-	if p := byAID[provAID]; p.ReviewCount != 1 || p.MailboxBacklog != 1 {
-		t.Errorf("provider: reviews=%d backlog=%d, want 1/1", p.ReviewCount, p.MailboxBacklog)
+	if p := byAID[provAID]; p.ReviewCount != 1 || !p.Listed {
+		t.Errorf("provider: reviews=%d listed=%v, want 1, listed", p.ReviewCount, p.Listed)
 	}
-	if r := byAID[reqAID]; r.ReviewsWritten != 1 || r.MailboxBacklog != 2 {
-		t.Errorf("requester: written=%d backlog=%d, want 1/2", r.ReviewsWritten, r.MailboxBacklog)
+	if r := byAID[reqAID]; r.ReviewCount != 0 || r.Listed {
+		t.Errorf("requester: reviews=%d listed=%v, want 0, not listed (no capability)", r.ReviewCount, r.Listed)
 	}
 	tot, err := hub.Totals()
 	if err != nil {
@@ -759,86 +734,6 @@ func TestAdminReadersOfTheCurrentHubSchema(t *testing.T) {
 	raw, _ := json.Marshal(revs)
 	if len(revs) != 1 || strings.Contains(string(raw), `"goal"`) || strings.Contains(string(raw), `"deliverable"`) {
 		t.Errorf("recent reviews: %s", raw)
-	}
-}
-
-// oldAgentTable is agent as a hub created it before guest mode was
-// removed.
-const oldAgentTable = `CREATE TABLE agent (
-   aid TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', caps TEXT NOT NULL DEFAULT '[]',
-   summary TEXT NOT NULL DEFAULT '', readme TEXT NOT NULL DEFAULT '', pricing TEXT NOT NULL DEFAULT '',
-   guest_quota INTEGER NOT NULL DEFAULT 5, kel BLOB NOT NULL, registered_at TEXT NOT NULL,
-   visibility TEXT NOT NULL DEFAULT 'hub-local', last_seen_at TEXT)`
-
-// A backup written before guest mode was removed still has agent.guest_quota.
-// Restoring it into a hub store of the current schema adds its agents and
-// does not bring the column back ([C38]).
-func TestRestoringFromAnOldSchemaBackup(t *testing.T) {
-	bak := filepath.Join(t.TempDir(), "hub-backup-old.db")
-	db, err := sql.Open("sqlite", bak)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(oldAgentTable); err != nil {
-		t.Fatal(err)
-	}
-	var aids []string
-	for i := 0; i < 3; i++ {
-		c, _ := identity.Incept()
-		kel, _ := identity.MarshalKEL(c.KEL())
-		if _, err := db.Exec(`INSERT INTO agent(aid,name,caps,summary,readme,pricing,guest_quota,kel,registered_at)
-		     VALUES(?,?,?,?,?,?,?,?,?)`, c.AID(), fmt.Sprintf("old-%d", i), `["x.y"]`, "s", "", "",
-			5, kel, "2026-07-19T00:00:00Z"); err != nil {
-			t.Fatal(err)
-		}
-		aids = append(aids, c.AID())
-	}
-	db.Close()
-
-	hubDir, _, _ := buildHubDB(t) // current schema, two agents
-	before, after, err := RestoreAgentsFromBackup(hubDir, bak)
-	if err != nil {
-		t.Fatalf("restoring an old-schema backup: %v", err)
-	}
-	if before != 2 || after != 5 {
-		t.Errorf("before=%d after=%d, want 2 and 5", before, after)
-	}
-	hub, err := OpenHubDB(hubDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer hub.Close()
-	var n int
-	if err := hub.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('agent') WHERE name='guest_quota'`).Scan(&n); err != nil {
-		t.Fatal(err)
-	}
-	if n != 0 {
-		t.Error("the restore brought agent.guest_quota back")
-	}
-	agents, err := hub.AllAgents("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	have := map[string]bool{}
-	for _, a := range agents {
-		have[a.AID] = true
-	}
-	for _, aid := range aids {
-		if !have[aid] {
-			t.Errorf("%s was not restored", aid)
-		}
-	}
-	// An archived row written before the removal carries guest_quota too,
-	// and restores the same way.
-	c, _ := identity.Incept()
-	kel, _ := identity.MarshalKEL(c.KEL())
-	row, _ := json.Marshal(map[string]any{"aid": c.AID(), "name": "archived", "caps": "[]",
-		"guest_quota": 5, "kel_b64": encB64(kel), "registered_at": "2026-07-19T00:00:00Z"})
-	if err := hub.RestoreDeletedAgent(string(row)); err != nil {
-		t.Fatalf("restoring an old archive: %v", err)
-	}
-	if _, err := hub.Agent(c.AID()); err != nil {
-		t.Errorf("the old archive was not restored: %v", err)
 	}
 }
 

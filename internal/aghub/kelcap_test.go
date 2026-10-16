@@ -11,31 +11,36 @@ package aghub_test
 // JWKS is cached by the hash of the stored KEL (kelcap_internal_test.go).
 
 import (
-	"crypto/ed25519"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/seal"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
 
-// bigKELController builds a valid KEL (icp + drt events, all self-signed;
-// drt does not change the signing key) whose CoreDet encoding reaches at
-// least targetBytes. An attacker mints these offline: each event is one
-// cheap signature. Size is sampled every 16 events to keep the builder
-// linear rather than re-marshalling the whole KEL each step.
+// bigKELController builds a valid KEL (icp + rot events; the attacker holds
+// every key of its own identity) whose CoreDet encoding reaches at least
+// targetBytes. An attacker mints these offline: each event is one cheap
+// signature. Size is sampled every 16 events to keep the builder linear
+// rather than re-marshalling the whole KEL each step.
 func bigKELController(t *testing.T, targetBytes int) *identity.Controller {
 	t.Helper()
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	pub, _, _ := ed25519.GenerateKey(nil)
+	// One millisecond apart, from the rot that named its witness: a hub
+	// takes a new key event within 5 minutes of its clock (KEL R-9, R-10).
+	ts := c.KEL()[len(c.KEL())-1].Event.Timestamp
 	for {
 		for i := 0; i < 16; i++ {
-			if err := c.Delegate(pub, 1); err != nil {
+			ts++
+			if err := identitytest.Rotate(c, ts); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -60,8 +65,8 @@ func TestARegistrationWithAKELPastTheMessagePathCapIsRefused(t *testing.T) {
 	if len(kelB) <= seal.MaxKELBytes {
 		t.Fatalf("test did not build a KEL past the cap: %d bytes", len(kelB))
 	}
-	code, b := registerWithCard(t, srv, attacker, "big", nil, nil)
-	if code != http.StatusBadRequest || !strings.Contains(string(b), "kel too long") {
+	code, b := registerCode(t, srv, attacker, "big", nil)
+	if code != http.StatusBadRequest || !strings.Contains(string(b), `"kel_invalid"`) || !strings.Contains(string(b), "too long") {
 		t.Fatalf("register with a %d-event, %d-byte KEL: %d %s, want 400 kel too long",
 			len(attacker.KEL()), len(kelB), code, b)
 	}
@@ -71,7 +76,7 @@ func TestARegistrationWithAKELPastTheMessagePathCapIsRefused(t *testing.T) {
 
 	// Under the cap, a long KEL registers and its JWKS is served.
 	long := bigKELController(t, seal.MaxKELBytes/2)
-	registerLegacy(t, srv, long, "long", nil)
+	register(t, srv, long, "long", nil)
 	if code, b := getJSON(t, srv.URL+"/agents/"+long.AID()+"/jwks.json"); code != http.StatusOK {
 		t.Fatalf("JWKS of a KEL under the cap: %d %s", code, b)
 	}
@@ -89,7 +94,7 @@ func TestAKeyHistoryStoredBeforeTheCapIsNotServed(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := mintKeySet(t, legacy, uint64(time.Now().UnixMilli()))
-	if _, err := store.PublishKeys(legacy.AID(), raw, legacy.KEL(), time.Now()); err != nil {
+	if _, err := store.PublishKeys(legacy.AID(), raw, 0, legacy.KEL(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if code, b := getJSON(t, srv.URL+"/agents/"+legacy.AID()+"/jwks.json"); code != http.StatusNotFound {

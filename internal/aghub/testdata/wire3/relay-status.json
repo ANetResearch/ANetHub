@@ -1,0 +1,494 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /relay/status (core §2.12.2; p2p-receipts §2.4.3, §2.4.4, DLV-W-16, DLV-W-17, DLV-W-18, DLV-H-4, DLV-H-5): a sender's anonymous status check of 1 to 64 envelopes by the rid it was given and the handle of the confirmation, all queued at one hub (via_hub, absent for this one). Each item is queued while the mailbox holds the rid, else done with the stored dack, else unknown, in the order asked. Checked in this order: the client address's bucket (10 a second, 50 at once; 429 rate_limited) and no identity header (400 identity_headers_not_allowed), both before the body is read; the body at most 16 KiB (413 too_large); decoded strictly (400 bad_request); the items (400 bad_status_query). An envelope queued at a peer is asked of that peer, and a peer that does not answer is 502 home_unreachable with Retry-After, never unknown; a via_hub that is no peer is unknown.",
+  "setup": "relay_status",
+  "cases": [
+    {
+      "name": "queued",
+      "cite": "§2.4.3",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "body": {
+          "items": [
+            {
+              "state": "queued"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "done, with the dack",
+      "cite": "§2.4.3, DLV-H-4",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_done}",
+              "handle": "${h_done}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "items": [
+            {
+              "state": "done",
+              "dack": "${d_done}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "done is told by the handle",
+      "cite": "§2.4.3",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_unknown}",
+              "handle": "${h_done}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "items": [
+            {
+              "state": "done",
+              "dack": "${d_done}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "the right rid of a collected row with another handle",
+      "cite": "T17",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_done}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "items": [
+            {
+              "state": "unknown"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "three items, answered in order",
+      "cite": "core §2.12.2",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_unknown}",
+              "handle": "${h_unknown}"
+            },
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_done}"
+            },
+            {
+              "rid": "${rid_done}",
+              "handle": "${h_done}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "items": [
+            {
+              "state": "unknown"
+            },
+            {
+              "state": "queued"
+            },
+            {
+              "state": "done",
+              "dack": "${d_done}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "via this hub",
+      "cite": "DLV-W-18",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}",
+              "via_hub": "${hub}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "items": [
+            {
+              "state": "queued"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "via a hub that is not a peer",
+      "cite": "DLV-W-18",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_done}",
+              "via_hub": "${nobody_hub}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "items": [
+            {
+              "state": "unknown"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "via a peer that does not answer",
+      "cite": "DLV-W-18",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_done}",
+              "via_hub": "${peer}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 502,
+        "headers": {
+          "Retry-After": "10"
+        },
+        "body": {
+          "reason": "home_unreachable",
+          "error": "The recipient's hub did not answer; retry after the given seconds."
+        }
+      }
+    },
+    {
+      "name": "with an identity header",
+      "cite": "CORE-K15, DLV-W-17",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3",
+          "X-ANet-AID": "${hub}"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "identity_headers_not_allowed",
+          "error": "Status checks are anonymous: send them without X-ANet identity headers."
+        }
+      }
+    },
+    {
+      "name": "a body over 16 KiB",
+      "cite": "core §2.12.2, DLV-W-16",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "text": "${big}"
+      },
+      "response": {
+        "status": 413,
+        "body": {
+          "reason": "too_large",
+          "error": "A status check body is at most 16 KiB."
+        }
+      }
+    },
+    {
+      "name": "an item with an outcome",
+      "cite": "CORE-E7, CORE-K13",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}",
+              "state": "done"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_request",
+          "error": "The request body has the member \"items[0].state\", which this route does not take; remove it and send again."
+        }
+      }
+    },
+    {
+      "name": "no items",
+      "cite": "DLV-W-16",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": []
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_status_query",
+          "error": "A status check takes 1 to 64 items with 16-byte rid and handle, all for one hub."
+        }
+      }
+    },
+    {
+      "name": "a 15-byte rid",
+      "cite": "DLV-W-16",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_short}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_status_query",
+          "error": "A status check takes 1 to 64 items with 16-byte rid and handle, all for one hub."
+        }
+      }
+    },
+    {
+      "name": "a padded rid",
+      "cite": "DLV-W-16, CORE-E5",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_padded}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_status_query",
+          "error": "A status check takes 1 to 64 items with 16-byte rid and handle, all for one hub."
+        }
+      }
+    },
+    {
+      "name": "no handle",
+      "cite": "DLV-W-16",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_status_query",
+          "error": "A status check takes 1 to 64 items with 16-byte rid and handle, all for one hub."
+        }
+      }
+    },
+    {
+      "name": "two hubs in one check",
+      "cite": "DLV-W-16",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            },
+            {
+              "rid": "${rid_done}",
+              "handle": "${h_done}",
+              "via_hub": "${hub}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_status_query",
+          "error": "A status check takes 1 to 64 items with 16-byte rid and handle, all for one hub."
+        }
+      }
+    },
+    {
+      "name": "from an address past its bucket",
+      "cite": "DLV-H-5",
+      "request": {
+        "method": "POST",
+        "path": "/relay/status",
+        "headers": {
+          "X-ANet-Wire": "3",
+          "X-Real-IP": "198.51.100.66"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Retry-After": "*"
+        },
+        "body": {
+          "reason": "rate_limited",
+          "error": "Too many status checks from this address; retry after the given seconds."
+        }
+      }
+    }
+  ]
+}

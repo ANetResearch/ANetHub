@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
@@ -29,9 +30,9 @@ import (
 // kel holds when the request arrives.
 func peerIdentityServer(t *testing.T, aid string, kel *atomic.Pointer[[]byte]) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(stampWire(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"aid":"` + aid + `","kel":"` + base64.StdEncoding.EncodeToString(*kel.Load()) + `"}`))
+		_, _ = w.Write([]byte(`{"aid":"` + aid + `","kel":"` + base64.RawURLEncoding.EncodeToString(*kel.Load()) + `"}`))
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -73,7 +74,7 @@ func TestAPeerKELIsPinnedOnlyWhenItReplaysToThePeer(t *testing.T) {
 
 	svc, err := New(t.TempDir(),
 		Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: fake.URL}}},
-		idSelf, newFakeLocal())
+		idSelf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func TestAMisPinnedPeerKELIsDroppedWhenTheServiceOpens(t *testing.T) {
 	cfg := Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: fake.URL}}}
 	dir := t.TempDir()
 
-	svc, err := New(dir, cfg, idSelf, newFakeLocal())
+	svc, err := New(dir, cfg, idSelf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +129,7 @@ func TestAMisPinnedPeerKELIsDroppedWhenTheServiceOpens(t *testing.T) {
 	}
 	svc.Close()
 
-	svc, err = New(dir, cfg, idSelf, newFakeLocal())
+	svc, err = New(dir, cfg, idSelf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,12 +156,12 @@ func TestAMisPinnedPeerKELIsDroppedWhenTheServiceOpens(t *testing.T) {
 // replayed [redteam:F34].
 func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 	idSelf, idPeer, _ := threeHubIdentities(t)
-	stranger, err := identity.Incept()
+	stranger, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 30; i++ {
-		if err := stranger.Rotate(uint64(i + 1)); err != nil {
+		if err := identitytest.Rotate(stranger, uint64(i+2)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -168,14 +169,14 @@ func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 	var served atomic.Pointer[[]byte]
 	served.Store(&strangerKEL)
 	var fetches atomic.Int32
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fake := httptest.NewServer(stampWire(func(w http.ResponseWriter, r *http.Request) {
 		fetches.Add(1)
-		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.StdEncoding.EncodeToString(*served.Load()) + `"}`))
+		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.RawURLEncoding.EncodeToString(*served.Load()) + `"}`))
 	}))
 	defer fake.Close()
 	svc, err := New(t.TempDir(),
 		Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: fake.URL}}},
-		idSelf, newFakeLocal())
+		idSelf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,15 +227,16 @@ func TestAPeerKELThatFailsIsNotFetchedOnEveryUse(t *testing.T) {
 // (ANetCore identity.Replay), and it is dropped [redteam:F34].
 func TestAPinnedPeerKELWithAMalformedKeyIsDroppedNotAPanic(t *testing.T) {
 	idSelf, idPeer, _ := threeHubIdentities(t)
-	short := []identity.SignedEvent{{Event: identity.KeyEvent{Type: identity.Inception,
-		Keys: [][]byte{make([]byte, 31)}, Threshold: 1}, Sig: make([]byte, 64)}}
+	short := []identity.SignedEvent{{Event: identity.KeyEvent{KELType: identity.KELType, Type: identity.Inception,
+		Keys: [][]byte{make([]byte, 31)}, NextDigest: make([]byte, 32), Threshold: 1, Timestamp: 1,
+		Toad: identity.ToadField(identity.ToadHub)}, Sig: make([]byte, 64)}}
 	blob, err := identity.MarshalKEL(short)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: "http://127.0.0.1:1"}}}
 	dir := t.TempDir()
-	svc, err := New(dir, cfg, idSelf, newFakeLocal())
+	svc, err := New(dir, cfg, idSelf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +244,7 @@ func TestAPinnedPeerKELWithAMalformedKeyIsDroppedNotAPanic(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.Close()
-	svc, err = New(dir, cfg, idSelf, newFakeLocal())
+	svc, err = New(dir, cfg, idSelf)
 	if err != nil {
 		t.Fatalf("reopening over a malformed pin: %v", err)
 	}
@@ -276,7 +278,7 @@ func TestUsesWaitingOnAFailingPeerKELFetchShareItsFailure(t *testing.T) {
 	var down atomic.Bool
 	down.Store(true)
 	var fetches atomic.Int32
-	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	fake := httptest.NewServer(stampWire(func(w http.ResponseWriter, r *http.Request) {
 		fetches.Add(1)
 		if down.Load() {
 			select {
@@ -287,12 +289,12 @@ func TestUsesWaitingOnAFailingPeerKELFetchShareItsFailure(t *testing.T) {
 			http.Error(w, "down", http.StatusInternalServerError)
 			return
 		}
-		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.StdEncoding.EncodeToString(idPeer.KEL) + `"}`))
+		_, _ = w.Write([]byte(`{"aid":"` + idPeer.AID + `","kel":"` + base64.RawURLEncoding.EncodeToString(idPeer.KEL) + `"}`))
 	}))
 	defer fake.Close()
 	svc, err := New(t.TempDir(),
 		Config{Delivery: "allowlist", Peers: []Peer{{AID: idPeer.AID, Endpoint: fake.URL}}},
-		idSelf, newFakeLocal())
+		idSelf)
 	if err != nil {
 		t.Fatal(err)
 	}

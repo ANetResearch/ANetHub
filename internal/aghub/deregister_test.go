@@ -32,11 +32,11 @@ func leave(t *testing.T, srv *httptest.Server, c *identity.Controller) (int, []b
 // crossing, and never arrived.
 func TestAnAgentCanLeaveAHub(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	register(t, srv, agent, "Mover", []string{"work.do"})
+	registerWithKeys(t, srv, agent, "Mover", []string{"work.do"})
 
 	// Registered: findable, and its key history is served.
 	if code, _ := getJSON(t, srv.URL+"/agents/"+agent.AID()+"/kel"); code != 200 {
@@ -85,8 +85,8 @@ func TestAnAgentCanLeaveAHub(t *testing.T) {
 func TestOnlyTheAgentCanDeregisterItself(t *testing.T) {
 	srv := newHub(t)
 	agent, thief := twoAgents(t)
-	register(t, srv, agent, "Agent", []string{"work.do"})
-	register(t, srv, thief, "Thief", nil)
+	registerWithKeys(t, srv, agent, "Agent", []string{"work.do"})
+	registerWithKeys(t, srv, thief, "Thief", nil)
 
 	// A real signature over a real request — the thief's own. It names
 	// the thief, so it cannot authorise anything about the agent.
@@ -151,7 +151,7 @@ func TestLeavingDoesNotEraseWhatHappened(t *testing.T) {
 	if err := json.Unmarshal(kelBody, &got); err != nil || got.KEL == "" {
 		t.Fatalf("empty key history after leaving: %s", kelBody)
 	}
-	raw, derr := base64.StdEncoding.DecodeString(got.KEL)
+	raw, derr := base64.RawURLEncoding.DecodeString(got.KEL)
 	if derr != nil {
 		t.Fatal(derr)
 	}
@@ -172,7 +172,7 @@ func TestLeavingDoesNotEraseWhatHappened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bal != 250+int64(aghub.RegistrationGrant) {
+	if bal != 250+int64(testRegistrationFunds) {
 		t.Errorf("leaving moved the balance: %d", bal)
 	}
 }
@@ -181,7 +181,7 @@ func TestLeavingDoesNotEraseWhatHappened(t *testing.T) {
 func TestLeavingWarnsAboutMailNobodyWillCollect(t *testing.T) {
 	srv := newHub(t)
 	provider, sender := twoAgents(t)
-	register(t, srv, provider, "Provider", []string{"work.do"})
+	registerWithKeys(t, srv, provider, "Provider", []string{"work.do"})
 	register(t, srv, sender, "Sender", nil)
 	if code, b, _ := relaySend(t, srv, sender, provider.AID(), testEnvelope(t, provider.AID(), nil)); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
@@ -214,7 +214,7 @@ func TestLeavingWarnsAboutMailNobodyWillCollect(t *testing.T) {
 func TestLeavingCountsOnlyTheMailStillWaiting(t *testing.T) {
 	srv := newHub(t)
 	provider, sender := twoAgents(t)
-	register(t, srv, provider, "Provider", []string{"work.do"})
+	registerWithKeys(t, srv, provider, "Provider", []string{"work.do"})
 	register(t, srv, sender, "Sender", nil)
 
 	for i := 0; i < 3; i++ {

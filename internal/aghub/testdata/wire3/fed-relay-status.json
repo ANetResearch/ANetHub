@@ -1,0 +1,276 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /fed/v3/relay-status (core §2.12.2, G3; p2p-receipts §2.5, DLV-W-19, DLV-W-19a, DLV-H-8): a hub of the peer table asks, signed for fed_status, about envelopes this hub queued for its senders: the /relay/status body without via_hub, answered as /relay/status answers it for this hub's own mailbox, always 200. A hub that is not a peer is 403 not_peer; no signature, or one for another action, 401 unauthorized; a via_hub is a member the route does not take (400 bad_request); the items as /relay/status checks them (400 bad_status_query); a peer past 100 checks a second and 500 at once is 429 rate_limited with Retry-After.",
+  "setup": "fed_relay_status",
+  "cases": [
+    {
+      "name": "a peer's check",
+      "cite": "DLV-W-19, DLV-H-8",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            },
+            {
+              "rid": "${rid_done}",
+              "handle": "${h_done}"
+            },
+            {
+              "rid": "${rid_unknown}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        },
+        "sign": {
+          "action": "fed_status",
+          "as": "peer"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "body": {
+          "items": [
+            {
+              "state": "queued"
+            },
+            {
+              "state": "done",
+              "dack": "${d_done}"
+            },
+            {
+              "state": "unknown"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "a hub that is not a peer",
+      "cite": "DLV-W-19",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        },
+        "sign": {
+          "action": "fed_status",
+          "as": "stranger"
+        }
+      },
+      "response": {
+        "status": 403,
+        "body": {
+          "reason": "not_peer",
+          "error": "This hub does not federate with yours; ask both operators to add each other as peers."
+        }
+      }
+    },
+    {
+      "name": "unsigned",
+      "cite": "DLV-W-19, core G3",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        }
+      },
+      "response": {
+        "status": 401,
+        "body_has": {
+          "reason": "unauthorized"
+        }
+      }
+    },
+    {
+      "name": "signed for another action",
+      "cite": "core §2.12.3",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        },
+        "sign": {
+          "action": "fed_bucket",
+          "as": "peer"
+        }
+      },
+      "response": {
+        "status": 401,
+        "body_has": {
+          "reason": "unauthorized"
+        }
+      }
+    },
+    {
+      "name": "with via_hub",
+      "cite": "DLV-W-19, CORE-E7",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}",
+              "via_hub": "${hub}"
+            }
+          ]
+        },
+        "sign": {
+          "action": "fed_status",
+          "as": "peer"
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_request",
+          "error": "The request body has the member \"items[0].via_hub\", which this route does not take; remove it and send again."
+        }
+      }
+    },
+    {
+      "name": "65 items",
+      "cite": "DLV-W-19",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "text": "{\"items\":${items65}}",
+        "sign": {
+          "action": "fed_status",
+          "as": "peer"
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_status_query",
+          "error": "A status check takes 1 to 64 items with 16-byte rid and handle, all for one hub."
+        }
+      }
+    },
+    {
+      "name": "no items",
+      "cite": "DLV-W-19",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": []
+        },
+        "sign": {
+          "action": "fed_status",
+          "as": "peer"
+        }
+      },
+      "response": {
+        "status": 400,
+        "body": {
+          "reason": "bad_status_query",
+          "error": "A status check takes 1 to 64 items with 16-byte rid and handle, all for one hub."
+        }
+      }
+    },
+    {
+      "name": "a body over 16 KiB",
+      "cite": "DLV-W-19",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "text": "${big}",
+        "sign": {
+          "action": "fed_status",
+          "as": "peer"
+        }
+      },
+      "response": {
+        "status": 413,
+        "body_has": {
+          "reason": "too_large"
+        }
+      }
+    },
+    {
+      "name": "a peer past its bucket",
+      "cite": "DLV-W-19a",
+      "request": {
+        "method": "POST",
+        "path": "/fed/v3/relay-status",
+        "headers": {
+          "X-ANet-Wire": "3"
+        },
+        "json": {
+          "items": [
+            {
+              "rid": "${rid_wait}",
+              "handle": "${h_unknown}"
+            }
+          ]
+        },
+        "sign": {
+          "action": "fed_status",
+          "as": "peer2"
+        }
+      },
+      "response": {
+        "status": 429,
+        "headers": {
+          "Retry-After": "*"
+        },
+        "body": {
+          "reason": "rate_limited",
+          "error": "Too many status checks from your hub; retry after the given seconds."
+        }
+      }
+    }
+  ]
+}

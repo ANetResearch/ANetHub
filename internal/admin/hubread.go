@@ -3,24 +3,33 @@ package admin
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // HubDB is the admin plane's handle on the PUBLIC hub store (the same hub.db the anet-hub binary
-// serves). Writes are limited to the registry delete and restore operator actions — every other
-// mutation belongs to the public hub's own signed API. Cross-process safety: both processes open the
-// file in WAL mode with a 15s busy timeout.
+// serves). Its one write is the operator's delete, and that is aghub.DeregisterTx, the one function
+// that removes an agent from a hub (hub-payment-privacy PAY-O1, PAY-O3): the admin plane writes no
+// agent row, no tombstone and no admission list of its own. Every other mutation belongs to the
+// public hub's own signed API or to anet-hub's subcommands. Cross-process safety: both processes open
+// the file in WAL mode with a 15s busy timeout, and a delete takes the write lock when it begins.
 //
-// Nothing here reads relay_message payloads. Since hub wire 2 they are sealed envelopes the admin
-// plane cannot open, and reading them at all would copy relay data out of the relay's own retention
-// (A2A-DESIGN §9, SI-1). The only relay figure read is a row count.
+// Nothing here reads relay_message payloads. They are sealed envelopes the admin plane cannot open,
+// and reading them at all would copy relay data out of the relay's own retention (A2A-DESIGN §9,
+// SI-1). The only relay figure read is the whole hub's row count (sealed-sender SSR-H19: no
+// per-agent mailbox figure).
+//
+// Nor does it read the ledger (credit_*, settle_guard), the balance proofs (liab_*) or the reviews a
+// peer hub sent (fed_review) (PAY-O5). The operator reads redemptions with anet-hub redemptions.
 type HubDB struct {
 	db *sql.DB
 	mu sync.Mutex
@@ -28,18 +37,61 @@ type HubDB struct {
 	path string // hub.db file path (for size stat)
 }
 
-// OpenHubDB opens the public hub store at dir (dir/hub.db must exist — the admin plane never creates
-// or migrates the public store).
+// hubDSN opens hub.db as the hub does: WAL, a busy timeout, secure_delete (a delete overwrites what
+// it removes, so the envelopes a deregistration drops do not stay readable in the file's free
+// space), and transactions that take the write lock when they begin (BEGIN IMMEDIATE).
+const hubDSN = "?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)" +
+	"&_pragma=secure_delete(ON)&_txlock=immediate"
+
+// ErrNoHubData is OpenHubDB's answer for a hub.db the hub has not created its schema in yet.
+var ErrNoHubData = errors.New("admin: hub.db holds no hub data yet")
+
+// OpenHubDB opens the public hub store at dir. dir/hub.db must exist: the admin plane never creates
+// or converts the public store.
+//
+// A hub.db this release does not open is refused before anything opens it for writing, and the
+// directory is left exactly as it was (aghub.CheckData reads it immutable, core CORE-V4): one of 0.2
+// or earlier wraps aghub.ErrHubDataV02, one a newer anet-hub wrote aghub.ErrHubDataTooNew.
+// anet-hub-admin answers them with anet-hub's own sentences (hub_identity_v02, hub_data_too_new).
 func OpenHubDB(dir string) (*HubDB, error) {
 	p := filepath.Join(dir, "hub.db")
 	if _, err := os.Stat(p); err != nil {
 		return nil, fmt.Errorf("admin: hub db: %w", err)
 	}
-	db, err := sql.Open("sqlite", p+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)")
+	if err := aghub.CheckData(dir); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", p+hubDSN)
 	if err != nil {
 		return nil, err
 	}
+	// CheckData read the file without its write-ahead log; read through it, the database can still
+	// turn out to be another release's, or one the hub never finished creating.
+	if err := checkSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &HubDB{db: db, path: p}, nil
+}
+
+// checkSchema is OpenHubDB's second look, through the open handle.
+func checkSchema(db *sql.DB) error {
+	var version, objects int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("admin: hub db: %w", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&objects); err != nil {
+		return fmt.Errorf("admin: hub db: %w", err)
+	}
+	switch {
+	case version == aghub.SchemaVersion:
+		return nil
+	case version == 0 && objects == 0:
+		return ErrNoHubData
+	case version > aghub.SchemaVersion:
+		return fmt.Errorf("%w (user_version %d)", aghub.ErrHubDataTooNew, version)
+	}
+	return fmt.Errorf("%w (user_version %d)", aghub.ErrHubDataV02, version)
 }
 
 // Close closes the handle.
@@ -54,38 +106,70 @@ func (h *HubDB) SizeBytes() int64 {
 	return fi.Size()
 }
 
-// AdminAgentView is the operator's registry row: the public AgentView fields PLUS what the public API
-// hides (unlisted agents, mailbox backlog, reviews written).
+// AdminAgentView is the operator's registry row: what the public listing says about an agent, for
+// every registered agent, listed or not (PAY-O5).
 //
-// The per-agent task counters (tasks_as_provider, tasks_as_requester, last_completed_at) are gone
-// with the completed_task table they were read from (A2A-DESIGN §9, [C38]). What the hub can still
-// state is reviews: ReviewCount is the reviews this agent received as provider, ReviewsWritten the
-// reviews it published as requester — each one anchored on a provider-signed receipt.
+// What it does not say: a price (prices are not public; they travel in the extended card the provider
+// signs), how many reviews the agent wrote (a review names no reviewer, SI-48), and how much mail is
+// queued for it (no per-agent mailbox figure, SSR-H19; the overview has the whole hub's backlog).
+// RegisteredAt is the UTC day of the registration, as the public listing states it.
 type AdminAgentView struct {
-	AID            string   `json:"aid"`
-	Name           string   `json:"name"`
-	Caps           []string `json:"caps"`
-	Summary        string   `json:"summary,omitempty"`
-	Readme         string   `json:"readme,omitempty"`
-	Pricing        string   `json:"pricing,omitempty"`
-	Listed         bool     `json:"listed"`
-	AvgRating      float64  `json:"avg_rating"`
-	ReviewCount    int      `json:"review_count"`
-	ReviewsWritten int      `json:"reviews_written"`
-	RegisteredAt   string   `json:"registered_at"`
-	MailboxBacklog int      `json:"mailbox_backlog"` // envelopes queued for this agent (a relay row exists only until ack)
+	AID          string   `json:"aid"`
+	Name         string   `json:"name"`
+	Caps         []string `json:"caps"`
+	Summary      string   `json:"summary,omitempty"`
+	Readme       string   `json:"readme,omitempty"`
+	Listed       bool     `json:"listed"`
+	AvgRating    float64  `json:"avg_rating"`
+	ReviewCount  int      `json:"review_count"`
+	RegisteredAt string   `json:"registered_at"`
 }
 
-// AllAgents returns EVERY registered agent (listed or not) with activity aggregates, most recently
-// registered first. q filters like the public search.
+// agentColumns are what scanAdminAgent reads, over agent a.
+const agentColumns = `a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at,
+	EXISTS(SELECT 1 FROM agent_keys k WHERE k.aid = a.aid),
+	COALESCE((SELECT AVG(r.rating) FROM review r WHERE r.subject_aid = a.aid), 0),
+	(SELECT COUNT(*) FROM review r WHERE r.subject_aid = a.aid)`
+
+// listed is the registry's rule (sealed-sender SSR-H18): an agent is listed once it advertises a
+// service (a capability or profile text) and has published a key set, since nobody could write to
+// it before.
+func listed(capsJSON, summary, readme string, hasKeys bool) bool {
+	// Parsed, not compared: a registration with no capabilities stores JSON "null".
+	var caps []string
+	_ = json.Unmarshal([]byte(capsJSON), &caps)
+	return hasKeys && (len(caps) > 0 || summary != "" || readme != "")
+}
+
+func scanAdminAgent(sc interface{ Scan(...any) error }) (AdminAgentView, error) {
+	var v AdminAgentView
+	var capsJSON string
+	var hasKeys bool
+	if err := sc.Scan(&v.AID, &v.Name, &capsJSON, &v.Summary, &v.Readme, &v.RegisteredAt,
+		&hasKeys, &v.AvgRating, &v.ReviewCount); err != nil {
+		return v, err
+	}
+	_ = json.Unmarshal([]byte(capsJSON), &v.Caps)
+	v.Listed = listed(capsJSON, v.Summary, v.Readme, hasKeys)
+	v.RegisteredAt = toTheDay(v.RegisteredAt)
+	return v, nil
+}
+
+// toTheDay is a stored registration time as its UTC day (midnight), as the public listing states it
+// (SSR-H18); "" for one that does not parse.
+func toTheDay(stamp string) string {
+	t, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil {
+		return ""
+	}
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).Format(time.RFC3339)
+}
+
+// AllAgents returns EVERY registered agent (listed or not), most recently registered first. q
+// filters like the public search.
 func (h *HubDB) AllAgents(q string) ([]AdminAgentView, error) {
-	query := `
-	SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at,
-	       COALESCE((SELECT AVG(rating) FROM review r WHERE r.subject_aid=a.aid), 0),
-	       COALESCE((SELECT COUNT(*) FROM review r WHERE r.subject_aid=a.aid), 0),
-	       COALESCE((SELECT COUNT(*) FROM review r WHERE r.reviewer_aid=a.aid), 0),
-	       COALESCE((SELECT COUNT(*) FROM relay_message m WHERE m.to_aid=a.aid), 0)
-	FROM agent a`
+	query := `SELECT ` + agentColumns + ` FROM agent a`
 	var args []any
 	if q != "" {
 		like := "%" + q + "%"
@@ -100,54 +184,71 @@ func (h *HubDB) AllAgents(q string) ([]AdminAgentView, error) {
 	defer rows.Close()
 	out := []AdminAgentView{}
 	for rows.Next() {
-		var v AdminAgentView
-		var capsJSON string
-		if err := rows.Scan(&v.AID, &v.Name, &capsJSON, &v.Summary, &v.Readme, &v.Pricing,
-			&v.RegisteredAt, &v.AvgRating, &v.ReviewCount, &v.ReviewsWritten,
-			&v.MailboxBacklog); err != nil {
+		v, err := scanAdminAgent(rows)
+		if err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(capsJSON), &v.Caps)
-		v.Listed = len(v.Caps) > 0 || v.Summary != "" || v.Readme != "" || v.Pricing != ""
 		out = append(out, v)
 	}
 	return out, rows.Err()
 }
 
-// Agent returns one agent's admin view, or an error if not registered.
+// ErrAgentNotFound is Agent's answer for an AID that is not registered.
+var ErrAgentNotFound = errors.New("admin: that agent is not registered")
+
+// Agent returns one agent's admin view, or ErrAgentNotFound.
 func (h *HubDB) Agent(aid string) (*AdminAgentView, error) {
-	all, err := h.AllAgents("")
+	v, err := scanAdminAgent(h.db.QueryRow(`SELECT `+agentColumns+` FROM agent a WHERE a.aid = ?`, aid))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrAgentNotFound, aid)
+	}
 	if err != nil {
 		return nil, err
 	}
-	for i := range all {
-		if all[i].AID == aid {
-			return &all[i], nil
-		}
-	}
-	return nil, fmt.Errorf("admin: agent %s not registered", aid)
+	return &v, nil
 }
 
-// HubReview mirrors the public review row (admin reads it straight from the store). No content:
-// the hub store has none (A2A-DESIGN §9 row 评价).
+// HubReview is one review stored here, as the operator sees it (PAY-O5): the interaction's
+// commitment (base64url), whom it reviews, the rating and comment, the receipt it rests on and the
+// UTC day it was written. A review stored here names no reviewer and holds no time finer than a day
+// (SI-48), and this view adds neither; it has no content either, since the hub store has none.
 type HubReview struct {
-	InteractionID string `json:"interaction_id"`
-	SubjectAID    string `json:"subject_aid"`
-	ReviewerAID   string `json:"reviewer_aid"`
-	Rating        int    `json:"rating"`
-	Comment       string `json:"comment,omitempty"`
-	ReceiptCID    string `json:"receipt_cid"`
-	CreatedAt     int64  `json:"created_at"`
+	IXCommit   string `json:"ix_commit"`
+	SubjectAID string `json:"subject_aid"`
+	Rating     int    `json:"rating"`
+	Comment    string `json:"comment"`
+	ReceiptCID string `json:"receipt_cid"`
+	CreatedDay uint64 `json:"created_day"`
 }
 
-// RecentReviews returns the newest limit reviews.
-func (h *HubDB) RecentReviews(limit int) ([]HubReview, error) {
+// reviewLimit bounds a page of reviews.
+func reviewLimit(limit int) int {
 	if limit <= 0 || limit > 500 {
-		limit = 50
+		return 50
 	}
-	rows, err := h.db.Query(
-		`SELECT interaction_id,subject_aid,reviewer_aid,rating,comment,receipt_cid,created_at
-		 FROM review ORDER BY created_at DESC LIMIT ?`, limit)
+	return limit
+}
+
+// RecentReviews returns the newest limit reviews stored here, newest day first.
+func (h *HubDB) RecentReviews(limit int) ([]HubReview, error) {
+	return h.reviews(``, reviewLimit(limit))
+}
+
+// ReviewsOf returns the newest limit reviews of the subject aid: the reviews an agent received. There
+// is no "reviews an agent wrote": a review names no reviewer (SI-48).
+func (h *HubDB) ReviewsOf(aid string, limit int) ([]HubReview, error) {
+	return h.reviews(aid, reviewLimit(limit))
+}
+
+func (h *HubDB) reviews(subject string, limit int) ([]HubReview, error) {
+	query := `SELECT ix_commit, subject_aid, rating, comment, receipt_cid, created_day FROM review`
+	var args []any
+	if subject != "" {
+		query += ` WHERE subject_aid = ?`
+		args = append(args, subject)
+	}
+	query += ` ORDER BY created_day DESC, ix_commit LIMIT ?`
+	rows, err := h.db.Query(query, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -155,10 +256,11 @@ func (h *HubDB) RecentReviews(limit int) ([]HubReview, error) {
 	out := []HubReview{}
 	for rows.Next() {
 		var r HubReview
-		if err := rows.Scan(&r.InteractionID, &r.SubjectAID, &r.ReviewerAID, &r.Rating, &r.Comment,
-			&r.ReceiptCID, &r.CreatedAt); err != nil {
+		var ix []byte
+		if err := rows.Scan(&ix, &r.SubjectAID, &r.Rating, &r.Comment, &r.ReceiptCID, &r.CreatedDay); err != nil {
 			return nil, err
 		}
+		r.IXCommit = wire3.EncodeB64URL(ix)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -166,9 +268,9 @@ func (h *HubDB) RecentReviews(limit int) ([]HubReview, error) {
 
 // HubTotals are the whole-store aggregates the snapshot ticker records.
 //
-// TasksCompleted has the meaning /stats gives it since A2A-DESIGN §9: distinct valid receipts
-// published to this hub through reviews. Snapshots taken before that change counted wire-1 relay
-// results instead, so the series has a step at the upgrade.
+// TasksCompleted has the meaning /stats gives it: distinct valid receipts published to this hub
+// through reviews. RelayBacklog is the whole hub's queued mail; there is no per-agent figure
+// (SSR-H19).
 type HubTotals struct {
 	Agents         int     `json:"agents"`
 	Listed         int     `json:"listed"`
@@ -181,28 +283,27 @@ type HubTotals struct {
 // Totals computes the aggregates.
 func (h *HubDB) Totals() (HubTotals, error) {
 	var t HubTotals
-	if err := h.db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&t.Agents); err != nil {
-		return t, err
-	}
-	rows, err := h.db.Query(`SELECT caps, summary, readme, pricing FROM agent`)
+	rows, err := h.db.Query(`SELECT caps, summary, readme,
+	    EXISTS(SELECT 1 FROM agent_keys k WHERE k.aid = a.aid) FROM agent a`)
 	if err != nil {
 		return t, err
 	}
 	for rows.Next() {
-		var capsJSON, sum, rd, pr string
-		if err := rows.Scan(&capsJSON, &sum, &rd, &pr); err != nil {
+		var capsJSON, sum, rd string
+		var hasKeys bool
+		if err := rows.Scan(&capsJSON, &sum, &rd, &hasKeys); err != nil {
 			rows.Close()
 			return t, err
 		}
-		// Same "listed" rule as the public hub's scanAgent: parsed caps (nil-caps registrations store
-		// JSON "null", which a raw string compare would miscount) or any profile text.
-		var caps []string
-		_ = json.Unmarshal([]byte(capsJSON), &caps)
-		if len(caps) > 0 || sum != "" || rd != "" || pr != "" {
+		t.Agents++
+		if listed(capsJSON, sum, rd, hasKeys) {
 			t.Listed++
 		}
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return t, err
+	}
 	if err := h.db.QueryRow(
 		`SELECT COUNT(DISTINCT receipt_cid) FROM review WHERE receipt_cid != ''`).Scan(&t.TasksCompleted); err != nil {
 		return t, err
@@ -214,108 +315,65 @@ func (h *HubDB) Totals() (HubTotals, error) {
 	if avg.Valid {
 		t.AvgRating = avg.Float64
 	}
-	// Since hub wire 2 a relay row exists only while undelivered (ack
-	// deletes it), so every row is backlog.
+	// A relay row exists only while undelivered (ack deletes it), so every
+	// row is backlog.
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM relay_message`).Scan(&t.RelayBacklog); err != nil {
 		return t, err
 	}
 	return t, nil
 }
 
-// DeleteAgent removes an agent from the public registry (reviews are kept — they are counterparty
-// evidence, not the agent's property). The agent can re-register; recording the
-// delist intent in moderation is the caller's job.
+// Deletion is what an operator's delete did (PAY-O3).
+type Deletion struct {
+	// Balance is the agent's balance, which stays on the ledger: it is
+	// still this hub's debt.
+	Balance int64
+	// Undelivered is how much mail was queued for it and is now dropped.
+	Undelivered int
+	// Open is whether this hub takes open sign-ups, in which case the AID
+	// can register again through the gates (with a key history that
+	// extends the one it left with).
+	Open bool
+}
+
+// DeleteAgent revokes aid's admission and deregisters it, in one BEGIN IMMEDIATE transaction, through
+// aghub.DeregisterTx (PAY-O1, PAY-O3): the same as anet-hub admissions revoke, so an operator has one
+// kind of delete to know. The agent's key history becomes its tombstone, so it can only come back
+// with a history that extends it, and only once it is admitted again (anet-hub admit) or, on an open
+// hub, through the gates. Its balance, its ledger window and the reviews it is the subject of stay.
+// The hub process drops what it holds in memory for the AID (its sessions) within two seconds, from
+// the dereg_event row the transaction leaves (PAY-O2).
 //
-// The agent's A2A card and its skill and tag index rows go with it: they
-// exist only for an agent on the registry, and the card is re-admitted
-// when the agent registers again. The hub's registry queries join the
-// agent table as well, so a row left behind would not be listed, but it
-// would sit in the database describing an agent the operator removed.
-func (h *HubDB) DeleteAgent(aid string) error {
+// An AID that is not registered is aghub.ErrNotRegistered, and nothing is written.
+func (h *HubDB) DeleteAgent(aid string) (Deletion, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	tx, err := h.db.Begin()
 	if err != nil {
-		return err
+		return Deletion{}, err
 	}
 	defer tx.Rollback()
-	if err := withdrawA2ACards(tx, `a.aid = ?`, aid); err != nil {
-		return err
-	}
-	res, err := tx.Exec(`DELETE FROM agent WHERE aid=?`, aid)
+	res, err := aghub.DeregisterTx(tx, aid, aghub.DeregOperator)
 	if err != nil {
-		return err
+		return Deletion{}, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("admin: agent %s not registered", aid)
+	open, err := admissionOpen(tx)
+	if err != nil {
+		return Deletion{}, err
 	}
-	if err := deleteA2AOrphans(tx); err != nil {
-		return err
+	if err := tx.Commit(); err != nil {
+		return Deletion{}, err
 	}
-	return tx.Commit()
+	return Deletion{Balance: res.Balance, Undelivered: res.Undelivered, Open: open}, nil
 }
 
-// withdrawA2ACards puts a withdrawal on the hub's A2A card federation
-// stream (/fed/v2/cards) for every agent matching cond (over agent a)
-// whose A2A card is there to withdraw, before the operator's delete
-// removes the rows, as the hub does when an agent deregisters
-// (aghub.withdrawA2ACard). Without it a peer that learned the card keeps
-// listing an agent the operator removed, and no resync corrects that: a
-// re-read serves what is published, not what stopped being.
-//
-// Only agents whose visibility federates: a withdrawal names the AID, and
-// the stream must not name one no peer was told about. The withdrawals
-// take the next positions of the sequence the cards and withdrawals share
-// (aghub.nextA2AFedSeq), in one statement, so the write lock that
-// statement takes covers reading the head of the stream; the stored head
-// (a2a_fed_seq) is then moved past them, so no position is given out
-// twice. The reason is the hub's "deregistered": the registration is gone.
-func withdrawA2ACards(tx *sql.Tx, cond string, args ...any) error {
-	insert := func(head string) error {
-		q := `INSERT INTO a2a_card_withdrawal(aid, reason, at, fed_seq)
-		      SELECT c.aid, 'deregistered', ?,
-		             (SELECT MAX((SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
-		                         (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)` + head + `))
-		             + ROW_NUMBER() OVER (ORDER BY c.aid)
-		        FROM agent_a2a_card c JOIN agent a ON a.aid = c.aid
-		       WHERE a.visibility IN ('federated', 'public') AND ` + cond + `
-		      ON CONFLICT(aid) DO UPDATE SET reason=excluded.reason, at=excluded.at, fed_seq=excluded.fed_seq`
-		_, err := tx.Exec(q, append([]any{time.Now().UTC().Format(time.RFC3339Nano)}, args...)...)
-		return err
+// admissionOpen reports whether the hub's admission mode is open; a hub that never set one is
+// closed (aghub.Store.AdmissionMode).
+func admissionOpen(tx *sql.Tx) (bool, error) {
+	var mode string
+	err := tx.QueryRow(`SELECT value FROM hub_meta WHERE key = 'admission_mode'`).Scan(&mode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	err := insert(`, (SELECT COALESCE(MAX(last),0) FROM a2a_fed_seq)`)
-	if err != nil && strings.Contains(err.Error(), "no such table: a2a_fed_seq") {
-		// A hub.db written by a hub that kept no stored head: the rows
-		// are the head, and there is no stored head to move.
-		if err = insert(``); err == nil {
-			return nil
-		}
-	}
-	if err != nil && strings.Contains(err.Error(), "no such table") {
-		// A hub.db written by a hub that predates the A2A card stream
-		// has published no A2A card.
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(`UPDATE a2a_fed_seq SET last = MAX(last,
-	    (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal)) WHERE id = 1`)
-	return err
-}
-
-// deleteA2AOrphans removes A2A card, skill and tag rows whose agent row is
-// gone, in the transaction that removed it. Every operator delete goes
-// through here (DeleteAgent, PruneAgentsExcept), and so do rows an older
-// admin binary left behind.
-func deleteA2AOrphans(tx *sql.Tx) error {
-	for _, table := range []string{"agent_a2a_card", "agent_skill", "agent_tag"} {
-		// A hub.db written by a hub that predates these tables does not
-		// have them, and there is nothing to remove from it.
-		if _, err := tx.Exec(`DELETE FROM ` + table + ` WHERE aid NOT IN (SELECT aid FROM agent)`); err != nil &&
-			!strings.Contains(err.Error(), "no such table") {
-			return err
-		}
-	}
-	return nil
+	return mode == aghub.AdmissionOpen, err
 }

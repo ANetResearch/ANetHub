@@ -25,12 +25,17 @@ import (
 // signed, and the payee's balance still reads as an integer.
 func TestSpotConcurrentSettlementsCannotTogetherPassWhatALedgerHolds(t *testing.T) {
 	w := newOverflowWorld(t)
-	third, err := identity.Incept()
+	third, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	register(t, w.srv, third, "Third", nil)
-	fundAgent(t, w.srv, w.victim.AID(), math.MaxInt64-150-balanceOf(t, w.srv, w.victim.AID()))
+	// Written outside the supply, which bounds every balance by what was
+	// issued in all; the row guard is what is tested.
+	if err := w.store.MoveBalanceWithoutEntryForTest(w.victim.AID(),
+		math.MaxInt64-150-balanceOf(t, w.srv, w.victim.AID())); err != nil {
+		t.Fatal(err)
+	}
 	own := payment.CreditNetwork(w.hubAID)
 	payers := []*identity.Controller{w.attacker, third}
 	payloads := make([]*payment.PaymentPayload, len(payers))
@@ -62,8 +67,8 @@ func TestSpotConcurrentSettlementsCannotTogetherPassWhatALedgerHolds(t *testing.
 			if _, ok := r.Extensions[payment.ExtReceipt]; ok {
 				t.Errorf("payer %d: a refused settlement carried a signed receipt", i)
 			}
-			if got := balanceOf(t, w.srv, payers[i].AID()); got != aghub.RegistrationGrant {
-				t.Errorf("refused payer %d balance = %d, want %d", i, got, aghub.RegistrationGrant)
+			if got := balanceOf(t, w.srv, payers[i].AID()); got != testRegistrationFunds {
+				t.Errorf("refused payer %d balance = %d, want %d", i, got, testRegistrationFunds)
 			}
 		}
 	}
@@ -77,10 +82,13 @@ func TestSpotConcurrentSettlementsCannotTogetherPassWhatALedgerHolds(t *testing.
 }
 
 // The hub's own row takes every redemption (a redemption is a payment to
-// the hub). With 5000 redeemed into it already, a redemption of 2^63-1 —
-// in range, from an account that holds it — would take the row past what
-// it can hold. It is refused and nothing moves: the redeemer keeps its
-// balance, no redemption is recorded, nothing goes on the issuance chain.
+// the hub). With the row standing above zero, a redemption of 2^63-1 — in
+// range, from an account that holds it — would take the row past what it
+// can hold. It is refused and nothing moves: the redeemer keeps its
+// balance, no redemption is recorded and the supply totals do not move.
+// Under the supply invariant the hub's row is never above zero and no
+// account holds 2^63-1 beside others; both are written here outside it (an
+// old hub, a hand edit), because the row guard has to hold there too.
 func TestSpotARedemptionThatWouldOverflowTheHubsOwnRowMovesNothing(t *testing.T) {
 	w := newOverflowWorld(t)
 	own := payment.CreditNetwork(w.hubAID)
@@ -94,7 +102,13 @@ func TestSpotARedemptionThatWouldOverflowTheHubsOwnRowMovesNothing(t *testing.T)
 	if code, b := redeem(w.victim, 5000, "spot-first"); code != 200 {
 		t.Fatalf("an ordinary redemption: %d %s", code, b)
 	}
-	fundAgent(t, w.srv, w.attacker.AID(), math.MaxInt64-balanceOf(t, w.srv, w.attacker.AID()))
+	if err := w.store.MoveBalanceWithoutEntryForTest(w.hubAID, 5000); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.MoveBalanceWithoutEntryForTest(w.attacker.AID(),
+		math.MaxInt64-balanceOf(t, w.srv, w.attacker.AID())); err != nil {
+		t.Fatal(err)
+	}
 	before := moneyState(t, w.dir)
 	code, b := redeem(w.attacker, math.MaxInt64, "spot-all")
 	if code == 200 {
@@ -115,10 +129,4 @@ func TestSpotARedemptionThatWouldOverflowTheHubsOwnRowMovesNothing(t *testing.T)
 	}
 	w.readable(t, w.attacker.AID(), "")
 	w.readable(t, w.hubAID, "")
-	// Lifetime totals are a separate matter (an internal note, residual):
-	// this hub has issued more than 2^63-1 over its life by now, and the
-	// cumulative sums behind /x402/supply cannot be computed in int64.
-	if _, err := w.store.Supply(w.hubAID); err != nil {
-		t.Logf("supply after lifetime issuance past 2^63-1: %v", err)
-	}
 }

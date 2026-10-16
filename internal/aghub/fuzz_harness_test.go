@@ -10,18 +10,17 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/a2acard"
-	"github.com/ANetResearch/ANetCore/adp"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // The fuzz harness (ANet an internal note).
@@ -48,13 +47,18 @@ type fz struct {
 	hub    *identity.Controller
 	db     *sql.DB // a second connection, for reading invariants
 	seq    atomic.Uint64
+	// started is a time (unix ms) taken after the hub's replay state was
+	// made: RC1 refuses as ts_stale a time signed before that.
+	started uint64
+	// signed is the largest X-ANet-TS this harness signed for each signer.
+	signedMu sync.Mutex
+	signed   map[string]uint64
 }
 
 // newFZ builds a hub whose rate limits do not end the run: the fuzzer
 // sends thousands of requests a second from one address and a handful of
-// AIDs, which the default buckets and the per-signer replay share would
-// turn into a stream of 429s that exercise nothing. The limits themselves
-// have their own tests.
+// AIDs, which the default buckets would turn into a stream of 429s that
+// exercise nothing. The limits themselves have their own tests.
 func newFZ(tb testing.TB) *fz {
 	tb.Helper()
 	dir := tb.TempDir()
@@ -62,32 +66,29 @@ func newFZ(tb testing.TB) *fz {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(tb.TempDir())
-	if err != nil {
-		tb.Fatal(err)
-	}
+	id := aghub.HubIdentityForTest(tb)
 	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
 	l := aghub.DefaultLimits()
-	l.SendRate, l.SendBurst = 1e6, 1<<30
 	l.RegisterPerMinute, l.RegisterBurst = 1e9, 1<<30
-	l.KeysLookupPerMinute, l.KeysLookupBurst = 1e9, 1<<30
 	l.MailboxMessages = 1 << 20
 	if err := s.SetLimits(l); err != nil {
 		tb.Fatal(err)
 	}
+	s.SetDirBucketRateForTest(1e9, 1<<30)
 	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		tb.Fatal(err)
 	}
 	tb.Cleanup(func() { db.Close(); store.Close() })
-	return &fz{store: store, srv: s, h: s.Handler(), hubAID: id.AID, hub: id.Ctrl, db: db}
+	return &fz{store: store, srv: s, h: s.Handler(), hubAID: id.AID, hub: id.Ctrl, db: db,
+		started: uint64(time.Now().UnixMilli()), signed: map[string]uint64{}}
 }
 
 // nonce is unique per request in this process. A signed request carries
-// it in its query, so two inputs that are otherwise identical, signed in
-// the same millisecond, are not one signature presented twice.
+// it in its query, so two inputs that are otherwise identical are two
+// different requests.
 func (f *fz) nonce() string { return strconv.FormatUint(f.seq.Add(1), 10) }
 
 // request builds a request with target as its request target. The target
@@ -100,7 +101,7 @@ func (f *fz) request(method, path, rawQuery string, body []byte) *http.Request {
 	req.URL.RawQuery = rawQuery
 	req.RequestURI = req.URL.RequestURI()
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ANet-Wire", "2")
+	req.Header.Set("X-ANet-Wire", wireHeader)
 	return req
 }
 
@@ -112,8 +113,15 @@ func (f *fz) serve(req *http.Request) *httptest.ResponseRecorder {
 }
 
 // sign sets relayauth v2 headers on req for body, signed by c for action
-// at time ts.
+// at time ts, and records ts as signed for c unless it is further ahead
+// than any hub takes (a minute past the window), which leaves no RC1
+// state behind.
 func (f *fz) sign(req *http.Request, c *identity.Controller, action string, body []byte, ts uint64) {
+	if ts <= uint64(time.Now().UnixMilli())+relayauth.MaxSkewMillis+60_000 {
+		f.signedMu.Lock()
+		f.signed[c.AID()] = max(f.signed[c.AID()], ts)
+		f.signedMu.Unlock()
+	}
 	sig, seq := c.Sign(relayauth.PreimageV2(action, c.AID(), f.hubAID, ts, req.Method, req.URL.RequestURI(), body))
 	req.Header.Set(relayauth.HeaderAID, c.AID())
 	req.Header.Set(relayauth.HeaderTS, strconv.FormatUint(ts, 10))
@@ -121,14 +129,33 @@ func (f *fz) sign(req *http.Request, c *identity.Controller, action string, body
 	req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(sig))
 }
 
-// signedDo sends body to path as c, signed now. A nonce is added to the
-// query unless the caller gave one.
+// lastSigned is the largest time this harness signed for aid so far.
+func (f *fz) lastSigned(aid string) uint64 {
+	f.signedMu.Lock()
+	defer f.signedMu.Unlock()
+	return f.signed[aid]
+}
+
+// signingTime is the time to sign c's next request at: now, or just above
+// the last time signed for c, as relayauth.MonoClock hands out. RC1
+// (hub-payment-privacy §4.2.5) takes each of a signer's times once, so two
+// requests of c in one millisecond at now would be refused as replayed.
+func (f *fz) signingTime(c *identity.Controller) uint64 {
+	f.signedMu.Lock()
+	defer f.signedMu.Unlock()
+	ts := max(uint64(time.Now().UnixMilli()), f.signed[c.AID()]+1)
+	f.signed[c.AID()] = ts
+	return ts
+}
+
+// signedDo sends body to path as c, signed now (signingTime). A nonce is
+// added to the query unless the caller gave one.
 func (f *fz) signedDo(c *identity.Controller, action, method, path, rawQuery string, body []byte) *httptest.ResponseRecorder {
 	if rawQuery == "" {
 		rawQuery = "fz=" + f.nonce()
 	}
 	req := f.request(method, path, rawQuery, body)
-	f.sign(req, c, action, body, uint64(time.Now().UnixMilli()))
+	f.sign(req, c, action, body, f.signingTime(c))
 	return f.serve(req)
 }
 
@@ -137,7 +164,7 @@ func (f *fz) signedDo(c *identity.Controller, action, method, path, rawQuery str
 // pair (nil without keys).
 func (f *fz) agent(tb testing.TB, name string, caps []string, withKeys bool) (*identity.Controller, *seal.KeyPair) {
 	tb.Helper()
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -146,7 +173,8 @@ func (f *fz) agent(tb testing.TB, name string, caps []string, withKeys bool) (*i
 	if withKeys {
 		var raw []byte
 		raw, kp = fzKeySet(tb, c, 1, 0)
-		body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+		body["enc_keys"], body["prev_seq"] = base64.RawURLEncoding.EncodeToString(raw), 0
+		noteKeys(c.AID(), raw)
 	}
 	rec := f.register(c, fzJSON(tb, body))
 	if rec.Code != http.StatusOK {
@@ -155,7 +183,7 @@ func (f *fz) agent(tb testing.TB, name string, caps []string, withKeys bool) (*i
 	return c, kp
 }
 
-// registration is a /register body for c with a signed ADP card.
+// registration is a /register body for c.
 func (f *fz) registration(tb testing.TB, c *identity.Controller, name string, caps []string) map[string]any {
 	tb.Helper()
 	kel, err := identity.MarshalKEL(c.KEL())
@@ -164,33 +192,17 @@ func (f *fz) registration(tb testing.TB, c *identity.Controller, name string, ca
 	}
 	return map[string]any{
 		"aid": c.AID(), "name": name, "caps": caps,
-		"kel":  base64.StdEncoding.EncodeToString(kel),
-		"card": fzADPCard(tb, c, name, caps),
+		"kel": base64.RawURLEncoding.EncodeToString(kel),
 	}
 }
 
-// register posts raw to /register signed as c.
+// register posts raw to /register signed as c, after the operator admitted
+// c (a new hub admits only its list; the admission gate has its own tests).
 func (f *fz) register(c *identity.Controller, raw []byte) *httptest.ResponseRecorder {
+	if _, err := f.store.Admit(c.AID(), 0, "", false); err != nil {
+		panic(err)
+	}
 	return f.signedDo(c, relayauth.ActionRegister, http.MethodPost, "/register", "", raw)
-}
-
-// fzADPCard is mintCard for a testing.TB.
-func fzADPCard(tb testing.TB, c *identity.Controller, name string, caps []string) json.RawMessage {
-	tb.Helper()
-	if caps == nil {
-		caps = []string{}
-	}
-	now := time.Now()
-	card := &adp.AgentCard{
-		SubjectDID: c.AID(), CardSchema: adp.CardSchema{Major: 1},
-		Seq: uint64(now.UnixNano()), IssuedAt: now.Unix(),
-		NotBefore:    now.Add(-time.Minute).Unix(),
-		Capabilities: caps, CriticalExtensions: []string{}, Name: name,
-	}
-	// A card the signer cannot encode (fuzzed text that is not UTF-8) is
-	// sent unsigned, which the hub must refuse.
-	_ = card.Sign(c)
-	return fzJSON(tb, card)
 }
 
 // fzJSON marshals v or fails.
@@ -204,17 +216,19 @@ func fzJSON(tb testing.TB, v any) []byte {
 }
 
 // fzKeySet mints a signed encryption key set for c with sequence seq and
-// one key valid from now-60s for the key lifetime, shifted by shiftMS.
+// one key valid from now-60s for the longest key validity, shifted by
+// shiftMS; the set's issued_at moves with it, so a shifted set is one that
+// was valid when it was made.
 func fzKeySet(tb testing.TB, c *identity.Controller, seq uint64, shiftMS int64) ([]byte, *seal.KeyPair) {
 	tb.Helper()
 	now := uint64(time.Now().UnixMilli())
 	nb := uint64(int64(now-60_000) + shiftMS)
-	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, nb, nb+seal.KeyLifetimeMS)
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, nb, nb+seal.MaxKeyValidityMS)
 	if err != nil {
 		tb.Fatal(err)
 	}
 	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: seq,
-		Keys: []seal.EncKey{kp.Public}, IssuedAt: now}
+		Keys: []seal.EncKey{kp.Public}, IssuedAt: nb + 60_000, Mbox: testMbox(tb)}
 	signed, err := seal.SignEncKeySet(set, c.Sign)
 	if err != nil {
 		tb.Fatal(err)
@@ -226,7 +240,8 @@ func fzKeySet(tb testing.TB, c *identity.Controller, seq uint64, shiftMS int64) 
 	return raw, kp
 }
 
-// fzEnvelope is a structurally valid sealed envelope addressed to "to".
+// fzEnvelope is a structurally valid sealed envelope addressed to "to",
+// sealed to the key to published last (publishedKID).
 func fzEnvelope(tb testing.TB, to string, ct []byte) []byte {
 	tb.Helper()
 	if len(ct) == 0 {
@@ -234,7 +249,8 @@ func fzEnvelope(tb testing.TB, to string, ct []byte) []byte {
 	}
 	env := &seal.SealedEnvelope{
 		V: seal.EnvelopeVersion, To: to, Suite: seal.SuiteX25519,
-		KID: bytes.Repeat([]byte{7}, seal.KIDLen), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
+		KID: publishedKID(to), Enc: bytes.Repeat([]byte{9}, 32), CT: ct,
+		Access: &seal.Access{Kind: seal.AccessKindSession},
 	}
 	b, err := env.Marshal()
 	if err != nil {
@@ -250,7 +266,7 @@ func fzA2ACard(tb testing.TB, c *identity.Controller, seq uint64, edits ...func(
 	if err != nil {
 		tb.Fatal(err)
 	}
-	out, err := a2acard.SignWithController(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
+	out, err := a2acard.SignWithSnapshot(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -266,7 +282,7 @@ func fzA2ACardOrRaw(tb testing.TB, c *identity.Controller, seq uint64, edits ...
 	if err != nil {
 		tb.Fatal(err)
 	}
-	out, err := a2acard.SignWithController(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
+	out, err := a2acard.SignWithSnapshot(b, c, "https://hub.example.org/agents/"+c.AID()+"/jwks.json")
 	if err != nil {
 		return b
 	}
@@ -314,8 +330,8 @@ func (f *fz) balance(tb testing.TB, aid string) int64 {
 //   - what is due to and owed by peers is not negative;
 //   - every account's entries add up to its balance (what `anet
 //     reconcile` checks);
-//   - the published supply agrees with itself: outstanding equals what
-//     the agent rows add up to, and the signed issuance chain agrees.
+//   - the supply adds up (P-PAY-3): the agent balances add up to
+//     issued − redeemed, and the hub's own row holds the negative of that.
 func (f *fz) ledgerInvariants(tb testing.TB) {
 	tb.Helper()
 	for _, q := range []string{
@@ -350,16 +366,20 @@ func (f *fz) ledgerInvariants(tb testing.TB) {
 		}
 	}
 	rows.Close()
+	f.supplyInvariant(tb)
+}
+
+// supplyInvariant is P-PAY-3 (hub-payment-privacy §4.2.1 PAY-S8): after
+// every step, Σ agent balances == issued − redeemed == −(the hub's row).
+func (f *fz) supplyInvariant(tb testing.TB) {
+	tb.Helper()
 	sup, err := f.store.Supply(f.hubAID)
 	if err != nil {
 		tb.Fatalf("supply: %v", err)
 	}
-	if sup.Outstanding != sup.Balances {
-		tb.Fatalf("supply: outstanding %d, agent balances %d", sup.Outstanding, sup.Balances)
-	}
-	if !sup.ChainAgrees {
-		tb.Fatalf("supply: the issuance chain says %d outstanding, the ledger %d (%+v)",
-			sup.ChainOutstanding, sup.Outstanding, sup)
+	if !sup.Consistent() {
+		tb.Fatalf("supply: agent balances %d, issued − redeemed %d, the hub's row %d (%+v)",
+			sup.Balances, sup.Outstanding, sup.HubRow, sup)
 	}
 }
 

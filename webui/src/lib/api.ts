@@ -6,7 +6,6 @@ export interface AgentView {
   caps: string[] | null;
   summary?: string;
   readme?: string;
-  pricing?: string;
   listed: boolean;
   avg_rating: number;
   review_count: number;
@@ -14,7 +13,7 @@ export interface AgentView {
   // 只在从对等 hub 学来的条目上有:这个 agent 住在哪个 hub。
   // 空表示本 hub。缺了它,页面就分不清本地和联邦来的 agent。
   home_hub?: string;
-  // 它最后一次取信的时间,以及是否已经很久没取了。
+  // 它最后一次取信的时间(只到小时),以及是否已经很久没取了。
   // 一个只列出 agent 而不说谁已经不再应答的目录,是在让人去等死人。
   last_seen?: string;
   quiet?: boolean;
@@ -26,24 +25,25 @@ export interface AgentView {
   // 只在 /graph 的节点上有意义:false 表示这个 agent 已不在本 hub 注册
   // —— 它离开了,或长期未取信。它的评价仍在,因为那些记录的是发生过的事。
   registered?: boolean;
+  // 给它写信要用的密钥历史、加密钥集与见证通告(base64url),供 daemon
+  // 直接取用而不必再按 AID 查询。页面不读它们。
+  kel?: string;
+  keys?: string;
+  key_state_notice?: string;
 }
 
-// 一条已验证的评价。hub 不持有交互内容(A2A-DESIGN §9):没有 goal、没有
-// deliverable。request_cid / result_cid 是回执里提供方签名的承诺值;hub 没有
-// 内容可以核对它们,所以 content_binding 恒为 "UNVERIFIED" —— "没有核对"与
-// "核对通过"是两种状态,页面不得把前者显示成后者。
+// 一条本 hub 保存的评价(评价 v2)。它不含评价人、不含交互编号,也没有精确到
+// 日以下的时间:hub 不保存这些(只用一个本 hub 才能算出的标签统计有几位不同
+// 的评价人)。receipt_cid 是这条评价所依据的、提供方签名的回执;评价由回执里的
+// 一次性评价钥签名,两处签名 hub 都核对过。hub 不持有交互内容(A2A-DESIGN §9)。
+// completed_day、created_day 是 UTC 日序号(自 1970-01-01 起的天数)。
 export interface ReviewView {
-  interaction_id: string;
   subject_aid: string;
-  reviewer_aid: string;
   rating: number;
   comment?: string;
   receipt_cid: string;
-  request_cid: string;
-  result_cid: string;
-  content_binding: string;
-  completed_at: number;
-  created_at: number;
+  completed_day: number;
+  created_day: number;
 }
 
 export interface Stats {

@@ -1,0 +1,161 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "Federation v3 (core §2.12.2, G3, G21; sealed-sender §2.8, §4.2.7, SSR-H15, SSR-H16): every /fed/v3 route is open to the hubs of the peer table only, signed by the asking hub with relayauth v2 for the route's action (fed_forward, fed_bucket, fed_cards, fed_reviews); no signature, or a signature for another action or over another request, is 401 unauthorized, a hub that is not a peer 403 not_peer. POST /fed/v3/forward carries the envelope itself (application/vnd.anet.envelope+cbor) and its outer key 7 as X-ANet-Access, and no session; it is answered {status: queued | duplicate, rid, recipient_quiet}, always 200, or refused: a recipient not registered here 404 unknown_destination, a credential refused 403 access_invalid. POST /fed/v3/directory:bucket takes the /directory:bucket request and answers this hub's own entries without partial. GET /fed/v3/cards serves the A2A card stream, base64url; GET /fed/v3/reviews the review stream (hub-payment-privacy §2.5), {cursor, reviews}, each entry review/2: the receipt, the review, this hub's attestation and the provider's key history, base64url, and fed_seq, and nothing that names the reviewer. The v0.2 routes /fed/v1/* and /fed/v2/* answer 404 not_found.",
+  "setup": "fed",
+  "cases": [
+    {
+      "name": "a first contact forwarded by a peer",
+      "cite": "§4.2.7 step 13",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}"},
+        "b64url": "${env_first}", "sign": {"action": "fed_forward", "as": "peer"}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"status": "queued", "recipient_quiet": false}}
+    },
+    {
+      "name": "the same envelope again",
+      "cite": "§4.2.7 step 10",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}"},
+        "b64url": "${env_first}", "sign": {"action": "fed_forward", "as": "peer"}},
+      "response": {"status": 200, "body_has": {"status": "duplicate", "recipient_quiet": false}}
+    },
+    {
+      "name": "under a delivery credential",
+      "cite": "§4.2.7 step 13",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_cap}"},
+        "b64url": "${env_cap}", "sign": {"action": "fed_forward", "as": "peer"}},
+      "response": {"status": 200, "body_has": {"status": "queued", "recipient_quiet": false}}
+    },
+    {
+      "name": "a credential with a proof by another key",
+      "cite": "§4.2.7 step 8",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_forged}"},
+        "b64url": "${env_forged}", "sign": {"action": "fed_forward", "as": "peer"}},
+      "response": {"status": 403, "body_has": {"reason": "access_invalid"}}
+    },
+    {
+      "name": "a recipient not registered here",
+      "cite": "§4.2.7 step 9",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}"},
+        "b64url": "${env_nobody}", "sign": {"action": "fed_forward", "as": "peer"}},
+      "response": {"status": 404, "body_has": {"reason": "unknown_destination"}}
+    },
+    {
+      "name": "a session header",
+      "cite": "§4.2.7 step 5",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-MAC": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+        "b64url": "${env_first}", "sign": {"action": "fed_forward", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "not signed",
+      "cite": "SSR-H16",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}"},
+        "b64url": "${env_first}"},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "signed by a hub that is not a peer",
+      "cite": "§4.2.7 step 1",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}"},
+        "b64url": "${env_first}", "sign": {"action": "fed_forward", "as": "stranger"}},
+      "response": {"status": 403, "body_has": {"reason": "not_peer"}}
+    },
+    {
+      "name": "signed for another action",
+      "cite": "§4.2.7 step 4",
+      "request": {"method": "POST", "path": "/fed/v3/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}"},
+        "b64url": "${env_first}", "sign": {"action": "fed_bucket", "as": "peer"}},
+      "response": {"status": 401, "body_has": {"reason": "unauthorized"}}
+    },
+    {
+      "name": "a bucket for a peer",
+      "cite": "SSR-W20",
+      "request": {"method": "POST", "path": "/fed/v3/directory:bucket",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"prefix": "", "bits": 0}, "sign": {"action": "fed_bucket", "as": "peer"}},
+      "response": {"status": 200, "body_has": {"max_bits": 0}}
+    },
+    {
+      "name": "a bucket narrower than this hub serves",
+      "cite": "SSR-W18",
+      "request": {"method": "POST", "path": "/fed/v3/directory:bucket",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"prefix": "AA", "bits": 8}, "sign": {"action": "fed_bucket", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bucket_too_narrow", "max_bits": 0}}
+    },
+    {
+      "name": "a bucket request with a member it does not take",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/fed/v3/directory:bucket",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"prefix": "", "bits": 0, "partial": true}, "sign": {"action": "fed_bucket", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a bucket for a hub that is not a peer",
+      "cite": "SSR-H16",
+      "request": {"method": "POST", "path": "/fed/v3/directory:bucket",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"},
+        "json": {"prefix": "", "bits": 0}, "sign": {"action": "fed_bucket", "as": "stranger"}},
+      "response": {"status": 403, "body_has": {"reason": "not_peer"}}
+    },
+    {
+      "name": "the card stream for a peer",
+      "cite": "core §2.12.2",
+      "request": {"method": "GET", "path": "/fed/v3/cards?cursor=0",
+        "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "fed_cards", "as": "peer"}},
+      "response": {"status": 200, "body": {"cursor": 0, "cards": []}}
+    },
+    {
+      "name": "the card stream with a cursor not in canonical decimal",
+      "cite": "core §2.12.2",
+      "request": {"method": "GET", "path": "/fed/v3/cards?cursor=-1",
+        "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "fed_cards", "as": "peer"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "the review stream for a peer",
+      "cite": "core §2.12.2; hub-payment-privacy §2.5",
+      "request": {"method": "GET", "path": "/fed/v3/reviews",
+        "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "fed_reviews", "as": "peer"}},
+      "response": {"status": 200, "body": {"cursor": 1, "reviews": [{"format": "review/2",
+        "receipt": "${rv_receipt}", "review": "${rv_review}", "attestation": "${rv_att}",
+        "provider_kel": "${rv_kel}", "fed_seq": 1}]}}
+    },
+    {
+      "name": "the review stream after its last entry",
+      "cite": "core §2.12.2",
+      "request": {"method": "GET", "path": "/fed/v3/reviews?cursor=1",
+        "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "fed_reviews", "as": "peer"}},
+      "response": {"status": 200, "body": {"cursor": 1, "reviews": []}}
+    },
+    {
+      "name": "the v0.2 forward",
+      "cite": "core G21",
+      "request": {"method": "POST", "path": "/fed/v1/forward",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json"}, "json": {}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "the v0.2 key lookup",
+      "cite": "core G21",
+      "request": {"method": "GET", "path": "/fed/v2/keys/${bob}", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "the v0.2 card stream",
+      "cite": "core G21",
+      "request": {"method": "GET", "path": "/fed/v2/cards", "headers": {"X-ANet-Wire": "3"}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    }
+  ]
+}

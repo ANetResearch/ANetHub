@@ -2,7 +2,6 @@ package aghub
 
 import (
 	"bytes"
-	"fmt"
 	"log"
 )
 
@@ -15,7 +14,7 @@ import (
 // "a2a_card": null as "withdraw my card": the card row and its skill and
 // tag index rows are deleted, the agent's directory name and capability
 // ids go back to what the registration declared (RegisterAgent has just
-// written them), a peer that learned the card is told on /fed/v2/cards,
+// written them), a peer that learned the card is told on /fed/v3/cards,
 // and card_status says "withdrawn". An absent a2a_card still means "no
 // change": a daemon that predates the field, or one that only refreshes
 // its registration, must not unpublish a card by omission.
@@ -67,32 +66,29 @@ func (s *Store) WithdrawA2ACard(aid string) error {
 			return err
 		}
 	}
+	// The directory entry no longer carries it (sealed-sender SSR-H17).
+	if err := s.refreshDirTx(tx, aid); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-// migrateA2AFedSeqHead creates the stored head of the A2A card stream and
-// seeds it from the rows already on the stream.
+// a2aFedSeqSchema is the stored head of the A2A card stream, which starts
+// at 0.
 //
 // The next position used to be MAX(fed_seq)+1 over the cards and the
 // withdrawals. A row deleted at the head (a card withdrawn by an agent that
 // does not federate, an operator's delete) then gave its position to the
 // next card, and a position a reader may already have passed meant two
 // different entries. The head only moves forward.
-func (s *Store) migrateA2AFedSeqHead() error {
-	for _, q := range []string{
+func a2aFedSeqSchema() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS a2a_fed_seq (
 		   id INTEGER PRIMARY KEY CHECK (id = 1),
 		   last INTEGER NOT NULL
 		 )`,
-		`INSERT OR IGNORE INTO a2a_fed_seq(id, last) SELECT 1, MAX(
-		   (SELECT COALESCE(MAX(fed_seq),0) FROM agent_a2a_card),
-		   (SELECT COALESCE(MAX(fed_seq),0) FROM a2a_card_withdrawal))`,
-	} {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate a2a card stream head: %w", err)
-		}
+		`INSERT INTO a2a_fed_seq(id, last) VALUES(1, 0)`,
 	}
-	return nil
 }
 
 // nextA2AFedSeq takes the next position on the A2A card federation stream,

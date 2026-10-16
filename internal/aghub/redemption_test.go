@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
@@ -19,7 +20,7 @@ import (
 // Credit that only goes in is a score. This is the way out.
 func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 	}
 
 	// The balance actually fell.
-	if got := balanceOf(t, srv, agent.AID()); got != int64(400+aghub.RegistrationGrant-300) {
+	if got := balanceOf(t, srv, agent.AID()); got != int64(400+testRegistrationFunds-300) {
 		t.Errorf("balance = %d", got)
 	}
 
@@ -113,11 +114,11 @@ func TestRedeemingTakesCreditOutOfCirculation(t *testing.T) {
 // A hub must not be able to redeem an agent's balance for it.
 func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	thief, err := identity.Incept()
+	thief, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 		"paymentPayload": json.RawMessage(mustPayload(t, thief, opt, "redeem:theft")),
 		"reference":      "theft",
 	})
-	if got := balanceOf(t, srv, agent.AID()); got != int64(400+aghub.RegistrationGrant) {
+	if got := balanceOf(t, srv, agent.AID()); got != int64(400+testRegistrationFunds) {
 		t.Errorf("somebody else's redemption moved this agent's credit: %d (code %d)", got, code)
 	}
 }
@@ -146,7 +147,7 @@ func TestOnlyTheAgentCanRedeemItsOwnCredit(t *testing.T) {
 // Redeeming more than you hold must fail, and must fail as a payment.
 func TestRedeemingMoreThanYouHoldIsRefused(t *testing.T) {
 	srv := newHub(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,11 +181,11 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 	// Two hubs. A payment made on peer's ledger, cleared at ours, leaves
 	// peer owing us — and then peer says it has paid.
 	ours, ourStore := newHubWithStore(t)
-	peerCtrl, err := identity.Incept()
+	peerCtrl, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 	if err := ourStore.SettleOwed(ourAID, peerCtrl.AID(), peerCtrl.KEL(), over); err == nil {
 		t.Error("a peer cleared more than it owed")
 	}
-	stranger, err := identity.Incept()
+	stranger, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,18 +265,44 @@ func TestAPeerCanDischargeWhatItOwes(t *testing.T) {
 
 func supplyOf(t *testing.T, srv *httptest.Server) aghub.Supply {
 	t.Helper()
-	resp, err := http.Get(srv.URL + "/x402/supply")
+	sup, err := storeOf(t, srv).Supply(hubAIDOf(t, srv))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	var out struct {
-		Supply aghub.Supply `json:"supply"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	return sup
+}
+
+// signedPayment is a PAYMENT-SIGNATURE header value: the payment payload
+// for opt, with an authorization the payer signed for its terms, base64.
+func signedPayment(t *testing.T, payer *identity.Controller, opt payment.PaymentOption,
+	interactionID string) string {
+	t.Helper()
+	amount, err := payment.ParseAmount(opt.Amount)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return out.Supply
+	now := time.Now()
+	a := &payment.Authorization{
+		PayTo: opt.PayTo, Amount: amount, Network: opt.Network, Nonce: interactionID,
+		IssuedAt: now.UnixMilli(), NotAfter: now.Add(5 * time.Minute).UnixMilli(),
+		InteractionID: interactionID,
+	}
+	if err := a.Sign(payer); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := a.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pp := payment.PaymentPayload{
+		X402Version: payment.Version, Accepted: opt,
+		Payload: map[string]any{"authorization": base64.StdEncoding.EncodeToString(raw)},
+	}
+	b, err := json.Marshal(pp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 // mustPayload builds the JSON PaymentPayload an agent signs.
@@ -306,7 +333,7 @@ func decodeB64(t *testing.T, s string) string {
 // at all.
 func TestAnOperatorGrantIsIssuedOnTheBooks(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,7 +343,7 @@ func TestAnOperatorGrantIsIssuedOnTheBooks(t *testing.T) {
 	if err := store.GrantCredit(agent.AID(), 500, "operator grant"); err != nil {
 		t.Fatal(err)
 	}
-	if bal, _ := store.Balance(agent.AID()); bal != 500+int64(aghub.RegistrationGrant) {
+	if bal, _ := store.Balance(agent.AID()); bal != 500+int64(testRegistrationFunds) {
 		t.Errorf("balance = %d after a 500 grant", bal)
 	}
 	after := supplyOf(t, srv)
@@ -378,10 +405,11 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 		who   *identity.Controller
 		delta int64
 	}{{payer, -120}, {payee, 120}} {
-		entries, err := store.LedgerEntries(tc.who.AID(), 50)
+		win, err := store.LedgerEntries(tc.who.AID(), 50)
 		if err != nil {
 			t.Fatal(err)
 		}
+		entries := win.Entries
 		found := false
 		for _, e := range entries {
 			if e.Reason == settled.Transaction && e.Delta == tc.delta {
@@ -393,23 +421,24 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 		}
 	}
 
-	// And the balance now agrees with the entries behind it, which is
-	// what reconcile checks.
+	// And the balance agrees with the entries behind it while they are all
+	// in the window (an account younger than 14 days), which is what
+	// reconcile checks; the window's sum and the page agree.
 	for _, c := range []*identity.Controller{payer, payee} {
 		bal, err := store.Balance(c.AID())
 		if err != nil {
 			t.Fatal(err)
 		}
-		entries, err := store.LedgerEntries(c.AID(), 200)
+		win, err := store.LedgerEntries(c.AID(), 200)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var sum int64
-		for _, e := range entries {
+		for _, e := range win.Entries {
 			sum += e.Delta
 		}
-		if sum != bal {
-			t.Errorf("%s: balance %d but entries sum to %d", c.AID()[:12], bal, sum)
+		if sum != bal || win.Sum != bal || win.Total != len(win.Entries) {
+			t.Errorf("%s: balance %d but entries sum to %d (window sum %d)", c.AID()[:12], bal, sum, win.Sum)
 		}
 	}
 }
@@ -422,7 +451,7 @@ func TestASettlementAppearsInBothLedgers(t *testing.T) {
 // twice and outstanding went negative by the redeemed amount.
 func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -467,11 +496,11 @@ func TestARedemptionMovesTheSupplyRowOnce(t *testing.T) {
 // could have been settled".
 func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 	ours, ourStore := newHubWithStore(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +550,7 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bal != 400+int64(aghub.RegistrationGrant) {
+	if bal != 400+int64(testRegistrationFunds) {
 		t.Errorf("the discharge moved a user's balance: %d", bal)
 	}
 }
@@ -537,12 +566,17 @@ func TestAHubCanDischargeAndThePeerAppliesIt(t *testing.T) {
 //
 // What must happen instead: the payer's hub destroys the credit and
 // records the obligation; the payee's hub creates it against the receipt.
-// Both write the change to their signed chains, so the chain equals the
+// Both record the change in their supply totals, so the totals equal the
 // balances on both sides afterwards.
+//
+// The payer's hub does this only for a payment the payee's hub forwarded,
+// signed (/fed/v3/settle, SettleForPeer), and owes that hub. At its own
+// /x402/settle a payee that does not bank there is payee_not_local and
+// nothing moves (hub-payment-privacy PAY-L4).
 func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	payer, err := identity.Incept()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,13 +600,21 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	if err := json.Unmarshal(mustPayload(t, payer, opt, "cross-1"), &pp); err != nil {
 		t.Fatal(err)
 	}
-	out := store.SettleWithRequirements(hubAID, &pp, &opt)
+	if out := store.SettleWithRequirements(hubAID, &pp, &opt); out.Success ||
+		out.ErrorReason != payment.ReasonPayeeNotLocal {
+		t.Fatalf("settling to a foreign payee at /x402/settle: %+v, want %s", out, payment.ReasonPayeeNotLocal)
+	}
+	if got := supplyOf(t, srv); got != before {
+		t.Fatalf("a refused settlement moved the supply: %+v -> %+v", before, got)
+	}
+	const peerHub = "did:anet:their-hub"
+	out := store.SettleForPeer(hubAID, peerHub, &pp, &opt)
 	if !out.Success {
-		t.Fatalf("settling to a foreign payee: %s", out.ErrorReason)
+		t.Fatalf("settling to a foreign payee forwarded by its hub: %s", out.ErrorReason)
 	}
 
 	// The payer paid.
-	if got, _ := store.Balance(payer.AID()); got != int64(400+aghub.RegistrationGrant-250) {
+	if got, _ := store.Balance(payer.AID()); got != int64(400+testRegistrationFunds-250) {
 		t.Errorf("payer balance = %d", got)
 	}
 	// The foreign payee holds nothing here. Crediting it here is the half
@@ -580,19 +622,19 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 	if got, _ := store.Balance(foreignPayee); got != 0 {
 		t.Errorf("a payee that banks elsewhere was credited %d here", got)
 	}
-	// The obligation is recorded instead.
+	// The obligation is recorded instead, owed to the hub that forwarded it.
 	due, err := store.Due()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if due[foreignPayee] != 250 {
-		t.Errorf("due to %s = %d, want 250", foreignPayee, due[foreignPayee])
+	if due[peerHub] != 250 || len(due) != 1 {
+		t.Errorf("due = %v, want 250 to %s only", due, peerHub)
 	}
 
-	// The supply fell by what left, and the chain agrees with the
-	// balances. A chain that did not record this would keep claiming the
-	// credit was still outstanding here while it was also outstanding on
-	// the peer.
+	// The supply fell by what left, and the totals agree with the
+	// balances and the hub's row (P-PAY-3). Totals that did not record
+	// this would keep claiming the credit was still outstanding here while
+	// it was also outstanding on the peer.
 	after := supplyOf(t, srv)
 	if after.Outstanding != before.Outstanding-250 {
 		t.Errorf("outstanding = %d, want %d", after.Outstanding, before.Outstanding-250)
@@ -601,27 +643,29 @@ func TestACrossHubPaymentCreatesCreditOnce(t *testing.T) {
 		t.Errorf("the ledger no longer balances: outstanding=%d balances=%d",
 			after.Outstanding, after.Balances)
 	}
-	if !after.ChainAgrees {
-		t.Errorf("the signed chain disagrees with the ledger: chain=%d outstanding=%d",
-			after.ChainOutstanding, after.Outstanding)
+	if !after.Consistent() {
+		t.Errorf("the supply totals disagree with the ledger: %+v", after)
+	}
+	if after.Redeemed != before.Redeemed+250 {
+		t.Errorf("redeemed = %d, want %d — paying a peer's agent was not recorded as leaving circulation",
+			after.Redeemed, before.Redeemed+250)
 	}
 }
 
 // The payee's side of the same payment: credit is created here, and the
-// signed chain records it as issuance.
+// supply totals record it as issuance.
 //
 // Clearing raised a local balance with no local account falling, which is
-// issuance by definition, and wrote nothing to the chain. The chain then
-// understated what was outstanding by exactly the cleared amount, so the
-// hub's own audit endpoint reported a discrepancy that was its own
-// omission rather than a ledger problem.
+// issuance by definition. Not recorded as such, the published outstanding
+// would understate what this hub owes by exactly the cleared amount, and
+// the next epoch would refuse to close.
 func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,13 +688,12 @@ func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 	if after.Outstanding != before.Outstanding+250 {
 		t.Errorf("outstanding = %d, want %d", after.Outstanding, before.Outstanding+250)
 	}
-	if !after.ChainAgrees {
-		t.Errorf("the signed chain disagrees after clearing: chain=%d outstanding=%d",
-			after.ChainOutstanding, after.Outstanding)
+	if !after.Consistent() {
+		t.Errorf("the supply totals disagree after clearing: %+v", after)
 	}
-	if after.ChainIssued != before.ChainIssued+250 {
-		t.Errorf("chain issued = %d, want %d — clearing was not recorded as issuance",
-			after.ChainIssued, before.ChainIssued+250)
+	if after.Issued != before.Issued+250 {
+		t.Errorf("issued = %d, want %d — clearing was not recorded as issuance",
+			after.Issued, before.Issued+250)
 	}
 }
 
@@ -668,11 +711,11 @@ func TestClearingFromAPeerIsRecordedAsIssuance(t *testing.T) {
 func TestTwoDischargesWithTheSameReferenceBothApply(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

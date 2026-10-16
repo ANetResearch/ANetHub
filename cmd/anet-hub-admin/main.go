@@ -13,10 +13,16 @@
 //
 // The official-agent directory is read from <--data>/officials.json, a JSON array of registry-only
 // manifests (id, aid, hub, caps and descriptive labels). Absent file → no official agents.
+//
+// What it refuses to start with, each with one sentence (internal/admin text.go) and before it
+// serves anything: --restore-agents-from and --keep-only-agents, removed (exit 2, before any
+// database is opened); an admin.db of an earlier release (admin.db_too_old); a hub data directory of
+// 0.2 or of a newer anet-hub (anet-hub's own hub_identity_v02 and hub_data_too_new), left as it was.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -27,6 +33,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetHub/internal/admin"
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
@@ -45,13 +52,16 @@ func main() {
 	snapEvery := flag.Duration("snapshot-every", 5*time.Minute, "stats snapshot interval (0 = off)")
 	harvestEvery := flag.Duration("harvest-every", 30*time.Minute,
 		"interval of the harvest run, which has no sources and does nothing (0 = off)")
-	restoreFrom := flag.String("restore-agents-from", "", "one-shot recovery: INSERT-OR-IGNORE agents from this backup hub.db into --hub-data, then exit")
-	keepOnly := flag.String("keep-only-agents", "", "one-shot: delete all agents EXCEPT this comma-separated AID list (undo an over-broad restore), then exit")
+	removed := defineRemovedFlags(flag.CommandLine)
 	showVersion := flag.Bool("version", false, "print version and exit")
 	checkToken := flag.Bool("check-token", false, "check $ADMIN_TOKEN against the start-up rules and exit: "+
 		"0 if the admin surface would start with it, 1 if not (deploy/deploy-admin.sh runs this on the host "+
 		"before a restart; the value is not printed)")
 	flag.Parse()
+	// A removed flag is answered first, before anything is opened.
+	if len(*removed) > 0 {
+		os.Exit(admin.Say(os.Stderr, (*removed)[0], nil))
+	}
 	if *showVersion {
 		fmt.Println(versionLine())
 		return
@@ -63,30 +73,6 @@ func main() {
 		}
 		return
 	}
-	// One-shot registry recovery (see recovery.go). Additive only — cannot delete/overwrite live agents.
-	if *restoreFrom != "" {
-		before, after, err := admin.RestoreAgentsFromBackup(*hubData, *restoreFrom)
-		if err != nil {
-			log.Fatalf("anet-hub-admin: restore: %v", err)
-		}
-		log.Printf("anet-hub-admin: restored agents from %s — before=%d after=%d (+%d)", *restoreFrom, before, after, after-before)
-		return
-	}
-	if *keepOnly != "" {
-		var keep []string
-		for _, a := range splitComma(*keepOnly) {
-			if a != "" {
-				keep = append(keep, a)
-			}
-		}
-		before, after, removed, err := admin.PruneAgentsExcept(*hubData, keep)
-		if err != nil {
-			log.Fatalf("anet-hub-admin: prune: %v", err)
-		}
-		log.Printf("anet-hub-admin: pruned agents — before=%d removed=%d after=%d (kept %d)", before, removed, after, len(keep))
-		return
-	}
-
 	token := os.Getenv("ADMIN_TOKEN")
 	if msg := tokenRefusal(token); msg != "" {
 		log.Fatal(msg)
@@ -116,6 +102,9 @@ func main() {
 		}()
 	}
 	store, err := admin.OpenStore(*data)
+	if errors.Is(err, admin.ErrAdminDBTooOld) {
+		os.Exit(admin.Say(os.Stderr, "admin.db_too_old", nil))
+	}
 	if err != nil {
 		log.Fatalf("anet-hub-admin: %v", err)
 	}
@@ -133,6 +122,9 @@ func main() {
 		log.Printf("anet-hub-admin: loaded %d official agent(s) from %s", added, officialsPath)
 	}
 	hub, err := admin.OpenHubDB(*hubData)
+	if code, refused := refuseHubData(err); refused {
+		os.Exit(code)
+	}
 	if err != nil {
 		log.Fatalf("anet-hub-admin: %v", err)
 	}
@@ -197,17 +189,48 @@ func versionLine() string {
 	return fmt.Sprintf("anet-hub-admin %s commit=%s built_at=%s", version.V, version.Commit, version.BuiltAt)
 }
 
-func splitComma(s string) []string {
-	var out []string
-	cur := ""
-	for _, r := range s {
-		if r == ',' {
-			out = append(out, cur)
-			cur = ""
-		} else if r != ' ' {
-			cur += string(r)
-		}
+// refuseHubData answers a hub data directory this release does not open (core CORE-V4) with the
+// sentence anet-hub gives for it, exit 1: data of 0.2 or earlier (hub_identity_v02), or data a newer
+// anet-hub wrote (hub_data_too_new). OpenHubDB has left the directory as it was.
+func refuseHubData(err error) (code int, refused bool) {
+	switch {
+	case errors.Is(err, aghub.ErrHubDataV02):
+		return admin.Say(os.Stderr, "hub_identity_v02", nil), true
+	case errors.Is(err, aghub.ErrHubDataTooNew):
+		return admin.Say(os.Stderr, "hub_data_too_new", nil), true
 	}
-	out = append(out, cur)
-	return out
+	return 0, false
+}
+
+// removedFlags are the flags of the two paths that wrote stored key histories back into the
+// registry, with the sentence each is answered with (hub-payment-privacy PAY-O4). They stay known to
+// the parser so that a command line with one is answered with what to do instead, exit 2, rather
+// than with "flag provided but not defined".
+var removedFlags = []struct{ name, key string }{
+	{"restore-agents-from", "admin.flag_removed.restore"},
+	{"keep-only-agents", "admin.flag_removed.prune"},
+}
+
+// removedFlag records that a removed flag was given. It takes no value of its own (a bool flag), so
+// "--restore-agents-from x" and a flag given last are both recognised; "=x" is accepted and ignored.
+type removedFlag struct {
+	key  string
+	seen *[]string
+}
+
+func (f removedFlag) String() string   { return "" }
+func (f removedFlag) IsBoolFlag() bool { return true }
+func (f removedFlag) Set(string) error {
+	*f.seen = append(*f.seen, f.key)
+	return nil
+}
+
+// defineRemovedFlags declares the removed flags on fs; the returned list collects the sentence key
+// of each one given, in order.
+func defineRemovedFlags(fs *flag.FlagSet) *[]string {
+	seen := &[]string{}
+	for _, r := range removedFlags {
+		fs.Var(removedFlag{key: r.key, seen: seen}, r.name, "removed (see the sentence it is answered with)")
+	}
+	return seen
 }

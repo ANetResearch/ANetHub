@@ -1,0 +1,115 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /directory:bucket and the directory's other faces (core §2.12.2; sealed-sender §2.7, §2.9, §4.2.8, SSR-H18, CORE-E5, CORE-E7, CORE-K15). An anonymous query {prefix, bits, cursor?} for the entries whose directory hash starts with the bits-bit prefix (ceil(bits/8) bytes of base64url, the bits past bits zero) is answered {max_bits, entries: [{h, box}], next?, partial?}; bits above the hub's dir_max_bits is 400 bucket_too_narrow with max_bits; a malformed prefix, a missing or unknown member is 400 bad_request; an identity header is 400 identity_headers_not_allowed; an older wire is 426. GET /hub/identity states dir_max_bits. The listings carry each agent's KEL and key set in base64url. The lookups by AID and the p2p rendezvous are gone: 404 not_found.",
+  "setup": "directory",
+  "cases": [
+    {
+      "name": "the whole directory",
+      "cite": "SSR-W18",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": "", "bits": 0}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"max_bits": 0}}
+    },
+    {
+      "name": "a bucket narrower than dir_max_bits",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": "${alice_prefix8}", "bits": 8}},
+      "response": {"status": 400, "body": {"reason": "bucket_too_narrow",
+        "error": "The directory query asks for more prefix bits than this hub serves; query again with at most max_bits bits.", "max_bits": 0}}
+    },
+    {
+      "name": "the full directory hash as the prefix",
+      "cite": "M11",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": "${alice_h}", "bits": 256}},
+      "response": {"status": 400, "body_has": {"reason": "bucket_too_narrow", "max_bits": 0}}
+    },
+    {
+      "name": "bits set past bits",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": "wA", "bits": 1}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"prefix\" must be the first ceil(bits/8) bytes of a directory hash with the bits past bits set to zero; send that prefix and send again."}}
+    },
+    {
+      "name": "a padded prefix",
+      "cite": "CORE-E5",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": "gA==", "bits": 1}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"prefix\" is not base64url (the URL-safe alphabet, no padding, no white space); encode it that way and send again."}}
+    },
+    {
+      "name": "no bits",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": ""}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "A directory query carries prefix and bits; add them and send again."}}
+    },
+    {
+      "name": "an unknown member",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": "", "bits": 0, "aid": "${alice}"}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The request body has the member \"aid\", which this route does not take; remove it and send again."}}
+    },
+    {
+      "name": "a cursor this hub did not give",
+      "cite": "core §2.12.2",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3"}, "json": {"prefix": "", "bits": 0, "cursor": "AA"}},
+      "response": {"status": 400, "body": {"reason": "bad_request",
+        "error": "The member \"cursor\" is not one this hub gave for this bucket; query the bucket again without it."}}
+    },
+    {
+      "name": "an identity header on the anonymous route",
+      "cite": "CORE-K15",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "3", "X-ANet-AID": "${alice}"}, "json": {"prefix": "", "bits": 0}},
+      "response": {"status": 400, "body_has": {"reason": "identity_headers_not_allowed"}}
+    },
+    {
+      "name": "an older wire",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/directory:bucket", "headers": {"X-ANet-Wire": "2"}, "json": {"prefix": "", "bits": 0}},
+      "response": {"status": 426, "body_has": {"reason": "wire_too_old"}}
+    },
+    {
+      "name": "/hub/identity states dir_max_bits",
+      "cite": "SSR-W18",
+      "request": {"method": "GET", "path": "/hub/identity"},
+      "response": {"status": 200, "body_has": {"aid": "${hub}", "wire": 3, "dir_max_bits": 0}}
+    },
+    {
+      "name": "the lookup of a key set by AID is gone",
+      "cite": "sealed-sender §2.7",
+      "request": {"method": "POST", "path": "/agents/keys:lookup", "headers": {"X-ANet-Wire": "3"}, "json": {"aid": "${alice}"}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "the lookup of a KEL by AID is gone",
+      "cite": "sealed-sender §2.7",
+      "request": {"method": "POST", "path": "/agents/kel:lookup", "headers": {"X-ANet-Wire": "3"}, "json": {"aid": "${alice}"}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "the lookup of a card by AID is gone",
+      "cite": "sealed-sender §2.7",
+      "request": {"method": "POST", "path": "/a2a/v1/agents/card:lookup", "headers": {"X-ANet-Wire": "3"}, "json": {"aid": "${alice}"}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "publishing a p2p address is gone",
+      "cite": "sealed-sender §2.7",
+      "request": {"method": "POST", "path": "/agents/${alice}/p2p", "headers": {"X-ANet-Wire": "3"}, "json": {"addr": "tcp://192.0.2.7:4001"}},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "the p2p address directory is gone",
+      "cite": "sealed-sender §2.7",
+      "request": {"method": "GET", "path": "/p2p/peers"},
+      "response": {"status": 404, "body_has": {"reason": "not_found"}}
+    },
+    {
+      "name": "the agent listing carries the KEL and the key set",
+      "cite": "SSR-H18",
+      "request": {"method": "GET", "path": "/agents/${alice}"},
+      "response": {"status": 200, "body_has": {"agent": {"aid": "${alice}", "kel": "${alice_kel}", "keys": "${alice_keys}"}}}
+    }
+  ]
+}

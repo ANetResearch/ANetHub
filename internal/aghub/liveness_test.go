@@ -24,7 +24,7 @@ import (
 // stopped collecting will not, whatever else it may still answer.
 func TestPollingIsWhatSaysAnAgentIsStillThere(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +60,9 @@ func TestPollingIsWhatSaysAnAgentIsStillThere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("last_seen is not a timestamp: %q", live.LastSeen)
 	}
-	if time.Since(seen) > time.Minute {
-		t.Errorf("last_seen is stale immediately: %s", live.LastSeen)
+	// Stated to the hour (sealed-sender SSR-H18): the hour of the poll.
+	if want := time.Now().UTC().Truncate(time.Hour); !seen.Equal(want) && !seen.Equal(want.Add(-time.Hour)) {
+		t.Errorf("last_seen is %s, not the hour of the poll just made", live.LastSeen)
 	}
 }
 
@@ -69,7 +70,7 @@ func TestPollingIsWhatSaysAnAgentIsStillThere(t *testing.T) {
 func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	provider, sender := twoAgents(t)
-	register(t, srv, provider, "Worker", []string{"work.do"})
+	registerWithKeys(t, srv, provider, "Worker", []string{"work.do"})
 	register(t, srv, sender, "Sender", nil)
 
 	// The provider collected its mail a long time ago and has not since.
@@ -79,21 +80,22 @@ func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("send refused: %d %s", code, b)
 	}
-	var out struct {
-		Status  string `json:"status"`
-		Quiet   bool   `json:"recipient_quiet"`
-		Warning string `json:"warning"`
-	}
+	var out map[string]any
 	if err := json.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
 	// Accepted, deliberately. This hub cannot know whether the agent is
 	// coming back, and refusing would be asserting that it is not.
-	if out.Status != "queued" {
-		t.Errorf("status = %q — a quiet recipient is not a reason to refuse", out.Status)
+	if out["status"] != "queued" {
+		t.Errorf("status = %v — a quiet recipient is not a reason to refuse", out["status"])
 	}
-	if !out.Quiet || out.Warning == "" {
+	// The sender is told by the flag alone: the answer carries no text
+	// about the recipient (sealed-sender §4.2.8; the daemon words it).
+	if out["recipient_quiet"] != true {
 		t.Errorf("the sender was told nothing and will now wait: %s", b)
+	}
+	if _, ok := out["warning"]; ok {
+		t.Errorf("the answer carries a warning: %s", b)
 	}
 
 	// And once it collects again, the warning stops.
@@ -112,8 +114,8 @@ func TestSendingToAQuietAgentIsAcceptedAndSaysSo(t *testing.T) {
 func TestTheDirectorySaysWhoHasGoneQuiet(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	live, quiet := twoAgents(t)
-	register(t, srv, live, "Live", []string{"work.do"})
-	register(t, srv, quiet, "Quiet", []string{"work.do"})
+	registerWithKeys(t, srv, live, "Live", []string{"work.do"})
+	registerWithKeys(t, srv, quiet, "Quiet", []string{"work.do"})
 	pollAs(t, srv, live)
 	backdatePoll(t, store, quiet.AID(), time.Now().Add(-6*time.Hour))
 
@@ -141,8 +143,8 @@ func TestTheDirectorySaysWhoHasGoneQuiet(t *testing.T) {
 func TestAnAbandonedAgentLeavesTheListingAndNothingElse(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	gone, requester := twoAgents(t)
-	register(t, srv, gone, "Gone", []string{"work.do"})
-	register(t, srv, requester, "Requester", nil)
+	registerWithKeys(t, srv, gone, "Gone", []string{"work.do"})
+	registerWithKeys(t, srv, requester, "Requester", nil)
 	uploadInterlockedReview(t, srv, gone, requester, 5, "good")
 	fundAgent(t, srv, gone.AID(), 400)
 	backdatePoll(t, store, gone.AID(), time.Now().Add(-40*24*time.Hour))
@@ -162,7 +164,7 @@ func TestAnAbandonedAgentLeavesTheListingAndNothingElse(t *testing.T) {
 		t.Errorf("its reviews went with it: %+v %v", rep.Local, err)
 	}
 	bal, err := store.Balance(gone.AID())
-	if err != nil || bal != 400+int64(aghub.RegistrationGrant) {
+	if err != nil || bal != 400+int64(testRegistrationFunds) {
 		t.Errorf("its balance went with it: %d %v", bal, err)
 	}
 	// And one poll brings it back.

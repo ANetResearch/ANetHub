@@ -1,0 +1,65 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "The kid of a queued envelope and the end of a poll page (forward-secrecy FS-H1, FS-H2, FS-H5; core G23, §2.12.2). An envelope sealed to a key its recipient does not publish is refused 409 kid_stale, in the one body of the code, as a first contact and under a delivery credential alike; nothing is queued. POST /relay/poll answers {messages: [{id, envelope, accepted_at}], more}: more is true when the page was cut short and returnable envelopes remain after it, false otherwise.",
+  "setup": "relay",
+  "cases": [
+    {
+      "name": "a first contact sealed to a key the recipient does not publish",
+      "cite": "FS-H1",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-Session": "${sid}", "X-ANet-MAC": "${mac_stale}", "X-ANet-TS": "${ts}"},
+        "b64url": "${env_stale}"},
+      "response": {"status": 409, "headers": {"X-ANet-Wire": "3", "Retry-After": null}, "body": {"reason": "kid_stale",
+        "error": "The envelope is sealed to an encryption key the recipient no longer publishes; fetch its current keys and seal it again."}}
+    },
+    {
+      "name": "the same under a delivery credential",
+      "cite": "FS-H1",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_cap_stale}"},
+        "b64url": "${env_cap_stale}"},
+      "response": {"status": 409, "body": {"reason": "kid_stale",
+        "error": "The envelope is sealed to an encryption key the recipient no longer publishes; fetch its current keys and seal it again."}}
+    },
+    {
+      "name": "nothing was queued",
+      "cite": "FS-H1, FS-H5",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "bob"},
+        "json": {}},
+      "response": {"status": 200, "body_has": {"messages": [], "more": false}}
+    },
+    {
+      "name": "a first contact sealed to the key the recipient publishes",
+      "cite": "FS-H1",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-Session": "${sid}", "X-ANet-MAC": "${mac_more1}", "X-ANet-TS": "${ts}"},
+        "b64url": "${env_more1}"},
+      "response": {"status": 200, "body_has": {"status": "queued"}}
+    },
+    {
+      "name": "and another",
+      "cite": "FS-H1",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-Session": "${sid}", "X-ANet-MAC": "${mac_more2}", "X-ANet-TS": "${ts}"},
+        "b64url": "${env_more2}"},
+      "response": {"status": 200, "body_has": {"status": "queued"}}
+    },
+    {
+      "name": "a page of one, with one after it",
+      "cite": "FS-H5",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "bob"},
+        "json": {"limit": 1}},
+      "response": {"status": 200, "body_has": {"more": true}}
+    },
+    {
+      "name": "a page of both",
+      "cite": "FS-H5",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "bob"},
+        "json": {"limit": 2}},
+      "response": {"status": 200, "body_has": {"more": false}}
+    }
+  ]
+}

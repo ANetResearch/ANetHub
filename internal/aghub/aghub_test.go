@@ -2,31 +2,28 @@ package aghub_test
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/adp"
-	"github.com/ANetResearch/ANetCore/anetcid"
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 func newHub(t *testing.T) *httptest.Server {
@@ -38,11 +35,15 @@ func newHub(t *testing.T) *httptest.Server {
 // operator does directly rather than over HTTP.
 func newHubWithStore(t *testing.T) (*httptest.Server, *aghub.Store) {
 	t.Helper()
+	// The identity the agents of aghub.NewAgentForTest name as their
+	// witness, so that this hub takes their registrations (KEL H-1).
+	return newHubSigningAs(t, aghub.HubIdentityForTest(t))
+}
+
+// newHubSigningAs is newHubWithStore for a hub of identity id.
+func newHubSigningAs(t *testing.T, id *hubid.Identity) (*httptest.Server, *aghub.Store) {
+	t.Helper()
 	store, err := aghub.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,6 +61,15 @@ func newHubWithStore(t *testing.T) (*httptest.Server, *aghub.Store) {
 	testHubCtrl.Store(srv.URL, id.Ctrl)
 	testHubServers.Store(srv.URL, s)
 	return srv, store
+}
+
+// newHubWithDir is newHubWithStore with the store directory handed back,
+// so a test can open the hub's own database the way an operator can.
+func newHubWithDir(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	dir := t.TempDir()
+	srv, _, _ := newHubAt(t, dir)
+	return srv, dir
 }
 
 // testHubServers holds the *Server behind a test URL, so a test can
@@ -105,7 +115,13 @@ var testHubStores sync.Map
 func post(t *testing.T, url string, body any) (int, []byte) {
 	t.Helper()
 	buf, _ := json.Marshal(body)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(buf))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ANet-Wire", wireHeader)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post %s: %v", url, err)
 	}
@@ -114,34 +130,88 @@ func post(t *testing.T, url string, body any) (int, []byte) {
 	return resp.StatusCode, b
 }
 
-// register does what the daemon does: signs the challenge AND publishes a
-// card, so the claims are attributable to the agent rather than to the
-// hub storing them.
+// register registers c under a signed challenge, as a daemon does; the
+// registration must succeed. (A directory entry an agent signs is its A2A
+// card: registerA2A.)
 func register(t *testing.T, srv *httptest.Server, c *identity.Controller, name string, caps []string) {
 	t.Helper()
-	code, b := registerWithCard(t, srv, c, name, caps, mintCard(t, c, name, caps))
+	code, b := registerCode(t, srv, c, name, caps)
 	if code != 200 {
 		t.Fatalf("register %s: %d %s", name, code, b)
 	}
 }
 
-// registerLegacy is a node that predates cards. It must still register.
-func registerLegacy(t *testing.T, srv *httptest.Server, c *identity.Controller, name string, caps []string) {
+// registerCode is register that hands back the answer instead of
+// requiring success.
+func registerCode(t *testing.T, srv *httptest.Server, c *identity.Controller, name string, caps []string) (int, []byte) {
 	t.Helper()
-	code, b := registerWithCard(t, srv, c, name, caps, nil)
-	if code != 200 {
-		t.Fatalf("register %s: %d %s", name, code, b)
+	return registerFunded(t, srv, c, registerBody(t, c, name, caps))
+}
+
+// testRegistrationFunds is what the test fixtures grant an agent when it
+// first registers here. Registration itself pays nothing (hub-payment-privacy
+// PAY-A5); a fixture that wants a funded account grants it explicitly, here.
+const testRegistrationFunds = 100
+
+// registerFunded is the fixture's registration: the operator admits the AID
+// (a new hub admits only its list), the agent registers with body, and a
+// first registration is funded with testRegistrationFunds.
+func registerFunded(t *testing.T, srv *httptest.Server, c *identity.Controller, body map[string]any) (int, []byte) {
+	t.Helper()
+	store := storeOf(t, srv)
+	first := !store.KnowsAgent(c.AID())
+	admitForTest(t, srv, c.AID())
+	witnessHere(t, srv, c, body)
+	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	if code == http.StatusOK && first && store.KnowsAgent(c.AID()) {
+		fundAgent(t, srv, c.AID(), testRegistrationFunds)
+	}
+	return code, b
+}
+
+// witnessHere makes c, when it is the agent body registers and its key
+// history names another hub as its witness, name the hub at srv instead
+// before it registers there (a hub registers only the agents it witnesses,
+// KEL H-1), as a daemon that moves to another hub does (KEL D-32), and puts
+// the extended history in body. The agents of aghub.NewAgentForTest name the
+// test hubs' identity already, so for most tests this does nothing; a test
+// of two hubs moves its agents to the second one with it.
+func witnessHere(t *testing.T, srv *httptest.Server, c *identity.Controller, body map[string]any) {
+	t.Helper()
+	if body["aid"] != c.AID() || body["check_only"] == true || c.Toad() != identity.ToadAgent {
+		return
+	}
+	hubAID := hubAIDOf(t, srv)
+	states, err := identity.Replay(c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states[len(states)-1].Witness == hubAID {
+		return
+	}
+	before, err := identity.MarshalKEL(c.KEL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := identitytest.SwitchWitness(c, hubAID, uint64(time.Now().UnixMilli())); err != nil {
+		t.Fatal(err)
+	}
+	if body["kel"] == base64.RawURLEncoding.EncodeToString(before) {
+		after, err := identity.MarshalKEL(c.KEL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body["kel"] = base64.RawURLEncoding.EncodeToString(after)
 	}
 }
 
-func registerWithCard(t *testing.T, srv *httptest.Server, c *identity.Controller,
-	name string, caps []string, card json.RawMessage) (int, []byte) {
+// admitForTest puts aid on the test hub's admission list, as the operator
+// does with anet-hub admit.
+func admitForTest(t *testing.T, srv *httptest.Server, aid string) {
 	t.Helper()
-	body := registerBody(t, c, name, caps)
-	if len(card) > 0 {
-		body["card"] = card
+	if _, err := storeOf(t, srv).Admit(aid, 0, "", false); err != nil {
+		t.Fatal(err)
 	}
-	return signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
 }
 
 // registerBody is a /register body for c, without authentication (that
@@ -154,86 +224,48 @@ func registerBody(t *testing.T, c *identity.Controller, name string, caps []stri
 	}
 	return map[string]any{
 		"aid": c.AID(), "name": name, "caps": caps,
-		"kel": base64.StdEncoding.EncodeToString(kelB),
+		"kel": base64.RawURLEncoding.EncodeToString(kelB),
 	}
 }
 
-func mintCard(t *testing.T, c *identity.Controller, name string, caps []string) json.RawMessage {
-	t.Helper()
-	if caps == nil {
-		caps = []string{}
-	}
-	now := time.Now()
-	card := &adp.AgentCard{
-		SubjectDID: c.AID(), CardSchema: adp.CardSchema{Major: 1},
-		Seq: uint64(now.UnixNano()), IssuedAt: now.Unix(),
-		NotBefore:    now.Add(-time.Minute).Unix(),
-		Capabilities: caps, CriticalExtensions: []string{}, Name: name,
-	}
-	if err := card.Sign(c); err != nil {
-		t.Fatal(err)
-	}
-	b, err := json.Marshal(card)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-
-// testRequestDoc and testDeliverable stand in for an interaction's request and result. They are
-// hashed into the receipt's anchors and never sent to the hub: the tests below check that no path
-// stores or returns them.
-var (
-	testRequestDoc  = []byte("the request: bake sourdough")
-	testDeliverable = []byte("the deliverable: a crusty loaf recipe")
-)
-
-// makeEvidence builds an interlocking provider-signed receipt + requester-signed review for one
-// interaction, with the receipt's content anchors set to the hashes of testRequestDoc /
-// testDeliverable. Returns the two objects base64-encoded, ready to POST to /reviews.
-func makeEvidence(t *testing.T, prov, req *identity.Controller, ixID string, rating int, subjectOverride string) map[string]string {
+// makeEvidence is a review by req of a task prov completed today
+// (evidence v2, aghub.ReviewKit): the receipt prov signs and the review req
+// signs with the task's one-time key, rated rating. subjectOverride, when
+// set, is the AID the review names in place of the provider.
+func makeEvidence(t *testing.T, prov, req *identity.Controller, ixID string, rating int, subjectOverride string) *aghub.ReviewKit {
 	t.Helper()
 	return makeEvidenceWithComment(t, prov, req, ixID, rating, subjectOverride, "")
 }
 
 // makeEvidenceWithComment is makeEvidence with a review comment.
 func makeEvidenceWithComment(t *testing.T, prov, req *identity.Controller, ixID string, rating int,
-	subjectOverride, comment string) map[string]string {
+	subjectOverride, comment string) *aghub.ReviewKit {
 	t.Helper()
-	reqCID, _ := anetcid.Sum(testRequestDoc)
-	resCID, _ := anetcid.Sum(testDeliverable)
-	rc := &evidence.Receipt{InteractionID: ixID, RequesterAID: req.AID(), ProviderAID: prov.AID(), RequestCID: reqCID, ResultCID: resCID, CompletedAt: 1000}
-	if err := rc.Sign(prov); err != nil {
-		t.Fatal(err)
-	}
-	rcid, _ := rc.CID()
-	subject := prov.AID()
+	k := aghub.NewReviewKitForTest(t, prov, req, ixID, uint64(rating))
 	if subjectOverride != "" {
-		subject = subjectOverride
+		k.Review.Subject = subjectOverride
 	}
-	rv := &evidence.Review{InteractionID: ixID, SubjectAID: subject, ReviewerAID: req.AID(), Rating: rating,
-		Comment: comment, ReceiptCID: rcid, CreatedAt: 2000}
-	if err := rv.Sign(req); err != nil {
-		t.Fatal(err)
-	}
-	rcB, _ := rc.Marshal()
-	rvB, _ := rv.Marshal()
-	return map[string]string{
-		"receipt": base64.StdEncoding.EncodeToString(rcB),
-		"review":  base64.StdEncoding.EncodeToString(rvB),
-	}
+	k.Review.Comment = comment
+	return k
+}
+
+// uploadReview posts k's review to /reviews, signed as its requester
+// (relayauth review), as the requester's daemon does.
+func uploadReview(t *testing.T, srv *httptest.Server, k *aghub.ReviewKit) (int, []byte) {
+	t.Helper()
+	return signedDo(t, srv, k.Requester, relayauth.ActionReview, http.MethodPost, "/reviews", k.Body(t))
 }
 
 // The happy path: two registered agents, one real interaction → the review is verified, stored, and
 // aggregated into the provider's average.
 func TestUploadReviewHappyPath(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "Provider", []string{"bakery"})
 	register(t, srv, req, "Requester", nil)
 
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_1", 5, "")); code != 200 {
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_1", 5, "")); code != 200 {
 		t.Fatalf("upload: %d %s", code, b)
 	}
 
@@ -253,52 +285,52 @@ func TestUploadReviewHappyPath(t *testing.T) {
 	if len(got.Reviews) != 1 || got.Reviews[0].Rating != 5 {
 		t.Fatalf("reviews = %+v", got.Reviews)
 	}
-	// The receipt's anchors are served; whether they match any content is
-	// stated as not checked here.
-	if got.Reviews[0].ResultCID == "" || got.Reviews[0].RequestCID == "" {
-		t.Fatalf("review missing the receipt anchors: %+v", got.Reviews[0])
-	}
-	if got.Reviews[0].ContentBinding != aghub.ContentBindingUnverified {
-		t.Fatalf("content_binding = %q, want %q", got.Reviews[0].ContentBinding, aghub.ContentBindingUnverified)
+	// The receipt it is anchored on is served, and the days; never the
+	// reviewer.
+	if got.Reviews[0].ReceiptCID == "" || got.Reviews[0].CreatedDay != aghub.TodayForTest() {
+		t.Fatalf("review missing its receipt or day: %+v", got.Reviews[0])
 	}
 }
 
-// The same interaction cannot be reviewed twice (interaction_id is the uniqueness key).
+// The same interaction cannot be reviewed twice (ix_commit is the uniqueness key).
 func TestUploadReviewDuplicateRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
-	body := makeEvidence(t, prov, req, "ix_dup", 4, "")
-	if code, _ := post(t, srv.URL+"/reviews", body); code != 200 {
-		t.Fatal("first upload should succeed")
+	k := makeEvidence(t, prov, req, "ix_dup", 4, "")
+	if code, b := uploadReview(t, srv, k); code != 200 {
+		t.Fatalf("first upload should succeed: %d %s", code, b)
 	}
-	if code, _ := post(t, srv.URL+"/reviews", body); code == 200 {
-		t.Fatal("duplicate interaction must be rejected")
+	if code, b := uploadReview(t, srv, k); code != http.StatusConflict || !strings.Contains(string(b), `"review_exists"`) {
+		t.Fatalf("duplicate interaction: %d %s, want 409 review_exists", code, b)
 	}
 }
 
 // A review whose subject does not match the receipt's provider is rejected (interlock check).
 func TestUploadReviewSubjectMismatchRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, prov, "P", nil)
 	register(t, srv, req, "R", nil)
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_bad", 5, "did:anet:someone-else")); code == 200 {
-		t.Fatalf("subject mismatch must be rejected, got %d %s", code, b)
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_bad", 5, "did:anet:someone-else")); code != 400 ||
+		!strings.Contains(string(b), `"receipt_not_reviewable"`) {
+		t.Fatalf("subject mismatch: %d %s, want 400 receipt_not_reviewable", code, b)
 	}
 }
 
-// Evidence for an unregistered provider is rejected (the Hub has no KEL to verify the receipt against).
+// Evidence for a provider this hub has no key history of is rejected (nothing to verify the receipt
+// against).
 func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 	srv := newHub(t)
-	prov, _ := identity.Incept()
-	req, _ := identity.Incept()
+	prov, _ := aghub.NewAgentForTest()
+	req, _ := aghub.NewAgentForTest()
 	register(t, srv, req, "R", nil) // only the requester registers
-	if code, _ := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_np", 5, "")); code == 200 {
-		t.Fatal("unregistered provider must be rejected")
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_np", 5, "")); code != 400 ||
+		!strings.Contains(string(b), `"receipt_not_reviewable"`) {
+		t.Fatalf("unknown provider: %d %s, want 400 receipt_not_reviewable", code, b)
 	}
 }
 
@@ -307,9 +339,9 @@ func TestUploadReviewUnregisteredProviderRejected(t *testing.T) {
 // rejected.
 func TestRelayBrokerSendPollAck(t *testing.T) {
 	srv := newHub(t)
-	recip, _ := identity.Incept()
-	sender, _ := identity.Incept()
-	register(t, srv, recip, "Recipient", nil)
+	recip, _ := aghub.NewAgentForTest()
+	sender, _ := aghub.NewAgentForTest()
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 
 	env := testEnvelope(t, recip.AID(), []byte("hello mailbox"))
@@ -332,7 +364,7 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 	if len(p.Messages) != 1 {
 		t.Fatalf("polled = %+v, want 1 message", p.Messages)
 	}
-	got, _ := base64.StdEncoding.DecodeString(p.Messages[0].Envelope)
+	got, _ := base64.RawURLEncoding.DecodeString(p.Messages[0].Envelope)
 	if !bytes.Equal(got, env) {
 		t.Fatal("the envelope changed in the relay")
 	}
@@ -350,24 +382,24 @@ func TestRelayBrokerSendPollAck(t *testing.T) {
 // a stranger register/overwrite that AID.
 func TestRegisterRequiresSignature(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
+	c, _ := aghub.NewAgentForTest()
 	kelB, _ := identity.MarshalKEL(c.KEL())
 	// no ts/sig
 	if code, _ := post(t, srv.URL+"/register", map[string]any{
-		"aid": c.AID(), "name": "NoSig", "kel": base64.StdEncoding.EncodeToString(kelB),
+		"aid": c.AID(), "name": "NoSig", "kel": base64.RawURLEncoding.EncodeToString(kelB),
 	}); code == 200 {
 		t.Fatal("register without a signed challenge must be rejected")
 	}
 }
 
 // A pure requester (registered, no caps/profile) is NOT listed; once its agent publishes a profile it
-// becomes listed and its readme/pricing are shown. A forged profile update (wrong key) is rejected.
+// becomes listed and its summary/readme are shown. A forged profile update (wrong key) is rejected.
 func TestProfileListingAndAuth(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
-	other, _ := identity.Incept()
-	register(t, srv, c, "Solo", nil) // no caps
-	register(t, srv, other, "Other", nil)
+	c, _ := aghub.NewAgentForTest()
+	other, _ := aghub.NewAgentForTest()
+	registerWithKeys(t, srv, c, "Solo", nil) // no caps
+	registerWithKeys(t, srv, other, "Other", nil)
 
 	// Not listed yet: absent from /agents.
 	if listedContains(t, srv, c.AID()) {
@@ -376,13 +408,13 @@ func TestProfileListingAndAuth(t *testing.T) {
 
 	// A forged profile update (claims c's AID, signed by other's key) must be rejected.
 	if code, _ := signedDo(t, srv, other, relayauth.ActionProfile, http.MethodPost, "/profile",
-		profileBody(c.AID(), "hi", "readme", "free")); code == 200 {
+		profileBody(c.AID(), "hi", "readme")); code == 200 {
 		t.Fatal("forged profile update must be rejected")
 	}
 
 	// The owner publishes a profile → now listed, with content shown.
 	if code, b := signedDo(t, srv, c, relayauth.ActionProfile, http.MethodPost, "/profile",
-		profileBody(c.AID(), "does translations", "# Bob\nFast + accurate", "¥1 per line")); code != 200 {
+		profileBody(c.AID(), "does translations", "# Bob\nFast + accurate")); code != 200 {
 		t.Fatalf("profile update: %d %s", code, b)
 	}
 	if !listedContains(t, srv, c.AID()) {
@@ -397,7 +429,7 @@ func TestProfileListingAndAuth(t *testing.T) {
 		Agent aghub.AgentView `json:"agent"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&got)
-	if got.Agent.Readme == "" || got.Agent.Pricing == "" || got.Agent.Summary == "" {
+	if got.Agent.Readme == "" || got.Agent.Summary == "" {
 		t.Fatalf("profile not stored/returned: %+v", got.Agent)
 	}
 	if !got.Agent.Listed {
@@ -406,8 +438,8 @@ func TestProfileListingAndAuth(t *testing.T) {
 }
 
 // profileBody is a /profile body naming aid.
-func profileBody(aid, summary, readme, pricing string) map[string]any {
-	return map[string]any{"aid": aid, "summary": summary, "readme": readme, "pricing": pricing}
+func profileBody(aid, summary, readme string) map[string]any {
+	return map[string]any{"aid": aid, "summary": summary, "readme": readme}
 }
 
 // listedContains reports whether aid appears in the public /agents listing.
@@ -434,11 +466,12 @@ func listedContains(t *testing.T, srv *httptest.Server, aid string) bool {
 // even when the request is properly signed by the claimed AID.
 func TestRegisterAidKelMismatchRejected(t *testing.T) {
 	srv := newHub(t)
-	a, _ := identity.Incept()
-	b, _ := identity.Incept()
+	a, _ := aghub.NewAgentForTest()
+	b, _ := aghub.NewAgentForTest()
 	kelB, _ := identity.MarshalKEL(b.KEL()) // b's KEL under a's claimed AID
+	admitForTest(t, srv, a.AID())
 	code, body := signedDo(t, srv, a, relayauth.ActionRegister, http.MethodPost, "/register", map[string]any{
-		"aid": a.AID(), "kel": base64.StdEncoding.EncodeToString(kelB),
+		"aid": a.AID(), "kel": base64.RawURLEncoding.EncodeToString(kelB),
 	})
 	if code != http.StatusBadRequest || !strings.Contains(string(body), "does not derive") {
 		t.Fatalf("aid/kel mismatch must be refused as such: %d %s", code, body)
@@ -458,7 +491,7 @@ func TestWireContractVersionIsStated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if got := resp.Header.Get("X-ANet-Wire"); got != "2" {
+	if got := resp.Header.Get("X-ANet-Wire"); got != "3" {
 		t.Fatalf("every response must state the contract version, got %q", got)
 	}
 }
@@ -506,7 +539,7 @@ func TestWireContractAcceptsALegacyCaller(t *testing.T) {
 // exists to remove.
 func TestTheHubPublishesKeyHistories(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -530,9 +563,9 @@ func TestTheHubPublishesKeyHistories(t *testing.T) {
 	if out.KEL == "" {
 		t.Fatal("no kel published — a third party cannot check this agent's signatures")
 	}
-	raw, err := base64.StdEncoding.DecodeString(out.KEL)
+	raw, err := base64.RawURLEncoding.DecodeString(out.KEL)
 	if err != nil {
-		t.Fatalf("kel is not base64: %v", err)
+		t.Fatalf("kel is not base64url (core CORE-E5): %v", err)
 	}
 	kel, err := identity.UnmarshalKEL(raw)
 	if err != nil {
@@ -555,22 +588,21 @@ func TestTheHubPublishesKeyHistories(t *testing.T) {
 // signature, and never ask either participant for anything.
 func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
 	srv := newHub(t)
-	prov, err := identity.Incept()
+	prov, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	register(t, srv, prov, "Provider", []string{"translate"})
 
-	rc := &evidence.Receipt{
-		InteractionID: "ix-1", RequesterAID: "did:anet:someone",
-		ProviderAID: prov.AID(), RequestCID: "bafyreq", ResultCID: "bafyres",
-		CompletedAt: uint64(time.Now().UnixMilli()),
-	}
-	if err := rc.Sign(prov); err != nil {
+	other, _ := aghub.NewAgentForTest()
+	k := aghub.NewReviewKitForTest(t, prov, other, "ix-1", 5)
+	rcB, _ := k.Wires(t)
+	rc, err := evidence.UnmarshalReceiptWire(rcB)
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(srv.URL + "/agents/" + rc.ProviderAID + "/kel")
+	resp, err := http.Get(srv.URL + "/agents/" + prov.AID() + "/kel")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,12 +613,12 @@ func TestAPublishedKELVerifiesARealReceipt(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := base64.StdEncoding.DecodeString(out.KEL)
+	raw, _ := base64.RawURLEncoding.DecodeString(out.KEL)
 	kel, err := identity.UnmarshalKEL(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := rc.Verify(kel, rc.CompletedAt); err != nil {
+	if _, err := rc.Verify(kel, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatalf("a stranger with the published KEL must be able to verify: %v", err)
 	}
 }
@@ -610,23 +642,23 @@ func TestAnUnknownAgentHasNoKEL(t *testing.T) {
 // invocation.
 func TestFindByCapability(t *testing.T) {
 	srv := newHub(t)
-	store, err := identity.Incept()
+	store, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cam, err := identity.Incept()
+	cam, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prose, err := identity.Incept()
+	prose, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	register(t, srv, store, "StoreNode", []string{"cas.put", "cas.get"})
-	register(t, srv, cam, "CameraNode", []string{"ptz.absolute@onvif/camera-006", "ptz.home@onvif/camera-006"})
+	registerWithKeys(t, srv, store, "StoreNode", []string{"cas.put", "cas.get"})
+	registerWithKeys(t, srv, cam, "CameraNode", []string{"ptz.absolute@onvif/camera-006", "ptz.home@onvif/camera-006"})
 	// An agent that merely talks about capabilities must not answer for
 	// them. This is the substring search's failure mode, written down.
-	register(t, srv, prose, "Blogger", []string{"writing"})
+	registerWithKeys(t, srv, prose, "Blogger", []string{"writing"})
 
 	names := func(q string) []string {
 		resp, err := http.Get(srv.URL + "/agents?cap=" + url.QueryEscape(q))
@@ -674,61 +706,12 @@ func TestFindByCapability(t *testing.T) {
 	}
 }
 
-// An upgraded hub already holds agents whose capabilities were only ever a
-// JSON blob. A directory that silently forgets its contents on upgrade is
-// worse than one that never had an index.
-func TestCapabilitiesAreIndexedForAgentsRegisteredBeforeTheIndex(t *testing.T) {
-	dir := t.TempDir()
-	c, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	kel, err := identity.MarshalKEL(c.KEL())
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.PutAgent(c.AID(), "Old", []string{"cas.put"}, kel); err != nil {
-		t.Fatal(err)
-	}
-	s.Close()
-
-	// The pre-index state: the agent row exists, the index does not. Done
-	// with raw SQL rather than a production method that exists only for a
-	// test — the point is what an old database looks like, and an old
-	// database has no such method either.
-	raw, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`DROP TABLE agent_cap`); err != nil {
-		t.Fatal(err)
-	}
-	raw.Close()
-
-	reopened, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	got, err := reopened.FindByCapability("cas.put")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Name != "Old" {
-		t.Errorf("an agent registered before the index is invisible to it: %v", got)
-	}
-}
-
 // Re-registering replaces the capability set. A node that dropped a
 // capability has stopped offering it, and a directory that kept answering
 // yes would send work to a provider that will refuse it.
 func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -751,211 +734,14 @@ func TestDroppingACapabilityRemovesItFromTheIndex(t *testing.T) {
 	}
 }
 
-// A registration says what an agent offers, and nothing made that
-// attributable to the agent saying it.
-//
-// The register challenge signs an action, an AID and a timestamp. It
-// proves who is calling and covers none of what they said, so this hub
-// could change an agent's name or capability list and no party could tell
-// — including the agent. Tolerable for a hub someone chose to trust;
-// untenable the moment a directory is federated, where the property being
-// relied on is that a peer can hide a card and never invent one.
-func TestASignedCardMakesTheRegistrationAttributable(t *testing.T) {
-	srv := newHub(t)
-	c, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	register(t, srv, c, "Honest", []string{"cas.put"})
-
-	resp, err := http.Get(srv.URL + "/agents/" + c.AID() + "/card")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("card endpoint = %d, want 200", resp.StatusCode)
-	}
-	var card adp.AgentCard
-	if err := json.NewDecoder(resp.Body).Decode(&card); err != nil {
-		t.Fatal(err)
-	}
-	if card.SubjectDID != c.AID() {
-		t.Errorf("card subject = %s, want %s", card.SubjectDID, c.AID())
-	}
-	// The claims are inside the signature, which is the whole point.
-	if len(card.Capabilities) != 1 || card.Capabilities[0] != "cas.put" {
-		t.Errorf("capabilities not in the card: %v", card.Capabilities)
-	}
-	if _, err := adp.AdmitCard(&card, time.Now(), 0, c.KEL(),
-		map[uint16]bool{1: true}, nil); err != nil {
-		t.Errorf("the published card does not verify against the agent's own KEL: %v", err)
-	}
-}
-
-// A card may only speak for the agent registering it. Otherwise any
-// registrant could publish claims in someone else's name — the exact
-// forgery a card exists to prevent.
-func TestACardForSomebodyElseIsRefused(t *testing.T) {
-	srv := newHub(t)
-	mallory, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	victim, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	card := &adp.AgentCard{
-		SubjectDID: victim.AID(), CardSchema: adp.CardSchema{Major: 1},
-		Seq: uint64(time.Now().Unix()), IssuedAt: time.Now().Unix(),
-		NotBefore:    time.Now().Add(-time.Minute).Unix(),
-		Capabilities: []string{"anything.at.all"}, CriticalExtensions: []string{},
-	}
-	if err := card.Sign(mallory); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(card)
-	if err != nil {
-		t.Fatal(err)
-	}
-	code, body := registerWithCard(t, srv, mallory, "Mallory", []string{"x"}, raw)
-	if code == http.StatusOK {
-		t.Fatalf("a card naming somebody else was accepted: %s", body)
-	}
-	if !strings.Contains(string(body), "not the registrant") {
-		t.Errorf("refused for the wrong reason: %s", body)
-	}
-}
-
-// A node running an older build sends no card and must still register.
-// Refusing it would make upgrading this hub look like an outage to
-// everyone who had not upgraded.
-func TestRegistrationWithoutACardStillWorks(t *testing.T) {
-	srv := newHub(t)
-	c, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	registerLegacy(t, srv, c, "Legacy", []string{"cas.get"})
-	resp, err := http.Get(srv.URL + "/agents/" + c.AID() + "/card")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("no card should be 404, got %d", resp.StatusCode)
-	}
-	// …and the agent is registered regardless.
-	if _, err := http.Get(srv.URL + "/agents/" + c.AID() + "/kel"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A peer hub can hide a card. It must not be able to invent one, and
-// these are the three ways it would try.
-func TestAPeerCannotForgeADirectoryEntry(t *testing.T) {
-	dir := t.TempDir()
-	s, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
-	agent, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mallory, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	kelOf := func(c *identity.Controller) string {
-		b, err := identity.MarshalKEL(c.KEL())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return base64.StdEncoding.EncodeToString(b)
-	}
-
-	// Honest: signed by its subject, with that subject's key history.
-	good := aghub.FedCard{
-		Card: mintCard(t, agent, "Remote", []string{"cas.put"}),
-		KEL:  kelOf(agent), Home: "https://hub-a.example",
-	}
-	if err := s.AdmitFedCard("did:anet:peer", good); err != nil {
-		t.Fatalf("an honest federated card must be admitted: %v", err)
-	}
-
-	// Someone else's key history bolted onto a real card. Without binding
-	// the KEL to the subject, a peer could pair any card with any keys and
-	// both halves would "verify".
-	swapped := good
-	swapped.KEL = kelOf(mallory)
-	if err := s.AdmitFedCard("did:anet:peer", swapped); err == nil {
-		t.Error("a card paired with somebody else's key history was admitted")
-	}
-
-	// A card the peer signed itself, claiming to be the agent.
-	forged := aghub.FedCard{
-		Card: mintCard(t, mallory, "Remote", []string{"anything"}),
-		KEL:  kelOf(mallory), Home: "https://hub-a.example",
-	}
-	// It verifies — mallory really did sign it — and it speaks only for
-	// mallory, which is the whole protection: a signature cannot be
-	// stretched over a name it does not own.
-	if err := s.AdmitFedCard("did:anet:peer", forged); err != nil {
-		t.Fatalf("mallory's own card should store under mallory: %v", err)
-	}
-	fed, err := s.FederatedAgents("cas.put")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fed) != 1 || fed[0].AID != agent.AID() {
-		t.Errorf("cas.put answered with %v, want only the real agent", fed)
-	}
-}
-
-// A peer must not be able to claim one of our own agents. Letting it
-// would redirect that agent's work to the peer, by asserting it is home.
-func TestAPeerCannotClaimAnAgentRegisteredHere(t *testing.T) {
-	srv := newHub(t)
-	local, err := identity.Incept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	register(t, srv, local, "Ours", []string{"cas.put"})
-
-	s, err := aghub.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	// Rebuild the same situation in a store we can reach directly.
-	kelB, _ := identity.MarshalKEL(local.KEL())
-	if err := s.PutAgent(local.AID(), "Ours", []string{"cas.put"}, kelB); err != nil {
-		t.Fatal(err)
-	}
-	err = s.AdmitFedCard("did:anet:peer", aghub.FedCard{
-		Card: mintCard(t, local, "Stolen", []string{"cas.put"}),
-		KEL:  base64.StdEncoding.EncodeToString(kelB), Home: "https://peer.example",
-	})
-	if err == nil {
-		t.Fatal("a peer claimed an agent registered here")
-	}
-	if !strings.Contains(err.Error(), "registered here") {
-		t.Errorf("refused for the wrong reason: %v", err)
-	}
-}
-
 // The facilitator settles credit, once, for the payer who signed it.
 func TestCreditSettlement(t *testing.T) {
 	srv := newHub(t)
-	payer, err := identity.Incept()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -965,7 +751,7 @@ func TestCreditSettlement(t *testing.T) {
 	hubAID := hubAIDOf(t, srv)
 	// Registering already granted each of them something, so the sums
 	// below start from the grant rather than from zero.
-	grant := int64(aghub.RegistrationGrant)
+	grant := int64(testRegistrationFunds)
 	fundAgent(t, srv, payer.AID(), 500)
 
 	auth := signedAuth(t, payer, payee.AID(), 120, hubAID, "ix-1")
@@ -1015,11 +801,11 @@ func TestCreditSettlement(t *testing.T) {
 
 func TestPaymentRefusals(t *testing.T) {
 	srv := newHub(t)
-	payer, err := identity.Incept()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payee, err := identity.Incept()
+	payee, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1038,7 +824,7 @@ func TestPaymentRefusals(t *testing.T) {
 	}
 
 	// More than the registration grant, and nothing else funded.
-	over := uint64(aghub.RegistrationGrant + 1)
+	over := uint64(testRegistrationFunds + 1)
 	broke := settle(creditPayload(t, signedAuth(t, payer, payee.AID(), over, hubAID, "ix-a"), payee.AID(), payment.CreditNetwork(hubAID)))
 	if broke.Success || broke.ErrorReason != payment.ReasonInsufficientFunds {
 		t.Errorf("an unfunded payment settled: %+v", broke)
@@ -1054,7 +840,7 @@ func TestPaymentRefusals(t *testing.T) {
 
 	// An unregistered payer has no key history here, so nothing can say
 	// they authorised it.
-	stranger, err := identity.Incept()
+	stranger, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1159,18 +945,18 @@ func postJSON(t *testing.T, url string, body any, out any) {
 // nobody evaluates.
 func TestRegistrationGrantsCreditOnce(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	register(t, srv, c, "Newcomer", []string{"x"})
-	if got := balanceOf(t, srv, c.AID()); got != aghub.RegistrationGrant {
-		t.Fatalf("a new agent has %d credits, want %d", got, aghub.RegistrationGrant)
+	if got := balanceOf(t, srv, c.AID()); got != testRegistrationFunds {
+		t.Fatalf("a new agent has %d credits, want %d", got, testRegistrationFunds)
 	}
 	// Re-registering is the same agent, not a faucet.
 	register(t, srv, c, "Newcomer", []string{"x", "y"})
 	register(t, srv, c, "Newcomer", []string{"z"})
-	if got := balanceOf(t, srv, c.AID()); got != aghub.RegistrationGrant {
+	if got := balanceOf(t, srv, c.AID()); got != testRegistrationFunds {
 		t.Errorf("re-registration paid out again: %d", got)
 	}
 }
@@ -1179,7 +965,7 @@ func TestRegistrationGrantsCreditOnce(t *testing.T) {
 // hub keeping it.
 func TestABalanceCanBeExplained(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1230,7 +1016,7 @@ func TestAGrantMustBePositive(t *testing.T) {
 // bounded: we can show exactly what the peer told us.
 func TestClearingAgainstAPeerHub(t *testing.T) {
 	_, store := newHubWithStore(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1262,7 +1048,7 @@ func TestClearingAgainstAPeerHub(t *testing.T) {
 
 	// A receipt signed by somebody who is not the ledger's hub is refused
 	// — otherwise any peer could issue itself credit here.
-	impostor, err := identity.Incept()
+	impostor, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1291,14 +1077,28 @@ func hubKELOf(t *testing.T, url string) []identity.SignedEvent {
 	return v.(*identity.Controller).KEL()
 }
 
+// hubKELsOf is the identity.HubKELSource of a reader that holds the key
+// history of the hub at srv, and only that one: what it takes to check the
+// witness notices that hub signs.
+func hubKELsOf(t *testing.T, srv *httptest.Server) identity.HubKELSource {
+	t.Helper()
+	aid, kel := hubAIDOf(t, srv), hubKELOf(t, srv.URL)
+	return func(hubAID string) ([]identity.SignedEvent, bool) {
+		if hubAID != aid {
+			return nil, false
+		}
+		return kel, true
+	}
+}
+
 // twoAgents mints a provider and a requester.
 func twoAgents(t *testing.T) (*identity.Controller, *identity.Controller) {
 	t.Helper()
-	prov, err := identity.Incept()
+	prov, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := identity.Incept()
+	req, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1320,8 +1120,8 @@ func setVisibility(t *testing.T, srv *httptest.Server, c *identity.Controller, v
 func uploadInterlockedReview(t *testing.T, srv *httptest.Server, prov, req *identity.Controller,
 	rating int, comment string) {
 	t.Helper()
-	body := makeEvidence(t, prov, req, "ix-"+comment+"-"+prov.AID()[:8], rating, "")
-	if code, b := post(t, srv.URL+"/reviews", body); code != 200 {
+	k := makeEvidenceWithComment(t, prov, req, "ix-"+comment+"-"+prov.AID()[:8], rating, "", comment)
+	if code, b := uploadReview(t, srv, k); code != 200 {
 		t.Fatalf("upload review: %d %s", code, b)
 	}
 }

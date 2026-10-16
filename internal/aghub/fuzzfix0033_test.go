@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
+	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 )
@@ -35,7 +37,7 @@ import (
 // takes the same authorization.
 func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 	srv, _ := newHubWithStore(t)
-	payer, err := identity.Incept()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +59,7 @@ func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 	if got := balanceOf(t, srv, payer.AID()); got != before {
 		t.Errorf("a refused settlement moved the payer %d -> %d", before, got)
 	}
-	if sup := supplyFull(t, srv); !sup.ChainAgrees || sup.Outstanding != sup.Balances {
+	if sup := supplyOf(t, srv); !sup.Consistent() || sup.Outstanding != sup.Balances {
 		t.Errorf("supply after the refused settlement: %+v", sup)
 	}
 
@@ -70,7 +72,7 @@ func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 	if got := balanceOf(t, srv, payer.AID()); got != before-10 {
 		t.Errorf("redeeming 10 moved the payer %d -> %d", before, got)
 	}
-	if sup := supplyFull(t, srv); !sup.ChainAgrees || sup.Redeemed != 10 {
+	if sup := supplyOf(t, srv); !sup.Consistent() || sup.Redeemed != 10 {
 		t.Errorf("supply after the redemption: %+v", sup)
 	}
 }
@@ -80,11 +82,11 @@ func TestAPaymentToTheHubIsOnlyARedemption(t *testing.T) {
 // this hub as payee, and clearing it would credit the hub's own row.
 func TestAPaymentToTheHubIsNotForwardedToAPeer(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	payer, err := identity.Incept()
+	payer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,11 +113,11 @@ func TestAPaymentToTheHubIsNotForwardedToAPeer(t *testing.T) {
 func TestAPeerReceiptPayingThisHubIsNotCleared(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	hubAID := hubAIDOf(t, srv)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	payer, _ := identity.Incept()
+	payer, _ := aghub.NewAgentForTest()
 	rec := &payment.Receipt{AuthID: "peer-auth-to-hub", Payer: payer.AID(), PayTo: hubAID, Amount: 10,
 		Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
 	if err := rec.Sign(peer); err != nil {
@@ -127,7 +129,7 @@ func TestAPeerReceiptPayingThisHubIsNotCleared(t *testing.T) {
 	if owed, _ := store.Owed(peer.AID()); owed != 0 {
 		t.Errorf("the peer is recorded as owing %d", owed)
 	}
-	if sup := supplyFull(t, srv); !sup.ChainAgrees || sup.Outstanding != sup.Balances {
+	if sup := supplyOf(t, srv); !sup.Consistent() || sup.Outstanding != sup.Balances {
 		t.Errorf("supply after the refused receipt: %+v", sup)
 	}
 }
@@ -146,11 +148,11 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	payer, payee := twoAgents(t)
 	register(t, srv, payer, "Payer", nil)
 	register(t, srv, payee, "Payee", nil)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stranger, _ := identity.Incept()
+	stranger, _ := aghub.NewAgentForTest()
 	receipt := func(id, payTo string, amount uint64) *payment.Receipt {
 		rec := &payment.Receipt{AuthID: id, Payer: "did:anet:their-user", PayTo: payTo, Amount: amount,
 			Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
@@ -159,7 +161,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 		}
 		return rec
 	}
-	issued := supplyFull(t, srv).Issued // the two registration grants
+	issued := supplyOf(t, srv).Issued // the two registration grants
 
 	err = store.ClearFromPeer(peer.AID(), peer.KEL(), receipt("past-supply", stranger.AID(), math.MaxInt64-100))
 	if err == nil || !strings.Contains(err.Error(), payment.ReasonInvalidAmount) {
@@ -178,7 +180,7 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 		t.Fatalf("a receipt that fills the supply exactly: %v", err)
 	}
 	sup, err := store.Supply(hubAIDOf(t, srv))
-	if err != nil || sup.Issued != math.MaxInt64 || !sup.ChainAgrees || sup.Outstanding != sup.Balances {
+	if err != nil || sup.Issued != math.MaxInt64 || !sup.Consistent() || sup.Outstanding != sup.Balances {
 		t.Fatalf("supply at the edge: %+v, %v", sup, err)
 	}
 	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), receipt("one-more", payee.AID(), 1)); err == nil {
@@ -187,11 +189,22 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 	if err := store.GrantCredit(payee.AID(), 1, "one more"); err == nil {
 		t.Error("an operator grant past the full supply was accepted")
 	}
-	// A registration at the bound is admitted without its grant.
-	late, _ := identity.Incept()
-	register(t, srv, late, "Late", nil)
+	// An admission grant past the full supply is refused with the admission,
+	// and a registration at the bound pays nothing anyway (PAY-A5).
+	late, _ := aghub.NewAgentForTest()
+	admitForTest(t, srv, late.AID())
+	if code, b := signedDo(t, srv, late, relayauth.ActionRegister, http.MethodPost, "/register",
+		registerBody(t, late, "Late", nil)); code != http.StatusOK {
+		t.Fatalf("a registration at the full supply: %d %s", code, b)
+	}
 	if b := balanceOf(t, srv, late.AID()); b != 0 {
 		t.Errorf("a registration past the full supply was granted %d", b)
+	}
+	if _, err := store.Admit(late.AID(), 1, "", false); err == nil {
+		t.Error("an admission grant past the full supply was paid")
+	}
+	if b := balanceOf(t, srv, late.AID()); b != 0 {
+		t.Errorf("a refused admission grant credited %d", b)
 	}
 	code, b := getJSON(t, srv.URL+"/x402/supply")
 	if code != http.StatusOK {
@@ -200,13 +213,14 @@ func TestIssuanceCannotPassWhatTheSupplyCanAddUp(t *testing.T) {
 }
 
 // GET /x402/issuance?from= above 2^63-1 answered 500: the uint64 went to
-// database/sql, which refuses a uint64 with the high bit set. No chain
+// database/sql, which refuses a uint64 with the high bit set. No epoch's
 // seq is that high, so the answer is an empty page (FuzzHubPublicRoutes,
 // boundary seed).
 func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
-	register(t, srv, c, "Grantee", nil) // one issuance on the chain
+	c, _ := aghub.NewAgentForTest()
+	register(t, srv, c, "Grantee", nil)
+	publishEpoch(t, storeOf(t, srv)) // one epoch on the chain, seq 0
 	for _, from := range []string{"18446744073709551615", "9223372036854775808", "9223372036854775807"} {
 		code, b := getJSON(t, srv.URL+"/x402/issuance?from="+from)
 		var out struct {
@@ -228,7 +242,7 @@ func TestAnIssuanceCursorPastInt64IsAnEmptyPage(t *testing.T) {
 // is kept; 2^63-1 itself still stores.
 func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 	srv := newHub(t)
-	c, _ := identity.Incept()
+	c, _ := aghub.NewAgentForTest()
 	register(t, srv, c, "Keys", nil)
 	raw, _ := mintKeySet(t, c, 1)
 	if code, b := publishKeys(t, srv, c, raw); code != http.StatusOK {
@@ -243,9 +257,9 @@ func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 	}
 	code, b := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
 	var v struct {
-		KeySet string `json:"keyset"`
+		Keys string `json:"keys"`
 	}
-	if code != http.StatusOK || json.Unmarshal(b, &v) != nil || v.KeySet != base64.StdEncoding.EncodeToString(raw) {
+	if code != http.StatusOK || json.Unmarshal(b, &v) != nil || v.Keys != base64.RawURLEncoding.EncodeToString(raw) {
 		t.Errorf("the stored set changed: %d %s", code, b)
 	}
 	raw, _ = mintKeySet(t, c, math.MaxInt64)
@@ -256,10 +270,11 @@ func TestAKeySetSeqPastInt64IsRefusedNotA500(t *testing.T) {
 
 // issuanceRoom and the credit it admits are one step: grants arriving
 // together at the supply's bound do not each find room for themselves
-// (the review of an internal note, finding 3). GrantOnRegistration and
-// GrantCredit checked the room outside any transaction and wrote after, so
-// with room for one grant, concurrent grants were all made and
-// /x402/supply went back to "integer overflow".
+// (a fuzzing review of the hub, finding 3). The grants checked the room
+// outside any transaction and wrote after, so with room for one grant,
+// concurrent grants were all made and /x402/supply went back to "integer
+// overflow". Two kinds of grant race here: the operator's (GrantCredit) and
+// the admission grant an operator gives a registered AID (Admit --grant).
 //
 // A write transaction held on the database from outside the store lets
 // every grant reach its check before any of them can write, so the race
@@ -272,14 +287,14 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 		t.Fatal("no store for this hub")
 	}
 	store := v.(*aghub.Store)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	stranger, _ := identity.Incept()
-	issued := supplyFull(t, srv).Issued
-	// Room for one grant of RegistrationGrant, not for two.
-	fill := uint64(math.MaxInt64 - issued - 3*aghub.RegistrationGrant/2)
+	stranger, _ := aghub.NewAgentForTest()
+	issued := supplyOf(t, srv).Issued
+	// Room for one grant of testRegistrationFunds, not for two.
+	fill := uint64(math.MaxInt64 - issued - 3*testRegistrationFunds/2)
 	rec := &payment.Receipt{AuthID: "near-the-bound", Payer: "did:anet:their-user", PayTo: stranger.AID(),
 		Amount: fill, Network: payment.CreditNetwork(peer.AID()), SettleAt: time.Now().UnixMilli()}
 	if err := rec.Sign(peer); err != nil {
@@ -287,6 +302,20 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	}
 	if err := store.ClearFromPeer(peer.AID(), peer.KEL(), rec); err != nil {
 		t.Fatalf("filling the supply to one grant short of the bound: %v", err)
+	}
+
+	const n = 16
+	admitted := make([]string, n)
+	for i := 0; i < n; i += 2 {
+		c, err := aghub.NewAgentForTest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		kel, _ := identity.MarshalKEL(c.KEL())
+		if err := store.PutAgent(c.AID(), "late", nil, kel); err != nil {
+			t.Fatal(err)
+		}
+		admitted[i] = c.AID()
 	}
 
 	hold, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=busy_timeout(15000)")
@@ -301,17 +330,15 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	if _, err := tx.Exec(`INSERT INTO credit_entry(aid, delta, reason, at) VALUES('hold', 0, 'hold', '')`); err != nil {
 		t.Fatal(err)
 	}
-	const n = 16
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			aid := fmt.Sprintf("did:anet:late-%02d", i)
 			if i%2 == 0 {
-				_ = store.GrantOnRegistration(aid)
+				_, _ = store.Admit(admitted[i], testRegistrationFunds, "", false)
 			} else {
-				_ = store.GrantCredit(aid, aghub.RegistrationGrant, "operator grant")
+				_ = store.GrantCredit(fmt.Sprintf("did:anet:late-%02d", i), testRegistrationFunds, "operator grant")
 			}
 		}(i)
 	}
@@ -327,7 +354,7 @@ func TestConcurrentGrantsAtTheBoundDoNotPassTheSupply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("supply after %d concurrent grants at the bound: %v", n, err)
 	}
-	if want := issued + int64(fill) + aghub.RegistrationGrant; sup.Issued != want || !sup.ChainAgrees {
+	if want := issued + int64(fill) + testRegistrationFunds; sup.Issued != want || !sup.Consistent() {
 		t.Fatalf("supply after %d concurrent grants with room for one: %+v, want issued %d", n, sup, want)
 	}
 }

@@ -1,7 +1,6 @@
 package aghub
 
 import (
-	"crypto/ed25519"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 )
 
 // [redteam:F36] GET /agents/{aid}/jwks.json needs no authentication and
@@ -32,7 +32,7 @@ func TestTheJWKSIsDerivedOncePerStoredKEL(t *testing.T) {
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
-	c, err := identity.Incept()
+	c, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +64,9 @@ func TestTheJWKSIsDerivedOncePerStoredKEL(t *testing.T) {
 	if n := derived.Load(); n != 1 {
 		t.Fatalf("21 requests for one KEL derived the JWKS %d times, want 1", n)
 	}
-	// The KEL grows (a drt adds a key state): the next request derives the
+	// The KEL grows (a rot adds a key state): the next request derives the
 	// new JWKS, once.
-	pub, _, _ := ed25519.GenerateKey(nil)
-	if err := c.Delegate(pub, 1); err != nil {
+	if err := identitytest.Rotate(c, 2); err != nil {
 		t.Fatal(err)
 	}
 	put()
@@ -91,7 +90,7 @@ func TestTheJWKSCacheIsBounded(t *testing.T) {
 	})
 	kels := make([][]byte, 4)
 	for i := range kels {
-		ctrl, err := identity.Incept()
+		ctrl, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}

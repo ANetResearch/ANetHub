@@ -1,7 +1,6 @@
 package aghub
 
 import (
-	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,15 +9,15 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/ael"
-	"github.com/ANetResearch/ANetCore/coredet"
-	"github.com/ANetResearch/ANetCore/identity"
+
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // Witnessing: holding somebody else's chain head so they cannot deny it
 // later.
 //
-// The issuance chain makes a rewrite detectable by anyone who already
-// holds an older copy. It offers nothing to a reader seeing the chain for
+// The supply epoch chain (supply.go) makes a rewrite detectable by anyone
+// who already holds an older copy. It offers nothing to a reader seeing the chain for
 // the first time, because a hub that has never been observed can present
 // whatever chain it likes.
 //
@@ -30,7 +29,7 @@ import (
 // is a convenience for readers looking for somewhere to start, not a
 // source of authority: a hub can withhold an inconvenient attestation.
 // It cannot forge one, because the witness's signature is over the head
-// the witness saw.
+// the witness saw. The head moves once per published epoch.
 //
 // Who witnesses whom:
 //
@@ -89,7 +88,7 @@ type AttestationView struct {
 	Seq        uint64 `json:"seq"`
 	HeadID     string `json:"head_id"`
 	ObservedAt int64  `json:"observed_at"`
-	// Attestation is the signed object, base64 CoreDet-CBOR. A reader
+	// Attestation is the signed object, base64url CoreDet-CBOR. A reader
 	// checking this must verify the object, not the JSON beside it.
 	Attestation string `json:"attestation"`
 }
@@ -116,13 +115,13 @@ func (s *Store) AttestationsAbout(chainDID string, limit int) ([]AttestationView
 			return nil, err
 		}
 		v.Seq = uint64(seq)
-		v.Attestation = base64.StdEncoding.EncodeToString(raw)
+		v.Attestation = wire3.EncodeB64URL(raw)
 		out = append(out, v)
 	}
 	return out, rows.Err()
 }
 
-// WitnessPeer fetches a peer's issuance head and signs what it saw.
+// WitnessPeer signs what this hub saw of a peer's supply epoch chain head.
 //
 // Returns the attestation so the caller can also send it to the peer;
 // storing it here is what matters, because evidence held only by the
@@ -166,7 +165,7 @@ func (s *Store) CheckAgainstAttestations(chainDID string, recs []*ael.EventRecor
 		if r == nil {
 			continue // not in the range we were given; not a contradiction
 		}
-		raw, derr := base64.StdEncoding.DecodeString(v.Attestation)
+		raw, derr := wire3.DecodeB64URL("attestation", v.Attestation)
 		if derr != nil {
 			continue
 		}
@@ -296,7 +295,7 @@ func (s *Store) WitnessHealthOf(chainDID string, now time.Time) (WitnessHealth, 
 	}
 	// How far the chain has run past the last thing anybody pinned — or
 	// fallen behind it.
-	_, headSeq, ok := s.IssuanceHead()
+	_, headSeq, ok := s.SupplyHead()
 	h.HasHead, h.HeadSeq = ok, headSeq
 	switch {
 	case ok && h.Attestations == 0:
@@ -341,50 +340,13 @@ func noteRollback(chainDID string, headSeq, witnessedSeq uint64, rolledBack bool
 		rollbackState.last = map[string][2]uint64{}
 	}
 	rollbackState.last[chainDID] = now
-	log.Printf("hub: issuance chain %s rolled back: head is at seq %d, below seq %d "+
+	log.Printf("hub: supply epoch chain %s rolled back: head is at seq %d, below seq %d "+
 		"that a witness has already signed for. The records that witness pinned are "+
 		"no longer being served; a fork, a rewrite and a restore from an older copy "+
 		"all look like this from outside", chainDID, headSeq, witnessedSeq)
 }
 
 // ---- HTTP ----
-
-// hIssuanceHead serves what a witness signs.
-func (s *Server) hIssuanceHead(w http.ResponseWriter, _ *http.Request) {
-	id, seq, ok := s.store.IssuanceHead()
-	if !ok {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"chain_did": s.hubAID,
-			"note":      "nothing has been issued on this hub yet, so there is no head to pin"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"chain_did": s.hubAID, "seq": seq, "head_id": id,
-		"note": "sign {chain_did, seq, head_id, observed_at} and keep it. " +
-			"An attestation held only by this hub is not evidence about this hub.",
-	})
-}
-
-// hIssuance serves the chain.
-func (s *Server) hIssuance(w http.ResponseWriter, r *http.Request) {
-	// Inclusive: ?from=0 (or absent) starts at the genesis record, which
-	// a verifier must have. Continue with head_seq+1.
-	var from uint64
-	if v := r.URL.Query().Get("from"); v != "" {
-		_, _ = fmt.Sscanf(v, "%d", &from)
-	}
-	entries, err := s.store.IssuanceSince(from, 0)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	id, seq, _ := s.store.IssuanceHead()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"chain_did": s.hubAID, "entries": entries, "head_id": id, "head_seq": seq,
-		"note": "verify the record field, not the parsed columns beside it — " +
-			"those are rendered by this hub and are not what it signed.",
-	})
-}
 
 // hWitnessSubmit accepts an attestation somebody made about this hub.
 //
@@ -395,30 +357,35 @@ func (s *Server) hIssuance(w http.ResponseWriter, r *http.Request) {
 // check it themselves, which is the only way it could ever be worth
 // anything to them.
 func (s *Server) hWitnessSubmit(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Attestation string `json:"attestation"`
-	}
-	if err := readJSONBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed request"})
+	var req WitnessRequest
+	if !wire3.ReadStrict(w, r, witnessBodyLimit, &req) {
 		return
 	}
-	raw, err := base64.StdEncoding.DecodeString(req.Attestation)
+	raw, err := wire3.DecodeB64URL("attestation", req.Attestation)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attestation not base64"})
+		wire3.RefuseDecode(w, err)
 		return
 	}
 	a, err := ael.UnmarshalHeadAttestation(raw)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The attestation does not decode as a signed head attestation; send the bytes your witness signed."})
 		return
 	}
 	if a.ChainDID != s.hubAID {
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "this attestation is about " + a.ChainDID + ", not this hub"})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "This attestation is about another chain; send it to the hub it names."})
 		return
 	}
+	if a.Envelope == nil {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The attestation is not signed; send the attestation as your witness signed it."})
+		return
+	}
+	// Signed and about this hub: what is left to fail is this hub's own
+	// database, which is no fault of the request (500 internal, G1).
 	if err := s.store.StoreAttestation(a); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -431,12 +398,12 @@ func (s *Server) hWitnessSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hWitnesses(w http.ResponseWriter, _ *http.Request) {
 	out, err := s.store.AttestationsAbout(s.hubAID, 0)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
 	health, herr := s.store.WitnessHealthOf(s.hubAID, time.Now())
 	if herr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": herr.Error()})
+		wire3.Internal(w, herr)
 		return
 	}
 	// Where each witness can be reached, so the instruction below is one
@@ -469,23 +436,12 @@ func (s *Server) hWitnesses(w http.ResponseWriter, _ *http.Request) {
 			"looks like from out here."})
 }
 
-// verifyRecords decodes and verifies a run of chain records.
-func verifyRecords(entries []IssuanceEntry, kel []identity.SignedEvent) ([]*ael.EventRecord, error) {
-	ledger := ael.NewLedger()
-	var out []*ael.EventRecord
-	for _, e := range entries {
-		raw, err := base64.StdEncoding.DecodeString(e.Record)
-		if err != nil {
-			return nil, fmt.Errorf("seq %d: %w", e.Seq, err)
-		}
-		var rec ael.EventRecord
-		if err := coredet.Unmarshal(raw, &rec); err != nil {
-			return nil, fmt.Errorf("seq %d: %w", e.Seq, err)
-		}
-		if err := ledger.Append(&rec, kel); err != nil {
-			return nil, fmt.Errorf("seq %d: %w", e.Seq, err)
-		}
-		out = append(out, &rec)
-	}
-	return out, nil
+// WitnessRequest is the body of POST /x402/witness: an attestation of this
+// hub's supply epoch chain head, base64url.
+type WitnessRequest struct {
+	Attestation string `json:"attestation"`
 }
+
+// witnessBodyLimit bounds POST /x402/witness. An attestation is a few
+// hundred bytes.
+const witnessBodyLimit = 16 << 10

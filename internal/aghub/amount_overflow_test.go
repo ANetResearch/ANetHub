@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/payment"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
@@ -51,13 +52,13 @@ const victimFunds = 5000
 // moneyTables is every table a payment, redemption or clearing writes.
 var moneyTables = []string{
 	"credit_balance", "credit_entry", "credit_settled", "credit_cleared",
-	"credit_redemption", "credit_issuance", "hub_owed", "hub_due", "hub_cleared",
+	"credit_redemption", "supply_totals", "supply_chain", "hub_owed", "hub_due", "hub_cleared",
 }
 
 // moneyState dumps every row of every money table, so "nothing moved"
 // is checked against the database rather than against the few balances a
-// test thought to look at. credit_issuance is the signed issuance chain,
-// so an unchanged dump also means no new chain record.
+// test thought to look at. supply_totals counts every supply event, so an
+// unchanged dump also means nothing was issued or redeemed.
 func moneyState(t *testing.T, dir string) string {
 	t.Helper()
 	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=busy_timeout(15000)")
@@ -144,10 +145,10 @@ func eachAmount(t *testing.T, amounts []uint64, body func(t *testing.T, w overfl
 // failure says who gained and who lost, then the full table dump.
 func (w overflowWorld) untouched(t *testing.T, before string) {
 	t.Helper()
-	if got, want := balanceOf(t, w.srv, w.attacker.AID()), int64(aghub.RegistrationGrant); got != want {
+	if got, want := balanceOf(t, w.srv, w.attacker.AID()), int64(testRegistrationFunds); got != want {
 		t.Errorf("attacker balance = %d, want %d", got, want)
 	}
-	if got, want := balanceOf(t, w.srv, w.victim.AID()), int64(aghub.RegistrationGrant+victimFunds); got != want {
+	if got, want := balanceOf(t, w.srv, w.victim.AID()), int64(testRegistrationFunds+victimFunds); got != want {
 		t.Errorf("victim balance = %d, want %d", got, want)
 	}
 	if after := moneyState(t, w.dir); after != before {
@@ -224,20 +225,27 @@ func TestAnUnholdableAmountDoesNotVerify(t *testing.T) {
 	})
 }
 
-// The attack itself: the attacker signs, the victim is the payee.
+// The attack itself: the attacker signs, the victim is the payee. A payee
+// that banks elsewhere takes the hub_due branch, which only a peer's
+// forwarded settlement reaches (/fed/v3/settle, SettleForPeer).
 func TestAnUnholdableAmountCannotBeSettled(t *testing.T) {
 	for _, payee := range []string{"local", "foreign"} {
 		t.Run(payee, func(t *testing.T) {
 			eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
 				payTo := w.victim.AID()
 				if payee == "foreign" {
-					// A payee that banks elsewhere takes the hub_due branch.
 					payTo = "did:anet:banks-elsewhere"
 				}
 				own := payment.CreditNetwork(w.hubAID)
 				before := moneyState(t, w.dir)
 				auth := signedAuth(t, w.attacker, payTo, amt, w.hubAID, "ov-settle")
-				_, sr := settleCall(t, w.srv, creditPayload(t, auth, payTo, own), requirementsFor(payTo, 1, own))
+				p, req := creditPayload(t, auth, payTo, own), requirementsFor(payTo, 1, own)
+				var sr payment.SettlementResponse
+				if payee == "foreign" {
+					sr = w.store.SettleForPeer(w.hubAID, "did:anet:peer-hub", p, req)
+				} else {
+					_, sr = settleCall(t, w.srv, p, req)
+				}
 				if sr.Success {
 					t.Errorf("amount %d settled", amt)
 				}
@@ -297,89 +305,10 @@ func TestAnUnholdableAmountCannotBeRedeemed(t *testing.T) {
 			t.Errorf("error = %q, want %s", out.Error, payment.ReasonInvalidAmount)
 		}
 		w.untouched(t, before)
-		if n, sum, err := w.store.RedemptionTotals(w.attacker.AID()); err != nil || n != 0 || sum != 0 {
-			t.Errorf("redemptions recorded: n=%d sum=%d err=%v", n, sum, err)
+		if win, err := w.store.Redemptions(w.attacker.AID(), 10); err != nil || win.Total != 0 || win.Sum != 0 {
+			t.Errorf("redemptions recorded: n=%d sum=%d err=%v", win.Total, win.Sum, err)
 		}
 	})
-}
-
-// The gateway settles whatever authorization rides in the header, so it
-// is another door onto the same settlement.
-func TestTheGatewayCannotSettleAnUnholdableAmount(t *testing.T) {
-	eachAmount(t, overflowAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		seller, err := identity.Incept()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if code, b := registerWithCard(t, w.srv, seller, "Worker", []string{"work.do"},
-			sellableCard(t, seller, "Worker", []string{"work.do"},
-				map[string]any{"work.do": 120}, "https://worker.example/x402/redeem")); code != 200 {
-			t.Fatalf("register seller: %d %s", code, b)
-		}
-		before := moneyState(t, w.dir)
-		// Terms that meet the quote in every way the gateway compares:
-		// the seller as payee, an amount "at least" the price. Booked as
-		// a negative number, it took the amount from the seller and
-		// credited the buyer, and the buyer still got the voucher.
-		auth := signedAuth(t, w.attacker, seller.AID(), amt, w.hubAID, "ov-gw")
-		raw, err := auth.Marshal()
-		if err != nil {
-			t.Fatal(err)
-		}
-		pp, err := json.Marshal(payment.PaymentPayload{
-			X402Version: payment.Version,
-			Accepted: payment.PaymentOption{
-				Scheme: payment.SchemeCredit, Network: payment.CreditNetwork(w.hubAID),
-				Amount: payment.Amount(amt), Asset: payment.AssetCredit, PayTo: seller.AID(),
-				MaxTimeoutSeconds: 300,
-			},
-			Payload: map[string]any{"authorization": base64.StdEncoding.EncodeToString(raw)},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		req, _ := http.NewRequest(http.MethodGet,
-			w.srv.URL+"/x402/resource/"+seller.AID()+"/work.do", nil)
-		req.Header.Set(payment.HeaderPaymentSignature, base64.StdEncoding.EncodeToString(pp))
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var body map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&body)
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK || body["voucher"] != nil {
-			t.Errorf("amount %d bought a voucher (status %d)", amt, resp.StatusCode)
-		}
-		w.untouched(t, before)
-	})
-}
-
-// A card cannot publish a price the ledger could not settle: the hub
-// would be quoting, and signing vouchers for, an amount that only exists
-// as a wrapped-around negative.
-func TestTheGatewayDoesNotQuoteAnUnholdablePrice(t *testing.T) {
-	srv := newHub(t)
-	for _, price := range []any{payment.Amount(1 << 63), payment.Amount(math.MaxUint64),
-		payment.Amount(math.MaxUint64 - 999), "0", float64(1 << 63), float64(1 << 64), 1e30} {
-		seller, err := identity.Incept()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if code, b := registerWithCard(t, srv, seller, "Greedy", []string{"work.do"},
-			sellableCard(t, seller, "Greedy", []string{"work.do"},
-				map[string]any{"work.do": price}, "https://greedy.example/x402/redeem")); code != 200 {
-			t.Fatalf("register: %d %s", code, b)
-		}
-		resp, err := http.Get(srv.URL + "/x402/resource/" + seller.AID() + "/work.do")
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusPaymentRequired {
-			t.Errorf("the gateway quoted a price of %v", price)
-		}
-	}
 }
 
 // Cross-hub, payer's side: a payment on a peer's ledger is forwarded to
@@ -389,11 +318,11 @@ func TestTheGatewayDoesNotQuoteAnUnholdablePrice(t *testing.T) {
 // forwarding and does not depend on the peer to get it right.
 func TestAnUnholdableAmountIsNotForwardedToAPeer(t *testing.T) {
 	eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
-		foreignPayer, err := identity.Incept() // banks on the peer, never registered here
+		foreignPayer, err := aghub.NewAgentForTest() // banks on the peer, never registered here
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -440,11 +369,11 @@ func TestAnUnholdableAmountIsNotForwardedToAPeer(t *testing.T) {
 // cannot hold. It is not cleared against the local payee.
 func TestAPeerReceiptForAnUnholdableAmountIsNotClearedForAForwardedPayment(t *testing.T) {
 	eachAmount(t, overflowAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
-		foreignPayer, err := identity.Incept()
+		foreignPayer, err := aghub.NewAgentForTest()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -480,7 +409,7 @@ func TestAPeerReceiptForAnUnholdableAmountIsNotClearedForAForwardedPayment(t *te
 // turns negative debited the local payee and the peer's debt to us.
 func TestAPeerReceiptForAnUnholdableAmountIsNotCleared(t *testing.T) {
 	eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -511,7 +440,7 @@ func TestAPeerReceiptForAnUnholdableAmountIsNotCleared(t *testing.T) {
 // debt by 1000.
 func TestAPeerDischargeForAnUnholdableAmountIsRefused(t *testing.T) {
 	eachAmount(t, unholdableAmounts, func(t *testing.T, w overflowWorld, amt uint64) {
-		peer, err := identity.Incept()
+		peer, err := identitytest.Hub()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -557,7 +486,7 @@ func TestAPeerDischargeForAnUnholdableAmountIsRefused(t *testing.T) {
 // itself is tested in cmd/anet-hub.)
 func TestAnOperatorCannotDischargeAnUnholdableAmount(t *testing.T) {
 	w := newOverflowWorld(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,24 +495,26 @@ func TestAnOperatorCannotDischargeAnUnholdableAmount(t *testing.T) {
 			t.Errorf("signed a discharge statement for %d", amt)
 		}
 	}
-	// A real obligation, so there is a due row to aim at.
+	// A real obligation, so there is a due row to aim at: the peer
+	// forwarded a payment of 50 for its own agent.
 	const payee = "did:anet:banks-elsewhere"
 	own := payment.CreditNetwork(w.hubAID)
 	auth := signedAuth(t, w.attacker, payee, 50, w.hubAID, "ov-due")
-	if _, sr := settleCall(t, w.srv, creditPayload(t, auth, payee, own), requirementsFor(payee, 50, own)); !sr.Success {
-		t.Fatalf("settling 50 to a foreign payee: %+v", sr)
+	if sr := w.store.SettleForPeer(w.hubAID, peer.AID(), creditPayload(t, auth, payee, own),
+		requirementsFor(payee, 50, own)); !sr.Success {
+		t.Fatalf("settling 50 for a peer's payee: %+v", sr)
 	}
 	before := moneyState(t, w.dir)
-	for _, n := range []int64{0, -1, -1000, math.MinInt64} {
-		if err := w.store.DischargeDue(payee, n); err == nil {
+	for _, n := range []int64{0, -1, -1000, math.MinInt64, 51} {
+		if err := w.store.DischargeDue(peer.AID(), n); err == nil {
 			t.Errorf("discharged %d", n)
 		}
 	}
 	if after := moneyState(t, w.dir); after != before {
 		t.Errorf("a refused discharge changed the money tables.\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-	if due, _ := w.store.Due(); due[payee] != 50 {
-		t.Errorf("due = %d, want 50", due[payee])
+	if due, _ := w.store.Due(); due[peer.AID()] != 50 || len(due) != 1 {
+		t.Errorf("due = %v, want 50 to the peer", due)
 	}
 }
 
@@ -625,11 +556,12 @@ func TestALegacyNegativeSettlementRowIsNotRepeatedAsASuccess(t *testing.T) {
 func TestALegacyNegativeRedemptionRowIsNotListedAsAnAmount(t *testing.T) {
 	w := newOverflowWorld(t)
 	execHubDB(t, w.dir, `INSERT INTO credit_redemption(auth_id, aid, amount, reference, at) VALUES(?,?,?,?,?)`,
-		"bafy-legacy", w.attacker.AID(), -1000, "legacy", time.Now().UTC().Format(time.RFC3339Nano))
-	list, err := w.store.Redemptions(w.attacker.AID(), 10)
+		"bafy-legacy", w.attacker.AID(), -1000, "legacy", time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z"))
+	win, err := w.store.Redemptions(w.attacker.AID(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
+	list := win.Redemptions
 	if len(list) != 1 {
 		t.Fatalf("listed %d redemptions, want 1", len(list))
 	}
@@ -637,8 +569,8 @@ func TestALegacyNegativeRedemptionRowIsNotListedAsAnAmount(t *testing.T) {
 		t.Errorf("legacy row listed as amount %d (stored %d), want 0 and stored -1000",
 			list[0].Amount, list[0].StoredAmount)
 	}
-	if _, sum, err := w.store.RedemptionTotals(w.attacker.AID()); err != nil || sum != 0 {
-		t.Errorf("sum = %d (%v), want 0", sum, err)
+	if win.Sum != 0 {
+		t.Errorf("sum = %d, want 0", win.Sum)
 	}
 }
 
@@ -677,7 +609,7 @@ func peerReceipt(t *testing.T, peer *identity.Controller, authID, payTo string, 
 
 func TestPeerReceiptsInRangeCannotSumPastWhatALedgerHolds(t *testing.T) {
 	w := newOverflowWorld(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,9 +664,17 @@ func TestPeerReceiptsInRangeCannotSumPastWhatALedgerHolds(t *testing.T) {
 
 // The same on this hub's own ledger: a payee whose balance cannot take
 // the payment. The payer is not debited, and no receipt is signed.
+//
+// The supply bounds every balance by what was ever issued, at most 2^63-1
+// in all, so a payee this close to the edge beside a payer with credit is
+// a ledger that was written outside it (an old hub, a hand edit); the row
+// guard holds there too.
 func TestASettlementThatWouldOverflowThePayeeMovesNothing(t *testing.T) {
 	w := newOverflowWorld(t)
-	fundAgent(t, w.srv, w.victim.AID(), math.MaxInt64-50-balanceOf(t, w.srv, w.victim.AID()))
+	if err := w.store.MoveBalanceWithoutEntryForTest(w.victim.AID(),
+		math.MaxInt64-50-balanceOf(t, w.srv, w.victim.AID())); err != nil {
+		t.Fatal(err)
+	}
 	own := payment.CreditNetwork(w.hubAID)
 	before := moneyState(t, w.dir)
 	auth := signedAuth(t, w.attacker, w.victim.AID(), 100, w.hubAID, "ov-sum-settle")
@@ -748,8 +688,8 @@ func TestASettlementThatWouldOverflowThePayeeMovesNothing(t *testing.T) {
 	if after := moneyState(t, w.dir); after != before {
 		t.Errorf("the money tables changed.\nbefore:\n%s\nafter:\n%s", before, after)
 	}
-	if got := balanceOf(t, w.srv, w.attacker.AID()); got != aghub.RegistrationGrant {
-		t.Errorf("payer balance = %d, want %d", got, aghub.RegistrationGrant)
+	if got := balanceOf(t, w.srv, w.attacker.AID()); got != testRegistrationFunds {
+		t.Errorf("payer balance = %d, want %d", got, testRegistrationFunds)
 	}
 	w.readable(t, w.victim.AID(), "")
 	// Within range it settles.
@@ -765,11 +705,11 @@ func TestASettlementThatWouldOverflowThePayeeMovesNothing(t *testing.T) {
 // local payee and added to what the peer owes.
 func TestAPeerReceiptForMoreThanTheForwardedAuthorizationIsNotCleared(t *testing.T) {
 	w := newOverflowWorld(t)
-	peer, err := identity.Incept()
+	peer, err := identitytest.Hub()
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreignPayer, err := identity.Incept()
+	foreignPayer, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}

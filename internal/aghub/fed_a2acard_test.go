@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -16,7 +17,7 @@ import (
 
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/identity"
-	"github.com/ANetResearch/ANetCore/relayauth"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/federation"
@@ -24,7 +25,58 @@ import (
 
 // Federation of A2A cards, GET /fed/v2/cards (A2A-DESIGN §10.6): the
 // stream a hub serves, admission of what a peer serves, withdrawals, the
-// home of a federated agent, and v1 alongside v2.
+// key set that travels with a card, and the home of a federated agent.
+
+const testHome = "https://home.example"
+
+// homePeerAID is the AID a consuming store files the learned cards under.
+const homePeerAID = "did:anet:home-hub"
+
+// fedHub is a hub plus its store, because these tests act as both the
+// agent (over HTTP) and the stream a peer reads (on the store).
+type fedHub struct {
+	srv   *httptest.Server
+	store *aghub.Store
+}
+
+func newFedHub(t *testing.T) *fedHub {
+	t.Helper()
+	srv, store := newHubWithStore(t)
+	return &fedHub{srv: srv, store: store}
+}
+
+// openPeerStore is a second hub's store, admitting what the first serves.
+func openPeerStore(t *testing.T) *aghub.Store {
+	t.Helper()
+	st, err := aghub.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+// federate registers c at hub with a signed A2A card naming caps as its
+// skills, and opts it into federation. It returns the card.
+func federate(t *testing.T, hub *fedHub, c *identity.Controller, name string, caps []string) json.RawMessage {
+	t.Helper()
+	card := signA2A(t, c, a2aCardNamed(c, 1, name, caps))
+	if got := registerA2A(t, hub.srv, c, name, nil, card); got.CardStatus != aghub.CardStatusOK {
+		t.Fatalf("register %s: %+v", name, got)
+	}
+	setVisibility(t, hub.srv, c, aghub.VisibilityFederated)
+	return card
+}
+
+// a2aCardNamed is a2aCardFor with the card's name and one skill per
+// capability id.
+func a2aCardNamed(c *identity.Controller, seq uint64, name string, caps []string) map[string]any {
+	var skills [][]string
+	for _, id := range caps {
+		skills = append(skills, []string{id, id, "test"})
+	}
+	return a2aCardFor(c, seq, withSkills(skills...), func(card map[string]any) { card["name"] = name })
+}
 
 // relayAt points a card's relay interface at hub.
 func relayAt(hub string) func(map[string]any) {
@@ -41,6 +93,15 @@ func a2aEntry(t *testing.T, c *identity.Controller, card json.RawMessage) aghub.
 		t.Fatal(err)
 	}
 	return aghub.FedA2ACard{Format: federation.FormatA2ACard, Card: card, KEL: kel, Home: testHome}
+}
+
+// keyedEntry is a2aEntry with a key set of c, as the stream carries the card
+// of an agent whose daemon runs.
+func keyedEntry(t *testing.T, c *identity.Controller, card json.RawMessage) aghub.FedA2ACard {
+	t.Helper()
+	e := a2aEntry(t, c, card)
+	e.Keys, _ = mintKeySet(t, c, uint64(time.Now().UnixMilli()))
+	return e
 }
 
 // fedRegistry is the registry a store answers with its federated cards.
@@ -92,11 +153,16 @@ func withdrawnAID(t *testing.T, e aghub.FedA2ACard) (aid, reason string) {
 // An agent's A2A card, once it opts into federation, reaches a peer hub
 // over /fed/v2/cards: it is listed in the peer's registry with the home
 // hub it lives on, served by the peer's card endpoint, found by skill,
-// named in /agents from the card, and its key set is answered by the
-// peer's /agents/{aid}/keys. Before the agent opts in, nothing travels.
+// named in /agents from the card, and its key history and key set travel
+// with the entry in the peer's registry (sealed-sender SSR-H18), not by the
+// peer's /agents/{aid}/keys, which answers for its own agents only. Before
+// the agent opts in, nothing travels.
 func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
-	a, b := federatedHubs(t, false, true)
-	agent, _ := twoAgents(t)
+	a, b := federatedHubs(t, true)
+	agent, err := aghub.NewAgentWitnessedBy(b.id.AID, time.Now()) // B is its hub
+	if err != nil {
+		t.Fatal(err)
+	}
 	card := signA2A(t, agent, a2aCardFor(agent, 1, relayAt(b.srv.URL),
 		withSkills([]string{"echo", "Echo", "text"})))
 	if got := registerA2A(t, b.srv, agent, "Agent", nil, card); got.CardStatus != aghub.CardStatusOK {
@@ -151,21 +217,31 @@ func TestAnA2ACardFederatesToAPeersRegistry(t *testing.T) {
 		t.Fatalf("B's registry: %+v", l)
 	}
 
-	// A key set published later moves the card on the stream, and the
-	// peer answers key lookups from it.
-	ks, _ := mintKeySet(t, agent, 1)
+	// A new key set published later moves the card on the stream, and the
+	// peer's registry entry carries it.
+	ks, _ := mintKeySet(t, agent, storedKeySeq(t, b.srv, agent.AID())+1)
 	if code, body := publishKeys(t, b.srv, agent, ks); code != http.StatusOK {
 		t.Fatalf("publish keys: %d %s", code, body)
 	}
 	a.fed.SyncOnce(ctx)
-	code, body := getJSON(t, a.srv.URL+"/agents/"+agent.AID()+"/keys")
-	if code != http.StatusOK {
-		t.Fatalf("keys at A: %d %s", code, body)
+	entry = nil
+	for _, e := range registry(t, a.srv, "?skill=echo").Agents {
+		if e.AID == agent.AID() {
+			entry = &e
+		}
 	}
-	var view aghub.KeysView
-	_ = json.Unmarshal(body, &view)
-	if got, _ := base64.StdEncoding.DecodeString(view.KeySet); !bytes.Equal(got, ks) {
-		t.Fatal("A answered with another key set")
+	kel, _ := identity.MarshalKEL(agent.KEL())
+	if entry == nil || entry.Keys != base64.RawURLEncoding.EncodeToString(ks) ||
+		entry.KEL != base64.RawURLEncoding.EncodeToString(kel) {
+		t.Fatalf("A's registry entry does not carry the agent's key history and key set: %+v", entry)
+	}
+	// So does its /agents entry.
+	if v := directoryEntry(t, a.srv, "echo", agent.AID()); v == nil ||
+		v.Keys != base64.RawURLEncoding.EncodeToString(ks) || v.KEL != base64.RawURLEncoding.EncodeToString(kel) {
+		t.Fatalf("A's /agents entry does not carry the agent's key history and key set: %+v", v)
+	}
+	if code, body := getJSON(t, a.srv.URL+"/agents/"+agent.AID()+"/keys"); code != http.StatusNotFound {
+		t.Fatalf("keys at A of an agent registered at B: %d %s, want 404", code, body)
 	}
 }
 
@@ -242,14 +318,14 @@ func TestAFederatedA2ACardThatDoesNotVerifyIsRefused(t *testing.T) {
 // it verifies against the KEL it came with.
 func TestAFederatedA2ACardCannotRollBackOrForkTheKEL(t *testing.T) {
 	peer := openPeerStore(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	blob, _ := agent.Export()
 	before, _ := identity.Restore(blob)
 	forked, _ := identity.Restore(blob)
-	if err := agent.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 1)))); err != nil {
@@ -259,7 +335,7 @@ func TestAFederatedA2ACardCannotRollBackOrForkTheKEL(t *testing.T) {
 	if !errors.Is(err, identity.ErrKELRollback) {
 		t.Fatalf("a newer card over the pre-rotation KEL: %v, want a rollback refusal", err)
 	}
-	if err := forked.Rotate(uint64(time.Now().UnixMilli()) + 7); err != nil {
+	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+7); err != nil {
 		t.Fatal(err)
 	}
 	err = peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, forked, signA2A(t, forked, a2aCardFor(forked, 3))))
@@ -267,7 +343,7 @@ func TestAFederatedA2ACardCannotRollBackOrForkTheKEL(t *testing.T) {
 		t.Fatalf("a card over a forked KEL: %v, want a fork refusal", err)
 	}
 	// The agent itself, rotating further, still goes through.
-	if err := agent.Rotate(uint64(time.Now().UnixMilli()) + 11); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())+11); err != nil {
 		t.Fatal(err)
 	}
 	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 4)))); err != nil {
@@ -286,8 +362,9 @@ func TestAFederatedA2ACardsHomeIsTheCardsRelayInterface(t *testing.T) {
 	defer log.SetOutput(os.Stderr)
 
 	// a2aCardFor's relay interface is https://hub.example.org/relay; the
-	// entry says testHome.
-	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 1)))); err != nil {
+	// entry says testHome. Both entries carry a key set: a card without one
+	// is not listed (SSR-H18).
+	if err := peer.AdmitFedA2ACard(homePeerAID, keyedEntry(t, agent, signA2A(t, agent, a2aCardFor(agent, 1)))); err != nil {
 		t.Fatal(err)
 	}
 	noRelay := func(card map[string]any) {
@@ -295,7 +372,7 @@ func TestAFederatedA2ACardsHomeIsTheCardsRelayInterface(t *testing.T) {
 			"url": "https://direct.example/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "1.0",
 		}}
 	}
-	if err := peer.AdmitFedA2ACard(homePeerAID, a2aEntry(t, direct, signA2A(t, direct, a2aCardFor(direct, 1, noRelay)))); err != nil {
+	if err := peer.AdmitFedA2ACard(homePeerAID, keyedEntry(t, direct, signA2A(t, direct, a2aCardFor(direct, 1, noRelay)))); err != nil {
 		t.Fatal(err)
 	}
 	reg := fedRegistry(t, peer, aghub.RegistryQuery{})
@@ -334,7 +411,7 @@ func TestAWithdrawnA2ACardLeavesThePeersRegistry(t *testing.T) {
 	if err := peer.AdmitFedA2ACard(homePeerAID, entries[0]); err != nil {
 		t.Fatal(err)
 	}
-	ks, _ := mintKeySet(t, agent, 1)
+	ks, _ := mintKeySet(t, agent, storedKeySeq(t, hub.srv, agent.AID())+1)
 	if code, body := publishKeys(t, hub.srv, agent, ks); code != http.StatusOK {
 		t.Fatalf("publish keys: %d %s", code, body)
 	}
@@ -427,7 +504,7 @@ func TestARotationWithdrawsTheCardUntilItIsResigned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := agent.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(agent, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	registerA2A(t, hub.srv, agent, "Agent", nil, nil)
@@ -470,54 +547,9 @@ func TestAFederatedA2ACardOfALocalAgentIsRefusedForNow(t *testing.T) {
 	}
 }
 
-// v1 and v2 run side by side: an agent that registered an ADP card and an
-// A2A card is on both streams, a peer admits both, and its directory lists
-// the agent once, from the A2A card.
-func TestTheADPAndA2ACardStreamsCoexist(t *testing.T) {
-	hub := newFedHub(t)
-	peer := openPeerStore(t)
-	agent, _ := twoAgents(t)
-	body := registerBody(t, agent, "ADP name", []string{"adp.cap"})
-	body["card"] = mintCard(t, agent, "ADP name", []string{"adp.cap"})
-	body["a2a_card"] = signA2A(t, agent, a2aCardFor(agent, 1))
-	if code, b := signedDo(t, hub.srv, agent, relayauth.ActionRegister, http.MethodPost, "/register", body); code != http.StatusOK {
-		t.Fatalf("register: %d %s", code, b)
-	}
-	setVisibility(t, hub.srv, agent, aghub.VisibilityFederated)
-
-	v1, _, err := hub.store.CardsSince(0, 100, testHome)
-	if err != nil || len(v1) != 1 {
-		t.Fatalf("v1 stream: %+v %v", v1, err)
-	}
-	v2, _ := a2aStream(t, hub.store, 0)
-	if len(v2) != 1 {
-		t.Fatalf("v2 stream: %+v", v2)
-	}
-	if err := peer.AdmitFedCard(homePeerAID, v1[0]); err != nil {
-		t.Fatal(err)
-	}
-	if err := peer.AdmitFedA2ACard(homePeerAID, v2[0]); err != nil {
-		t.Fatal(err)
-	}
-	agents, err := peer.FederatedAgents("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(agents) != 1 || agents[0].Name != "Test Agent" || strings.Join(agents[0].Caps, ",") != "echo" {
-		t.Fatalf("the peer's directory: %+v, want one entry from the A2A card", agents)
-	}
-	if byADP, _ := peer.FederatedAgents("adp.cap"); len(byADP) != 0 {
-		t.Errorf("the ADP card answered for an agent with an A2A card: %+v", byADP)
-	}
-	if bySkill, _ := peer.FederatedAgents("echo"); len(bySkill) != 1 {
-		t.Errorf("the A2A card's skill id does not find the agent: %+v", bySkill)
-	}
-}
-
 // An agent this hub knows only by the A2A card a peer publishes can be
-// reviewed by a user here, the review goes out on /fed/v1/reviews like
-// one of an agent known by its ADP card, and the agent is named from the
-// card. Once the peer withdraws the card, the consent it stood for is
+// reviewed by a user here, the review goes out on /fed/v3/reviews, and
+// the agent is named from the card. Once the peer withdraws the card, the consent it stood for is
 // gone and the review is no longer served.
 func TestReviewsOfAnAgentKnownByItsA2ACardTravel(t *testing.T) {
 	hub, store := newHubWithStore(t)
@@ -550,21 +582,11 @@ func TestReviewsOfAnAgentKnownByItsA2ACardTravel(t *testing.T) {
 }
 
 // A subject registered here is governed by its own visibility, whatever a
-// peer's copy of its card (either stream) left behind from before it
-// registered: a hub-local agent's reviews stay here.
+// peer's copy of its card left behind from before it registered: a
+// hub-local agent's reviews stay here.
 func TestAPeersStaleCardDoesNotPublishALocalAgentsReviews(t *testing.T) {
 	hub, store := newHubWithStore(t)
 	provider, requester := twoAgents(t)
-	kel, err := identity.MarshalKEL(provider.KEL())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AdmitFedCard(homePeerAID, aghub.FedCard{
-		Card: mintCard(t, provider, "Provider", []string{"work.do"}),
-		KEL:  base64.StdEncoding.EncodeToString(kel), Home: testHome,
-	}); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.AdmitFedA2ACard(homePeerAID,
 		a2aEntry(t, provider, signA2A(t, provider, a2aCardFor(provider, 1)))); err != nil {
 		t.Fatal(err)
@@ -581,37 +603,242 @@ func TestAPeersStaleCardDoesNotPublishALocalAgentsReviews(t *testing.T) {
 	}
 }
 
-// An agent known from both streams is checked against the longer KEL: the
-// ADP card came over the KEL before a rotation, the re-signed A2A card
-// over the rotated one, and a receipt signed under the new key verifies.
-func TestAPeerLearnedKELIsTheLongerOfTheTwoStreams(t *testing.T) {
+// A peer-learned KEL follows the agent's rotation: the card re-signed
+// after it arrives over the extended KEL, the extended KEL is the one
+// this hub checks evidence against, and a receipt signed under the new
+// key verifies.
+func TestAPeerLearnedKELFollowsTheAgentsRotation(t *testing.T) {
 	hub, store := newHubWithStore(t)
 	provider, requester := twoAgents(t)
 	register(t, hub, requester, "Requester", nil)
-	before, err := identity.MarshalKEL(provider.KEL())
-	if err != nil {
+	unsigned := a2aCardFor(provider, 1)
+	if err := store.AdmitFedA2ACard(homePeerAID, a2aEntry(t, provider, signA2A(t, provider, unsigned))); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdmitFedCard(homePeerAID, aghub.FedCard{
-		Card: mintCard(t, provider, "Provider", []string{"work.do"}),
-		KEL:  base64.StdEncoding.EncodeToString(before), Home: testHome,
-	}); err != nil {
+	if err := identitytest.Rotate(provider, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
-	if err := provider.Rotate(uint64(time.Now().UnixMilli())); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AdmitFedA2ACard(homePeerAID,
-		a2aEntry(t, provider, signA2A(t, provider, a2aCardFor(provider, 1)))); err != nil {
-		t.Fatal(err)
+	if err := store.AdmitFedA2ACard(homePeerAID, a2aEntry(t, provider, signA2A(t, provider, unsigned))); err != nil {
+		t.Fatalf("the card re-signed after the rotation: %v", err)
 	}
 	after, _ := identity.MarshalKEL(provider.KEL())
 	if got, err := store.AnyKEL(provider.AID()); err != nil || !bytes.Equal(got, after) {
 		t.Fatalf("AnyKEL served the KEL before the rotation (%v)", err)
 	}
-	body := makeEvidence(t, provider, requester, "ix-rotated", 5, "")
-	if code, b := post(t, hub.URL+"/reviews", body); code != http.StatusOK {
+	if code, b := uploadReview(t, hub, makeEvidence(t, provider, requester, "ix-rotated", 5, "")); code != http.StatusOK {
 		t.Fatalf("a receipt signed under the rotated key: %d %s", code, b)
+	}
+}
+
+// A card no peer was ever offered is removed, not announced. A withdrawal
+// names an AID, and emitting one for a hub-local agent would publish, in
+// the act of leaving, exactly what the hub-local tier exists to keep
+// unpublished.
+func TestAHubLocalAgentIsNotNamedWhenItLeaves(t *testing.T) {
+	hub := newFedHub(t)
+	private, public := twoAgents(t)
+	registerA2A(t, hub.srv, private, "Private", nil, signA2A(t, private, a2aCardFor(private, 1)))
+	federate(t, hub, public, "Public", []string{"work.do"})
+	if code, b := leave(t, hub.srv, private); code != http.StatusOK {
+		t.Fatalf("deregister: %d %s", code, b)
+	}
+	entries, _ := a2aStream(t, hub.store, 0)
+	for _, e := range entries {
+		if strings.Contains(string(e.Card), private.AID()) {
+			t.Errorf("a hub-local agent's AID reached the federation stream on its way out: %s", e.Card)
+		}
+	}
+	// The agent that did federate is still on the stream, so the check
+	// above is not passing because the stream is empty.
+	if len(entries) != 1 || entries[0].Format != federation.FormatA2ACard {
+		t.Fatalf("the stream: %+v, want the one federated card", entries)
+	}
+}
+
+// A card registered again must not quietly cancel a withdrawal no peer has
+// read yet: while the agent stays hub-local the withdrawal stands, and the
+// hub still lists the card it just accepted.
+func TestRepublishingACardDoesNotCancelAStandingWithdrawal(t *testing.T) {
+	hub := newFedHub(t)
+	agent, _ := twoAgents(t)
+	federate(t, hub, agent, "Shy", []string{"work.do"})
+	_, cursor := a2aStream(t, hub.store, 0)
+	setVisibility(t, hub.srv, agent, aghub.VisibilityHubLocal)
+	// The node re-registers — a restart, a capability change — before the
+	// peer's next sync round.
+	more := signA2A(t, agent, a2aCardNamed(agent, 2, "Shy", []string{"work.do", "work.more"}))
+	if got := registerA2A(t, hub.srv, agent, "Shy", nil, more); got.CardStatus != aghub.CardStatusOK {
+		t.Fatalf("re-register: %+v", got)
+	}
+	after, _ := a2aStream(t, hub.store, cursor)
+	if len(after) != 1 {
+		t.Fatalf("%d entries after the peer's cursor, want the standing withdrawal: %+v", len(after), after)
+	}
+	if aid, _ := withdrawnAID(t, after[0]); aid != agent.AID() {
+		t.Fatalf("re-registering a card cancelled a withdrawal the peer had not read: %s", after[0].Card)
+	}
+	if d := directoryEntry(t, hub.srv, "work.more", agent.AID()); d == nil {
+		t.Error("the card registered again is not the one the hub lists")
+	}
+}
+
+// A withdrawal for an agent registered here can only touch the
+// peer-learned copy, never the local registry or this hub's own stream.
+func TestAPeerWithdrawalCannotUnregisterALocalAgent(t *testing.T) {
+	hub := newFedHub(t)
+	agent, _ := twoAgents(t)
+	federate(t, hub, agent, "Local", []string{"work.do"})
+	_, cursor := a2aStream(t, hub.store, 0)
+	// A real withdrawal of the same AID from a second hub, fed back to the
+	// hub the agent actually lives on.
+	other := newFedHub(t)
+	federate(t, other, agent, "Local", []string{"work.do"})
+	if code, b := leave(t, other.srv, agent); code != http.StatusOK {
+		t.Fatalf("deregister on the other hub: %d %s", code, b)
+	}
+	stolen, _ := a2aStream(t, other.store, 0)
+	if len(stolen) != 1 || stolen[0].Format != federation.FormatWithdrawal {
+		t.Fatalf("setup: %+v", stolen)
+	}
+	if err := hub.store.AdmitFedA2ACard("did:anet:other-hub", stolen[0]); err != nil {
+		t.Fatalf("the withdrawal errored rather than being ignored: %v", err)
+	}
+	if n := agentsServing(t, hub.srv, "work.do"); n != 1 {
+		t.Fatalf("a peer's withdrawal removed an agent registered here (%d)", n)
+	}
+	if l := registry(t, hub.srv, ""); len(l.Agents) != 1 {
+		t.Fatalf("a peer's withdrawal delisted an agent registered here: %+v", l.Agents)
+	}
+	if still, _ := a2aStream(t, hub.store, cursor); len(still) != 0 {
+		t.Errorf("a peer's withdrawal changed this hub's own stream: %+v", still)
+	}
+}
+
+// A federating agent's key set travels with its card, a new key set moves
+// the card to the head of the stream, and the pulling hub stores the set
+// only when it verifies for the card's subject and comes from the peer
+// that taught the card; another AID's set is ignored, and the card itself
+// is still admitted.
+func TestKeysTravelWithTheCardAndAreVerifiedOnArrival(t *testing.T) {
+	hub := newFedHub(t)
+	agent, stranger := twoAgents(t)
+	federate(t, hub, agent, "Keyed", []string{"work.do"})
+	base := storedKeySeq(t, hub.srv, agent.AID()) // the set it registered with
+	k1, _ := mintKeySet(t, agent, base+1)
+	if code, body := publishKeys(t, hub.srv, agent, k1); code != http.StatusOK {
+		t.Fatalf("publish: %d %s", code, body)
+	}
+	entries, cursor := a2aStream(t, hub.store, 0)
+	if len(entries) != 1 || !bytes.Equal(entries[0].Keys, k1) {
+		t.Fatalf("the card entry does not carry the key set: %+v", entries)
+	}
+	peer := openPeerStore(t)
+	if err := peer.AdmitFedA2ACard(homePeerAID, entries[0]); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() []byte {
+		ks, _, _ := peer.FedA2ACardKeys(agent.AID())
+		return ks
+	}
+	if !bytes.Equal(stored(), k1) {
+		t.Fatal("the peer did not store the verified key set")
+	}
+
+	// A new set moves the card past the cursor a peer holds.
+	k2, _ := mintKeySet(t, agent, base+2)
+	if code, body := publishKeys(t, hub.srv, agent, k2); code != http.StatusOK {
+		t.Fatalf("publish 2: %d %s", code, body)
+	}
+	after, _ := a2aStream(t, hub.store, cursor)
+	if len(after) != 1 || !bytes.Equal(after[0].Keys, k2) {
+		t.Fatalf("a new key set did not reach the stream: %+v", after)
+	}
+	if err := peer.AdmitFedA2ACard(homePeerAID, after[0]); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored(), k2) {
+		t.Fatal("the peer kept the older set")
+	}
+
+	foreign, _ := mintKeySet(t, stranger, 99)
+	swapped := after[0]
+	swapped.Keys = foreign
+	if err := peer.AdmitFedA2ACard(homePeerAID, swapped); err != nil {
+		t.Fatalf("the card itself was refused: %v", err)
+	}
+	if !bytes.Equal(stored(), k2) {
+		t.Error("another AID's key set was stored under this card")
+	}
+	// Only the peer that taught the card may update it: a valid, newer
+	// set on the same card from a different peer is not stored.
+	k3, _ := mintKeySet(t, agent, base+3)
+	fromOther := after[0]
+	fromOther.Keys = k3
+	if err := peer.AdmitFedA2ACard("did:anet:other-hub", fromOther); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored(), k2) {
+		t.Fatal("a peer that did not teach the card replaced its key set")
+	}
+	// The federation seam carries the set both ways.
+	views, _, err := aghub.FedDirectory{S: hub.store}.A2ACardsSince(cursor, 100, testHome)
+	if err != nil || len(views) != 1 || !bytes.Equal(views[0].Keys, k2) {
+		t.Fatalf("FedDirectory.A2ACardsSince dropped the key set: %+v %v", views, err)
+	}
+	other := openPeerStore(t)
+	if err := (aghub.FedDirectory{S: other}).AdmitFedA2ACard(homePeerAID, views[0]); err != nil {
+		t.Fatal(err)
+	}
+	if ks, _, _ := other.FedA2ACardKeys(agent.AID()); !bytes.Equal(ks, k2) {
+		t.Fatal("FedDirectory.AdmitFedA2ACard dropped the key set")
+	}
+}
+
+// The consumer rule on a peer's card stream (§3.1): a set below the stored
+// seq is a rollback, a set with the stored seq and different content is a
+// fork, and the stored set sent again under a broken signature does not
+// replace the stored one; all three are ignored. They come from the peer
+// that taught the card, so none is refused for coming from the wrong peer,
+// and the card itself is still admitted.
+func TestAPeerCannotForkOrCorruptAStoredKeySet(t *testing.T) {
+	hub := newFedHub(t)
+	agent, _ := twoAgents(t)
+	federate(t, hub, agent, "Keyed", []string{"work.do"})
+	base := storedKeySeq(t, hub.srv, agent.AID()) // the set it registered with
+	k2, _ := mintKeySet(t, agent, base+2)
+	if code, body := publishKeys(t, hub.srv, agent, k2); code != http.StatusOK {
+		t.Fatalf("publish: %d %s", code, body)
+	}
+	entries, _ := a2aStream(t, hub.store, 0)
+	if len(entries) != 1 {
+		t.Fatalf("stream: %+v", entries)
+	}
+	peer := openPeerStore(t)
+	if err := peer.AdmitFedA2ACard(homePeerAID, entries[0]); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() []byte {
+		ks, _, _ := peer.FedA2ACardKeys(agent.AID())
+		return ks
+	}
+	if !bytes.Equal(stored(), k2) {
+		t.Fatal("setup: the peer did not store the set")
+	}
+	k1, _ := mintKeySet(t, agent, base+1)
+	fork, _ := mintKeySet(t, agent, base+2) // same seq, other keys, validly signed
+	for name, keys := range map[string][]byte{
+		"a lower seq (a rollback)":                k1,
+		"a fork (same seq, other content)":        fork,
+		"the stored set under a broken signature": tamperSig(t, k2),
+	} {
+		e := entries[0]
+		e.Keys = keys
+		if err := peer.AdmitFedA2ACard(homePeerAID, e); err != nil {
+			t.Fatalf("%s: the card itself was refused: %v", name, err)
+		}
+		if !bytes.Equal(stored(), k2) {
+			t.Errorf("%s replaced the stored set", name)
+		}
 	}
 }
 

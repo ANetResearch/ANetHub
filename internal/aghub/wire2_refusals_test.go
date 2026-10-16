@@ -2,30 +2,27 @@ package aghub_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/federation"
 )
 
 // Refusal paths of the wire-2 endpoints that the positive tests do not
-// reach: path-scoped authentication on visibility and p2p, the publisher
-// rule for a re-signed or tampered key set, the consumer rule for key sets
-// in the card stream, the poll budget and order, the atomic KEL check on
-// registration, per-address limits for IPv6 callers and for federated key
-// lookups, and the 507 a sender sees when the recipient's hub is full.
+// reach: path-scoped authentication on visibility, the publisher rule for a
+// re-signed or tampered key set, the consumer rule for key sets in the card
+// stream, the poll budget and order, the atomic KEL check on registration,
+// per-address limits for IPv6 callers, and the 507 a sender sees when the
+// recipient's hub is full.
 
 // signedPathRequest builds a request to path signed by signer for action,
 // optionally claiming another AID in X-ANet-AID.
@@ -37,7 +34,7 @@ func signedPathRequest(t *testing.T, srvURL string, hubAID string, signer *ident
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-ANet-Wire", "2")
+	req.Header.Set("X-ANet-Wire", wireHeader)
 	if signer != nil {
 		signV2(t, req, signer, action, hubAID, body, signingNow())
 	}
@@ -93,30 +90,6 @@ func TestOnlyTheAgentCanChangeItsVisibility(t *testing.T) {
 	}
 }
 
-// A p2p address is a statement about oneself: another registered agent's
-// valid signature does not publish an address for the agent in the path.
-func TestAnotherAgentCannotPublishAnAgentsP2PAddress(t *testing.T) {
-	srv := newHub(t)
-	agent, other := twoAgents(t)
-	register(t, srv, agent, "Agent", nil)
-	register(t, srv, other, "Other", nil)
-	hubAID := hubAIDOf(t, srv)
-	path := "/agents/" + agent.AID() + "/p2p"
-	body := rawBody(t, map[string]any{"addr": "tcp://198.51.100.7:4001"})
-	for _, claim := range []string{"", agent.AID()} {
-		req := signedPathRequest(t, srv.URL, hubAID, other, relayauth.ActionP2P, path, body, claim)
-		if code, b, _ := send(t, req); code != http.StatusUnauthorized {
-			t.Errorf("another agent's signature (claim %q): %d %s, want 401", claim, code, b)
-		}
-	}
-	if code, b := getJSON(t, srv.URL+path); code == http.StatusOK {
-		t.Fatalf("an address published by another agent is served: %s", b)
-	}
-	if code, b := publishAddr(t, srv, agent, "tcp://198.51.100.7:4001"); code != 200 {
-		t.Fatalf("control: the agent's own address: %d %s", code, b)
-	}
-}
-
 // signSet signs set as c and returns the SignedEncKeySet encoding.
 func signSet(t *testing.T, c *identity.Controller, set *seal.EncKeySet) []byte {
 	t.Helper()
@@ -158,29 +131,33 @@ func storedKeys(t *testing.T, srvURL, aid string) []byte {
 	if err := json.Unmarshal(b, &view); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
+	raw, err := base64.RawURLEncoding.DecodeString(view.Keys)
+	if err != nil {
+		t.Fatalf("the served key set is not base64url: %v", err)
+	}
 	return raw
 }
 
 // "Same seq and same set bytes" is a no-op only for a set that verifies:
 // the same set under a broken signature is refused and does not replace
-// the stored signature, while the same set re-signed after a rotation is
-// accepted as unchanged and its new signature is what the hub serves from
-// then on. The pre-rotation signature is then refused, because a key set
-// is verified against the key in force (§3.1 step 2).
+// the stored signature. A rotation takes the set its retired key signed
+// away (KEL H-2), the same set re-signed after it is accepted, and its new
+// signature is what the hub serves from then on. The pre-rotation
+// signature is then refused, because a key set is verified against the key
+// in force (§3.1 step 2).
 func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	register(t, srv, c, "Agent", nil)
 	now := uint64(time.Now().UnixMilli())
-	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now+seal.KeyLifetimeMS)
+	kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 	if err != nil {
 		t.Fatal(err)
 	}
-	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: 7, Keys: []seal.EncKey{kp.Public}, IssuedAt: now}
+	set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: c.AID(), Seq: 7, Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: testMbox(t)}
 	before := signSet(t, c, set)
 	if code, b := publishKeys(t, srv, c, before); code != 200 {
 		t.Fatalf("first publish: %d %s", code, b)
@@ -191,8 +168,8 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 		t.Errorf("the same set under a broken signature: %d %s, want 400", code, b)
 	}
 	body := registerBody(t, c, "Agent", nil)
-	body["enc_keys"] = base64.StdEncoding.EncodeToString(broken)
-	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	withEncKeys(t, srv, body, c.AID(), broken)
+	code, b := registerFunded(t, srv, c, body)
 	var reg aghub.RegisterResponse
 	_ = json.Unmarshal(b, &reg)
 	if code != 200 || reg.KeysStatus != aghub.KeysStatusInvalid {
@@ -203,11 +180,14 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	}
 
 	// Rotate, register the longer KEL, and re-sign the identical set.
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
-	if code, b := registerWithCard(t, srv, c, "Agent", nil, nil); code != 200 {
+	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
 		t.Fatalf("register after rotation: %d %s", code, b)
+	}
+	if code, b := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys"); code != http.StatusNotFound {
+		t.Fatalf("the set the rotation retired is still served: %d %s", code, b)
 	}
 	after := signSet(t, c, set)
 	if bytes.Equal(after, before) {
@@ -216,8 +196,8 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	code, b = publishKeys(t, srv, c, after)
 	var out aghub.KeysPublishResponse
 	_ = json.Unmarshal(b, &out)
-	if code != 200 || out.KeysStatus != aghub.KeysStatusUnchanged {
-		t.Fatalf("the same set re-signed after rotation: %d %s, want 200 unchanged", code, b)
+	if code != 200 || out.KeysStatus != aghub.KeysStatusOK {
+		t.Fatalf("the same set re-signed after rotation: %d %s, want 200 ok", code, b)
 	}
 	if got := storedKeys(t, srv.URL, c.AID()); !bytes.Equal(got, after) {
 		t.Fatal("the hub still serves the pre-rotation signature")
@@ -227,46 +207,6 @@ func TestTheSameKeySetMustStillVerify(t *testing.T) {
 	}
 	if got := storedKeys(t, srv.URL, c.AID()); !bytes.Equal(got, after) {
 		t.Fatal("the pre-rotation signature replaced the current one")
-	}
-}
-
-// The consumer rule on a peer's card stream (§3.1): a set with the stored
-// seq and different content is a fork and is ignored, and the stored set
-// sent again under a broken signature does not replace the stored one.
-// Both come from the peer that taught the card, so neither is refused for
-// coming from the wrong peer.
-func TestAPeerCannotForkOrCorruptAStoredKeySet(t *testing.T) {
-	hub := newFedHub(t)
-	agent, _ := twoAgents(t)
-	federate(t, hub, agent, "Keyed", []string{"work.do"})
-	k2, _ := mintKeySet(t, agent, 2)
-	if code, body := publishKeys(t, hub.srv, agent, k2); code != 200 {
-		t.Fatalf("publish: %d %s", code, body)
-	}
-	cards, _, err := hub.store.CardsSince(0, 100, testHome)
-	if err != nil || len(cards) != 1 {
-		t.Fatalf("stream: %v %v", cards, err)
-	}
-	peer := openPeerStore(t)
-	if err := peer.AdmitFedCard(homePeerAID, cards[0]); err != nil {
-		t.Fatal(err)
-	}
-	if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-		t.Fatal("setup: the peer did not store the set")
-	}
-	fork, _ := mintKeySet(t, agent, 2) // same seq, other keys, validly signed
-	for name, keys := range map[string][]byte{
-		"a fork (same seq, other content)":        fork,
-		"the stored set under a broken signature": tamperSig(t, k2),
-	} {
-		entry := cards[0]
-		entry.Keys = base64.StdEncoding.EncodeToString(keys)
-		if err := peer.AdmitFedCard(homePeerAID, entry); err != nil {
-			t.Fatalf("%s: the card itself was refused: %v", name, err)
-		}
-		if ks, _, _ := peer.FedCardKeys(agent.AID()); !bytes.Equal(ks, k2) {
-			t.Errorf("%s replaced the stored set", name)
-		}
 	}
 }
 
@@ -281,7 +221,7 @@ func TestAPollIsBoundedByTheBudgetAndOldestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	var sent [][]byte
 	for i, n := range []int{1500, 300, 300, 300} {
@@ -292,7 +232,7 @@ func TestAPollIsBoundedByTheBudgetAndOldestFirst(t *testing.T) {
 		sent = append(sent, env)
 	}
 	envelopeOf := func(p polled, i int) []byte {
-		b, _ := base64.StdEncoding.DecodeString(p.Messages[i].Envelope)
+		b, _ := base64.RawURLEncoding.DecodeString(p.Messages[i].Envelope)
 		return b
 	}
 	p := relayPoll(t, srv, recip)
@@ -318,7 +258,7 @@ func TestLeavingRemovesTheA2ACard(t *testing.T) {
 	c, _ := twoAgents(t)
 	body := registerBody(t, c, "Agent", nil)
 	body["a2a_card"] = signA2A(t, c, a2aCardFor(c, 1))
-	code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	code, b := registerFunded(t, srv, c, body)
 	if code != 200 {
 		t.Fatalf("register: %d %s", code, b)
 	}
@@ -347,7 +287,7 @@ func TestLeavingRemovesTheA2ACard(t *testing.T) {
 // wrote cannot then replace the KEL with a fork or a shorter copy.
 func TestRegisterAgentChecksTheKELInTheWriteTransaction(t *testing.T) {
 	store := openPeerStore(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,13 +304,13 @@ func TestRegisterAgentChecksTheKELInTheWriteTransaction(t *testing.T) {
 	if err := write(initial); err != nil {
 		t.Fatalf("first registration: %v", err)
 	}
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
 	if err := write(c.KEL()); err != nil {
 		t.Fatalf("an extending KEL: %v", err)
 	}
-	if err := forked.Rotate(uint64(time.Now().UnixMilli()) + 3); err != nil {
+	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+3); err != nil {
 		t.Fatal(err)
 	}
 	if err := write(forked.KEL()); !errors.Is(err, aghub.ErrKELNotExtended) || !errors.Is(err, identity.ErrKELFork) {
@@ -399,7 +339,8 @@ func TestRegistrationIsRateLimitedPerIPv6Prefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := func(ip string) int {
-		c, _ := identity.Incept()
+		c, _ := aghub.NewAgentForTest()
+		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))
 		req.Header.Set("X-Real-IP", ip)
@@ -417,62 +358,21 @@ func TestRegistrationIsRateLimitedPerIPv6Prefix(t *testing.T) {
 	}
 }
 
-// The federated half of GET /agents/{aid}/keys sends a signed request to
-// every peer for an unauthenticated caller, so it is limited per client
-// address; answers from local registrations are not.
-func TestFederatedKeyLookupsAreRateLimitedPerClient(t *testing.T) {
-	srv := newHub(t)
-	l := aghub.DefaultLimits()
-	l.KeysLookupPerMinute, l.KeysLookupBurst = 1, 1
-	if err := serverOf(t, srv).SetLimits(l); err != nil {
-		t.Fatal(err)
-	}
-	asked := 0
-	serverOf(t, srv).SetFederatedKeyLookup(func(_ context.Context, aid string, _ func(ks, kel []byte) error) ([]byte, []byte, string, error) {
-		asked++
-		return nil, nil, "", fmt.Errorf("every peer: %w", federation.ErrNoKeys)
-	})
-	local, _ := twoAgents(t)
-	register(t, srv, local, "Local", nil)
-	k, _ := mintKeySet(t, local, 1)
-	if code, b := publishKeys(t, srv, local, k); code != 200 {
-		t.Fatalf("publish: %d %s", code, b)
-	}
-	get := func(aid, ip string) (int, http.Header) {
-		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/agents/"+aid+"/keys", nil)
-		req.Header.Set("X-Real-IP", ip)
-		code, _, hdr := send(t, req)
-		return code, hdr
-	}
-	unknown := func() string { c, _ := identity.Incept(); return c.AID() }
-	if code, _ := get(unknown(), "203.0.113.5"); code != http.StatusNotFound {
-		t.Fatalf("first federated lookup: %d, want 404 from the peers", code)
-	}
-	code, hdr := get(unknown(), "203.0.113.5")
-	if code != http.StatusTooManyRequests {
-		t.Fatalf("second federated lookup from the same address: %d, want 429", code)
-	}
-	if ra, err := strconv.Atoi(hdr.Get("Retry-After")); err != nil || ra < 1 {
-		t.Errorf("Retry-After = %q", hdr.Get("Retry-After"))
-	}
-	if asked != 1 {
-		t.Errorf("the peers were asked %d times, want 1", asked)
-	}
-	if code, _ := get(local.AID(), "203.0.113.5"); code != http.StatusOK {
-		t.Errorf("a local agent's keys from the limited address: %d, want 200", code)
-	}
-	if code, _ := get(unknown(), "203.0.113.6"); code != http.StatusNotFound {
-		t.Errorf("a federated lookup from another address: %d, want 404", code)
-	}
-}
-
 // A full mailbox at the recipient's hub reaches the sender as 507, the
-// same answer a full local mailbox gives, not as a generic 502.
+// same answer a full local mailbox gives, not as a generic 502
+// (sealed-sender SSR-H13).
 func TestAFullMailboxAtThePeerHubIs507ForTheSender(t *testing.T) {
-	a, b := twoFederatedHubs(t, true)
+	a, b := twoFederatedHubs(t)
 	recip, sender := twoAgents(t)
 	register(t, b.srv, recip, "Provider", nil)
 	register(t, a.srv, sender, "Requester", nil)
+	// A recipient is in its hub's directory, which is how the sender's hub
+	// finds where it lives, once it has published a key set.
+	if keys, _ := mintKeySet(t, recip, 1); true {
+		if code, body := publishKeys(t, b.srv, recip, keys); code != 200 {
+			t.Fatalf("publish at B: %d %s", code, body)
+		}
+	}
 	l := aghub.DefaultLimits()
 	l.MailboxMessages = 1
 	if err := b.s.SetLimits(l); err != nil {
@@ -486,23 +386,20 @@ func TestAFullMailboxAtThePeerHubIs507ForTheSender(t *testing.T) {
 	}
 }
 
-// The replay cache records a signature only after it verifies. A request
+// RC1 records a signed time only after the signature verifies. A request
 // whose body does not match its signature is refused without spending the
-// signature, so the genuine request carrying it is still accepted, and a
-// caller without the key cannot fill the cache.
+// time, so the genuine request carrying it is still accepted, and a caller
+// without the key cannot add to the replay state.
 func TestARefusedRequestDoesNotSpendItsSignature(t *testing.T) {
 	srv := newHub(t)
-	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	sender, _ := twoAgents(t)
 	register(t, srv, sender, "Sender", nil)
-	body := rawBody(t, map[string]any{"to_aid": recip.AID(),
-		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("genuine")))})
-	genuine := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-	signV2(t, genuine, sender, relayauth.ActionSend, hubAIDOf(t, srv), body, signingNow())
+	body := rawBody(t, map[string]any{"summary": "genuine", "readme": ""})
+	genuine := newRequest(t, srv, http.MethodPost, "/profile", body)
+	signV2(t, genuine, sender, relayauth.ActionProfile, hubAIDOf(t, srv), body, signingNow())
 
-	altered := rawBody(t, map[string]any{"to_aid": recip.AID(),
-		"envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("altered")))})
-	forged := newRequest(t, srv, http.MethodPost, "/relay/send", altered)
+	altered := rawBody(t, map[string]any{"summary": "altered", "readme": ""})
+	forged := newRequest(t, srv, http.MethodPost, "/profile", altered)
 	forged.Header = genuine.Header.Clone()
 	if code, b, _ := send(t, forged); code != http.StatusUnauthorized {
 		t.Fatalf("the signature over another body: %d %s, want 401", code, b)

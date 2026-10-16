@@ -2,7 +2,6 @@ package admin
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -220,57 +219,6 @@ func TestAuthorizationHeaderIsParsedNotTrimmed(t *testing.T) {
 	}
 }
 
-// Restoring an agent puts its governance state back too.
-//
-// The delete records a "delisted" moderation intent. The restore called
-// SetModeration(aid, "", ...) — an empty status, which SetModeration rejects —
-// and discarded the returned error, so the reset never ran and never said so.
-// The agent came back into the registry still displayed as removed by an
-// operator, in the risk queue and the enforcement view alike.
-func TestRestoringAnAgentClearsTheDelistedFlag(t *testing.T) {
-	srv, store, _, provAID, _ := newTestServer(t)
-	h := srv.Handler()
-
-	if w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+provAID, "test-token", nil); w.Code != http.StatusOK {
-		t.Fatalf("delete: %d", w.Code)
-	}
-	mods, err := store.Moderations()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mods[provAID].Status != "delisted" {
-		t.Fatalf("precondition: delete did not record delisted, got %q", mods[provAID].Status)
-	}
-
-	if w, _ := doReq(t, h, "POST", "/admin/api/deleted/"+provAID+"/restore", "test-token", nil); w.Code != http.StatusOK {
-		t.Fatalf("restore: %d", w.Code)
-	}
-	mods, err = store.Moderations()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := mods[provAID].Status; got != "ok" {
-		t.Errorf("moderation after restore = %q, want %q — the agent is back in "+
-			"the registry and still shown as removed by an operator", got, "ok")
-	}
-	// And the operator's view agrees: the governance columns are what an
-	// operator actually reads, not the table.
-	_, out := doReq(t, h, "GET", "/admin/api/agents", "test-token", nil)
-	for _, a := range out["agents"].([]any) {
-		m, _ := a.(map[string]any)
-		if m["aid"] != provAID {
-			continue
-		}
-		if s, ok := m["moderation"]; ok {
-			t.Errorf("the agents view still reports moderation %v after a restore", s)
-		}
-	}
-	_, out = doReq(t, h, "GET", "/admin/api/agents/"+provAID, "test-token", nil)
-	if md, ok := out["moderation"].(map[string]any); ok && md["status"] != "ok" {
-		t.Errorf("agent detail reports moderation %v after a restore", md["status"])
-	}
-}
-
 // Deleting an official agent that was never registered is not recorded as a
 // delete.
 //
@@ -413,35 +361,37 @@ func TestNoProductionHostIsCompiledIn(t *testing.T) {
 	}
 }
 
-// The operator surface exposes its recovery path in the console.
+// The console shows the way back from a delete, and it is the one the
+// software has: anet-hub admit (hub-payment-privacy PAY-O4).
 //
-// GET /api/deleted and POST /api/deleted/{aid}/restore existed and worked, and
-// the single-file console called neither: the two delete buttons had no
-// counterpart, so undoing a mis-click meant curl. An endpoint no page calls is
-// reachable only by the person who wrote it.
-func TestTheConsoleReachesTheRecoveryEndpoints(t *testing.T) {
+// The deleted list is reachable from the sidebar, it offers the list as an
+// admit file (?format=admit), and it never calls the removed restore route,
+// which answers 404; the delete confirmation and the list both name
+// anet-hub admit, since that is what an operator reads at the moment they
+// hesitate.
+func TestTheConsoleShowsTheWayBackFromADelete(t *testing.T) {
 	page := string(AdminHTML())
 	for _, want := range []string{
-		"api('/deleted')", // the archive listing
-		"'/deleted/'+encodeURIComponent(aid)+'/restore'", // the restore call
-		"'operations/recycle': vRecycle",                 // routed
-		"id:'recycle'",                                   // and reachable from the sidebar
+		"api('/deleted')",                // the listing
+		"/deleted?format=admit",          // the batch undo
+		"anet-hub admit",                 // the undo, in words
+		"'operations/recycle': vRecycle", // routed
+		"id:'recycle'",                   // and reachable from the sidebar
 	} {
 		if !strings.Contains(page, want) {
-			t.Errorf("the console does not contain %q — the archive has a writer, "+
-				"an API and no way in from the page", want)
+			t.Errorf("the console does not contain %q", want)
 		}
 	}
-	// The delete confirmation says where the agent goes, since that is what an
-	// operator reads at the moment they hesitate.
-	if !strings.Contains(page, "回收站") {
-		t.Error("the console never mentions the recycle bin")
+	for _, gone := range []string{"/restore", "restoreAgent", "reviews_written", "mailbox_backlog", "reviewer_aid"} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the console still uses %q, which the admin API no longer has", gone)
+		}
 	}
 }
 
-// The restore path the console calls is a real route with the shape the page
-// assumes: a JSON object, not a bare list, and an aid in the path.
-func TestRestoreEndpointShapeMatchesTheConsole(t *testing.T) {
+// The deleted list has the shape the console reads: a JSON object whose
+// entries are {aid, deleted_at, actor} and nothing more (PAY-O4).
+func TestDeletedListShapeMatchesTheConsole(t *testing.T) {
 	srv, _, _, provAID, _ := newTestServer(t)
 	h := srv.Handler()
 	if w, _ := doReq(t, h, "DELETE", "/admin/api/agents/"+provAID, "test-token", nil); w.Code != http.StatusOK {
@@ -450,21 +400,11 @@ func TestRestoreEndpointShapeMatchesTheConsole(t *testing.T) {
 	_, out := doReq(t, h, "GET", "/admin/api/deleted", "test-token", nil)
 	list, _ := out["deleted"].([]any)
 	if len(list) != 1 {
-		t.Fatalf("archive listing has %d entries, want 1", len(list))
+		t.Fatalf("deleted listing has %d entries, want 1", len(list))
 	}
 	row, _ := list[0].(map[string]any)
-	for _, k := range []string{"aid", "row", "deleted_at", "actor"} {
-		if _, ok := row[k]; !ok {
-			t.Errorf("archive entry has no %q; the console renders it", k)
-		}
-	}
-	// The console parses "row" as JSON to show the name and caps.
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(row["row"].(string)), &parsed); err != nil {
-		t.Fatalf("the archived row is not JSON: %v", err)
-	}
-	if _, ok := parsed["name"]; !ok {
-		t.Error("the archived row carries no name; the recycle bin would show only an AID")
+	if len(row) != 3 || row["aid"] != provAID || row["actor"] != "admin" || row["deleted_at"] == "" {
+		t.Errorf("deleted entry %v, want exactly {aid, deleted_at, actor}", row)
 	}
 }
 

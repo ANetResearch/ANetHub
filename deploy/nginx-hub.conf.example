@@ -10,7 +10,7 @@
 # contained. Now one of them does.
 #
 #     daemon control plane   internal/daemon/control_api.go  maxControlBody
-#     hub                    internal/aghub/limits.go        Limits.sendBodyLimit (~128 MiB by default)
+#     hub                    internal/aghub/limits.go        Limits.sendBodyLimit (96 MiB by default)
 #     nginx                  this file                       client_max_body_size
 #
 # The number below must be the smallest of the three you actually want,
@@ -22,7 +22,7 @@
 # Logs (A2A-DESIGN X1, §21 item 1) [redteam:F3]. The hub stores no record
 # of who sent what to whom; nginx's default access log would. Every hub
 # request line names agents (/agents/<aid>/..., /a2a/v1/agents/<aid>/card,
-# /fed/v2/keys/<aid>, /x402/resource/<aid>/...) and comes from the client's
+# /x402/resource/<aid>/...) and comes from the client's
 # address, so a kept log rebuilds the social graph — sender address ->
 # recipient, with times and sizes — long after the envelope was acked and
 # deleted. Both server blocks therefore keep no access log (access_log off

@@ -2,10 +2,10 @@ package aghub_test
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 
-	"github.com/ANetResearch/ANetCore/identity"
 	"os"
 	"reflect"
 	"regexp"
@@ -191,15 +191,11 @@ func TestHealthzReportsTheBuild(t *testing.T) {
 	}
 }
 
-// Every AID an edge names must have a node.
-//
-// nodes came from the browsable listing and edges from every stored
-// review, and the two disagree by construction: an agent that left, or
-// went quiet for a month, drops out of the listing while its reviews
-// stay — because leaving removes routing and keeps evidence. Production
-// served one node and fifteen edges, and a renderer given that either
-// drops the edges silently or fails.
-func TestTheGraphHasANodeForEveryEdge(t *testing.T) {
+// GET /graph is {nodes: [{aid, name, reviewCount}]} and has no edges
+// (hub-payment-privacy PAY-V5): an edge was a reviewer, and the hub keeps
+// none. A reviewed agent that left still has its node and its count —
+// leaving removes routing, not evidence — and the reviewer is nowhere in it.
+func TestTheGraphHasNoEdgesAndKeepsWhatWasReviewed(t *testing.T) {
 	srv, _ := newHubWithStore(t)
 	provider, requester := twoAgents(t)
 	register(t, srv, provider, "Provider", []string{"work.do"})
@@ -211,52 +207,55 @@ func TestTheGraphHasANodeForEveryEdge(t *testing.T) {
 		t.Fatalf("deregister: %d %s", code, b)
 	}
 
-	g := graphOf(t, srv)
-	if len(g.Edges) == 0 {
-		t.Fatal("the review edge vanished with the agent — evidence was deleted, not just routing")
+	raw, g := graphOf(t, srv)
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
 	}
-	nodes := map[string]aghub.AgentView{}
-	for _, n := range g.Nodes {
-		nodes[n.AID] = n
+	if _, ok := top["edges"]; ok || len(top) != 1 {
+		t.Errorf("/graph has members other than nodes: %s", raw)
 	}
-	for _, e := range g.Edges {
-		for _, aid := range []string{e.Source, e.Target} {
-			if _, ok := nodes[aid]; !ok {
-				t.Errorf("edge names %s, which has no node", aid[:12])
-			}
+	var nodes []map[string]any
+	if err := json.Unmarshal(top["nodes"], &nodes); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		if len(n) != 3 || n["aid"] == nil || n["name"] == nil || n["reviewCount"] == nil {
+			t.Errorf("a node is not {aid, name, reviewCount}: %v", n)
 		}
 	}
-	// And the one that left is marked, so a reader can tell it apart from
-	// an agent still being routed to.
-	if n, ok := nodes[provider.AID()]; !ok {
-		t.Error("the departed provider has no node at all")
-	} else if n.Registered {
-		t.Error("a departed agent is marked as still registered")
+	byAID := map[string]aghub.GraphNode{}
+	for _, n := range g.Nodes {
+		byAID[n.AID] = n
 	}
-	// The requester never left and must still read as registered.
-	if n, ok := nodes[requester.AID()]; ok && !n.Registered {
-		t.Error("an agent that is still here is marked as gone")
+	if n, ok := byAID[provider.AID()]; !ok || n.ReviewCount != 1 {
+		t.Errorf("the departed provider's node: %+v (present %v), want its one review", n, ok)
+	}
+	if strings.Contains(string(raw), requester.AID()) {
+		t.Error("/graph names the reviewer")
 	}
 }
 
-func graphOf(t *testing.T, srv *httptest.Server) struct {
-	Nodes []aghub.AgentView `json:"nodes"`
-	Edges []aghub.Edge      `json:"edges"`
-} {
+func graphOf(t *testing.T, srv *httptest.Server) ([]byte, struct {
+	Nodes []aghub.GraphNode `json:"nodes"`
+}) {
 	t.Helper()
 	var out struct {
-		Nodes []aghub.AgentView `json:"nodes"`
-		Edges []aghub.Edge      `json:"edges"`
+		Nodes []aghub.GraphNode `json:"nodes"`
 	}
 	resp, err := http.Get(srv.URL + "/graph")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return out
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return raw, out
 }
 
 // The ledger endpoint must say how much it did not return.
@@ -267,7 +266,7 @@ func graphOf(t *testing.T, srv *httptest.Server) struct {
 // came from the cap rather than the ledger.
 func TestLedgerReportsTheWholeAccountNotJustThePage(t *testing.T) {
 	srv, store := newHubWithStore(t)
-	agent, err := identity.Incept()
+	agent, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,35 +375,54 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 		value any
 		want  []string
 	}{
-		{"RelaySendRequest", aghub.RelaySendRequest{}, []string{"envelope", "to_aid"}},
-		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"id", "recipient_quiet", "status", "via_hub", "warning"}},
+		{"SessionRequest", aghub.SessionRequest{}, []string{"epk"}},
+		{"SessionResponse", aghub.SessionResponse{}, []string{"ct", "enc", "exp", "sid"}},
+		{"RelaySendResponse", aghub.RelaySendResponse{}, []string{"recipient_quiet", "rid", "status", "via_hub"}},
 		{"RelayPollRequest", aghub.RelayPollRequest{}, []string{"after_id", "limit"}},
-		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"messages"}},
-		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"envelope", "id"}},
-		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"ids"}},
-		{"RelayAckResponse", aghub.RelayAckResponse{}, []string{"acked"}},
+		{"RelayPollResponse", aghub.RelayPollResponse{}, []string{"key_state_notice", "key_state_notice_error", "messages", "more"}},
+		{"RelayEnvelopeView", aghub.RelayEnvelopeView{}, []string{"accepted_at", "envelope", "id"}},
+		{"RelayAckRequest", aghub.RelayAckRequest{}, []string{"items"}},
+		{"RelayAckItem", aghub.RelayAckItem{}, []string{"dack", "handle", "id"}},
+		{"RelayAckResponse", aghub.RelayAckResponse{}, []string{"acked", "stored"}},
+		{"RelayStatusRequest", aghub.RelayStatusRequest{}, []string{"items"}},
+		{"RelayStatusItem", aghub.RelayStatusItem{}, []string{"handle", "rid", "via_hub"}},
+		{"RelayStatusResponse", aghub.RelayStatusResponse{}, []string{"items"}},
+		{"RelayStatusResult", aghub.RelayStatusResult{}, []string{"dack", "state"}},
+		{"FedRelayStatusRequest", aghub.FedRelayStatusRequest{}, []string{"items"}},
+		{"FedRelayStatusItem", aghub.FedRelayStatusItem{}, []string{"handle", "rid"}},
 		{"RegisterRequest", aghub.RegisterRequest{}, []string{
-			"a2a_card", "aid", "caps", "card", "enc_keys", "invite", "kel", "name", "pricing", "readme", "summary"}},
+			"a2a_card", "aid", "caps", "check_only", "enc_keys", "kel", "name", "pow", "prev_seq",
+			"readme", "summary"}},
 		{"RegisterResponse", aghub.RegisterResponse{}, []string{
-			"aid", "card_error", "card_status", "keys_error", "keys_status", "status"}},
-		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "pricing", "readme", "summary"}},
-		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keyset"}},
-		// POST /agents/keys:lookup, the daemon's recipient lookup [redteam:F3].
-		{"KeysLookupRequest", aghub.KeysLookupRequest{}, []string{"aid"}},
-		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keyset"}},
+			"aid", "card_error", "card_status", "key_state_notice", "key_state_notice_error", "keys_error", "keys_status",
+			"probation_until", "revocations", "status", "trial"}},
+		// POST /agents/kel:push and GET /agents/{aid}/kel (KEL §2.7).
+		{"KELPushRequest", aghub.KELPushRequest{}, []string{"aid", "kel"}},
+		{"KELPushResponse", aghub.KELPushResponse{}, []string{"aid", "head", "seq", "unchanged"}},
+		{"AgentKELView", aghub.AgentKELView{}, []string{"aid", "kel", "registered"}},
+		{"CheckOnlyResponse", aghub.CheckOnlyResponse{}, []string{"status"}},
+		{"ProfileRequest", aghub.ProfileRequest{}, []string{"aid", "readme", "summary"}},
+		{"KeysView", aghub.KeysView{}, []string{"aid", "kel", "keys"}},
+		// POST /directory:bucket, the daemon's recipient lookup, which
+		// names no agent (sealed-sender §2.9) [redteam:F3].
+		{"DirBucketRequest", aghub.DirBucketRequest{}, []string{"bits", "cursor", "prefix"}},
+		{"DirBucketResponse", aghub.DirBucketResponse{}, []string{"entries", "max_bits", "next", "partial"}},
+		{"DirBucketEntry", aghub.DirBucketEntry{}, []string{"box", "h"}},
+		{"KeysPublishRequest", aghub.KeysPublishRequest{}, []string{"keys", "prev_seq"}},
 		{"KeysPublishResponse", aghub.KeysPublishResponse{}, []string{"aid", "keys_status"}},
-		{"FedCard", aghub.FedCard{}, []string{"card", "fed_seq", "home", "kel", "keys"}},
 		// The A2A registry (A2A-DESIGN §10.5), read by the daemon's
 		// list_agents (ANet internal/hubapi pins the same names).
 		{"A2AAgentEntry", aghub.A2AAgentEntry{}, []string{
-			"aid", "avgRating", "card", "cardVerification", "homeHub", "lastSeen", "quiet", "reviewCount", "verifiedAt"}},
+			"aid", "avgRating", "card", "cardVerification", "homeHub", "kel", "key_state_notice", "keys", "lastSeen", "quiet",
+			"reviewCount", "verifiedAt"}},
 		{"A2AAgentList", aghub.A2AAgentList{}, []string{"agents", "nextCursor"}},
-		{"federation.Envelope", federation.Envelope{}, []string{
-			"dest_aid", "hop", "key_state_seq", "origin_hub_aid", "payload", "payload_cid", "seen_hubs", "sig", "ts", "v"}},
-		{"federation.KeysAnswer", federation.KeysAnswer{}, []string{"kel", "keyset"}},
-		// GET /fed/v2/cards (A2A-DESIGN §10.6), read by peer hubs.
+		// POST /fed/v3/forward and /fed/v3/directory:bucket, answered to
+		// peer hubs (sealed-sender §2.8).
+		{"FedForwardResponse", aghub.FedForwardResponse{}, []string{"recipient_quiet", "rid", "status"}},
+		{"FedBucketResponse", aghub.FedBucketResponse{}, []string{"entries", "max_bits", "next"}},
+		// GET /fed/v3/cards (A2A-DESIGN §10.6), read by peer hubs.
 		{"federation.FedA2ACardEntry", federation.FedA2ACardEntry{}, []string{
-			"card", "fed_seq", "format", "home", "kel", "keys"}},
+			"card", "fed_seq", "format", "home", "kel", "key_state_notice", "keys"}},
 		{"federation.FedA2ACardPage", federation.FedA2ACardPage{}, []string{"cards", "cursor"}},
 	} {
 		got := goJSONFields(t, tc.value)
@@ -415,12 +433,15 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 	// The per-field status values a daemon branches on.
 	for _, pair := range [][2]string{
 		{aghub.KeysStatusOK, "ok"}, {aghub.KeysStatusUnchanged, "unchanged"}, {aghub.KeysStatusAbsent, "absent"},
-		{aghub.KeysStatusInvalid, "invalid"}, {aghub.KeysStatusConflict, "conflict"},
+		{aghub.KeysStatusInvalid, "invalid"},
 		{aghub.CardStatusOK, "ok"}, {aghub.CardStatusUnchanged, "unchanged"}, {aghub.CardStatusAbsent, "absent"},
 		{aghub.CardStatusInvalid, "invalid"}, {aghub.CardStatusConflict, "conflict"},
 		{aghub.CardStatusWithdrawn, "withdrawn"},
 		{aghub.CardVerificationOK, "ok"},
-		// The /fed/v2/cards entry formats a peer hub dispatches on.
+		{aghub.NoticeErrQuarantine, "quarantine"}, {aghub.NoticeErrNotAdmitted, "not_admitted"},
+		{aghub.NoticeErrNotWitness, "not_witness"},
+		{aghub.CardErrorPriceInPublicCard, "price_in_public_card"},
+		// The /fed/v3/cards entry formats a peer hub dispatches on.
 		{federation.FormatA2ACard, "a2a-card/1"}, {federation.FormatWithdrawal, "withdrawal/1"},
 	} {
 		if pair[0] != pair[1] {
@@ -431,27 +452,24 @@ func TestTheWire2FieldNamesArePinned(t *testing.T) {
 
 // The version numbers and the authentication header names are part of the
 // contract too: the daemon sends these exact strings.
-func TestTheWire2VersionsAndHeadersArePinned(t *testing.T) {
-	if aghub.WireVersion != 2 {
-		t.Errorf("hub wire version %d, want 2", aghub.WireVersion)
-	}
-	if federation.ForwardVersion != 2 {
-		t.Errorf("federation forward version %d, want 2", federation.ForwardVersion)
+func TestTheWireVersionsAndHeadersArePinned(t *testing.T) {
+	if aghub.WireVersion != 3 {
+		t.Errorf("hub wire version %d, want 3", aghub.WireVersion)
 	}
 	for _, pair := range [][2]string{
 		{relayauth.HeaderAID, "X-ANet-AID"}, {relayauth.HeaderTS, "X-ANet-TS"},
 		{relayauth.HeaderSeq, "X-ANet-Seq"}, {relayauth.HeaderSig, "X-ANet-Sig"},
-		{relayauth.ActionSend, "send"}, {relayauth.ActionPoll, "poll"}, {relayauth.ActionAck, "ack"},
+		// send and p2p are retired: relayauth no longer defines them (golden/relayauth_v3_test.go
+		// in ANetCore pins every action that remains).
+		{relayauth.ActionPoll, "poll"}, {relayauth.ActionAck, "ack"},
 		{relayauth.ActionRegister, "register"}, {relayauth.ActionProfile, "profile"},
 		{relayauth.ActionVisibility, "visibility"}, {relayauth.ActionDeregister, "deregister"},
-		{relayauth.ActionP2P, "p2p"}, {relayauth.ActionKeys, "keys"},
-		// The recipient key lookup the daemon POSTs (ANet internal/hubapi
-		// KeysLookupPath pins the same path) [redteam:F3].
-		{aghub.KeysLookupPath, "/agents/keys:lookup"},
-		// The card and KEL lookups, likewise (hubapi KELLookupPath,
-		// CardLookupPath) [redteam:F3].
-		{aghub.KELLookupPath, "/agents/kel:lookup"},
-		{aghub.CardLookupPath, "/a2a/v1/agents/card:lookup"},
+		{relayauth.ActionKeys, "keys"}, {relayauth.ActionSession, "session"},
+		// The headers of a send (core §2.12.1).
+		{aghub.HeaderAccess, "X-ANet-Access"}, {relayauth.HeaderSession, "X-ANet-Session"},
+		{relayauth.HeaderMAC, "X-ANet-MAC"}, {relayauth.HeaderHome, "X-ANet-Home"},
+		{aghub.EnvelopeContentType, "application/vnd.anet.envelope+cbor"},
+		{aghub.RelayQueued, "queued"}, {aghub.RelayDuplicate, "duplicate"},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%q, want %q", pair[0], pair[1])
@@ -466,7 +484,7 @@ func TestTheWire2RoutesAreServed(t *testing.T) {
 	srv := newHub(t)
 	c, _ := twoAgents(t)
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodPost, "/relay/send"}, {http.MethodPost, "/relay/poll"}, {http.MethodPost, "/relay/ack"},
+		{http.MethodPost, "/relay/session"}, {http.MethodPost, "/relay/poll"}, {http.MethodPost, "/relay/ack"},
 		{http.MethodPost, "/register"}, {http.MethodPost, "/profile"},
 		{http.MethodPost, "/agents/" + c.AID() + "/keys"},
 	} {
@@ -478,18 +496,13 @@ func TestTheWire2RoutesAreServed(t *testing.T) {
 	}
 	code, body := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
 	var out map[string]string
-	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
-		t.Errorf("GET keys of an unknown AID: %d %s, want the handler's JSON 404", code, body)
+	if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" || out["reason"] != "unknown_aid" {
+		t.Errorf("GET keys of an unknown AID: %d %s, want the handler's 404 unknown_aid", code, body)
 	}
-	// The daemon tells this route's own 404 (a JSON error) from a hub that
-	// does not serve it (the mux's plain-text 405 or 404) and only then
-	// falls back to GET.
-	for _, path := range []string{aghub.KeysLookupPath, aghub.KELLookupPath, aghub.CardLookupPath} {
-		code, body, _ = send(t, newRequest(t, srv, http.MethodPost, path, []byte(`{"aid":"`+c.AID()+`"}`)))
-		out = nil
-		if code != http.StatusNotFound || json.Unmarshal(body, &out) != nil || out["error"] == "" {
-			t.Errorf("POST %s of an unknown AID: %d %s, want the handler's JSON 404", path, code, body)
-		}
+	// The anonymous directory route answers a query from its own handler.
+	code, body, _ = send(t, newRequest(t, srv, http.MethodPost, "/directory:bucket", []byte(`{"prefix":"","bits":0}`)))
+	if code != http.StatusOK || !strings.Contains(string(body), `"max_bits":0`) {
+		t.Errorf("POST /directory:bucket: %d %s, want 200 with max_bits", code, body)
 	}
 }
 
@@ -552,26 +565,26 @@ func TestTheFacilitatorContractIsPinned(t *testing.T) {
 }
 
 // Review and stats field names, pinned (A2A-DESIGN §9 rows 评价 and
-// completed_task, §17 contract row "评价无内容字段").
+// completed_task, §17 contract row "评价无内容字段"; hub-payment-privacy §2.5,
+// SI-48 for evidence v2).
 //
-// The daemon in ANet declares ReviewView and the upload body in
-// internal/hubapi and pins them in hubapi_test.go; that list has to change
-// with this one (ANet task C2): goal and deliverable removed,
-// content_binding added, and guest_quota removed from AgentView. No
-// content field may appear in any of these: the hub does not receive
-// interaction content, so a field that could carry it is a field some
-// client would fill.
+// The daemon in ANet declares the upload body and the review view in
+// internal/hubapi and pins them in hubapi_test.go; that list changes with
+// this one (PAY-14). No content field may appear in any of these: the hub
+// does not receive interaction content, so a field that could carry it is a
+// field some client would fill. Nor may a reviewer, an interaction id or a
+// time finer than a day.
 func TestTheReviewFieldNamesArePinned(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		value any
 		want  []string
 	}{
-		{"UploadReviewRequest", aghub.UploadReviewRequest{}, []string{"receipt", "review"}},
+		{"UploadReviewRequest", aghub.UploadReviewRequest{}, []string{"receipt", "review", "rsalt"}},
+		{"UploadReviewResponse", aghub.UploadReviewResponse{}, []string{"attestation", "status"}},
 		{"ReviewView", aghub.ReviewView{}, []string{
-			"comment", "completed_at", "content_binding", "created_at", "interaction_id", "rating",
-			"receipt_cid", "request_cid", "result_cid", "reviewer_aid", "subject_aid"}},
-		{"FedReview", aghub.FedReview{}, []string{"fed_seq", "provider_kel", "receipt", "review", "reviewer_kel"}},
+			"comment", "completed_day", "created_day", "rating", "receipt_cid", "subject_aid"}},
+		{"FedReviewEntry", aghub.FedReviewEntry{}, []string{"attestation", "fed_seq", "format", "provider_kel", "receipt", "review"}},
 		{"HubStats", aghub.HubStats{}, []string{
 			"agents", "avg_rating", "federated_agents", "modules", "reviews", "tasks_completed"}},
 	} {
@@ -583,6 +596,8 @@ func TestTheReviewFieldNamesArePinned(t *testing.T) {
 			switch f {
 			case "goal", "deliverable", "request_doc", "transcript", "body":
 				t.Errorf("%s carries %q, a content field", tc.name, f)
+			case "reviewer_aid", "reviewer_kel", "interaction_id", "created_at", "completed_at":
+				t.Errorf("%s carries %q, which names the reviewer or the interaction or is a time", tc.name, f)
 			}
 		}
 	}
@@ -590,11 +605,5 @@ func TestTheReviewFieldNamesArePinned(t *testing.T) {
 		if f == "guest_quota" {
 			t.Error("AgentView still carries guest_quota; guest mode is removed")
 		}
-	}
-	if aghub.ContentBindingUnverified != "UNVERIFIED" {
-		t.Errorf("content binding state %q, want %q", aghub.ContentBindingUnverified, "UNVERIFIED")
-	}
-	if aghub.MaxReviewCommentRunes != 280 {
-		t.Errorf("review comment bound %d, want 280", aghub.MaxReviewCommentRunes)
 	}
 }

@@ -2,57 +2,45 @@ import { useEffect, useState } from "react";
 import { BadgeCheck, Copy, Check } from "lucide-react";
 import { fetchAgent, type AgentView, type ReviewView } from "../lib/api";
 import { renderMd } from "../lib/markdown";
-import { shortAid, fmtTime, copyText } from "../lib/utils";
+import { shortAid, copyText } from "../lib/utils";
 import { Dialog } from "./ui/dialog";
 import { Badge } from "./ui/badge";
 import { Avatar } from "./ui/avatar";
 import { Stars } from "./AgentsSection";
 
-/** 内容绑定的状态文字。hub 不持有交互内容,无法核对回执里的 request_cid / result_cid
- *  是否对应某份内容;"未核对"必须如实显示,不得显示成"已验证"。 */
-export function contentBindingLabel(state: string | undefined): string {
-  if (state === "UNVERIFIED" || !state) return "内容绑定未核对（hub 不持有交互内容）";
-  return "内容绑定：" + state;
+/** 一个 UTC 日序号（自 1970-01-01 起的天数）显示为 YYYY-MM-DD。评价只保存到日。 */
+export function fmtDay(day?: number): string {
+  return day ? new Date(day * 86400000).toISOString().slice(0, 10) : "";
 }
 
 // Exported for tests. What a review looks like on screen is where the
 // evidence surface either reaches a person or does not.
 //
-// A review carries the rating, the reviewer's comment and the receipt it
-// is anchored on. It carries no request and no deliverable: the hub never
-// receives them (A2A-DESIGN §9), so there is nothing to show and nothing
-// the hub could have checked. The two signatures and their interlock are
-// what the hub verified, and that is what the green line says.
+// A review carries the rating, the comment, the receipt it is anchored on
+// and the days of the receipt and of the review. It names no reviewer and
+// no interaction: the hub keeps neither (evidence v2), and it never
+// receives the request or the deliverable (A2A-DESIGN §9). The provider's
+// signature on the receipt and the review's, by the one-time key the
+// receipt names, are what the hub verified, and that is what the line in
+// red says.
 export function Review({ r }: { r: ReviewView }) {
   return (
     <div className="border border-gray-200 bg-white p-4">
       <div className="flex items-center justify-between gap-2">
         <Stars avg={r.rating} />
-        <span className="font-mono text-[11px] text-gray-400">by {shortAid(r.reviewer_aid)}</span>
+        {r.created_day ? <span className="font-mono text-[11px] text-gray-400">{fmtDay(r.created_day)}</span> : null}
       </div>
       {r.comment && <p className="mt-2 text-[13px] italic leading-relaxed text-gray-800">“{r.comment}”</p>}
       <div className="mt-3 space-y-0.5 border-t border-dashed border-gray-200 pt-3 font-mono text-[10px] leading-relaxed text-gray-400">
-        {r.request_cid && (
-          <div className="truncate">
-            <b className="text-gray-500">request_cid</b> {r.request_cid}
-          </div>
-        )}
-        {r.result_cid && (
-          <div className="truncate">
-            <b className="text-gray-500">result_cid</b> {r.result_cid}
-          </div>
-        )}
-        {r.completed_at ? (
+        {r.completed_day ? (
           <div>
-            <b className="text-gray-500">completed</b> {fmtTime(r.completed_at)}
+            <b className="text-gray-500">completed</b> {fmtDay(r.completed_day)}
           </div>
         ) : null}
-        <div className="font-body text-[11px] text-gray-500">{contentBindingLabel(r.content_binding)}</div>
       </div>
       <div className="mt-3 flex items-center gap-1.5 text-[11px] text-[#E60000]">
         <BadgeCheck className="size-3.5" />
         双方签名已验证 · 回执 {shortAid(r.receipt_cid)}
-        {r.created_at ? <span className="text-gray-400"> · {fmtTime(r.created_at)}</span> : null}
       </div>
     </div>
   );
@@ -148,23 +136,15 @@ export function AgentDetailDialog({
                 dangerouslySetInnerHTML={{ __html: renderMd(a.readme) }}
               />
             )}
-            {a.pricing && (
-              <div className="mb-3 border border-[#E60000]/25 bg-[#E60000]/4 px-4 py-2.5 text-[13px]">
-                <span className="mb-0.5 block text-[10px] uppercase tracking-wider text-gray-400">
-                  收费（仅展示）
-                </span>
-                {a.pricing}
-              </div>
-            )}
 
             <h4 className="mb-3 mt-6 font-bebas text-lg tracking-[0.08em]">
               VERIFIED REVIEWS <span className="text-[#E60000]">·</span>{" "}
-              <span className="text-gray-400 text-sm tracking-normal font-body">签名与回执已验证，不含交互内容</span>
+              <span className="text-gray-400 text-sm tracking-normal font-body">签名与回执已验证，不含交互内容与评价人</span>
             </h4>
             {data!.reviews.length ? (
               <div className="space-y-3">
                 {data!.reviews.map((r, i) => (
-                  <Review key={r.interaction_id + i} r={r} />
+                  <Review key={r.receipt_cid + i} r={r} />
                 ))}
               </div>
             ) : (

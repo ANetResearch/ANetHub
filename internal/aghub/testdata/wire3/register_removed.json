@@ -1,0 +1,23 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /register without the members v0.3.0 removed (HPP §2.2, §4.2.6; core §1.2): the public price list (pricing) and the signed ADP card (card) are gone, so either is 400 bad_request naming the member, as any member the route does not take is (CORE-E7); in its own file because /register is limited per client address.",
+  "setup": "register",
+  "cases": [
+    {
+      "name": "the public price list is gone: pricing is bad_request",
+      "cite": "PAY-A1 step 2, HPP §4.2.6 item 2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}", "kel": "${listed_kel}", "pricing": "3 credits a call"}},
+      "response": {"status": 400,
+        "body": {"reason": "bad_request", "error": "The request body has the member \"pricing\", which this route does not take; remove it and send again."}}
+    },
+    {
+      "name": "the ADP card is gone: card is bad_request",
+      "cite": "PAY-A1 step 2, HPP §4.2.6 item 3",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "listed"},
+        "json": {"aid": "${listed}", "kel": "${listed_kel}", "card": {"subject_did": "${listed}"}}},
+      "response": {"status": 400,
+        "body": {"reason": "bad_request", "error": "The request body has the member \"card\", which this route does not take; remove it and send again."}}
+    }
+  ]
+}

@@ -9,16 +9,17 @@ package aghub_test
 // log alone still gave the edge sender -> recipient, with times and sizes.
 //
 // Two changes, each checked here: the shipped vhosts keep no access log
-// (and an error log at crit only), and the key lookup a daemon makes names
-// the recipient in its body (POST /agents/keys:lookup), not in its request
-// line, so even a proxy that an operator runs with the default log records
-// no such edge from the lookup.
+// (and an error log at crit only), and a daemon finds its recipient in a
+// directory bucket (POST /directory:bucket, sealed-sender §2.9), which names
+// neither the recipient nor its directory hash, only a prefix of a few bits
+// that many agents share, so even a proxy that an operator runs with the
+// default log records no such edge from the lookup.
 
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,11 +30,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ANetResearch/ANetCore/dirbox"
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // nginxBlocks returns the body of every `<name> {` block of an nginx
@@ -164,160 +165,88 @@ func (l *combinedLog) wrap(next http.Handler) http.Handler {
 }
 
 // A sender that looks its recipient up the way a daemon now does leaves no
-// request line naming the recipient, even behind a proxy that logs every
-// line: the lookup that used to give the edge sender -> recipient is
-// POST /agents/keys:lookup with the AID in the body.
-func TestAKeysLookupDoesNotNameTheRecipientInTheRequestLine(t *testing.T) {
+// request line, and no request body, naming the recipient or its directory
+// hash, even behind a proxy that logs every line: it asks for the bucket of
+// a short prefix of the hash and opens the recipient's entry itself.
+func TestABucketLookupDoesNotNameTheRecipient(t *testing.T) {
 	store, err := aghub.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := aghub.HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
 	var acc combinedLog
-	srv := httptest.NewServer(acc.wrap(s.Handler()))
+	var bodies [][]byte
+	var mu sync.Mutex
+	srv := httptest.NewServer(acc.wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, b)
+		mu.Unlock()
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		s.Handler().ServeHTTP(w, r)
+	})))
 	t.Cleanup(func() { srv.Close(); store.Close() })
 	testHubAID.Store(srv.URL, id.AID)
+	testHubStores.Store(srv.URL, store)
 
 	alice, bob := twoAgents(t)
 	const ipAlice, ipBob = "203.0.113.10", "198.51.100.20"
-	as := func(ip string, req *http.Request) (int, []byte) {
-		req.Header.Set("X-Real-IP", ip)
-		code, b, _ := send(t, req)
-		return code, b
-	}
 	for _, p := range []struct {
 		c  *identity.Controller
 		ip string
 	}{{alice, ipAlice}, {bob, ipBob}} {
-		if code, b := as(p.ip, signedRequest(t, srv, p.c, relayauth.ActionRegister, http.MethodPost,
-			"/register", registerBody(t, p.c, "n", nil))); code != 200 {
+		if _, err := store.Admit(p.c.AID(), 0, "", false); err != nil {
+			t.Fatal(err)
+		}
+		req := signedRequest(t, srv, p.c, relayauth.ActionRegister, http.MethodPost, "/register", registerBody(t, p.c, "n", nil))
+		req.Header.Set("X-Real-IP", p.ip)
+		if code, b, _ := send(t, req); code != 200 {
 			t.Fatalf("register: %d %s", code, b)
 		}
 		raw, _ := mintKeySet(t, p.c, uint64(time.Now().UnixMilli()))
-		if code, b := as(p.ip, signedRequest(t, srv, p.c, relayauth.ActionKeys, http.MethodPost,
-			"/agents/"+p.c.AID()+"/keys", map[string]any{"keyset": base64.StdEncoding.EncodeToString(raw)})); code != 200 {
+		req = signedRequest(t, srv, p.c, relayauth.ActionKeys, http.MethodPost,
+			"/agents/"+p.c.AID()+"/keys", map[string]any{"keys": base64.RawURLEncoding.EncodeToString(raw), "prev_seq": 0})
+		req.Header.Set("X-Real-IP", p.ip)
+		if code, b, _ := send(t, req); code != 200 {
 			t.Fatalf("publish keys: %d %s", code, b)
 		}
 	}
+	mu.Lock()
+	bodies = nil
+	mu.Unlock()
 
-	// Alice looks Bob up as a daemon does now, then sends.
-	lookup, _ := json.Marshal(aghub.KeysLookupRequest{AID: bob.AID()})
-	req := newRequest(t, srv, http.MethodPost, aghub.KeysLookupPath, lookup)
-	code, viaPost := as(ipAlice, req)
-	if code != 200 {
-		t.Fatalf("keys lookup: %d %s", code, viaPost)
+	// Alice looks Bob up as a daemon does now.
+	entry := lookUpInBucket(t, srv, bob.AID(), ipAlice)
+	if entry == nil {
+		t.Fatal("Bob's entry is not in the bucket of his directory hash")
 	}
-	env := testEnvelope(t, bob.AID(), bytes.Repeat([]byte{0xA5}, 3000))
-	if code, b := as(ipAlice, signedRequest(t, srv, alice, relayauth.ActionSend, http.MethodPost, "/relay/send",
-		map[string]any{"to_aid": bob.AID(), "envelope": base64.StdEncoding.EncodeToString(env)})); code != 200 {
-		t.Fatalf("send: %d %s", code, b)
-	}
-	code, pb := as(ipBob, signedRequest(t, srv, bob, relayauth.ActionPoll, http.MethodPost, "/relay/poll", map[string]any{}))
-	if code != 200 || !bytes.Contains(pb, []byte(`"id":`)) {
-		t.Fatalf("poll: %d %s", code, pb)
+	keys, _, _, _ := store.LocalKeys(bob.AID())
+	if !bytes.Equal(entry.Keys, keys) {
+		t.Fatal("the entry does not carry the key set Bob published")
 	}
 
+	h, _ := dirbox.Hash(bob.AID())
 	acc.mu.Lock()
 	lines := append([]string(nil), acc.lines...)
 	acc.mu.Unlock()
+	if len(lines) == 0 {
+		t.Fatal("nothing was logged")
+	}
 	for _, l := range lines {
-		if strings.HasPrefix(l, ipAlice+" ") && strings.Contains(l, bob.AID()) {
+		if strings.HasPrefix(l, ipAlice+" ") && (strings.Contains(l, bob.AID()) ||
+			strings.Contains(l, base64.RawURLEncoding.EncodeToString(h))) {
 			t.Errorf("a request line from the sender's address names the recipient: %s", l)
 		}
 	}
-
-	// The lookup answers what GET /agents/{aid}/keys answers, which stays
-	// for older daemons.
-	code, viaGet := getJSON(t, srv.URL+"/agents/"+bob.AID()+"/keys")
-	if code != 200 || !bytes.Equal(viaGet, viaPost) {
-		t.Fatalf("GET keys: %d %s; the POST lookup answered %s", code, viaGet, viaPost)
-	}
-}
-
-// The lookup routes' refusals: an AID nobody holds is the handler's JSON
-// 404 (what a daemon reads as "recipient unknown", or "no card"), a body
-// without an AID is 400, and a body larger than an AID needs is 413.
-func TestTheKeysLookupRefusals(t *testing.T) {
-	srv := newHub(t)
-	c, _ := twoAgents(t)
-	for _, path := range []string{aghub.KeysLookupPath, aghub.KELLookupPath, aghub.CardLookupPath} {
-		for _, tc := range []struct {
-			name string
-			body []byte
-			code int
-		}{
-			{"unknown AID", []byte(`{"aid":"` + c.AID() + `"}`), http.StatusNotFound},
-			{"no AID", []byte(`{}`), http.StatusBadRequest},
-			{"not JSON", []byte(`aid=` + c.AID()), http.StatusBadRequest},
-			{"oversized", []byte(`{"aid":"` + strings.Repeat("a", 8<<10) + `"}`), http.StatusRequestEntityTooLarge},
-		} {
-			code, b, _ := send(t, newRequest(t, srv, http.MethodPost, path, tc.body))
-			var out map[string]string
-			if code != tc.code || json.Unmarshal(b, &out) != nil || out["error"] == "" {
-				t.Errorf("%s %s: %d %s, want %d with a JSON error", path, tc.name, code, b, tc.code)
-			}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, b := range bodies {
+		if bytes.Contains(b, []byte(bob.AID())) || bytes.Contains(b, []byte(base64.RawURLEncoding.EncodeToString(h))) ||
+			bytes.Contains(b, []byte(base64.RawURLEncoding.EncodeToString(h[:8]))) {
+			t.Errorf("a request body names the recipient or more than a short prefix of its hash: %s", b)
 		}
-	}
-}
-
-// Before it writes to a peer, a daemon reads the peer's card (the proxy
-// card an A2A client asks for first, MCP get_agent_card) and the peer's
-// KEL to verify it, from its own address. Those lookups named the peer in
-// the request line too, and the send path's key lookup alone was moved to
-// the body: an A2A client talking to a peer through its daemon still left
-// sender-address -> peer in a logging proxy's lines [redteam:F3]. The
-// card and KEL lookups now take the AID in the body as well, and answer
-// what the GETs answer.
-func TestTheCardAndKELLookupsDoNotNameTheAgentInTheRequestLine(t *testing.T) {
-	store, err := aghub.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.SetHubKey(id.Ctrl)
-	s := aghub.NewServer(store)
-	s.SetHubAID(id.AID)
-	var acc combinedLog
-	srv := httptest.NewServer(acc.wrap(s.Handler()))
-	t.Cleanup(func() { srv.Close(); store.Close() })
-	testHubAID.Store(srv.URL, id.AID)
-
-	bob, _ := twoAgents(t)
-	registerA2A(t, srv, bob, "Bob", nil, signA2A(t, bob, a2aCardFor(bob, 1)))
-	const ipAlice = "203.0.113.10"
-	lookup := func(path string) []byte {
-		body, _ := json.Marshal(aghub.KeysLookupRequest{AID: bob.AID()})
-		req := newRequest(t, srv, http.MethodPost, path, body)
-		req.Header.Set("X-Real-IP", ipAlice)
-		code, b, _ := send(t, req)
-		if code != http.StatusOK {
-			t.Fatalf("POST %s: %d %s", path, code, b)
-		}
-		return b
-	}
-	card, kel := lookup(aghub.CardLookupPath), lookup(aghub.KELLookupPath)
-
-	acc.mu.Lock()
-	lines := append([]string(nil), acc.lines...)
-	acc.mu.Unlock()
-	for _, l := range lines {
-		if strings.HasPrefix(l, ipAlice+" ") && strings.Contains(l, bob.AID()) {
-			t.Errorf("a request line from the reader's address names the agent: %s", l)
-		}
-	}
-	if code, b := getJSON(t, srv.URL+"/a2a/v1/agents/"+bob.AID()+"/card"); code != 200 || !bytes.Equal(b, card) {
-		t.Fatalf("GET card: %d %s; the POST lookup answered %s", code, b, card)
-	}
-	if code, b := getJSON(t, srv.URL+"/agents/"+bob.AID()+"/kel"); code != 200 || !bytes.Equal(b, kel) {
-		t.Fatalf("GET kel: %d %s; the POST lookup answered %s", code, b, kel)
 	}
 }

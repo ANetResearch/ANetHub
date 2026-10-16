@@ -2,8 +2,9 @@
 // that runs BESIDE the public anet-hub binary and never changes public behavior. It is:
 //
 //	registry ops — an operator view over the public hub.db registry (ALL agents, listed or not, with
-//	               review counts and mailbox backlog), moderation state, and registry delete/restore.
-//	               Official agents are registered by id, AID, hub and capabilities only.
+//	               the reviews they received), moderation state, and the delete, which revokes an
+//	               agent's admission and deregisters it (aghub.DeregisterTx; undone by anet-hub
+//	               admit). Official agents are registered by id, AID, hub and capabilities only.
 //	audit        — every mutating admin action is recorded (who/what/when) in admin.db.
 //
 // It holds no task content and has no channel to any (A2A-DESIGN §9, [C39]). Earlier versions
@@ -13,8 +14,8 @@
 // cleanup (deploy/cleanup-content-v0.2.sh) deletes it.
 //
 // admin.db is the admin plane's OWN store; the public hub.db is opened alongside it (same WAL file the
-// hub serves from — busy_timeout guards cross-process writes, which are limited to registry deletes
-// and restores).
+// hub serves from — busy_timeout guards cross-process writes, which are limited to the operator's
+// delete).
 package admin
 
 import (
@@ -35,13 +36,19 @@ type Store struct {
 	mu sync.Mutex
 }
 
-// OpenStore opens (creating if needed) the admin store at dir.
+// OpenStore opens (creating if needed) the admin store at dir. An admin.db an earlier release wrote
+// is ErrAdminDBTooOld, and the file is not touched.
 func OpenStore(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("admin: dir required")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("admin: mkdir: %w", err)
+	}
+	// An admin.db of an earlier release is refused before it is opened
+	// for writing, and left as it was (ErrAdminDBTooOld).
+	if err := checkAdminDB(filepath.Join(dir, "admin.db")); err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", filepath.Join(dir, "admin.db")+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)")
 	if err != nil {
@@ -59,6 +66,11 @@ func OpenStore(dir string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
+	// Read again through the write-ahead log, which checkAdminDB did not
+	// read, before anything is created.
+	if err := checkDeletedAgentTable(s.db); err != nil {
+		return err
+	}
 	stmts := []string{
 		// One row per official agent: the parsed AGENT manifest (JSON mirror of the ANetAgents repo's
 		// AGENT.yaml). enabled=0 hides it from the ops plane without losing the manifest.

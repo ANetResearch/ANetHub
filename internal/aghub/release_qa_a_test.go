@@ -20,7 +20,7 @@ import (
 
 func mustIncept(t *testing.T) *identity.Controller {
 	t.Helper()
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func registerWithProfile(t *testing.T, srv *httptest.Server, c *identity.Control
 	t.Helper()
 	body := registerBody(t, c, name, []string{})
 	body["readme"] = readme
-	return signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+	return registerFunded(t, srv, c, body)
 }
 
 // getAgents runs one directory query and returns the agents in the order
@@ -101,11 +101,11 @@ func agentNames(agents []aghub.AgentView) []string {
 // ?cap=text.*.
 func TestCapabilityMatchingIsCaseSensitiveWithAndWithoutTheStar(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	register(t, srv, c, "DigestNode", []string{"Text.Digest"})
+	registerWithKeys(t, srv, c, "DigestNode", []string{"Text.Digest"})
 
 	found := func(q string) bool {
 		code, agents := getAgents(t, srv, "?cap="+url.QueryEscape(q))
@@ -138,7 +138,7 @@ func TestCapabilityMatchingIsCaseSensitiveWithAndWithoutTheStar(t *testing.T) {
 
 	// Dropping LIKE also drops its pattern language. Nothing in a
 	// capability id may act as a wildcard in either form.
-	register(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
+	registerWithKeys(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
 	for _, q := range []string{"cas.%", "cas.%*", "cas._", "cas._*", "cas.pu_", "cas.pu_*"} {
 		if code, agents := getAgents(t, srv, "?cap="+url.QueryEscape(q)); code != http.StatusOK {
 			t.Fatalf("cap=%q: %d", q, code)
@@ -178,13 +178,13 @@ func TestAnOverlongCapabilityIDIsRefused(t *testing.T) {
 	c := mustIncept(t)
 	caps := capsOfLength(qaACapIDLimit+1, 1)
 
-	code, body := registerWithCard(t, srv, c, "Greedy", caps, mintCard(t, c, "Greedy", caps))
+	code, body := registerCode(t, srv, c, "Greedy", caps)
 	if code != http.StatusBadRequest {
 		t.Fatalf("an overlong capability id must be refused, got %d %s", code, body)
 	}
 	// The refusal has to say which bound was crossed; "400" alone sends
 	// an operator to read hub source.
-	if !strings.Contains(string(body), "capability id") {
+	if !strings.Contains(strings.ToLower(string(body)), "capability id") {
 		t.Errorf("the refusal does not name the reason: %s", body)
 	}
 	// Refused means nothing was written — not written and then rejected.
@@ -203,7 +203,7 @@ func TestTooManyCapabilitiesAreRefused(t *testing.T) {
 	c := mustIncept(t)
 	caps := capsOfLength(32, qaACapCount+1)
 
-	code, body := registerWithCard(t, srv, c, "Greedy", caps, mintCard(t, c, "Greedy", caps))
+	code, body := registerCode(t, srv, c, "Greedy", caps)
 	if code != http.StatusBadRequest {
 		t.Fatalf("an oversized capability set must be refused, got %d %s", code, body)
 	}
@@ -249,10 +249,11 @@ func TestACapabilitySetExactlyAtTheBoundIsAccepted(t *testing.T) {
 		}
 	}
 
-	code, body := registerWithCard(t, srv, c, "AtTheLimit", caps, mintCard(t, c, "AtTheLimit", caps))
+	code, body := registerCode(t, srv, c, "AtTheLimit", caps)
 	if code != http.StatusOK {
 		t.Fatalf("a registration exactly at the bound must be accepted, got %d %s", code, body)
 	}
+	ensureKeys(t, srv, c) // listed once it has a key set (SSR-H18)
 	code, agents := getAgents(t, srv, "?cap="+url.QueryEscape(caps[0]))
 	if code != http.StatusOK || len(agents) != 1 || agents[0].Name != "AtTheLimit" {
 		t.Fatalf("an accepted capability is not findable: %d %v", code, agentNames(agents))
@@ -277,8 +278,8 @@ func TestAnOversizedRegistrationBodyIsRefused(t *testing.T) {
 // question nobody asked, with nothing in the response to say so.
 func TestABlankCapFilterIsRefusedRatherThanIgnored(t *testing.T) {
 	srv := newHub(t)
-	register(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
-	register(t, srv, mustIncept(t), "CameraNode", []string{"ptz.home"})
+	registerWithKeys(t, srv, mustIncept(t), "StoreNode", []string{"cas.put"})
+	registerWithKeys(t, srv, mustIncept(t), "CameraNode", []string{"ptz.home"})
 
 	for _, blank := range []string{"", "%20", "+", "%09", "%20%20"} {
 		code, agents := getAgents(t, srv, "?cap="+blank)
@@ -295,20 +296,22 @@ func TestABlankCapFilterIsRefusedRatherThanIgnored(t *testing.T) {
 
 // --- admission/F-3: a refused registration is observable ---
 
-// The admission gate's audit surface was its success side only: invite_use
-// rows and the redeemers in -invite-list. A refusal left no log line, no
-// row and nothing in -invite-list, so an operator running a closed hub
-// could not tell whether anybody had been turned away.
+// A refusal left no log line and no row, so an operator running a closed
+// hub could not tell whether anybody had been turned away. A newcomer the
+// hub would not take is logged with its AID, which is what the operator
+// needs to admit it.
 func TestARefusedRegistrationLeavesARecord(t *testing.T) {
 	logs := captureLog(t)
 	srv, store := newHubWithStore(t)
-	if err := store.SetInviteRequired(true); err != nil {
-		t.Fatal(err)
-	}
 	c := mustIncept(t)
 
-	if code, body := registerWithInvite(t, srv, c, "Uninvited", ""); code != http.StatusForbidden {
-		t.Fatalf("an uninvited agent must be refused, got %d %s", code, body)
+	code, body := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
+		registerBody(t, c, "Unadmitted", nil))
+	if code != http.StatusForbidden {
+		t.Fatalf("an agent not on the list of a closed hub must be refused, got %d %s", code, body)
+	}
+	if store.KnowsAgent(c.AID()) {
+		t.Fatal("a refused agent was registered anyway")
 	}
 	got := logs.String()
 	if !strings.Contains(got, c.AID()) {
@@ -317,8 +320,8 @@ func TestARefusedRegistrationLeavesARecord(t *testing.T) {
 	if !strings.Contains(got, "refused") {
 		t.Fatalf("the refusal is not identifiable as one: %q", got)
 	}
-	// And it says why, so "wrong token" and "hub is closed" stay apart.
-	if !strings.Contains(got, "invite") {
+	// And it says why, and what the operator can do.
+	if !strings.Contains(got, "admission list") || !strings.Contains(got, "anet-hub admit "+c.AID()) {
 		t.Fatalf("the refusal does not say why: %q", got)
 	}
 }
@@ -338,7 +341,7 @@ func TestTheKernelDoesNotServeTheFederationReviewStream(t *testing.T) {
 	// was handing out. Without this the endpoint would have been empty
 	// for a reason that has nothing to do with the fix.
 	setVisibility(t, srv, prov, "federated")
-	if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix_fed1", 5, "")); code != http.StatusOK {
+	if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix_fed1", 5, "")); code != http.StatusOK {
 		t.Fatalf("upload: %d %s", code, b)
 	}
 
@@ -413,7 +416,7 @@ func capsServe(caps []string, filter string) bool {
 func TestPeerLearnedAgentsAppearInEveryDirectoryQuery(t *testing.T) {
 	srv := newHub(t)
 	local := mustIncept(t)
-	register(t, srv, local, "LocalBakery", []string{"cas.put"})
+	registerWithKeys(t, srv, local, "LocalBakery", []string{"cas.put"})
 	remote := aghub.AgentView{
 		AID: "bafyremote", Name: "RemoteCamera", Caps: []string{"ptz.absolute"},
 		Listed: true, HomeHub: "hub:peer",

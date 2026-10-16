@@ -3,18 +3,19 @@ package aghub
 import (
 	"crypto/rand"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
-	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/payment"
 	"github.com/ANetResearch/ANetCore/relayauth"
+
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // Credit that can only go in is not credit, it is a score.
@@ -31,10 +32,11 @@ import (
 //	             it does is destroy the credit and sign a statement of
 //	             what was destroyed and against which external reference,
 //	             so the agent holds a claim it can produce later.
-//	supply       what the hub has issued, what has come back, and what is
-//	             therefore outstanding. Published, because a custodian
-//	             whose liabilities cannot be counted is being trusted for
-//	             more than it said.
+//	supply       what the hub owes in total, published once per supply
+//	             epoch with a tree each account checks its own balance
+//	             against (supply.go). Published, because a custodian whose
+//	             liabilities cannot be counted is being trusted for more
+//	             than it said.
 //	clearing     two hubs settling what they owe each other, so hub_owed
 //	             comes down instead of only up.
 //
@@ -52,6 +54,9 @@ const (
 
 // Redemption is one credit-out event, as the agent sees it.
 type Redemption struct {
+	// Seq orders the redemptions; /agents/{aid}/redemptions states the
+	// earliest of its window as oldest_seq.
+	Seq    uint64 `json:"seq"`
 	AuthID string `json:"auth_id"`
 	AID    string `json:"aid"`
 	Amount uint64 `json:"amount"`
@@ -118,18 +123,19 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	} else if found {
 		return prior, nil
 	}
-	if rf := currentAuth(auth, kel, time.Now().UnixMilli()); rf != nil {
+	if rf := s.keyAtFirstVerify(auth, id, kel, s.now().UnixMilli()); rf != nil {
 		return Redemption{}, rf
 	}
-	settled := s.settleAuth(hubAID, auth, id)
+	settled := s.settleAuth(hubAID, auth, id, "")
 	if !settled.Success {
 		detail, _ := settled.Extensions[payment.ExtErrorDetail].(string)
 		return Redemption{}, &Refusal{Reason: settled.ErrorReason, Detail: detail}
 	}
-	at := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.Exec(
+	at := ledgerStamp(s.now())
+	res, err := s.db.Exec(
 		`INSERT INTO credit_redemption(auth_id, aid, amount, reference, at) VALUES(?,?,?,?,?)`,
-		settled.Transaction, auth.Payer, amt, reference, at); err != nil {
+		settled.Transaction, auth.Payer, amt, reference, at)
+	if err != nil {
 		// The credit is already gone; the note is what is missing. Say
 		// so rather than reporting a failure that would have the agent
 		// believe it still had the balance.
@@ -143,53 +149,127 @@ func (s *Store) Redeem(hubAID string, p *payment.PaymentPayload, reference strin
 	// whole ledger sum to zero and a hub's outstanding liability is a
 	// number anyone can compute rather than one it reports.
 	//
-	// The entry is NOT written here. A redemption is a payment whose
-	// payee is the hub, and settleAuth writes an entry for both
-	// parties — so adding one here counted the hub's row twice and drove
-	// outstanding negative by the redeemed amount.
-	// And on the signed chain, so the supply is auditable in both
-	// directions. A redemption missing from the chain would leave the
-	// chain overstating what is outstanding.
-	if err := s.appendIssuance(EvCreditRetired, auth.Payer, amt, reference); err != nil {
-		log.Printf("hub: redemption %s not recorded on the issuance chain: %v",
-			settled.Transaction, err)
-	}
+	// Neither the entry nor the supply event is written here. A
+	// redemption is a payment whose payee is the hub, and settleAuth
+	// writes an entry for both parties and records the credit leaving
+	// circulation, in the settlement's transaction — so adding either here
+	// would count it twice.
 
 	out := Redemption{AuthID: settled.Transaction, AID: auth.Payer, Amount: auth.Amount,
 		Reference: reference, At: at}
+	if seq, err := res.LastInsertId(); err == nil && seq > 0 {
+		out.Seq = uint64(seq)
+	}
 	if enc, ok := settled.Extensions[payment.ExtReceipt].(string); ok {
 		out.Receipt = enc
 	}
 	return out, nil
 }
 
-// entry appends to the ledger without touching a balance.
-func (s *Store) entry(aid string, delta int64, reason string) error {
-	_, err := s.db.Exec(
-		`INSERT INTO credit_entry(aid, delta, reason, at) VALUES(?,?,?,?)`,
-		aid, delta, reason, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+// RedemptionWindow is what /agents/{aid}/redemptions serves: an account's
+// redemptions of the last LedgerWindowDays days (PAY-L6), the newest limit
+// of them, newest first, with the window's totals.
+type RedemptionWindow struct {
+	Redemptions []Redemption
+	// Total and Sum cover every redemption of the window, whatever the
+	// page; OldestSeq is the seq of the earliest of them, 0 when there is
+	// none.
+	Total     int
+	Sum       uint64
+	OldestSeq uint64
 }
 
-// Redemptions lists what an agent has taken out.
-// RedemptionTotals reports how many withdrawals an account has made and
-// what they sum to, over the whole account rather than one page. It is
-// what lets a caller reconcile without paging, and what lets the endpoint
-// say honestly that the list it returned is not everything.
-func (s *Store) RedemptionTotals(aid string) (total int, sum uint64, err error) {
-	var n int64
-	var amt sql.NullInt64
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*), SUM(amount) FROM credit_redemption WHERE aid=?`, aid,
-	).Scan(&n, &amt); err != nil {
-		return 0, 0, err
+// Redemptions lists what an agent has taken out in the ledger window,
+// newest first. Older ones are deleted (janitor.go): the redeemer's own
+// lasting record is the receipt on its evidence chain.
+func (s *Store) Redemptions(aid string, limit int) (RedemptionWindow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
 	}
+	from := windowStart(s.now())
+	var w RedemptionWindow
+	var n int64
+	var amt, oldest sql.NullInt64
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*), SUM(amount), MIN(seq) FROM credit_redemption WHERE aid=? AND at >= ?`, aid, from,
+	).Scan(&n, &amt, &oldest); err != nil {
+		return w, err
+	}
+	w.Total = int(n)
 	if amt.Valid {
 		// 0 for a total that is not a positive int64 (possible only with
 		// rows from before the amount range check); see storedAmount.
-		sum, _ = storedAmount(amt.Int64)
+		w.Sum, _ = storedAmount(amt.Int64)
 	}
-	return int(n), sum, nil
+	if oldest.Valid {
+		w.OldestSeq = uint64(oldest.Int64)
+	}
+	rows, err := s.db.Query(
+		`SELECT seq, auth_id, aid, amount, reference, at FROM credit_redemption
+		 WHERE aid=? AND at >= ? ORDER BY seq DESC LIMIT ?`, aid, from, limit)
+	if err != nil {
+		return w, err
+	}
+	defer rows.Close()
+	w.Redemptions = []Redemption{}
+	for rows.Next() {
+		var r Redemption
+		var amt int64
+		if err := rows.Scan(&r.Seq, &r.AuthID, &r.AID, &amt, &r.Reference, &r.At); err != nil {
+			return w, err
+		}
+		// A row from before the amount range check (-1000 for a
+		// redemption signed as 2^64-1000) is listed, since it is the
+		// account's history, but not as an amount it never was: a bare
+		// uint64(…) would show the overflowed figure as credit taken out.
+		if n, ok := storedAmount(amt); ok {
+			r.Amount = n
+		} else {
+			r.StoredAmount = amt
+			log.Printf("hub: %v", errStoredAmount("credit_redemption", r.AuthID, amt))
+		}
+		w.Redemptions = append(w.Redemptions, r)
+	}
+	return w, rows.Err()
+}
+
+// WindowRedemptions is what anet-hub redemptions lists (hub-payment-privacy
+// PAY-U2): every redemption of the ledger window (PAY-L6), of every account,
+// oldest first, with the window's count (Total) and sum. Rows older than the
+// window that the janitor has not deleted yet are not part of it. It only
+// reads, so it runs beside a running hub.
+func (s *Store) WindowRedemptions() (RedemptionWindow, error) {
+	w := RedemptionWindow{Redemptions: []Redemption{}}
+	rows, err := s.db.Query(
+		`SELECT seq, auth_id, aid, amount, reference, at FROM credit_redemption
+		 WHERE at >= ? ORDER BY at, seq`, windowStart(s.now()))
+	if err != nil {
+		return w, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r Redemption
+		var amt int64
+		if err := rows.Scan(&r.Seq, &r.AuthID, &r.AID, &amt, &r.Reference, &r.At); err != nil {
+			return w, err
+		}
+		// A row from before the amount range check is listed with its
+		// stored figure and not counted in the sum (see Redemptions).
+		if n, ok := storedAmount(amt); ok {
+			r.Amount = n
+			if w.Sum += n; w.Sum < n {
+				w.Sum = math.MaxUint64 // past what a sum can state
+			}
+		} else {
+			r.StoredAmount = amt
+		}
+		if w.OldestSeq == 0 || r.Seq < w.OldestSeq {
+			w.OldestSeq = r.Seq
+		}
+		w.Redemptions = append(w.Redemptions, r)
+	}
+	w.Total = len(w.Redemptions)
+	return w, rows.Err()
 }
 
 // redemptionOf is the redemption recorded for an authorization, with the
@@ -198,8 +278,8 @@ func (s *Store) redemptionOf(hubAID, authID string) (Redemption, bool, error) {
 	var r Redemption
 	var amt int64
 	err := s.db.QueryRow(
-		`SELECT auth_id, aid, amount, reference, at FROM credit_redemption WHERE auth_id=?`, authID).
-		Scan(&r.AuthID, &r.AID, &amt, &r.Reference, &r.At)
+		`SELECT seq, auth_id, aid, amount, reference, at FROM credit_redemption WHERE auth_id=?`, authID).
+		Scan(&r.Seq, &r.AuthID, &r.AID, &amt, &r.Reference, &r.At)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Redemption{}, false, nil
 	}
@@ -212,7 +292,7 @@ func (s *Store) redemptionOf(hubAID, authID string) (Redemption, bool, error) {
 		return Redemption{}, false, errStoredAmount("credit_redemption", authID, amt)
 	}
 	r.Amount = n
-	if settled, ok, err := s.settledBefore(hubAID, authID); err != nil {
+	if settled, _, ok, err := s.settledBefore(hubAID, authID); err != nil {
 		return Redemption{}, false, err
 	} else if ok {
 		r.Receipt, _ = settled.Extensions[payment.ExtReceipt].(string)
@@ -220,140 +300,13 @@ func (s *Store) redemptionOf(hubAID, authID string) (Redemption, bool, error) {
 	return r, true, nil
 }
 
-func (s *Store) Redemptions(aid string, limit int) ([]Redemption, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	rows, err := s.db.Query(
-		`SELECT auth_id, aid, amount, reference, at FROM credit_redemption
-		 WHERE aid=? ORDER BY rowid DESC LIMIT ?`, aid, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []Redemption{}
-	for rows.Next() {
-		var r Redemption
-		var amt int64
-		if err := rows.Scan(&r.AuthID, &r.AID, &amt, &r.Reference, &r.At); err != nil {
-			return nil, err
-		}
-		// A row from before the amount range check (-1000 for a
-		// redemption signed as 2^64-1000) is listed, since it is the
-		// account's history, but not as an amount it never was: a bare
-		// uint64(…) would show the overflowed figure as credit taken out.
-		if n, ok := storedAmount(amt); ok {
-			r.Amount = n
-		} else {
-			r.StoredAmount = amt
-			log.Printf("hub: %v", errStoredAmount("credit_redemption", r.AuthID, amt))
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// Supply is what this hub has put into circulation and what has come
-// back, so its liability can be counted rather than asserted.
-type Supply struct {
-	Issued      int64 `json:"issued"`
-	Redeemed    int64 `json:"redeemed"`
-	Outstanding int64 `json:"outstanding"`
-	// Balances is what every agent row adds up to. It must equal
-	// Outstanding; a hub where it does not has a bug or a thumb on the
-	// scale, and either way the number is the way to find out.
-	Balances int64 `json:"balances"`
-	// Owed is what peer hubs owe this one, kept apart from the local
-	// supply because a claim on another hub is not credit here.
-	Owed int64 `json:"owed_by_peers"`
-	// Due is the other direction: credit this hub destroyed to pay agents
-	// that bank on peers, and therefore owes to those peers' hubs.
-	//
-	// Published because it is the only place the obligation appears. The
-	// credit is already off this ledger — outstanding fell when it left —
-	// so a reader looking only at supply would see a hub that had retired
-	// credit and owed nobody anything.
-	Due int64 `json:"due_to_peers"`
-	// ChainIssued and ChainRetired are the same totals derived from the
-	// signed issuance chain instead of the balance table.
-	//
-	// Published alongside rather than instead, because the point is the
-	// comparison. The two are written by the same process and should
-	// always agree; when they do not, this hub moved credit without
-	// recording it on the chain, and a reader can see that without
-	// trusting either number. ChainAgrees says whether they match.
-	ChainIssued  int64 `json:"chain_issued"`
-	ChainRetired int64 `json:"chain_retired"`
-	// ChainOpening is supply that predates the chain: outstanding when
-	// the chain began, issued before anything recorded issuance.
-	//
-	// Reported separately rather than folded into ChainIssued, because
-	// the two are not equally supported. Everything in ChainIssued has a
-	// signed, ordered record that a witness can pin. ChainOpening is this
-	// hub's own statement about its own past, and nothing outside the hub
-	// vouches for it.
-	ChainOpening int64 `json:"chain_opening,omitempty"`
-	// ChainOutstanding is what the chain says is outstanding now:
-	// opening + issued - retired.
-	//
-	// This, not the issued/redeemed split, is what the chain and the
-	// table can be held to. A chain that begins partway through a hub's
-	// life knows nothing about how much was issued and redeemed before
-	// it — only the net that was outstanding when it opened. Comparing
-	// the historical split reported false disagreement on any hub that
-	// had processed a redemption before the chain existed.
-	ChainOutstanding int64 `json:"chain_outstanding"`
-	ChainAgrees      bool  `json:"chain_agrees"`
-	// ChainHead is the current head of the issuance chain, which is what
-	// a witness attests to.
-	//
-	// ChainHeadSeq has no omitempty: an AEL's first record is seq 0, and
-	// omitting it would make a one-record chain indistinguishable from no
-	// chain to every reader deciding whether there is a head to pin.
-	ChainHead    string `json:"chain_head,omitempty"`
-	ChainHeadSeq uint64 `json:"chain_head_seq"`
-}
-
-// Supply computes the hub's position.
-func (s *Store) Supply(hubAID string) (Supply, error) {
-	var out Supply
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(delta),0) FROM credit_entry WHERE aid=? AND delta<0`,
-		hubAID).Scan(&out.Issued); err != nil {
-		return out, err
-	}
-	out.Issued = -out.Issued
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(delta),0) FROM credit_entry WHERE aid=? AND delta>0`,
-		hubAID).Scan(&out.Redeemed); err != nil {
-		return out, err
-	}
-	out.Outstanding = out.Issued - out.Redeemed
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(credits),0) FROM credit_balance WHERE aid<>?`,
-		hubAID).Scan(&out.Balances); err != nil {
-		return out, err
-	}
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(amount),0) FROM hub_owed`).Scan(&out.Owed); err != nil {
-		return out, err
-	}
-	if err := s.db.QueryRow(
-		`SELECT COALESCE(SUM(amount),0) FROM hub_due`).Scan(&out.Due); err != nil {
-		return out, err
-	}
-	ci, cr, co, cerr := s.IssuanceTotals()
-	if cerr != nil {
-		return out, cerr
-	}
-	out.ChainIssued, out.ChainRetired, out.ChainOpening = ci, cr, co
-	out.ChainOutstanding = co + ci - cr
-	out.ChainAgrees = out.ChainOutstanding == out.Outstanding
-	out.ChainHead, out.ChainHeadSeq, _ = s.IssuanceHead()
-	return out, nil
-}
-
 // ---- clearing between hubs ----
+
+// StatementError is a peer's discharge statement this hub does not apply
+// (POST /fed/v3/clear answers 400 bad_request with the sentence).
+type StatementError struct{ Sentence string }
+
+func (e *StatementError) Error() string { return e.Sentence }
 
 // SettleOwed reduces what a peer hub owes us, against that peer's signed
 // statement that it has paid.
@@ -368,10 +321,13 @@ func (s *Store) Supply(hubAID string) (Supply, error) {
 // ClearFromPeer already extends and the same answer applies: peers are an
 // allowlist, and the statement is attributable, so a peer that does this
 // can be shown to have done it.
+//
+// A statement this hub does not apply is a *StatementError, whose sentence
+// says why; any other error is this hub's.
 func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEvent,
 	rec *payment.Receipt) error {
 	if rec == nil {
-		return fmt.Errorf("no clearing statement")
+		return &StatementError{"The request carries no discharge statement; send the signed statement as receipt."}
 	}
 	// A negative discharge passes "more than owed" and raises the debt.
 	amt, ok := amountInt64(rec.Amount)
@@ -379,13 +335,14 @@ func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEven
 		return amountRefusal("clearing statement", rec.Amount)
 	}
 	if rec.Payer != peerAID {
-		return fmt.Errorf("this statement is from %s, not from %s", rec.Payer, peerAID)
+		return &StatementError{"The statement is not your hub's own (its payer is another hub); sign it as your hub and send it again."}
 	}
 	if rec.PayTo != hubAID {
-		return fmt.Errorf("this statement discharges an obligation to %s, not to us", rec.PayTo)
+		return &StatementError{"The statement discharges what is owed to another hub, not to this one; address it to this hub and send it again."}
 	}
-	if err := rec.Verify(peerKEL, peerAID, time.Now().UnixMilli()); err != nil {
-		return fmt.Errorf("clearing statement from %s: %w", peerAID, err)
+	// At the time the peer signed it (KEL H-34).
+	if err := rec.Verify(peerKEL, peerAID, rec.SettleAt); err != nil {
+		return &StatementError{"The statement's signature does not verify against your hub's key history; sign it again with your hub's current key."}
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -403,18 +360,28 @@ func (s *Store) SettleOwed(hubAID, peerAID string, peerKEL []identity.SignedEven
 	// obligation once.
 	if _, err := tx.Exec(
 		`INSERT INTO hub_cleared(auth_id, peer_aid, amount, at) VALUES(?,?,?,?)`,
-		rec.AuthID, peerAID, amt, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return nil // already applied; the same statement, not a new one
+		rec.AuthID, peerAID, amt, ledgerStamp(s.now())); err != nil {
+		// Already applied is success: the same statement, not a new one.
+		// Any other failure to write the row is returned; reading every
+		// failure as "already applied" answered a discharge that was never
+		// applied as done, and the debtor then reduced its own record.
+		var n int
+		if qerr := tx.QueryRow(`SELECT COUNT(1) FROM hub_cleared WHERE auth_id=?`, rec.AuthID).
+			Scan(&n); qerr == nil && n > 0 {
+			return nil
+		}
+		return fmt.Errorf("recording the discharge %s: %w", rec.AuthID, err)
 	}
 	var owed int64
 	if err := tx.QueryRow(`SELECT COALESCE(amount,0) FROM hub_owed WHERE peer_aid=?`,
-		peerAID).Scan(&owed); err != nil && err.Error() != "sql: no rows in result set" {
+		peerAID).Scan(&owed); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if amt > owed {
 		// Rolls back the guard row with it, so this exact statement can
 		// be presented again if the debt ever reaches that size.
-		return fmt.Errorf("%s offers to clear %d but owes %d", peerAID, rec.Amount, owed)
+		return &StatementError{fmt.Sprintf("The statement discharges %d credits, and this hub records your hub owing it %d; "+
+			"compare the two hubs' records, then send a statement for at most that.", amt, owed)}
 	}
 	if _, err := tx.Exec(
 		`UPDATE hub_owed SET amount = amount - ? WHERE peer_aid = ?`,
@@ -458,7 +425,7 @@ func (s *Store) IssueOwedSettlement(hubAID, peerAID string, amount uint64,
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
 	}
-	now := time.Now().UnixMilli()
+	now := s.now().UnixMilli()
 	rec := &payment.Receipt{
 		AuthID: fmt.Sprintf("clear:%s:%s:%d:%d:%s",
 			peerAID, reference, amount, now, hex.EncodeToString(nonce[:])),
@@ -495,9 +462,28 @@ func (s *Server) hRedeem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// hRedemptions lists an agent's withdrawals, newest first.
+// RedemptionsResponse is GET /agents/{aid}/redemptions: the account's
+// redemptions of the ledger window, newest first (core §2.12.2;
+// hub-payment-privacy PAY-L6).
+type RedemptionsResponse struct {
+	Redemptions []Redemption `json:"redemptions"`
+	// Total and Sum cover every redemption of the window, whatever the
+	// page; Returned is how many this page lists.
+	Total     int    `json:"total"`
+	Sum       uint64 `json:"sum"`
+	Returned  int    `json:"returned"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Note      string `json:"note,omitempty"`
+	// WindowDays is always LedgerWindowDays; OldestSeq is the seq of the
+	// earliest redemption in the window, 0 when there is none.
+	WindowDays uint   `json:"window_days"`
+	OldestSeq  uint64 `json:"oldest_seq"`
+}
+
+// hRedemptions lists an agent's withdrawals of the ledger window, newest
+// first.
 //
-// The same shape hLedger already carries, for the same reason: the page is
+// The same shape hLedger carries, for the same reason: the page is
 // capped and the response used to say nothing about it. Once an account
 // passed 100 withdrawals the list stopped growing — a new redemption
 // pushed the oldest one out — so a caller counting the list to see whether
@@ -508,8 +494,10 @@ func (s *Server) hRedeem(w http.ResponseWriter, r *http.Request) {
 // stayed red for sixty seconds of polling while the very next check found
 // the record — because it matched one left by an earlier run.
 //
-// total and sum cover the whole account regardless of the page, so a
-// caller can reconcile without paging and can see when there is more.
+// total and sum cover the whole window regardless of the page; window_days
+// and oldest_seq say that the window is all there is (PAY-L6): older
+// redemptions are deleted, and the redeemer's lasting record is the receipt
+// on its own evidence chain.
 //
 // Served to the account holder only: the request must be signed by the
 // AID in the path (relayauth v2, action "redemptions"), and the signature
@@ -520,86 +508,101 @@ func (s *Server) hRedemptions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	aid := a.AID
 	limit := 0
 	if v := r.URL.Query().Get("limit"); v != "" {
 		_, _ = fmt.Sscanf(v, "%d", &limit)
 	}
-	out, err := s.store.Redemptions(aid, limit)
+	win, err := s.store.Redemptions(a.AID, limit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
-	total, sum, err := s.store.RedemptionTotals(aid)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+	out := RedemptionsResponse{Redemptions: win.Redemptions, Total: win.Total, Sum: win.Sum,
+		Returned: len(win.Redemptions), WindowDays: LedgerWindowDays, OldestSeq: win.OldestSeq}
+	if win.Total > len(win.Redemptions) {
+		out.Truncated = true
+		out.Note = "redemptions is the newest page; total and sum cover every withdrawal of the last " +
+			"window_days days. Older ones are deleted; your receipts are your record of them."
 	}
-	body := map[string]any{
-		"redemptions": out, "total": total, "sum": sum, "returned": len(out),
-	}
-	if total > len(out) {
-		body["truncated"] = true
-		body["note"] = "redemptions is the newest page; total and sum cover every withdrawal. " +
-			"Reconcile against sum, not against the page."
-	}
-	writeJSON(w, http.StatusOK, body)
+	writeJSON(w, http.StatusOK, out)
 }
 
-// hSupply publishes what this hub owes its users.
-//
-// Public and unauthenticated. A custodian that would only tell you its
-// liabilities if you asked nicely is one whose liabilities you should
-// assume are worse than it says.
-func (s *Server) hSupply(w http.ResponseWriter, _ *http.Request) {
-	out, err := s.store.Supply(s.hubAID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"hub":    s.hubAID,
-		"supply": out,
-		"note": "outstanding is what this hub owes its users. balances is what those users' rows " +
-			"add up to; the two must agree. credit is issued by this hub and redeemed back to it — " +
-			"what a redemption is worth outside this ledger is between the hub and the agent, and " +
-			"is not something this software can vouch for.",
-	})
-}
-
-// clearingRequest is a peer hub saying it has paid what it owed.
-type clearingRequest struct {
+// ClearRequest is the body of POST /fed/v3/clear: a peer hub's signed
+// statement that it has paid what it owed this hub (the body of the former
+// /federation/clear; core §2.12.2).
+type ClearRequest struct {
+	// PeerAID is the hub that sends the statement; it must be the hub that
+	// signed the request.
 	PeerAID string `json:"peer_aid"`
-	// Receipt is the peer's signed statement, base64 CoreDet-CBOR.
+	// Receipt is the statement, coredet(payment.Receipt) in base64url
+	// (core CORE-E5).
 	Receipt string `json:"receipt"`
 }
 
-// hClear applies a peer's discharge.
-func (s *Server) hClear(w http.ResponseWriter, r *http.Request) {
-	var req clearingRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": payment.ReasonMalformed})
+// ClearResponse is the answer of POST /fed/v3/clear: the peer, and what it
+// still owes this hub once the statement is applied.
+type ClearResponse struct {
+	Peer string `json:"peer"`
+	Owed int64  `json:"owed"`
+}
+
+// FedClearBodyLimit bounds a /fed/v3/clear body: an AID and one statement.
+const FedClearBodyLimit = 64 << 10
+
+// ServeFedClear answers POST /fed/v3/clear (hub-payment-privacy PAY-U2) for a
+// request the peer hub peerAID signed (federation authPeer has checked the
+// peer table, the signature and RC1), whose body is body: the peer's signed
+// statement that it has paid what it owed. Applied once (SettleOwed); a
+// repeat of an applied statement is answered as applied. A refusal is a
+// wire-3 error body (core G1): 400 bad_request, with a sentence that says
+// what is wrong with the request or the statement.
+func (s *Server) ServeFedClear(w http.ResponseWriter, peerAID string, body []byte) {
+	var req ClearRequest
+	if err := wire3.DecodeStrict(body, &req); err != nil {
+		wire3.RefuseDecode(w, err)
 		return
 	}
-	raw, err := base64.StdEncoding.DecodeString(req.Receipt)
+	if req.PeerAID != peerAID {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The member \"peer_aid\" names another hub than the one that signed this request; name your own hub and send again."})
+		return
+	}
+	raw, err := wire3.DecodeB64URL("receipt", req.Receipt)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "receipt not base64"})
+		wire3.RefuseDecode(w, err)
 		return
 	}
 	rec, err := payment.UnmarshalReceipt(raw)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The member \"receipt\" is not a signed discharge statement; send the statement your hub signed."})
 		return
 	}
-	kel, err := s.peerKEL(req.PeerAID)
+	kel, err := s.store.peerKELFor(s.peerKEL, peerAID, receiptSeq(rec))
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		wire3.Internal(w, err)
 		return
 	}
-	if err := s.store.SettleOwed(s.hubAID, req.PeerAID, kel, rec); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	if err := s.store.SettleOwed(s.hubAID, peerAID, kel, rec); err != nil {
+		var se *StatementError
+		var rf *Refusal
+		switch {
+		case errors.As(err, &se):
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: se.Sentence})
+		case errors.As(err, &rf):
+			wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest, Error: fmt.Sprintf(
+				"The statement discharges %d credits, outside 1..%d; sign one for a whole number of credits in that range.",
+				rec.Amount, int64(math.MaxInt64))})
+		default:
+			wire3.Internal(w, err)
+		}
 		return
 	}
-	owed, _ := s.store.Owed(req.PeerAID)
-	writeJSON(w, http.StatusOK, map[string]any{"peer": req.PeerAID, "owed": owed})
+	owed, err := s.store.Owed(peerAID)
+	if err != nil {
+		wire3.Internal(w, err)
+		return
+	}
+	log.Printf("hub: fed_clear signed by %s: applied; it owes this hub %d", peerAID, owed)
+	writeJSON(w, http.StatusOK, ClearResponse{Peer: peerAID, Owed: owed})
 }

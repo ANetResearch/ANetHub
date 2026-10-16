@@ -11,6 +11,9 @@ import (
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
 // ---- relayauth v2 on every signed route ----
@@ -24,14 +27,13 @@ type authRoute struct {
 var authRoutes = []authRoute{
 	{http.MethodPost, relayauth.ActionPoll, func(string) string { return "/relay/poll" }},
 	{http.MethodPost, relayauth.ActionAck, func(string) string { return "/relay/ack" }},
-	{http.MethodPost, relayauth.ActionSend, func(string) string { return "/relay/send" }},
+	{http.MethodPost, relayauth.ActionSession, func(string) string { return "/relay/session" }},
 	{http.MethodPost, relayauth.ActionProfile, func(string) string { return "/profile" }},
 	{http.MethodPost, relayauth.ActionKeys, func(a string) string { return "/agents/" + a + "/keys" }},
 	{http.MethodGet, relayauth.ActionBalance, func(a string) string { return "/agents/" + a + "/balance" }},
 	{http.MethodGet, relayauth.ActionLedger, func(a string) string { return "/agents/" + a + "/ledger" }},
 	{http.MethodGet, relayauth.ActionRedemptions, func(a string) string { return "/agents/" + a + "/redemptions" }},
 	{http.MethodPost, relayauth.ActionVisibility, func(a string) string { return "/agents/" + a + "/visibility" }},
-	{http.MethodPost, relayauth.ActionP2P, func(a string) string { return "/agents/" + a + "/p2p" }},
 }
 
 // Tamper bits of FuzzHubRelayAuthV2.
@@ -50,10 +52,22 @@ const (
 // with it as the input says, and checks the one property the scheme
 // exists for: a request whose headers, body, target or action differ from
 // what was signed is refused, and one that does not is accepted exactly
-// when its time is inside the window.
+// when its time is inside the window and above every time signed for the
+// signer before (RC1, hub-payment-privacy §4.2.5).
 //
 // "Accepted" means the answer is not the authentication refusal (401).
 // The handlers may still refuse the body (400) or the state (404, 409).
+//
+// One signer signs every input, at the time the input says, so RC1 may
+// refuse a correctly signed request inside the window: as replayed when
+// an earlier input had the same time, as ts_stale when an earlier one was
+// later. Either says so by its reason, and ts_stale names a floor at or
+// above the time. A refused tampered request is unauthorized, never
+// ts_stale or replayed, and carries no floor (PAY-R8).
+//
+// A replaced header that contains U+0000 never reaches the signature
+// check: the wire-3 contract refuses it first as bad_request (core
+// CORE-E9), so such a request must be answered 400 bad_request instead.
 func FuzzHubRelayAuthV2(f *testing.F) {
 	h := newFZ(f)
 	a, _ := h.agent(f, "fuzz-auth", []string{"fuzz.auth"}, true)
@@ -64,7 +78,7 @@ func FuzzHubRelayAuthV2(f *testing.F) {
 	seeds := [][]byte{
 		[]byte(`{}`),
 		[]byte(`{"limit":5,"after_id":0}`),
-		[]byte(`{"ids":[1,2,3]}`),
+		[]byte(`{"items":[{"id":1},{"id":2}]}`),
 		[]byte(`{"to_aid":"` + a.AID() + `","envelope":"` + env + `"}`),
 		[]byte(`{"summary":"s","readme":"r","pricing":"p"}`),
 		[]byte(`{"visibility":"hub-local"}`),
@@ -91,6 +105,9 @@ func FuzzHubRelayAuthV2(f *testing.F) {
 		skew %= 2*relayauth.MaxSkewMillis + 60_000
 		now := time.Now().UnixMilli()
 		ts := uint64(now + skew)
+		// Above everything signed for a before (and after the hub's RC1
+		// state was made): RC1 has nothing to refuse it for.
+		fresh := ts > h.lastSigned(a.AID()) && ts >= h.started
 
 		signedQuery, signedAction := query, rt.action
 		if tamper&tbTarget != 0 {
@@ -138,24 +155,54 @@ func FuzzHubRelayAuthV2(f *testing.F) {
 			req.Header.Add(relayauth.HeaderSig, req.Header.Get(relayauth.HeaderSig))
 		}
 
+		nul := wire3.CheckRequest(req) != nil
 		rec := h.serve(req)
 		code := rec.Code
 		if !allowed(code, 200, 400, 401, 404, 409, 413, 429) {
 			t.Fatalf("%s %s (tamper %08b): unexpected %d %s", rt.method, path, tamper, code, rec.Body.Bytes())
 		}
+		if nul {
+			var refusal struct {
+				Reason string `json:"reason"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &refusal)
+			if !tampered || code != http.StatusBadRequest || refusal.Reason != string(wire3.ReasonBadRequest) {
+				t.Fatalf("%s %s: request with U+0000 in a header (tamper %08b, tampered %v) answered %d, not 400 bad_request: %s",
+					rt.method, path, tamper, tampered, code, rec.Body.Bytes())
+			}
+			return
+		}
 		inWindow := skew > -relayauth.MaxSkewMillis+5_000 && skew < relayauth.MaxSkewMillis-5_000
 		outWindow := skew < -relayauth.MaxSkewMillis-5_000 || skew > relayauth.MaxSkewMillis+5_000
+		var refusal struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &refusal)
+		floorHdr := rec.Header().Get("X-ANet-TS-Floor")
+		rc1 := refusal.Reason == string(wire3.ReasonTSStale) || refusal.Reason == string(wire3.ReasonReplayed)
 		switch {
 		case tampered && code != http.StatusUnauthorized:
 			t.Fatalf("%s %s: tampered request (bits %08b) answered %d, not 401: %s",
 				rt.method, path, tamper, code, rec.Body.Bytes())
-		case !tampered && inWindow && code == http.StatusUnauthorized:
-			t.Fatalf("%s %s: correctly signed request inside the window (skew %d ms) refused: %s",
-				rt.method, path, skew, rec.Body.Bytes())
+		case tampered && (rc1 || floorHdr != ""):
+			t.Fatalf("%s %s: tampered request (bits %08b) told about RC1 (floor %q): %s",
+				rt.method, path, tamper, floorHdr, rec.Body.Bytes())
+		case !tampered && inWindow && code == http.StatusUnauthorized && (fresh || !rc1):
+			t.Fatalf("%s %s: correctly signed request inside the window (skew %d ms, above every earlier time %v) refused: %s",
+				rt.method, path, skew, fresh, rec.Body.Bytes())
+		case refusal.Reason == string(wire3.ReasonTSStale) && !floorAtLeast(floorHdr, ts):
+			t.Fatalf("%s %s: ts_stale for %d with the floor %q, not at or above it", rt.method, path, ts, floorHdr)
 		case !tampered && outWindow && code != http.StatusUnauthorized:
 			t.Fatalf("%s %s: request signed %d ms off answered %d, not 401", rt.method, path, skew, code)
 		}
 	})
+}
+
+// floorAtLeast reports whether hdr, an X-ANet-TS-Floor, is a number at or
+// above ts.
+func floorAtLeast(hdr string, ts uint64) bool {
+	f, err := strconv.ParseUint(hdr, 10, 64)
+	return err == nil && f >= ts
 }
 
 // signedHeaders signs a request with the given terms and returns its
@@ -172,95 +219,12 @@ func signedHeaders(t *testing.T, h *fz, c *identity.Controller, action, method, 
 	return out
 }
 
-// ---- /relay/send: the outer envelope check ----
-
-// FuzzHubRelaySend sends a signed /relay/send with a fuzzed body or a
-// fuzzed envelope. Properties:
+// ---- /relay/send ----
 //
-//   - the answer is one of the relay's refusals or 200, never a 5xx;
-//   - an envelope is queued only if it parses as a sealed envelope whose
-//     outer "to" is the registered recipient the request names, and the
-//     recipient then polls exactly those bytes;
-//   - an envelope that does parse, for a registered recipient named
-//     consistently, is queued (the check refuses nothing it should pass).
-func FuzzHubRelaySend(f *testing.F) {
-	h := newFZ(f)
-	sender, _ := h.agent(f, "fuzz-sender", nil, true)
-	recip, _ := h.agent(f, "fuzz-recipient", nil, true)
-	good := fzEnvelope(f, recip.AID(), []byte("hello"))
-	f.Add(uint8(0), []byte(nil), good, "")
-	f.Add(uint8(1), []byte(nil), good, "")
-	f.Add(uint8(2), []byte(nil), good, "bafyreinobody")
-	f.Add(uint8(3), []byte(`{"to_aid":"x","envelope":"AAAA"}`), []byte(nil), "")
-	f.Add(uint8(3), []byte(`{"to_aid":"`+recip.AID()+`","envelope":"`+base64.StdEncoding.EncodeToString(good)+`"}`), []byte(nil), "")
-	f.Add(uint8(0), []byte(nil), fzEnvelope(f, sender.AID(), nil), "")
-	f.Add(uint8(0), []byte(nil), []byte{0xa0}, "")
-	f.Add(uint8(0), []byte(nil), []byte("plaintext payload"), "")
-
-	f.Fuzz(func(t *testing.T, mode uint8, rawBody, envelope []byte, toStr string) {
-		rawBody, envelope, toStr = clipB(rawBody, 64<<10), clipB(envelope, 64<<10), clip(toStr, 256)
-		to := recip.AID()
-		switch mode % 4 {
-		case 1:
-			to = sender.AID()
-		case 2:
-			to = toStr
-		}
-		body := rawBody
-		if mode%4 != 3 {
-			body = fzJSON(t, map[string]any{"to_aid": to, "envelope": base64.StdEncoding.EncodeToString(envelope)})
-		}
-		var req struct {
-			ToAID    string `json:"to_aid"`
-			Envelope string `json:"envelope"`
-		}
-		jerr := json.Unmarshal(body, &req)
-		rawEnv, berr := base64.StdEncoding.DecodeString(req.Envelope)
-		outer, perr := seal.ParseOuter(rawEnv)
-		registered := req.ToAID == recip.AID() || req.ToAID == sender.AID()
-		wellFormed := jerr == nil && req.ToAID != "" && req.Envelope != "" && berr == nil &&
-			perr == nil && outer.To == req.ToAID
-
-		before, _ := h.store.RelayPending(req.ToAID)
-		rec := h.signedDo(sender, relayauth.ActionSend, http.MethodPost, "/relay/send", "", body)
-		if !allowed(rec.Code, 200, 400, 404, 413, 507) {
-			t.Fatalf("send: unexpected %d %s", rec.Code, rec.Body.Bytes())
-		}
-		if rec.Code == http.StatusOK {
-			if !wellFormed || !registered {
-				t.Fatalf("send queued an envelope the outer check should refuse (to %q, parse %v): %s",
-					req.ToAID, perr, rec.Body.Bytes())
-			}
-			var out struct {
-				ID     int64  `json:"id"`
-				Status string `json:"status"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Status != "queued" || out.ID <= 0 {
-				t.Fatalf("send answered 200 with %s", rec.Body.Bytes())
-			}
-			owner := recip
-			if req.ToAID == sender.AID() {
-				owner = sender
-			}
-			msgs := pollAll(t, h, owner, out.ID-1)
-			if len(msgs) == 0 || msgs[0].ID != out.ID || msgs[0].Envelope != base64.StdEncoding.EncodeToString(rawEnv) {
-				t.Fatalf("queued id %d is not what the recipient polls: %+v", out.ID, msgs)
-			}
-			ack := h.signedDo(owner, relayauth.ActionAck, http.MethodPost, "/relay/ack", "",
-				fzJSON(t, map[string]any{"ids": []int64{out.ID}}))
-			if ack.Code != http.StatusOK {
-				t.Fatalf("ack: %d %s", ack.Code, ack.Body.Bytes())
-			}
-			return
-		}
-		if after, _ := h.store.RelayPending(req.ToAID); after != before {
-			t.Fatalf("a refused send (%d) changed the mailbox of %q: %d -> %d", rec.Code, req.ToAID, before, after)
-		}
-		if wellFormed && registered && len(rawEnv) <= int(h.srv.Limits().MaxEnvelope) {
-			t.Fatalf("a well-formed envelope for a registered recipient was refused: %d %s", rec.Code, rec.Body.Bytes())
-		}
-	})
-}
+// The wire-3 send is fuzzed in the package's own tests
+// (FuzzRelaySendV3, FuzzRelaySession, FuzzAccessHeader in
+// relay_fuzz_internal_test.go), where the session and the credentials are
+// at hand.
 
 // polledMsg is one /relay/poll entry.
 type polledMsg struct {
@@ -291,13 +255,17 @@ func pollAll(t *testing.T, h *fz, c *identity.Controller, afterID int64) []polle
 // holding envelopes for the caller and for somebody else. Properties:
 //
 //   - poll answers 200 or 400 (400 exactly when the body does not decode
-//     or after_id is negative);
+//     strictly, core CORE-E7, or after_id or limit is negative);
 //   - a 200 lists only the caller's envelopes, ids strictly ascending and
 //     above after_id, at most limit of them (100 when limit is not
 //     positive);
-//   - ack answers 200 or 400, deletes only ids in the caller's own
-//     mailbox, reports exactly how many it deleted, and leaves the other
-//     mailbox as it was.
+//   - ack answers 200 or 400 (400 exactly when the body does not decode
+//     strictly or its items are not 1 to 1000 with an id each and a 16-byte
+//     handle and an 80-byte dack together or neither, DLV-W-14), deletes only
+//     ids in the caller's own mailbox, reports exactly how many it deleted,
+//     stores exactly one delivery confirmation for each row it deleted whose
+//     first item carries one (DLV-H-3), and leaves the other mailbox as it
+//     was; a 400 deletes and stores nothing.
 func FuzzHubRelayPollAck(f *testing.F) {
 	h := newFZ(f)
 	me, _ := h.agent(f, "fuzz-mailbox", nil, true)
@@ -305,19 +273,25 @@ func FuzzHubRelayPollAck(f *testing.F) {
 	refill := func(tb testing.TB) {
 		for _, c := range []*identity.Controller{me, other} {
 			for n, _ := h.store.RelayPending(c.AID()); n < 8; n++ {
-				if _, err := h.store.RelayEnqueue(c.AID(), fzEnvelope(tb, c.AID(), []byte(h.nonce()))); err != nil {
+				if _, err := h.store.QueueEnvelope(c.AID(), fzEnvelope(tb, c.AID(), []byte(h.nonce()))); err != nil {
 					tb.Fatal(err)
 				}
 			}
 		}
 	}
 	refill(f)
-	f.Add([]byte(`{}`), []byte(`{"ids":[]}`))
-	f.Add([]byte(`{"limit":3,"after_id":2}`), []byte(`{"ids":[1,2,3]}`))
-	f.Add([]byte(`{"limit":-1,"after_id":-1}`), []byte(`{"ids":[-1,0,9223372036854775807]}`))
-	f.Add([]byte(`{"limit":1e3}`), []byte(`{"ids":null}`))
+	handle := base64.RawURLEncoding.EncodeToString(make([]byte, 16))
+	dack := base64.RawURLEncoding.EncodeToString(make([]byte, 80))
+	f.Add([]byte(`{}`), []byte(`{"items":[]}`))
+	f.Add([]byte(`{"limit":3,"after_id":2}`), []byte(`{"items":[{"id":1},{"id":2},{"id":3}]}`))
+	f.Add([]byte(`{"limit":-1,"after_id":-1}`), []byte(`{"items":[{"id":-1},{"id":0},{"id":9223372036854775807}]}`))
+	f.Add([]byte(`{"limit":1e3}`), []byte(`{"items":null}`))
 	f.Add([]byte(nil), []byte(`[1]`))
-	f.Add([]byte(`{"after_id":9223372036854775807,"limit":2147483647}`), []byte(`{"ids":[9,9,9]}`))
+	f.Add([]byte(`{"after_id":9223372036854775807,"limit":2147483647}`), []byte(`{"items":[{"id":9},{"id":9},{"id":9}]}`))
+	f.Add([]byte(`{}`), []byte(`{"items":[{"id":1,"handle":"`+handle+`","dack":"`+dack+`"},{"id":1,"handle":"`+handle+`","dack":"`+dack+`"}]}`))
+	f.Add([]byte(`{}`), []byte(`{"items":[{"id":2,"handle":"`+handle+`"}]}`))
+	f.Add([]byte(`{}`), []byte(`{"items":[{"id":2,"handle":"`+handle+`=","dack":"`+dack+`"}]}`))
+	f.Add([]byte(`{}`), []byte(`{"ids":[1,2,3]}`))
 
 	f.Fuzz(func(t *testing.T, pollBody, ackBody []byte) {
 		pollBody, ackBody = clipB(pollBody, 4<<10), clipB(ackBody, 4<<10)
@@ -329,10 +303,16 @@ func FuzzHubRelayPollAck(f *testing.F) {
 		perr := error(nil)
 		if len(pollBody) > 0 {
 			perr = json.Unmarshal(pollBody, &preq)
+			if perr == nil {
+				// The hub decodes the body strictly (core CORE-E7): a member it
+				// does not take, a member given twice, U+0000 or invalid UTF-8
+				// is refused although encoding/json accepts it.
+				perr = wire3.DecodeStrict(pollBody, &aghub.RelayPollRequest{})
+			}
 		}
 		rec := h.signedDo(me, relayauth.ActionPoll, http.MethodPost, "/relay/poll", "", pollBody)
 		switch {
-		case perr != nil || preq.AfterID < 0:
+		case perr != nil || preq.AfterID < 0 || preq.Limit < 0:
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("poll %q: %d, want 400", pollBody, rec.Code)
 			}
@@ -358,7 +338,7 @@ func FuzzHubRelayPollAck(f *testing.F) {
 					t.Fatalf("poll after %d: ids not ascending above it: %+v", preq.AfterID, out.Messages)
 				}
 				last = m.ID
-				raw, err := base64.StdEncoding.DecodeString(m.Envelope)
+				raw, err := base64.RawURLEncoding.DecodeString(m.Envelope)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -368,33 +348,23 @@ func FuzzHubRelayPollAck(f *testing.F) {
 			}
 		}
 
-		var areq struct {
-			IDs []int64 `json:"ids"`
-		}
-		aerr := json.Unmarshal(ackBody, &areq)
 		mine := map[int64]bool{}
 		for _, m := range pollAll(t, h, me, 0) {
 			mine[m.ID] = true
 		}
-		expect := 0
-		seen := map[int64]bool{}
-		for _, id := range areq.IDs {
-			if mine[id] && !seen[id] {
-				expect++
-			}
-			seen[id] = true
-		}
+		valid, expect, expectStored := ackExpectation(ackBody, mine)
 		otherBefore, _ := h.store.RelayPending(other.AID())
 		mineBefore, _ := h.store.RelayPending(me.AID())
+		dacksBefore := dackRows(t, h.store)
 		rec = h.signedDo(me, relayauth.ActionAck, http.MethodPost, "/relay/ack", "", ackBody)
 		otherAfter, _ := h.store.RelayPending(other.AID())
 		mineAfter, _ := h.store.RelayPending(me.AID())
 		if otherAfter != otherBefore {
 			t.Fatalf("ack %q changed another agent's mailbox: %d -> %d", ackBody, otherBefore, otherAfter)
 		}
-		if aerr != nil {
-			if rec.Code != http.StatusBadRequest || mineAfter != mineBefore {
-				t.Fatalf("ack %q: %d (mailbox %d -> %d), want 400 and nothing deleted", ackBody, rec.Code, mineBefore, mineAfter)
+		if !valid {
+			if rec.Code != http.StatusBadRequest || mineAfter != mineBefore || dackRows(t, h.store) != dacksBefore {
+				t.Fatalf("ack %q: %d (mailbox %d -> %d), want 400 and nothing deleted or stored", ackBody, rec.Code, mineBefore, mineAfter)
 			}
 			return
 		}
@@ -402,11 +372,62 @@ func FuzzHubRelayPollAck(f *testing.F) {
 			t.Fatalf("ack %q: %d %s", ackBody, rec.Code, rec.Body.Bytes())
 		}
 		var out struct {
-			Acked int `json:"acked"`
+			Acked  int `json:"acked"`
+			Stored int `json:"stored"`
 		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &out)
 		if out.Acked != expect || mineBefore-mineAfter != expect {
 			t.Fatalf("ack %q: reported %d, deleted %d, want %d", ackBody, out.Acked, mineBefore-mineAfter, expect)
 		}
+		if out.Stored != expectStored || dackRows(t, h.store) > dacksBefore+expectStored {
+			t.Fatalf("ack %q: stored %d delivery confirmations, want %d", ackBody, out.Stored, expectStored)
+		}
 	})
+}
+
+// ackExpectation is what a /relay/ack with body must do to a mailbox whose
+// ids are mine (DLV-W-14, DLV-H-3): whether it is taken, how many rows it
+// deletes, and how many delivery confirmations it stores (one for each row
+// it deletes whose first item carries one).
+func ackExpectation(body []byte, mine map[int64]bool) (valid bool, acked, stored int) {
+	var req aghub.RelayAckRequest
+	if wire3.DecodeStrict(body, &req) != nil || len(req.Items) == 0 || len(req.Items) > aghub.MaxAckItems {
+		return false, 0, 0
+	}
+	for _, it := range req.Items {
+		if it.ID == nil || *it.ID <= 0 || (it.Handle == "") != (it.DAck == "") {
+			return false, 0, 0
+		}
+		if it.Handle != "" {
+			if _, err := wire3.DecodeB64URLSize("handle", it.Handle, 16); err != nil {
+				return false, 0, 0
+			}
+			if _, err := wire3.DecodeB64URLSize("dack", it.DAck, 80); err != nil {
+				return false, 0, 0
+			}
+		}
+	}
+	seen := map[int64]bool{}
+	for _, it := range req.Items {
+		id := *it.ID
+		if !mine[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		acked++
+		if it.Handle != "" {
+			stored++
+		}
+	}
+	return true, acked, stored
+}
+
+// dackRows is how many delivery confirmations the store holds.
+func dackRows(t *testing.T, store *aghub.Store) int {
+	t.Helper()
+	var n int
+	if err := store.DBForTest().QueryRow(`SELECT COUNT(*) FROM relay_dack`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

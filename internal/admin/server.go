@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ANetResearch/ANetHub/internal/aghub"
 	"github.com/ANetResearch/ANetHub/internal/version"
 )
 
@@ -124,11 +126,12 @@ func (s *Server) Handler() http.Handler {
 	api("POST "+b+"/api/harvest", s.hHarvest)
 	api("GET "+b+"/api/reviews", s.hReviews)
 	api("GET "+b+"/api/audit", s.hAudit)
-	// The other half of a reversible delete. Archiving without a way to
-	// read the archive back made "any delete is reversible" true of the
-	// bytes and false of the operator.
+	// Who was deleted, when and by whom; ?format=admit is the same list as
+	// the input of anet-hub admit --file, which is how a batch of deletes is
+	// undone. There is no restore route: it wrote an old key history back
+	// into the registry (hub-payment-privacy PAY-O4), and a request to it
+	// answers 404 like any other removed route.
 	api("GET "+b+"/api/deleted", s.hDeleted)
-	api("POST "+b+"/api/deleted/{aid}/restore", s.hRestore)
 	// Any other path under /api/ answers 404 in JSON, after authentication.
 	// Without this a GET to a removed route (for example
 	// /api/official/{id}/insights) fell through to the SPA route above and
@@ -449,16 +452,20 @@ func (s *Server) hAgents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hAgent(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	agent, err := s.hub.Agent(aid)
-	if err != nil {
+	if errors.Is(err, ErrAgentNotFound) {
 		errJSON(w, http.StatusNotFound, err)
 		return
 	}
-	reviews, _ := s.hub.RecentReviews(200)
-	own := []HubReview{}
-	for _, rv := range reviews {
-		if rv.SubjectAID == aid || rv.ReviewerAID == aid {
-			own = append(own, rv)
-		}
+	if err != nil {
+		errJSON(w, http.StatusInternalServerError, err)
+		return
+	}
+	// The reviews it received. A review names no reviewer (SI-48), so
+	// there is no list of the reviews an agent wrote.
+	own, err := s.hub.ReviewsOf(aid, 200)
+	if err != nil {
+		errJSON(w, http.StatusInternalServerError, err)
+		return
 	}
 	sessions, _ := s.store.Sessions("", aid, 50)
 	mods, _ := s.store.Moderations()
@@ -489,6 +496,11 @@ func (s *Server) hModerate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// hDeleteAgent is the operator's delete: it revokes the agent's admission and deregisters it
+// (HubDB.DeleteAgent, aghub.DeregisterTx; hub-payment-privacy PAY-O3), exactly as anet-hub admissions
+// revoke does. The answer is {ok, balance, message}: message says what happened and how to undo it
+// (admin.deleted), or, on a hub open to sign-ups, that the AID can register again
+// (admin.deleted.open).
 func (s *Server) hDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	aid := r.PathValue("aid")
 	// Rate-limit destructive registry ops. A real operator never deletes in bursts; this stops a
@@ -498,18 +510,36 @@ func (s *Server) hDeleteAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "删除过于频繁，已限流（防批量误删/攻击）。稍后重试。"})
 		return
 	}
-	// Archive the full row (incl. kel) BEFORE deleting, so any delete is reversible.
-	if rowJSON, err := s.hub.FullAgentRow(aid); err == nil {
-		_ = s.store.ArchiveDeletedAgent(aid, rowJSON, "admin")
-	}
-	if err := s.hub.DeleteAgent(aid); err != nil {
-		errJSON(w, http.StatusBadRequest, err)
+	del, err := s.hub.DeleteAgent(aid)
+	switch {
+	case errors.Is(err, aghub.ErrNotRegistered):
+		errJSON(w, http.StatusNotFound, fmt.Errorf("%w: %s", ErrAgentNotFound, aid))
+		return
+	case errors.Is(err, aghub.ErrTombstoneShrinks):
+		// The registered key history does not extend the tombstone this
+		// hub keeps for the AID; DeregisterTx changed nothing and logged it.
+		errJSON(w, http.StatusConflict, err)
+		return
+	case err != nil:
+		errJSON(w, http.StatusInternalServerError, err)
 		return
 	}
-	// Record the intent — deletion alone is not enforcement (the agent may re-register).
-	_ = s.store.SetModeration(aid, "delisted", "removed from registry by operator")
-	s.store.Audit("admin", "agent.delete", aid, "archived for restore")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if err := s.store.RecordDeletedAgent(aid, "admin"); err != nil {
+		log.Printf("admin: recording the delete of %s: %v", aid, err)
+	}
+	// The moderation mark records the operator's decision; the admission
+	// list is what enforces it.
+	_ = s.store.SetModeration(aid, "delisted", "admission revoked and deregistered by an operator")
+	s.store.Audit("admin", "agent.delete", aid,
+		fmt.Sprintf("admission revoked and deregistered; balance %d stays on the ledger", del.Balance))
+	key := "admin.deleted"
+	if del.Open {
+		key = "admin.deleted.open"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "balance": del.Balance,
+		"message": Sentence(key, map[string]string{"aid": aid, "n": strconv.FormatInt(del.Balance, 10)}),
+	})
 }
 
 func (s *Server) hOfficials(w http.ResponseWriter, r *http.Request) {
@@ -595,7 +625,8 @@ func (s *Server) hVision(w http.ResponseWriter, r *http.Request) {
 }
 
 // hStore is the Agent Store composition: agents grouped by product line, with tier + capability
-// rollups. Payments are out of scope here (pricing text is display-only, as in the public hub).
+// rollups. Payments are out of scope here; prices are not public at all (they travel in the
+// provider-signed extended card, end to end), so the hub holds none to show.
 func (s *Server) hStore(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.hub.AllAgents("")
 	if err != nil {
@@ -621,7 +652,7 @@ func (s *Server) hStore(w http.ResponseWriter, r *http.Request) {
 		}
 		lines[line] = append(lines[line], map[string]any{
 			"aid": a.AID, "name": a.Name, "caps": a.Caps, "summary": a.Summary,
-			"pricing": a.Pricing, "avg_rating": a.AvgRating, "review_count": a.ReviewCount,
+			"avg_rating": a.AvgRating, "review_count": a.ReviewCount,
 			"tier": tier, "official_id": officialID,
 		})
 		for _, c := range a.Caps {
@@ -825,65 +856,36 @@ func PlaceholderToken(tok string) bool {
 	return strings.Count(n, n[:1]) == len(n)
 }
 
-// hDeleted lists agents an operator removed, newest first.
+// hDeleted lists the agents operators deleted, newest first: {deleted: [{aid, deleted_at, actor}]}
+// (PAY-O4). With ?format=admit it is the same list as plain text, each AID once, one per line: the
+// input of anet-hub admit --file, which undoes a batch of mistaken deletes. ?limit bounds how many
+// deletes are read (100 by default, at most 500).
 func (s *Server) hDeleted(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.store.DeletedAgents(100)
+	format := r.URL.Query().Get("format")
+	if format != "" && format != "admit" {
+		errJSON(w, http.StatusBadRequest, fmt.Errorf("format is admit, or absent for JSON"))
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	rows, err := s.store.DeletedAgents(limit)
 	if err != nil {
 		errJSON(w, http.StatusInternalServerError, err)
 		return
 	}
-	if rows == nil {
-		rows = []DeletedAgent{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"deleted": rows})
-}
-
-// hRestore puts one archived agent back.
-//
-// The most recent archive for that AID: an agent deleted twice has two
-// rows, and the newer one is the state it was last in.
-func (s *Server) hRestore(w http.ResponseWriter, r *http.Request) {
-	aid := r.PathValue("aid")
-	rows, err := s.store.DeletedAgents(500)
-	if err != nil {
-		errJSON(w, http.StatusInternalServerError, err)
+	if format == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": rows})
 		return
 	}
+	var b strings.Builder
+	seen := map[string]bool{}
 	for _, d := range rows {
-		if d.AID != aid {
+		if seen[d.AID] || !aghub.ValidAID(d.AID) {
 			continue
 		}
-		if err := s.hub.RestoreDeletedAgent(d.RowJSON); err != nil {
-			errJSON(w, http.StatusBadRequest, err)
-			return
-		}
-		s.store.Audit("admin", "agent.restore", aid, "from archive "+d.DeletedAt)
-		// The delete recorded a moderation intent ("delisted"); restoring has to
-		// clear it, or the agent comes back into the registry still shown as
-		// removed by an operator.
-		//
-		// The reset was here from the start and never took effect: it passed an
-		// empty status, SetModeration rejects any status outside
-		// ok|flagged|delisted, and the returned error was discarded. A dropped
-		// error is why a step that exists could be absent for three releases,
-		// so this one is checked. The registry row is already back at this
-		// point, which is why the failure is reported as a partial outcome
-		// rather than as "restore failed" — the operator has to know both that
-		// the agent returned and that its governance state did not.
-		if err := s.store.SetModeration(aid, "ok", "restored by operator"); err != nil {
-			s.store.Audit("admin", "agent.restore.moderation_failed", aid, err.Error())
-			log.Printf("admin: restore %s: moderation not reset: %v", aid, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]any{
-				"error":              "已恢复注册表记录，但监管状态未复位：" + err.Error(),
-				"restored":           true,
-				"moderation_cleared": false,
-			})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"ok": true, "archived_at": d.DeletedAt, "moderation": "ok"})
-		return
+		seen[d.AID] = true
+		b.WriteString(d.AID + "\n")
 	}
-	writeJSON(w, http.StatusNotFound, map[string]string{
-		"error": "no archived copy of " + aid})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, b.String())
 }

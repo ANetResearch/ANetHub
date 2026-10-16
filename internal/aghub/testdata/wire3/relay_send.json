@@ -1,0 +1,105 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /relay/send (core §2.12.1, §2.12.2; sealed-sender §4.2.1, SSR-H2, SSR-H3, CORE-K15): the body is the envelope itself (application/vnd.anet.envelope+cbor) and X-ANet-Access its outer key 7, base64url. A first contact (access kind 0) carries X-ANet-Session, X-ANet-MAC and X-ANet-TS; a send under a delivery credential (kind 1) carries no session header and no identity header. A queued send is answered {status: queued, rid, recipient_quiet}, the same envelope again {status: duplicate} with the same rid. Refusals: a wrong Content-Type 400 bad_request; identity headers 400 identity_headers_not_allowed; a missing or malformed access 400 bad_envelope; session headers on a credential send 400 bad_request; a first contact without its session 401 session_invalid; a credential refused for any reason 403 access_invalid, always the same body; a first contact for an AID not registered here 404 recipient_unknown.",
+  "setup": "relay",
+  "cases": [
+    {
+      "name": "a first contact",
+      "cite": "§4.2.1 step 11",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-Session": "${sid}", "X-ANet-MAC": "${mac_first}", "X-ANet-TS": "${ts}"},
+        "b64url": "${env_first}"},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"status": "queued", "recipient_quiet": false}}
+    },
+    {
+      "name": "the same envelope again",
+      "cite": "§4.2.1 step 7, SSR-W15",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-Session": "${sid}", "X-ANet-MAC": "${mac_first}", "X-ANet-TS": "${ts}"},
+        "b64url": "${env_first}"},
+      "response": {"status": 200, "body_has": {"status": "duplicate", "recipient_quiet": false}}
+    },
+    {
+      "name": "under a delivery credential",
+      "cite": "§4.2.1 step 11",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_cap}"},
+        "b64url": "${env_cap}"},
+      "response": {"status": 200, "body_has": {"status": "queued", "recipient_quiet": false}}
+    },
+    {
+      "name": "a JSON body",
+      "cite": "§4.2.1 step 1",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/json", "X-ANet-Access": "${access_cap}"},
+        "json": {"to_aid": "${bob}", "envelope": "${env_cap}"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a credential with the sender's AID",
+      "cite": "CORE-K15",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_cap}",
+          "X-ANet-AID": "${alice}"},
+        "b64url": "${env_cap}"},
+      "response": {"status": 400, "body": {"reason": "identity_headers_not_allowed",
+        "error": "This route is anonymous; send the request without the X-ANet-AID, X-ANet-Seq and X-ANet-Sig headers."}}
+    },
+    {
+      "name": "no access",
+      "cite": "§4.2.1 step 1",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor"},
+        "b64url": "${env_cap}"},
+      "response": {"status": 400, "body_has": {"reason": "bad_envelope"}}
+    },
+    {
+      "name": "a credential with a session",
+      "cite": "CORE-K15",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_cap}",
+          "X-ANet-Session": "${sid}"},
+        "b64url": "${env_cap}"},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a first contact without its MAC",
+      "cite": "CORE-K15",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-Session": "${sid}", "X-ANet-TS": "${ts}"},
+        "b64url": "${env_first}"},
+      "response": {"status": 401, "body": {"reason": "session_invalid",
+        "error": "The sending session is missing, expired or does not verify; open a new session and send again."}}
+    },
+    {
+      "name": "a proof by another key",
+      "cite": "SSR-H3",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_forged}"},
+        "b64url": "${env_forged}"},
+      "response": {"status": 403, "headers": {"Retry-After": null}, "body": {"reason": "access_invalid",
+        "error": "The delivery credential in X-ANet-Access was not accepted; use a current one from the recipient, or send without one."}}
+    },
+    {
+      "name": "a first contact for an AID not registered here",
+      "cite": "§4.2.1 step 6",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"X-ANet-Wire": "3", "Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access0}",
+          "X-ANet-Session": "${sid}", "X-ANet-MAC": "${mac_unknown}", "X-ANet-TS": "${ts}"},
+        "b64url": "${env_unknown}"},
+      "response": {"status": 404, "body": {"reason": "recipient_unknown",
+        "error": "No hub this hub can reach knows the recipient; check the recipient's AID."}}
+    },
+    {
+      "name": "no wire header",
+      "cite": "CORE-V1",
+      "request": {"method": "POST", "path": "/relay/send",
+        "headers": {"Content-Type": "application/vnd.anet.envelope+cbor", "X-ANet-Access": "${access_cap}"},
+        "b64url": "${env_cap}"},
+      "response": {"status": 426, "body_has": {"reason": "wire_too_old", "required_wire": 3, "required_anet": "0.3.0"}}
+    }
+  ]
+}

@@ -9,48 +9,51 @@
 //	           acks what it processed (/relay/ack, which deletes the rows). The hub sees the
 //	           recipient, the size and the time, and stores neither the sender nor anything inside
 //	           the ciphertext. See relay.go.
-//	reviews  — a requester uploads {provider-signed receipt, requester-signed review}. The Hub verifies
-//	           BOTH signatures against the registered KELs and checks they interlock (same interaction,
-//	           reviewer == receipt.requester, subject == receipt.provider, review→receipt CID). Neither
-//	           party can forge the other's signature, so a stored rating provably came from a real
-//	           counterparty of a real interaction. interaction_id is the uniqueness key (one review each).
+//	reviews  — a requester uploads, signed as itself, the receipt its provider signed and the review it
+//	           signed with the one-time key the receipt names (evidence v2). The Hub checks the provider's
+//	           signature, the review key's, that the two are about one task and that the uploader is the
+//	           requester the receipt committed to, then keeps the review WITHOUT the reviewer: a tag under
+//	           a key only this hub holds counts distinct reviewers, and every stored time is a day. The
+//	           interaction's ix_commit is the uniqueness key (one review each). See reviews.go.
 //
 // v0.1 is deliberately centralized: there is no P2P. Aggregation is intentionally simple (mean + count);
 // richer reputation and a decentralized transport are later versions.
 package aghub
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/adp"
-	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/seal"
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
 
 // AgentView is an agent's public registry entry plus its aggregate rating. Agents are addressed purely
 // by AID (v0.1 has no P2P endpoint) — all traffic flows through the Hub relay. The profile fields
-// (summary/readme/pricing) are AGENT-authored self-description (set via `anet profile set`); pricing is
-// display-only text in v0.1 (no settlement).
+// (summary/readme) are AGENT-authored self-description (set via `anet profile set`). There is no price:
+// prices are not public, they travel in the extended card the provider signs, end to end.
 type AgentView struct {
 	AID          string   `json:"aid"`
 	Name         string   `json:"name"`
 	Caps         []string `json:"caps"`
 	Summary      string   `json:"summary,omitempty"` // one-line self-description
 	Readme       string   `json:"readme,omitempty"`  // longer markdown self-description
-	Pricing      string   `json:"pricing,omitempty"` // free-form pricing text (display-only in v0.1)
 	Listed       bool     `json:"listed"`            // true if it advertises a service (caps or profile) — only listed agents appear in the starfield/find
 	AvgRating    float64  `json:"avg_rating"`
 	ReviewCount  int      `json:"review_count"`
-	RegisteredAt string   `json:"registered_at"`
+	RegisteredAt string   `json:"registered_at"` // the UTC day of the first registration, as midnight (SSR-H18)
 	// HomeHub is set only on an agent learned from a peer hub: which hub
 	// it lives on, and so where work for it must be sent. Empty means
 	// this hub.
@@ -64,100 +67,160 @@ type AgentView struct {
 	// It is NOT a route: a departed agent is not deliverable, and
 	// nothing here puts it back in a listing.
 	Departed bool `json:"departed,omitempty"`
-	// Registered is false on a graph node reconstructed from a review
-	// whose subject or reviewer is no longer in the registry.
+	// Registered is false on the view of an AID this hub knows only from
+	// a peer, or from reviews stored after it left.
 	//
 	// Leaving a hub removes the routing and keeps the evidence, which is
-	// the right trade — reviews record things that happened. The
-	// consequence lands here: the graph had edges naming agents with no
-	// node, and a renderer either drops them silently or fails. Saying
-	// "this agent is no longer registered here" keeps the graph
-	// self-consistent and keeps what happened visible.
+	// the right trade — reviews record things that happened. Saying "this
+	// agent is no longer registered here" keeps what happened visible
+	// without offering a route.
 	Registered bool `json:"registered"`
 	// LastSeen and Quiet report whether this agent is still collecting
-	// its mail. A directory that lists agents without saying which of
-	// them have stopped answering is a directory that sends people to
-	// wait on the dead.
+	// its mail (liveness.go: the hour of the last poll, and a boolean). A
+	// directory that lists agents without saying which of them have
+	// stopped answering is a directory that sends people to wait on the
+	// dead.
 	LastSeen string `json:"last_seen,omitempty"`
 	Quiet    bool   `json:"quiet,omitempty"`
+	// KEL and Keys are the agent's key history and encryption key set
+	// (seal.SignedEncKeySet), base64url (core G2), so that a reader of the
+	// listing can write to the agent without looking it up again by AID
+	// (sealed-sender SSR-H18). Every listing entry has both: an agent that
+	// has published no key set yet is not listed, since nobody could write
+	// to it. Both are absent where the view is not a listing entry (/graph,
+	// a departed agent; /agents/{aid} of an agent without a key set has
+	// no keys).
+	KEL  string `json:"kel,omitempty"`
+	Keys string `json:"keys,omitempty"`
+	// KeyStateNotice is the witness notice of the KEL's tip (NoticeWire,
+	// base64url), when there is one: the notice this hub signed as the
+	// agent's witness (notice.go), or for an agent learned from a peer the
+	// one its card stream carried.
+	KeyStateNotice string `json:"key_state_notice,omitempty"`
 }
 
-// ReviewView is one stored, verified review: the rating, the reviewer's comment and the anchors of
-// the provider-signed receipt it is interlocked with.
+// ReviewView is one review stored here, as /agents/{aid} serves it: the rating, the comment, the
+// receipt it is anchored on and the two days the objects carry (hub-payment-privacy §2.5).
 //
-// It carries no interaction content (A2A-DESIGN §0 decision 2, §9 row 评价). The hub verifies both
-// signatures and the interlock, but it never receives the request or the deliverable, so it cannot
-// check that the receipt's request_cid and result_cid are the hashes of any particular bytes.
-// ContentBinding states that explicitly as "UNVERIFIED" rather than leaving the field out: an absent
-// check and a passed check are different states and must not look alike. A party holding the
-// content can recompute the CIDs offline and reach its own verdict.
+// It names no reviewer and no interaction, and holds no time finer than a UTC day (SI-48): the
+// hub keeps none of them (reviews.go). The receipt and the review were checked here against the
+// provider's key history and the receipt's one-time review key; a party holding the interaction's
+// content can recompute receipt_cid's commitments for itself.
 type ReviewView struct {
-	InteractionID  string `json:"interaction_id"`
-	SubjectAID     string `json:"subject_aid"`
-	ReviewerAID    string `json:"reviewer_aid"`
-	Rating         int    `json:"rating"`
-	Comment        string `json:"comment,omitempty"`
-	ReceiptCID     string `json:"receipt_cid"`
-	RequestCID     string `json:"request_cid"`     // the receipt's commitment to the request
-	ResultCID      string `json:"result_cid"`      // the receipt's commitment to the result
-	ContentBinding string `json:"content_binding"` // always ContentBindingUnverified on this hub
-	CompletedAt    uint64 `json:"completed_at"`    // provider's receipt time (unix millis)
-	CreatedAt      uint64 `json:"created_at"`      // review time (unix millis)
-}
-
-// ContentBindingUnverified is ReviewView.ContentBinding on every review this hub serves: the hub
-// holds no content, so whether the receipt's request_cid and result_cid match any bytes was not
-// checked here.
-const ContentBindingUnverified = "UNVERIFIED"
-
-// MaxReviewCommentRunes bounds a review comment, in Unicode code points. The comment is the only
-// free text a review carries, it is published to anyone who reads the agent, and it is signed by
-// the reviewer, so an over-long one is refused rather than truncated (truncating would break the
-// signature). 280 is short enough that a comment cannot carry a pasted transcript.
-const MaxReviewCommentRunes = 280
-
-// ReviewDetail is what the Hub stores beside a verified review: the receipt's anchors and time,
-// copied from the provider-signed receipt. No content.
-type ReviewDetail struct {
-	RequestCID  string
-	ResultCID   string
-	CompletedAt uint64
+	SubjectAID   string `json:"subject_aid"`
+	Rating       int    `json:"rating"`
+	Comment      string `json:"comment,omitempty"`
+	ReceiptCID   string `json:"receipt_cid"`
+	CompletedDay uint64 `json:"completed_day"` // the receipt's UTC day
+	CreatedDay   uint64 `json:"created_day"`   // the review's UTC day
 }
 
 // Store is the Hub's durable registry + relay + review store (SQLite).
 type Store struct {
+	// dir is the data directory: hub.db, and the review tag key in
+	// keys/ (tagkey.go).
+	dir string
+	// tagKey is the review tag key as this process loaded it.
+	tagKey tagKeyState
 	// hubKey signs settlement receipts. Nil until the application wires
 	// it, and a store without one settles without signing rather than
-	// refusing — an unsigned settlement is weaker, not broken.
-	hubKey *identity.Controller
+	// refusing — an unsigned settlement is weaker, not broken. It is the
+	// hub identity as a Signer (KEL H-36): what signs here never holds the
+	// key, and each signature names the key state that made it.
+	hubKey identity.Signer
+	// refreshPeerKEL, when set, fetches a peer hub's key history again
+	// for an object that peer signed under a key state past the pinned
+	// one (KEL H-34; hubobjects.go). Nil in a build without federation.
+	refreshPeerKEL func(aid string) ([]identity.SignedEvent, error)
 	// peerSettle forwards a payment on another hub'''s ledger to that hub.
 	peerSettle PeerSettler
 	clearable  func() []string
 	// hubAID is the row credit is issued from and redeemed into, so the
 	// ledger sums to zero and the hub's liability is countable.
 	hubAID string
-	// issuance serialises appends to the supply chain. A gap or a
-	// duplicate sequence number would make the chain unverifiable, and
-	// two concurrent grants are an ordinary thing to have.
-	issuance issuanceChain
-	// issueMu makes each creation of credit (GrantOnRegistration,
-	// GrantCredit, ClearFromPeer) one step with issuanceRoom, the check
-	// that it fits what the supply can add up to. The grants read the room
-	// and wrote in separate statements, so grants arriving together at the
-	// bound each found room for itself and the sum passed MaxInt64 anyway
-	// (the review of ANet an internal note). Taken before issuance.mu, never
-	// after it.
-	issueMu sync.Mutex
+	// liabTrees caches the liability trees of the epochs whose proofs
+	// are still served (supply.go).
+	liabTrees liabTreeCache
 	// quota bounds each recipient's undelivered messages (relay.go).
 	quota relayQuota
 	db    *sql.DB
 	mu    sync.Mutex
+	// clock is the time admission and the inactive sweep read (nil:
+	// time.Now). Tests move it forward.
+	clock func() time.Time
+	// admGate is the admission state that lives only in this process
+	// (admission.go): the proof-of-work key and today's counters.
+	gateOnce sync.Once
+	admGate  *admissionGate
+	// dereg holds the in-process callbacks run when an AID is
+	// deregistered, and whether this process is the hub (deregister.go).
+	dereg deregHooks
+	// revoked caches what cap_revocation says about the credentials sends
+	// ask about (revoke.go).
+	revoked revokedCache
+	// quotas is the operator's raised per-recipient quotas as the hub
+	// process last read them (quota.go).
+	quotas quotaCache
+	// dirBits is dir_max_bits as last computed (directory.go).
+	dirBits dirBitsCache
+	// kids is the decoded key sets of recent recipients, for the kid
+	// check of every queued envelope (relay.go kidAcceptable).
+	kids kidCache
+	// dack is the row count of relay_dack, once counted (dack.go).
+	dack dackState
+	// dirNotice, when a test sets it, gives the witness notice a directory
+	// entry carries instead of the notice cache (directory.go dirNoticeOf).
+	dirNotice func(q rowQuerier, aid string) ([]byte, error)
+	// kelHooks are run when a registered agent's key history grows
+	// (OnKELExtended).
+	kelHooks kelHooks
+	// quarantine is the restore quarantine as this process knows it, and
+	// hwm the count of key-history changes it last wrote to kel_hwm
+	// (restore.go).
+	quarantine quarantineState
+	hwm        hwmState
 }
 
-// Open opens (creating if needed) a Hub store at dir (SQLite at dir/hub.db).
+// kelHooks are the callbacks a Store runs after it stored new key events of
+// a registered agent.
+type kelHooks struct {
+	mu    sync.Mutex
+	hooks []func(aid string)
+}
+
+// OnKELExtended adds a callback run with the AID of a registered agent
+// whose key history this store has just extended (a rotation, or the dip
+// that ends it), after the write committed. It is how state that a key
+// change must end, and that lives only in the hub process's memory, is
+// dropped: sealed-sender drops the agent's first-contact sessions and their
+// send buckets (SSR-H9). Callbacks must be quick.
+func (s *Store) OnKELExtended(f func(aid string)) {
+	s.kelHooks.mu.Lock()
+	defer s.kelHooks.mu.Unlock()
+	s.kelHooks.hooks = append(s.kelHooks.hooks, f)
+}
+
+// runKELHooks runs every OnKELExtended callback for aid.
+func (s *Store) runKELHooks(aid string) {
+	s.kelHooks.mu.Lock()
+	hooks := append([]func(string){}, s.kelHooks.hooks...)
+	s.kelHooks.mu.Unlock()
+	for _, f := range hooks {
+		f(aid)
+	}
+}
+
+// Open opens the Hub store at dir (SQLite at dir/hub.db), creating it when
+// there is none. A hub.db that this release did not write is refused, not
+// converted (core CORE-V4): one an earlier anet-hub wrote is ErrHubDataV02,
+// one a newer anet-hub wrote is ErrHubDataTooNew, and in both cases the file
+// is left exactly as it was (CheckData).
 func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("hub: dir required")
+	}
+	if err := CheckData(dir); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("hub: mkdir: %w", err)
@@ -179,50 +242,226 @@ func Open(dir string) (*Store, error) {
 	// busy_timeout (waiting could deadlock). The send failed with "database
 	// is locked" (ANet an internal note F2). A lock taken at BEGIN waits
 	// under busy_timeout like any single statement.
-	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+
+	db, err := sql.Open("sqlite", filepath.Join(dir, dataFile)+
 		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)&_pragma=secure_delete(ON)"+
 		"&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("hub: open db: %w", err)
 	}
-	s := &Store{db: db, quota: relayQuota{
+	// Every connection SQLite opens parses the whole schema before its first
+	// statement. database/sql keeps 2 idle connections by default, so under
+	// more than two concurrent requests most of them opened a fresh
+	// connection, parsed the schema and closed it again: in a profile of the
+	// hub under load the SQLite parser took about 35% of the CPU. The pool
+	// keeps as many idle connections as the hub serves requests at once in
+	// practice; an idle connection costs its page cache and nothing else.
+	db.SetMaxIdleConns(dbIdleConns)
+	s := &Store{dir: dir, db: db, quota: relayQuota{
 		messages: DefaultLimits().MailboxMessages,
 		bytes:    DefaultLimits().MailboxBytes,
 	}}
-	if err := s.migrateInvites(); err != nil {
-		return nil, err
-	}
-	if err := s.migrate(); err != nil {
+	if err := s.createSchema(); err != nil {
 		db.Close()
 		return nil, err
 	}
-	// An upgraded hub already holds agents whose capabilities were only
-	// ever a JSON blob; index them before serving.
-	if err := s.backfillCaps(); err != nil {
-		return nil, err
+	// A database older than the last key-history change this hub made
+	// begins a quarantine here, whoever opens it first (KEL H-21).
+	if err := s.checkKELHighWater(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("hub: checking the database against %s: %w", kelHWMFile, err)
 	}
+	// A deregistration deletes the AID's revocations (deregSteps) and, when
+	// the operator removed it, its raised quota; what this process holds
+	// of either is read again.
+	s.OnDeregistered(func(string) {
+		s.revoked.forget()
+		s.quotas.invalidate()
+	})
 	return s, nil
 }
 
 // Close closes the db handle.
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
-	stmts := []string{
+// dataFile is the hub's database in its data directory.
+const dataFile = "hub.db"
+
+// dbIdleConns is how many idle connections the pool keeps (Open).
+const dbIdleConns = 32
+
+// SchemaVersion is the PRAGMA user_version of a 0.3.0 hub.db (core CORE-V4).
+// A new database gets it together with its whole schema, in one transaction
+// (createSchema).
+const SchemaVersion = 3
+
+// ErrHubDataV02 is a hub.db an earlier anet-hub wrote: its user_version is
+// below SchemaVersion, or it has tables and no version at all. 0.3.0 does not
+// convert one (core CORE-V4); anet-hub says hub_identity_v02.
+var ErrHubDataV02 = errors.New("hub: hub.db was written by anet-hub 0.2 or earlier, and 0.3.0 does not migrate it")
+
+// ErrHubDataTooNew is a hub.db a newer anet-hub wrote: its user_version is
+// above SchemaVersion. The data is valid and must not be moved away; the
+// operator upgrades anet-hub (hub_data_too_new).
+var ErrHubDataTooNew = errors.New("hub: hub.db was written by a newer anet-hub than this one")
+
+// CheckData says whether this release can open the hub.db in dir, and writes
+// nothing: nil when there is none yet, when the file holds no schema (a
+// creation that never committed) and for a 0.3.0 database; an error wrapping
+// ErrHubDataV02 or ErrHubDataTooNew otherwise. The file is read with SQLite's
+// immutable flag, which takes no lock and makes no -wal or -shm file, so a
+// directory the hub refuses stays exactly as it was.
+func CheckData(dir string) error {
+	path := filepath.Join(dir, dataFile)
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("hub: %w", err)
+	}
+	db, err := sql.Open("sqlite", readOnlyURI(path))
+	if err != nil {
+		return fmt.Errorf("hub: open %s: %w", path, err)
+	}
+	defer db.Close()
+	version, objects, err := schemaState(db)
+	if err != nil {
+		return fmt.Errorf("hub: read %s: %w", path, err)
+	}
+	return judgeSchema(version, objects)
+}
+
+// readOnlyURI is the SQLite URI that opens the file at path read-only and
+// immutable.
+func readOnlyURI(path string) string {
+	p := filepath.ToSlash(path)
+	if filepath.IsAbs(path) && !strings.HasPrefix(p, "/") {
+		p = "/" + p // a drive letter: file:/C:/…
+	}
+	return "file:" + (&url.URL{Path: p}).EscapedPath() + "?mode=ro&immutable=1"
+}
+
+// schemaState reads a database's user_version and the number of objects in
+// its schema, through q (the database or a transaction).
+func schemaState(q rowQuerier) (version, objects int, err error) {
+	if err = q.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return 0, 0, err
+	}
+	err = q.QueryRow(`SELECT count(*) FROM sqlite_master`).Scan(&objects)
+	return version, objects, err
+}
+
+// judgeSchema is nil for a 0.3.0 database and for a file with no schema yet;
+// ErrHubDataTooNew for a version above SchemaVersion; ErrHubDataV02 for
+// anything else (an earlier version, or tables without a version).
+func judgeSchema(version, objects int) error {
+	switch {
+	case version == SchemaVersion, version == 0 && objects == 0:
+		return nil
+	case version > SchemaVersion:
+		return fmt.Errorf("%w (user_version %d, this release writes %d)", ErrHubDataTooNew, version, SchemaVersion)
+	}
+	return fmt.Errorf("%w (user_version %d, not %d)", ErrHubDataV02, version, SchemaVersion)
+}
+
+// schema is the 0.3.0 hub.db, one part per file that owns the tables, in the
+// order createSchema runs them. A table or a column a later change needs goes
+// into its CREATE statement here; nothing alters an existing database (core
+// CORE-V4), so there is no ALTER TABLE, no rebuild and no backfill.
+var schema = [][]string{
+	coreSchema(),
+	reviewSchema(),
+	relayTables,
+	relayIndexes,
+	a2aCardSchema(),
+	fedA2ACardSchema(),
+	a2aFedSeqSchema(),
+	admissionSchema(),
+	supplySchema(),
+	noticeSchema(),
+	restoreSchema(),
+	firstVerifySchema(),
+}
+
+// createSchema gives a file with no schema the whole of schema and
+// user_version SchemaVersion, in one transaction: a database is complete or
+// empty, so a creation cut short cannot leave a file the next start would
+// take for an earlier release's. A 0.3.0 database is left as it is.
+func (s *Store) createSchema() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("hub: begin: %w", err)
+	}
+	defer tx.Rollback()
+	version, objects, err := schemaState(tx)
+	if err != nil {
+		return fmt.Errorf("hub: read the schema: %w", err)
+	}
+	if version == SchemaVersion {
+		return nil
+	}
+	// CheckData read the file without its write-ahead log; read through it,
+	// the database can still turn out to be another release's (one that
+	// stopped before SQLite moved its log into the file). It is refused all
+	// the same and nothing in it is converted.
+	if err := judgeSchema(version, objects); err != nil {
+		return err
+	}
+	for _, part := range schema {
+		for _, q := range part {
+			if _, err := tx.Exec(q); err != nil {
+				return fmt.Errorf("hub: create the schema: %w", err)
+			}
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion)); err != nil {
+		return fmt.Errorf("hub: create the schema: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("hub: commit the schema: %w", err)
+	}
+	return nil
+}
+
+// coreSchema is the registry, the ledger and the small tables that have no
+// file of their own.
+func coreSchema() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS agent (
 		   aid TEXT PRIMARY KEY,
 		   name TEXT NOT NULL DEFAULT '',
 		   caps TEXT NOT NULL DEFAULT '[]',
 		   summary TEXT NOT NULL DEFAULT '',
 		   readme TEXT NOT NULL DEFAULT '',
-		   pricing TEXT NOT NULL DEFAULT '',
 		   kel BLOB NOT NULL,
-		   registered_at TEXT NOT NULL
+		   -- The tip of kel: the seq and event id of its last event,
+		   -- written with kel in the same statement (putAgent, PushKEL),
+		   -- so a listing can tell whether the cached witness notice
+		   -- states the tip without decoding the history.
+		   tip_seq INTEGER NOT NULL DEFAULT 0,
+		   tip_head TEXT NOT NULL DEFAULT '',
+		   registered_at TEXT NOT NULL,
+		   -- Visibility is the agent's answer to "may this hub tell other
+		   -- hubs about me". Three tiers, hub-local by default — the
+		   -- conservative default is deliberate (K208 §5.2): a directory
+		   -- that federated by default would publish, once and for everyone
+		   -- who never thought about it.
+		   visibility TEXT NOT NULL DEFAULT 'hub-local',
+		   -- When this agent last collected its mail; NULL until it first
+		   -- polls (liveness.go).
+		   last_seen_at TEXT,
+		   -- How the account came in (admission.go): list, window or
+		   -- open. A row written without a registration (PutAgent) reads
+		   -- as admitted by the operator.
+		   admitted_via TEXT NOT NULL DEFAULT 'list',
+		   -- Unix ms; NULL for an account that never had a probation.
+		   probation_until INTEGER,
+		   -- none, pending or granted: the trial credit of PAY-A5.
+		   trial TEXT NOT NULL DEFAULT 'none',
+		   -- The agent's directory entry (directory.go): the hash it is
+		   -- filed under and the box sealed under its AID. NULL for an
+		   -- agent without one (no key set). A hash belongs to one AID.
+		   dir_hash BLOB UNIQUE,
+		   dir_box BLOB
 		 )`,
-		// No interaction content (A2A-DESIGN §9 row 评价). A table from
-		// before that change is rebuilt by migrateContentV2.
-		reviewTableV2,
-		`CREATE INDEX IF NOT EXISTS idx_review_subject ON review(subject_aid)`,
 		// A capability id is precise, structured and machine-resolvable —
 		// "cas.put", "ptz.absolute@onvif/camera-006" — and discovery could
 		// only match it as a substring inside a JSON blob, alongside the
@@ -236,25 +475,6 @@ func (s *Store) migrate() error {
 		   PRIMARY KEY (aid, cap)
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_cap ON agent_cap(cap)`,
-		// The agent's own signed statement of what it offers. Stored
-		// verbatim, because the signature covers these exact bytes and a
-		// re-encoding would break it for everyone downstream.
-		`CREATE TABLE IF NOT EXISTS agent_card (
-		   aid TEXT PRIMARY KEY,
-		   seq INTEGER NOT NULL,
-		   card BLOB NOT NULL,
-		   stored_at TEXT NOT NULL,
-		   -- fed_seq orders cards for federation sync: a peer asks for
-		   -- everything after the cursor it holds. It advances on every
-		   -- store, including an update, or a peer that already synced an
-		   -- agent would never see that agent change.
-		   fed_seq INTEGER NOT NULL DEFAULT 0
-		 )`,
-		`CREATE INDEX IF NOT EXISTS idx_card_fedseq ON agent_card(fed_seq)`,
-		// Cards learned from a peer hub, kept apart from cards published
-		// here. Which hub an agent actually lives on decides where its
-		// work is delivered, and a directory that forgot the difference
-		// would answer with agents it cannot reach.
 		// The credit ledger. Balances live here, which is exactly what
 		// makes this hub their custodian — see facilitator.go.
 		`CREATE TABLE IF NOT EXISTS credit_balance (
@@ -262,7 +482,10 @@ func (s *Store) migrate() error {
 		   credits INTEGER NOT NULL DEFAULT 0
 		 )`,
 		// Every movement, so a balance can be explained rather than just
-		// asserted.
+		// asserted. Kept 14 days (the ledger window, janitor.go); at is
+		// ledgerStamp, so text order is time order. AUTOINCREMENT, so a
+		// seq is never given out twice and the largest one ever written
+		// outlives the rows (a supply epoch's ledger_hw).
 		`CREATE TABLE IF NOT EXISTS credit_entry (
 		   seq INTEGER PRIMARY KEY AUTOINCREMENT,
 		   aid TEXT NOT NULL,
@@ -270,60 +493,63 @@ func (s *Store) migrate() error {
 		   reason TEXT NOT NULL DEFAULT '',
 		   at TEXT NOT NULL
 		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_credit_entry_aid ON credit_entry(aid, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_credit_entry_at ON credit_entry(at)`,
 		// One row per settled authorization: the idempotency key and the
 		// replay guard in one. Inserted before the balance moves, so a
 		// concurrent second settle loses on the primary key rather than
-		// on a check it raced.
+		// on a check it raced. receipt is the hub's signed receipt, kept so
+		// a repeat is answered with the same bytes. not_after is the
+		// authorization's (unix ms): the row is kept until 7 days after it,
+		// and a repeat after that is expired anyway. guard_h is the
+		// settle_guard key the settlement holds, NULL without a binding;
+		// via is the peer hub that forwarded it (/fed/v3/settle), '' for a
+		// settlement asked for here.
 		`CREATE TABLE IF NOT EXISTS credit_settled (
 		   auth_id TEXT PRIMARY KEY,
 		   payer TEXT NOT NULL,
 		   pay_to TEXT NOT NULL,
 		   amount INTEGER NOT NULL,
-		   interaction_id TEXT NOT NULL DEFAULT '',
-		   at TEXT NOT NULL
+		   at TEXT NOT NULL,
+		   receipt BLOB,
+		   not_after INTEGER NOT NULL,
+		   guard_h BLOB,
+		   via TEXT NOT NULL DEFAULT ''
 		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_settled_not_after ON credit_settled(not_after)`,
+		`CREATE INDEX IF NOT EXISTS idx_settled_guard ON credit_settled(guard_h) WHERE guard_h IS NOT NULL`,
+		// One settlement per payer and task (hub-payment-privacy PAY-L3):
+		// h is evidence.SettleGuard(payer, pay_bind) (core L33), so the
+		// guard holds no payer and no task; until (unix ms) is 30 days
+		// after the settlement.
+		`CREATE TABLE IF NOT EXISTS settle_guard (
+		   h BLOB PRIMARY KEY,
+		   until INTEGER NOT NULL
+		 ) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS idx_settle_guard_until ON settle_guard(until)`,
 		// Foreign authorizations already cleared here, so a peer
-		// repeating a receipt cannot credit our user twice.
+		// repeating a receipt cannot credit our user twice. settle_at is
+		// the receipt's (unix ms): kept until 8 days after it, a day
+		// longer than a receipt is accepted at all.
 		`CREATE TABLE IF NOT EXISTS credit_cleared (
 		   auth_id TEXT PRIMARY KEY,
 		   peer_aid TEXT NOT NULL,
 		   pay_to TEXT NOT NULL,
 		   amount INTEGER NOT NULL,
-		   at TEXT NOT NULL
+		   at TEXT NOT NULL,
+		   settle_at INTEGER NOT NULL
 		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_cleared_settle_at ON credit_cleared(settle_at)`,
 		// What each peer hub owes this one. A claim on another hub, kept
 		// apart from credit here — the two must not be allowed to look
 		// alike.
 		// Credit taken back out of circulation, one row per authorization
 		// the agent signed away. The reference is what the hub agreed to
 		// settle against outside this system; opaque here on purpose.
-		// The exact signed objects a review was verified from. Kept because
-		// a hub that stored the conclusion and discarded the evidence can
-		// only pass on its own say-so, and federating reputation on say-so
-		// is the thing this design exists to avoid. Only the receipt and
-		// the review: no content (see migrateContentV2).
-		reviewBlobTableV2,
-		// Reviews learned from a peer hub, kept apart from local ones so
-		// the arithmetic can stay per source.
-		`CREATE TABLE IF NOT EXISTS fed_review (
-			interaction_id TEXT PRIMARY KEY,
-			subject_aid    TEXT NOT NULL,
-			reviewer_aid   TEXT NOT NULL,
-			rating         INTEGER NOT NULL,
-			comment        TEXT NOT NULL DEFAULT '',
-			receipt_cid    TEXT NOT NULL DEFAULT '',
-			peer_aid       TEXT NOT NULL,
-			created_at     INTEGER NOT NULL DEFAULT 0,
-			stored_at      TEXT NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_fed_review_subject ON fed_review(subject_aid)`,
-		// Every change to the total supply, in order, signed. The record
-		// column holds the ael.EventRecord that actually verifies; the
-		// parsed columns beside it are for querying and are not what a
-		// reader should check.
 		// Attestations: what somebody signed about a chain's head at a
 		// moment. Both directions live here — what others said about
-		// this hub, and what this hub said about its peers.
+		// this hub's supply epoch chain, and what this hub said about its
+		// peers'.
 		`CREATE TABLE IF NOT EXISTS head_attestation (
 			id          TEXT PRIMARY KEY,
 			chain_did   TEXT NOT NULL,
@@ -334,25 +560,19 @@ func (s *Store) migrate() error {
 			blob        BLOB NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_attestation_chain ON head_attestation(chain_did, seq)`,
-		`CREATE TABLE IF NOT EXISTS credit_issuance (
-			seq     INTEGER PRIMARY KEY,
-			id      TEXT NOT NULL UNIQUE,
-			prev_id TEXT NOT NULL,
-			kind    TEXT NOT NULL,
-			aid     TEXT NOT NULL,
-			amount  INTEGER NOT NULL,
-			reason  TEXT NOT NULL DEFAULT '',
-			at      INTEGER NOT NULL,
-			record  BLOB NOT NULL
-		)`,
+		// Kept 14 days, like credit_entry (the operator reads them with
+		// anet-hub redemptions within that time); seq is what
+		// /agents/{aid}/redemptions states as oldest_seq.
 		`CREATE TABLE IF NOT EXISTS credit_redemption (
-			auth_id   TEXT PRIMARY KEY,
+			seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+			auth_id   TEXT NOT NULL UNIQUE,
 			aid       TEXT NOT NULL,
 			amount    INTEGER NOT NULL,
 			reference TEXT NOT NULL DEFAULT '',
 			at        TEXT NOT NULL
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_redemption_aid ON credit_redemption(aid)`,
+		`CREATE INDEX IF NOT EXISTS idx_redemption_aid ON credit_redemption(aid, seq)`,
+		`CREATE INDEX IF NOT EXISTS idx_redemption_at ON credit_redemption(at)`,
 		// A peer hub's signed discharge of what it owed us. Keyed on the
 		// statement id so a replayed discharge clears the debt once.
 		`CREATE TABLE IF NOT EXISTS hub_cleared (
@@ -365,17 +585,6 @@ func (s *Store) migrate() error {
 		   peer_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
-		// The debtor side of the same relationship, keyed by payee rather
-		// than by hub: this hub settled a payment to an agent that banks
-		// elsewhere, so the credit left this ledger and is owed to
-		// whichever hub holds that agent. Keyed by payee because that is
-		// what the authorization names — which hub holds it is a fact this
-		// hub may not have.
-		`CREATE TABLE IF NOT EXISTS p2p_addr (
-		   aid  TEXT PRIMARY KEY,
-		   addr TEXT NOT NULL,
-		   at   TEXT NOT NULL
-		 )`,
 		// Key histories of agents that have left. Routing goes when an
 		// agent deregisters; proof does not. Without this the receipts
 		// and reviews the hub still serves became uncheckable against
@@ -385,27 +594,17 @@ func (s *Store) migrate() error {
 		   kel BLOB NOT NULL,
 		   at  TEXT NOT NULL
 		 )`,
+		// The debtor side of the same relationship: what this hub owes
+		// each peer hub. A peer that forwarded a settlement for its own
+		// agent (/fed/v3/settle, signed by that peer) is owed what left
+		// this ledger. Keyed by the peer that signed the request, a fact
+		// this hub verified, not by the payee, whose hub it would only be
+		// guessing (hub-payment-privacy PAY-L4).
 		`CREATE TABLE IF NOT EXISTS hub_due (
-		   payee_aid TEXT PRIMARY KEY,
+		   peer_aid TEXT PRIMARY KEY,
 		   amount INTEGER NOT NULL DEFAULT 0
 		 )`,
-		`CREATE TABLE IF NOT EXISTS fed_card (
-		   aid TEXT PRIMARY KEY,
-		   seq INTEGER NOT NULL,
-		   card BLOB NOT NULL,
-		   kel BLOB NOT NULL,
-		   home TEXT NOT NULL,
-		   peer_aid TEXT NOT NULL,
-		   stored_at TEXT NOT NULL,
-		   keys BLOB
-		 )`,
-		// The wire-2 relay table; an existing wire-1 table is rebuilt by
-		// migrateRelayV2 below. See relay.go.
-		relayTableV2,
-		// What a one-time migration did, for the operator who asks later:
-		// counts and instants, never row content. Written by
-		// migrateRelayV2 (keys Meta* in relay.go) and read by
-		// deploy/cleanup-content-v0.2.sh.
+		// Small hub-wide settings, one row each (the admission mode).
 		`CREATE TABLE IF NOT EXISTS hub_meta (
 		   key TEXT PRIMARY KEY,
 		   value TEXT NOT NULL
@@ -420,75 +619,35 @@ func (s *Store) migrate() error {
 		   keyset BLOB NOT NULL,
 		   stored_at TEXT NOT NULL
 		 )`,
-		// The A2A AgentCard an agent submitted at registration, stored as
-		// the raw bytes it sent once it passed admission (A2A-DESIGN
-		// §10.3). The admission columns and the skill and tag indexes are
-		// added by migrateA2ACard; see a2acard.go.
-		`CREATE TABLE IF NOT EXISTS agent_a2a_card (
+		// The delivery credentials an owner revoked (sealed-sender SSR-H10;
+		// revoke.go): the owner's AID, the credential's 16-byte random id
+		// and when, in unix ms. Kept 31 days, at most 100 000 per owner,
+		// and in the weekly backup (deploy/hub-db-roll.sh).
+		`CREATE TABLE IF NOT EXISTS cap_revocation (
+		   owner TEXT NOT NULL,
+		   cap_id BLOB NOT NULL,
+		   revoked_at INTEGER NOT NULL,
+		   PRIMARY KEY (owner, cap_id)
+		 ) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS idx_cap_revocation_at ON cap_revocation(revoked_at)`,
+		// What the operator raised for one recipient above the defaults
+		// (anet-hub quota; sealed-sender SSR-H5, SSR-H22; quota.go): every
+		// value at or above its default. In the weekly backup.
+		`CREATE TABLE IF NOT EXISTS quota_override (
 		   aid TEXT PRIMARY KEY,
-		   card BLOB NOT NULL,
-		   stored_at TEXT NOT NULL
+		   first_contacts_per_min INTEGER NOT NULL,
+		   non_contact_msgs INTEGER NOT NULL,
+		   non_contact_bytes INTEGER NOT NULL
 		 )`,
 	}
-	for _, q := range stmts {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate: %w", err)
-		}
-	}
-	// Additive upgrade for pre-existing DBs: add the profile columns if they are missing. ADD COLUMN
-	// errors with "duplicate column name" when they already exist (fresh DBs from the CREATE above) —
-	// that is expected and ignored, so migrate stays idempotent.
-	for _, q := range []string{
-		`ALTER TABLE agent ADD COLUMN summary TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agent ADD COLUMN readme TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE agent ADD COLUMN pricing TEXT NOT NULL DEFAULT ''`,
-		// Visibility is the agent's answer to "may this hub tell other
-		// hubs about me". Three tiers, hub-local by default — the
-		// conservative default is deliberate (K208 §5.2): a directory
-		// that federated by default would publish, once and for everyone
-		// who never thought about it.
-		`ALTER TABLE agent ADD COLUMN visibility TEXT NOT NULL DEFAULT 'hub-local'`,
-		// When this agent last collected its mail. NULL for rows that
-		// predate the column, which must read as "unknown" and never as
-		// "dead" — see liveness.go.
-		`ALTER TABLE agent ADD COLUMN last_seen_at TEXT`,
-		`ALTER TABLE agent_card ADD COLUMN fed_seq INTEGER NOT NULL DEFAULT 0`,
-		// The encryption key set a peer's card sync carried (§3.9).
-		`ALTER TABLE fed_card ADD COLUMN keys BLOB`,
-	} {
-		if _, err := s.db.Exec(q); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-			return fmt.Errorf("hub: migrate profile: %w", err)
-		}
-	}
-	if err := s.migrateRelayV2(); err != nil {
-		return err
-	}
-	if err := s.migrateContentV2(); err != nil {
-		return err
-	}
-	// Stored receipts and the (payer, interaction_id) binding constraint
-	// on credit_settled (facilitator.go).
-	if err := s.migrateSettlement(); err != nil {
-		return err
-	}
-	// The voucher issued for each gateway settlement (gateway.go).
-	if err := s.migrateGateway(); err != nil {
-		return err
-	}
-	for _, q := range relayIndexesV2 {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("hub: migrate: %w", err)
-		}
-	}
-	// A2A card admission columns and the skill/tag indexes (a2acard.go).
-	return s.migrateA2ACard()
 }
 
 // PutAgent registers or updates an agent (upsert on AID). The caller has already verified the KEL
 // derives this AID. anet models no availability class — an agent may always be offline (the relay is
 // store-and-forward), so nothing about "resident vs intermittent" is recorded.
 func (s *Store) PutAgent(aid, name string, caps []string, kel []byte) error {
-	return s.putAgent(aid, name, caps, kel, nil)
+	_, err := s.putAgent(aid, name, caps, kel, nil, nil)
+	return err
 }
 
 // ErrKELNotExtended is RegisterAgent's refusal of a KEL that does not
@@ -500,62 +659,102 @@ var ErrKELNotExtended = errors.New("hub: the submitted KEL does not extend the o
 // aid (the agent row, or the kept departed KEL) must be a prefix of events,
 // and that is checked in the same transaction as the write.
 //
-// hRegister also checks this before redeeming an invite, so that a
-// refused KEL costs nothing. That earlier check and the write are separate
+// hRegister also checks this before anything is written (PAY-A1 step 6),
+// so that a refused KEL costs nothing. That earlier check and the write are separate
 // statements, and two registrations for one AID can both pass it before
 // either writes; the later write would then replace a KEL that the other
 // had just extended, for example with a fork signed by a superseded key.
 // Checking again here, under the store mutex and inside the write
 // transaction, closes that interval.
 func (s *Store) RegisterAgent(aid, name string, caps []string, kelBytes []byte, events []identity.SignedEvent) error {
+	_, err := s.registerAgent(aid, name, caps, kelBytes, events, nil)
+	return err
+}
+
+// registerAgent is RegisterAgent with what admission writes beside a first
+// registration (adm, nil for none; hub-payment-privacy PAY-A1 step 10), in
+// the same transaction. admitted reports whether adm was written: false when
+// the AID was registered meanwhile by a concurrent registration, which wrote
+// its own. adm.via viaRegistered is an AID the gate let past because it was
+// registered: if its row has gone since, the registration is refused with
+// errDeregisteredMeanwhile rather than written without admission.
+func (s *Store) registerAgent(aid, name string, caps []string, kelBytes []byte, events []identity.SignedEvent,
+	adm *admissionWrite) (admitted bool, err error) {
 	if len(events) == 0 {
-		return fmt.Errorf("%w: empty KEL", ErrKELNotExtended)
+		return false, fmt.Errorf("%w: empty KEL", ErrKELNotExtended)
 	}
-	return s.putAgent(aid, name, caps, kelBytes, events)
+	return s.putAgent(aid, name, caps, kelBytes, events, adm)
+}
+
+// admissionWrite is what the first registration of an AID writes beside its
+// row (PAY-A1 step 10): how it came in, and for a window the window whose
+// place it takes.
+type admissionWrite struct {
+	via    string // viaList, viaWindow or viaOpen; viaRegistered: no gate (registered at step 4)
+	window int64  // viaWindow: the window's id
+	now    time.Time
 }
 
 // putAgent writes the agent row and its capability index. When extend is
-// non-nil, the KEL already held for aid must be a prefix of it.
-func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []identity.SignedEvent) error {
+// non-nil, the KEL already held for aid must be a prefix of it. When adm is
+// non-nil and the row is new, the admission columns are written too, and an
+// admission grant on the list is paid; all in one transaction.
+func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []identity.SignedEvent,
+	adm *admissionWrite) (admitted bool, err error) {
 	// The bound is enforced here as well as at the HTTP boundary, because
 	// this is where the index is written and it is the invariant the index
 	// depends on. The handler checks first so a caller gets 400 with the
 	// offending id named rather than 500.
 	if err := validateCaps(caps); err != nil {
-		return err
+		return false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	capsJSON, _ := json.Marshal(caps)
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := s.now().UTC().Format(time.RFC3339)
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
+	// longer: kel strictly extends a key history this hub held for aid (its
+	// row, or the tombstone it left), which ends a restore quarantine for it
+	// (KEL H-20 a).
+	longer := false
 	if extend != nil {
 		held, err := knownKEL(tx, aid)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if held != nil {
 			if err := identity.ExtendsKEL(held, extend); err != nil {
-				return fmt.Errorf("%w: %w", ErrKELNotExtended, err)
+				return false, fmt.Errorf("%w: %w", ErrKELNotExtended, err)
 			}
+			longer = len(extend) > len(held)
 		}
 	}
+	existed := false
+	var heldKEL []byte
+	switch err := tx.QueryRow(`SELECT kel FROM agent WHERE aid=?`, aid).Scan(&heldKEL); {
+	case err == nil:
+		existed = true
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, err
+	}
+	tipSeq, tipHead := storedTip(kel)
 	if _, err := tx.Exec(
-		`INSERT INTO agent(aid,name,caps,kel,registered_at) VALUES(?,?,?,?,?)
-		 ON CONFLICT(aid) DO UPDATE SET name=excluded.name, caps=excluded.caps, kel=excluded.kel`,
-		aid, name, string(capsJSON), kel, now); err != nil {
-		return err
+		`INSERT INTO agent(aid,name,caps,kel,tip_seq,tip_head,registered_at) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(aid) DO UPDATE SET name=excluded.name, caps=excluded.caps, kel=excluded.kel,
+		   tip_seq=excluded.tip_seq, tip_head=excluded.tip_head`,
+		aid, name, string(capsJSON), kel, tipSeq, tipHead, now); err != nil {
+		return false, err
 	}
 	// Re-registering replaces the capability set rather than adding to it:
 	// a node that dropped a capability has stopped offering it, and a
 	// directory that kept answering yes would be sending work to a
 	// provider that will refuse it.
 	if _, err := tx.Exec(`DELETE FROM agent_cap WHERE aid=?`, aid); err != nil {
-		return err
+		return false, err
 	}
 	for _, c := range caps {
 		c = strings.TrimSpace(c)
@@ -563,10 +762,103 @@ func (s *Store) putAgent(aid, name string, caps []string, kel []byte, extend []i
 			continue
 		}
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO agent_cap(aid,cap) VALUES(?,?)`, aid, c); err != nil {
-			return err
+			return false, err
 		}
 	}
-	return tx.Commit()
+	if adm != nil && adm.via == viaRegistered {
+		// The gate let it past as registered; deregistered since, it would
+		// come back here without passing the gate (PAY-A1 step 4).
+		if !existed {
+			return false, errDeregisteredMeanwhile
+		}
+	} else if adm != nil && !existed {
+		if err := s.writeAdmissionTx(tx, aid, adm); err != nil {
+			return false, err
+		}
+		admitted = true
+	}
+	// The registration took new key events (an agent re-registers with
+	// the same key history on every start, which changes nothing): what
+	// was stated under the old tip goes in this transaction (KEL H-2).
+	changed := existed && !bytes.Equal(heldKEL, kel)
+	if changed {
+		if err := kelChangedTx(tx, aid, kel); err != nil {
+			return false, err
+		}
+	}
+	// A first registration stores a key history too: both are counted
+	// against a restore from an older copy of this database (KEL H-21).
+	if changed || !existed {
+		if err := countKELChangeTx(tx); err != nil {
+			return false, err
+		}
+	}
+	// Only more events end a quarantine, never other bytes: whoever holds
+	// the key the restored tip names could otherwise send the history held
+	// here again, encoded differently, and be released at once.
+	if longer {
+		if err := releaseTx(tx, aid, releasedLongerKEL, s.now()); err != nil {
+			return false, err
+		}
+	}
+	// The key history may have grown (sealed-sender SSR-H17).
+	if err := s.refreshDirTx(tx, aid); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	s.syncKELHighWater()
+	if changed {
+		s.runKELHooks(aid)
+	}
+	return admitted, nil
+}
+
+// storedTip is the tip_seq and tip_head an agent row keeps for the key
+// history kel: the seq and event id of its last event, or 0 and "" for one
+// that does not decode (no notice states that, so a listing carries none).
+func storedTip(kel []byte) (int64, string) {
+	seq, head, ok := kelTip(kel)
+	if !ok || seq > math.MaxInt64 {
+		return 0, ""
+	}
+	return int64(seq), head
+}
+
+// kelChangedTx is what a registered agent's new key history ends, in the
+// transaction that stores it (KEL H-2), kel being the history now stored:
+//
+//   - the key set, unless it is signed under the tip of kel: a key set is a
+//     statement of the current key only (KEL C-11, core CORE-K8), and one
+//     signed by a key the agent rotated away from may be a thief's. The
+//     agent publishes its set again, signed with its new key (with the
+//     rotation's registration, or after it); until then it has no
+//     directory entry and nothing is queued for it (relay.go kidAcceptable);
+//   - the witness notice this hub keeps for it, which stated the old tip.
+//
+// The A2A card is re-verified against the new history by the caller once
+// this commits (RegisterA2ACard, recheckA2ACard): one signed by a retired
+// key is delisted.
+func kelChangedTx(tx *sql.Tx, aid string, kel []byte) error {
+	tipSeq, _, ok := kelTip(kel)
+	if !ok {
+		return fmt.Errorf("hub: the key history stored for %s does not decode", aid)
+	}
+	var raw []byte
+	err := tx.QueryRow(`SELECT keyset FROM agent_keys WHERE aid=?`, aid).Scan(&raw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	default:
+		if signed, derr := seal.UnmarshalSignedEncKeySet(raw); derr != nil || signed.KeyStateSeq != tipSeq {
+			if _, err := tx.Exec(`DELETE FROM agent_keys WHERE aid=?`, aid); err != nil {
+				return err
+			}
+		}
+	}
+	return forgetNoticeTx(tx, aid)
 }
 
 // Bounds on what one registration may put into the capability index.
@@ -622,7 +914,8 @@ func excerpt(s string) string {
 	return string(r[:runes]) + "\u2026"
 }
 
-// FindByCapability returns agents offering a capability id.
+// FindByCapability returns agents offering a capability id, those with a
+// key set only (SSR-H18, as ListAgents).
 //
 // Exact by default, prefix when the query ends in "*". A capability id is
 // structured — family, action, and often a device or vendor after "@" —
@@ -646,7 +939,7 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 			// is a structured identifier that a provider dispatches on, not
 			// prose — "Text.Digest" and "text.digest" name two different
 			// capabilities, and only one of them will be answered — so both
-			// forms compare bytes. This also matches cardServes(), which is
+			// forms compare bytes. This also matches capsServe(), which is
 			// how the same question is answered for a peer-learned agent.
 			//
 			// substr has no pattern language of its own, so the escaping
@@ -667,14 +960,14 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at, a.last_seen_at,
-		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
+		        COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 		 FROM agent a
 		 JOIN agent_cap c ON c.aid = a.aid
 		 LEFT JOIN review r ON r.subject_aid = a.aid
 		 WHERE `+strings.Join(preds, " OR ")+`
 		 GROUP BY a.aid
-		 ORDER BY AVG(r.rating) DESC, COUNT(r.interaction_id) DESC, a.registered_at`, args...)
+		 ORDER BY AVG(r.rating) DESC, COUNT(r.ix_commit) DESC, a.registered_at`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +978,9 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !av.Browsable() {
+		// Listed only with a key set (SSR-H18): an agent nobody can
+		// write to yet is not offered to anyone.
+		if !av.Browsable() || av.Keys == "" {
 			continue
 		}
 		out = append(out, av)
@@ -693,61 +988,19 @@ func (s *Store) FindByCapability(cap string) ([]AgentView, error) {
 	return out, rows.Err()
 }
 
-// backfillCaps populates agent_cap for rows registered before the table
-// existed. Without it an upgraded hub answers "nobody serves that" for
-// every agent already registered — a directory that silently forgets its
-// contents on upgrade is worse than one that never had an index.
-func (s *Store) backfillCaps() error {
-	rows, err := s.db.Query(
-		`SELECT aid, caps FROM agent WHERE aid NOT IN (SELECT DISTINCT aid FROM agent_cap)`)
-	if err != nil {
-		return err
-	}
-	type row struct {
-		aid, caps string
-	}
-	var pending []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.aid, &r.caps); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, r := range pending {
-		var caps []string
-		if json.Unmarshal([]byte(r.caps), &caps) != nil {
-			continue
-		}
-		for _, c := range caps {
-			if c = strings.TrimSpace(c); c != "" {
-				if _, err := s.db.Exec(`INSERT OR IGNORE INTO agent_cap(aid,cap) VALUES(?,?)`, r.aid, c); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	return nil
-}
-
-// PutProfile updates an agent's self-authored profile (summary/readme/pricing). The agent must already
-// be registered (its identity is proven at registration + on this call's signed challenge). Profile is
-// kept separate from PutAgent so a plain re-registration never wipes it.
-func (s *Store) PutProfile(aid, summary, readme, pricing string) error {
+// PutProfile updates an agent's self-authored profile (summary/readme). The agent must already
+// be registered (its identity is proven at registration + on this call's signed challenge); for an AID
+// with no registration it returns ErrNotRegistered. Profile is kept separate from PutAgent so a plain
+// re-registration never wipes it.
+func (s *Store) PutProfile(aid, summary, readme string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`UPDATE agent SET summary=?, readme=?, pricing=? WHERE aid=?`,
-		summary, readme, pricing, aid)
+	res, err := s.db.Exec(`UPDATE agent SET summary=?, readme=? WHERE aid=?`, summary, readme, aid)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("hub: agent %s not registered", aid)
+		return ErrNotRegistered
 	}
 	return nil
 }
@@ -778,35 +1031,33 @@ func (s *Store) AgentKEL(aid string) ([]byte, error) {
 // not pass it — the KEL is what the arithmetic is done against, not a
 // permission to skip the arithmetic.
 func (s *Store) AnyKEL(aid string) ([]byte, error) {
-	if kel, err := s.AgentKEL(aid); err == nil {
-		return kel, nil
+	kel, err := s.anyKEL(aid)
+	if err == nil && kel == nil {
+		err = fmt.Errorf("hub: %s is neither registered here, known from a peer, nor a former registrant", aid)
 	}
-	// From a peer's ADP card stream (fed_card) or its A2A card stream
-	// (fed_a2a_card, fed_a2acard.go; a withdrawn row still holds the KEL,
-	// which is proof, not routing). Each table only ever extends its own
-	// copy, but the two streams arrive independently, so when both hold
-	// one the longer is served: a KEL that extends another is longer, and
-	// serving the other would go back to a key state the agent rotated
-	// away from, against which its current A2A card no longer verifies.
-	var kel []byte
-	err := s.db.QueryRow(
-		`SELECT kel FROM (
-		   SELECT kel FROM fed_card WHERE aid=?
-		   UNION ALL
-		   SELECT kel FROM fed_a2a_card WHERE aid=?
-		 ) ORDER BY length(kel) DESC LIMIT 1`, aid, aid).Scan(&kel)
-	if err == nil {
-		return kel, nil
+	return kel, err
+}
+
+// anyKEL is AnyKEL with nil, nil for an AID this hub knows nothing of, so a
+// caller can tell "unknown" from a failed read.
+func (s *Store) anyKEL(aid string) ([]byte, error) {
+	for _, q := range []string{
+		`SELECT kel FROM agent WHERE aid=?`,
+		// From a peer's A2A card stream (fed_a2a_card, fed_a2acard.go; a
+		// withdrawn row still holds the KEL, which is proof, not
+		// routing). The row only ever extends its own copy (§3.8).
+		`SELECT kel FROM fed_a2a_card WHERE aid=?`,
+		// An agent that left. Its routing is gone and its proof is not.
+		`SELECT kel FROM departed_kel WHERE aid=?`,
+	} {
+		var kel []byte
+		err := s.db.QueryRow(q, aid).Scan(&kel)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && len(kel) == 0 {
+			continue
+		}
+		return kel, err
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-	// An agent that left. Its routing is gone and its proof is not.
-	if derr := s.db.QueryRow(`SELECT kel FROM departed_kel WHERE aid=?`, aid).Scan(&kel); derr == nil {
-		return kel, nil
-	}
-	return nil, fmt.Errorf(
-		"hub: %s is neither registered here, known from a peer, nor a former registrant", aid)
+	return nil, nil
 }
 
 // KnownKEL returns the KEL this hub holds for aid from a registration:
@@ -839,35 +1090,14 @@ func knownKEL(q rowQuerier, aid string) ([]identity.SignedEvent, error) {
 	return identity.UnmarshalKEL(raw)
 }
 
-// HasInteraction reports whether a review for interactionID already exists (one-review-per-interaction).
-func (s *Store) HasInteraction(interactionID string) bool {
-	var one int
-	err := s.db.QueryRow(`SELECT 1 FROM review WHERE interaction_id=?`, interactionID).Scan(&one)
-	return err == nil
-}
-
-// PutReview stores a verified review and the anchors of its receipt (interaction_id is the unique
-// key). No interaction content is stored.
-func (s *Store) PutReview(rv *evidence.Review, d ReviewDetail) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
-		`INSERT INTO review(interaction_id,subject_aid,reviewer_aid,rating,comment,receipt_cid,
-		   request_cid,result_cid,completed_at,created_at,stored_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		rv.InteractionID, rv.SubjectAID, rv.ReviewerAID, rv.Rating, rv.Comment, rv.ReceiptCID,
-		d.RequestCID, d.ResultCID, d.CompletedAt, rv.CreatedAt, now)
-	return err
-}
-
 // ListAgents returns LISTED agents (those advertising a service — caps or a profile) with their
 // aggregate rating, best-rated first. A non-empty query filters to agents whose AID, name, caps or
 // profile contain it (case-insensitive) — the `find` backend. Pure requesters (registered but with no
-// caps/profile) are intentionally omitted so they do not clutter the starfield.
+// caps/profile) are intentionally omitted so they do not clutter the starfield, and so is an agent
+// that has published no key set yet (sealed-sender SSR-H18): nobody could write to it.
 func (s *Store) ListAgents(query string) ([]AgentView, error) {
-	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at, a.last_seen_at,
-	             COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+	q := `SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, ` + agentKeyColumns + `,
+	             COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 	      FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid`
 	var args []any
 	if query != "" {
@@ -875,7 +1105,7 @@ func (s *Store) ListAgents(query string) ([]AgentView, error) {
 		q += ` WHERE a.aid LIKE ? OR a.name LIKE ? OR a.caps LIKE ? OR a.summary LIKE ? OR a.readme LIKE ?`
 		args = append(args, like, like, like, like, like)
 	}
-	q += ` GROUP BY a.aid ORDER BY AVG(r.rating) DESC, COUNT(r.interaction_id) DESC, a.registered_at`
+	q += ` GROUP BY a.aid ORDER BY AVG(r.rating) DESC, COUNT(r.ix_commit) DESC, a.registered_at`
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -887,7 +1117,7 @@ func (s *Store) ListAgents(query string) ([]AgentView, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !av.Listed || !av.Browsable() {
+		if !av.Listed || !av.Browsable() || av.Keys == "" {
 			continue
 		}
 		out = append(out, av)
@@ -951,7 +1181,7 @@ func (s *Store) departedView(aid string) (*AgentView, error) {
 	var count int
 	var avg float64
 	if err := s.db.QueryRow(
-		`SELECT COUNT(interaction_id), COALESCE(AVG(rating),0) FROM review WHERE subject_aid=?`,
+		`SELECT COUNT(*), COALESCE(AVG(rating),0) FROM review WHERE subject_aid=?`,
 		aid).Scan(&count, &avg); err != nil {
 		return nil, err
 	}
@@ -977,8 +1207,8 @@ func (s *Store) departedView(aid string) (*AgentView, error) {
 // GetAgent returns one agent's entry + aggregate and its reviews (newest first).
 func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 	row := s.db.QueryRow(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing, a.registered_at, a.last_seen_at,
-		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
+		        COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 		 FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		 WHERE a.aid=? GROUP BY a.aid`, aid)
 	av, err := scanAgent(row)
@@ -1004,24 +1234,11 @@ func (s *Store) GetAgent(aid string) (*AgentView, []ReviewView, error) {
 	} else if err != nil {
 		return nil, nil, err
 	}
-	rrows, err := s.db.Query(
-		`SELECT interaction_id, subject_aid, reviewer_aid, rating, comment, receipt_cid,
-		        request_cid, result_cid, completed_at, created_at
-		 FROM review WHERE subject_aid=? ORDER BY created_at DESC`, aid)
+	reviews, err := s.reviewsOf(aid)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rrows.Close()
-	var reviews []ReviewView
-	for rrows.Next() {
-		rv := ReviewView{ContentBinding: ContentBindingUnverified}
-		if err := rrows.Scan(&rv.InteractionID, &rv.SubjectAID, &rv.ReviewerAID, &rv.Rating, &rv.Comment, &rv.ReceiptCID,
-			&rv.RequestCID, &rv.ResultCID, &rv.CompletedAt, &rv.CreatedAt); err != nil {
-			return nil, nil, err
-		}
-		reviews = append(reviews, rv)
-	}
-	return &av, reviews, rrows.Err()
+	return &av, reviews, nil
 }
 
 // HubStats are the headline metrics shown on the public landing page.
@@ -1053,9 +1270,9 @@ type HubStats struct {
 	Reviews        int     `json:"reviews"`    // verified reviews stored here
 	AvgRating      float64 `json:"avg_rating"` // mean rating over all reviews (0 if none)
 	// Modules names the optional hub modules compiled into and wired by
-	// this build (for example "federation", "taskboard"). The web UI hides
-	// the task board when "taskboard" is absent. Empty when the kernel was
-	// started without the module wiring, as in unit tests.
+	// this build (for example "federation"). A client tells a module this
+	// build lacks from one that is present and empty by it. Empty when the
+	// kernel was started without the module wiring, as in unit tests.
 	Modules []string `json:"modules"`
 }
 
@@ -1086,51 +1303,42 @@ func (s *Store) Stats() (HubStats, error) {
 	return out, nil
 }
 
-// Edge is a verified review relationship: the reviewer rated the subject. It is the real, cryptographically
-// backed collaboration signal the starfield draws (reviewer → subject).
-type Edge struct {
-	Source string `json:"source"` // reviewer AID
-	Target string `json:"target"` // subject (provider) AID
-	Rating int    `json:"rating"`
-}
-
-// ReviewEdges returns one edge per stored review (reviewer → subject).
-func (s *Store) ReviewEdges() ([]Edge, error) {
-	rows, err := s.db.Query(`SELECT reviewer_aid, subject_aid, rating FROM review`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Edge
-	for rows.Next() {
-		var e Edge
-		if err := rows.Scan(&e.Source, &e.Target, &e.Rating); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
 type scanner interface{ Scan(dest ...any) error }
+
+// agentKeyColumns are the key history, the key set and the cached witness
+// notice scanAgent reads after a.last_seen_at. The notice is the cached one
+// only while it states the tip the row holds (tip_seq, tip_head, written
+// with the key history), so no listing decodes a key history to tell.
+const agentKeyColumns = `a.kel, (SELECT k.keyset FROM agent_keys k WHERE k.aid = a.aid),
+	` + tipNoticeColumn
+
+// tipNoticeColumn is the cached witness notice of the agent row a when it
+// states the tip of the key history the row holds, else NULL.
+const tipNoticeColumn = `(SELECT n.blob FROM notice_cache n
+	   WHERE n.aid = a.aid AND n.seq = a.tip_seq AND n.head = a.tip_head)`
 
 func scanAgent(sc scanner) (AgentView, error) {
 	var av AgentView
 	var capsJSON string
 	var lastSeen sql.NullString
-	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme, &av.Pricing,
-		&av.RegisteredAt, &lastSeen, &av.AvgRating, &av.ReviewCount); err != nil {
+	var kel, keys, notice []byte
+	if err := sc.Scan(&av.AID, &av.Name, &capsJSON, &av.Summary, &av.Readme,
+		&av.RegisteredAt, &lastSeen, &kel, &keys, &notice, &av.AvgRating, &av.ReviewCount); err != nil {
 		return av, err
 	}
 	// Every listing surface runs through this one function, so all of
-	// them agree about who is still collecting. Three copies of the same
-	// arithmetic would be three copies that drift.
+	// them agree about who is still collecting, and none of them states a
+	// time more precisely than SSR-H18 allows: the registration to the
+	// day, the last poll to the hour. Three copies of the same arithmetic
+	// would be three copies that drift.
 	live := livenessFrom(lastSeen.String, time.Now())
 	av.LastSeen, av.Quiet = live.LastSeen, live.Quiet
+	av.RegisteredAt = toTheDay(av.RegisteredAt)
+	av.KEL, av.Keys, av.KeyStateNotice = b64url(kel), b64url(keys), b64url(notice)
 	_ = json.Unmarshal([]byte(capsJSON), &av.Caps)
 	// An agent is "listed" (shown as a provider) once it advertises a service: any capability or any
 	// profile text. A pure requester has none of these and stays out of the public listing.
-	av.Listed = len(av.Caps) > 0 || av.Summary != "" || av.Readme != "" || av.Pricing != ""
+	av.Listed = len(av.Caps) > 0 || av.Summary != "" || av.Readme != ""
 	av.Registered = true // it came out of the agent table
 	return av, nil
 }
@@ -1147,8 +1355,8 @@ func aidFromKEL(kel []identity.SignedEvent) (string, error) {
 	return states[len(states)-1].AID, nil
 }
 
-// GraphNodeFor builds a node for an AID that appears in an edge but not
-// in the listing.
+// GraphNodeFor builds the view of an AID that is not in the listing: one
+// reviewed here, or one a peer told this hub about.
 //
 // It looks the agent up first: an agent that is registered but merely
 // unlisted or quiet has a name and capabilities worth showing, and only
@@ -1156,9 +1364,9 @@ func aidFromKEL(kel []identity.SignedEvent) (string, error) {
 // would throw away information the hub still holds.
 func (s *Store) GraphNodeFor(aid string) AgentView {
 	row := s.db.QueryRow(
-		`SELECT a.aid, a.name, a.caps, a.summary, a.readme, a.pricing,
-		        a.registered_at, a.last_seen_at,
-		        COALESCE(AVG(r.rating),0), COUNT(r.interaction_id)
+		`SELECT a.aid, a.name, a.caps, a.summary, a.readme,
+		        a.registered_at, a.last_seen_at, `+agentKeyColumns+`,
+		        COALESCE(AVG(r.rating),0), COUNT(r.ix_commit)
 		   FROM agent a LEFT JOIN review r ON r.subject_aid = a.aid
 		  WHERE a.aid=? GROUP BY a.aid`, aid)
 	if av, err := scanAgent(row); err == nil {
@@ -1167,17 +1375,8 @@ func (s *Store) GraphNodeFor(aid string) AgentView {
 	// Not in the registry at all: it left, or it never banked here and is
 	// only known through a review that crossed from a peer. It is named
 	// from its A2A card while a peer publishes one (fed_a2acard.go), as
-	// /agents names it, else from its ADP card.
+	// /agents names it.
 	var fedName string
 	_ = s.db.QueryRow(`SELECT name FROM fed_a2a_card WHERE aid=? AND verified_at IS NOT NULL`, aid).Scan(&fedName)
-	var raw []byte
-	if fedName == "" {
-		if err := s.db.QueryRow(`SELECT card FROM fed_card WHERE aid=?`, aid).Scan(&raw); err == nil {
-			var card adp.AgentCard
-			if json.Unmarshal(raw, &card) == nil {
-				fedName = card.Name
-			}
-		}
-	}
 	return AgentView{AID: aid, Name: fedName, Caps: []string{}, Registered: false}
 }

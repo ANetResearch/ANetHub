@@ -59,3 +59,25 @@ func TestTheKernelAndAdminDoNotDependOnContentCodecs(t *testing.T) {
 		}
 	}
 }
+
+// The signed ADP card is gone from the hub with the public prices it
+// carried: an agent's directory entry is its signed A2A card. No package
+// of this module, tests included, depends on ANetCore/adp any more, so the
+// card cannot come back through a dependency nobody noticed.
+func TestTheHubDoesNotDependOnADP(t *testing.T) {
+	const adp = "github.com/ANetResearch/ANetCore/adp"
+	out, err := exec.Command("go", "list", "-deps", "-test", "-f", "{{.ImportPath}}",
+		"github.com/ANetResearch/ANetHub/...").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list -deps: %v\n%s", err, out)
+	}
+	deps := strings.Fields(string(out))
+	if len(deps) < 50 {
+		t.Fatalf("go list -deps returned %d packages: %s", len(deps), out)
+	}
+	for _, d := range deps {
+		if d == adp || strings.HasPrefix(d, adp+"/") {
+			t.Errorf("the hub depends on %s", d)
+		}
+	}
+}

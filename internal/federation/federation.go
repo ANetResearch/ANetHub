@@ -1,10 +1,20 @@
-// Package federation implements K208 delivery federation (集连, sub-plane A):
-// hub-to-hub forwarding of sealed envelopes. The hub signs the
-// ForwardEnvelope with its own AID (hubid) — that signature means "this flow
-// passed my quota and policy checks", never content endorsement. Since
-// forward v2 (A2A-DESIGN §3.9) the envelope names only the destination:
-// the sender, the message kind and the interaction are inside the sealed
-// payload and are neither forwarded nor stored by either hub.
+// Package federation is a hub's federation with its peer hubs, v3
+// (sealed-sender §2.8, §4.2.6, §4.2.7; core G3, G21): the routes under
+// /fed/v3 that peers call, each signed by the asking hub with relayauth v2
+// and checked by authPeer, and the requests this hub makes to them.
+//
+// Delivery (sub-plane A): a send whose recipient is registered at a peer is
+// handed on, by the sender's hub, to that one home hub (/fed/v3/forward);
+// the request is the envelope and its delivery credential, and names no
+// sender. Finding the home and the recipient's keys goes by directory
+// bucket (/fed/v3/directory:bucket), never by AID. Discovery (sub-plane B):
+// the A2A card stream (/fed/v3/cards) and the review stream
+// (/fed/v3/reviews), pulled by each hub from its peers.
+//
+// The hub signs its requests to peers with its own AID (hubid); that
+// signature means "this request is this hub's", never an endorsement of
+// what it carries. The kernel's checks and state stay in the kernel
+// (Kernel); this package moves the bytes and authenticates the peers.
 package federation
 
 import (
@@ -25,22 +35,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ANetResearch/ANetCore/anetcid"
-	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 	_ "modernc.org/sqlite"
 
-	"github.com/ANetResearch/ANetHub/internal/seamerr"
-
 	"github.com/ANetResearch/ANetHub/internal/hubid"
+	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
-
-// MaxHop bounds transit (K208 §4.2).
-const MaxHop = 3
-
-// DedupeWindow is the payload-CID idempotency window (K208: 7 days).
-const DedupeWindow = 7 * 24 * time.Hour
 
 // Peer is one statically configured federation peer (K208 v0.1: no hub
 // auto-discovery).
@@ -103,131 +105,48 @@ func LoadConfig(dir string) (Config, error) {
 	return c, nil
 }
 
-// LocalDelivery is what federation needs from the hub kernel — wired by the
-// application, so this module never imports the kernel's internals.
-//
-// Enqueue receives only the destination and the sealed envelope. It
-// returns an error wrapping ErrMailboxFull when the destination's quota is
-// reached, and one wrapping ErrBadEnvelope when the bytes are not a sealed
-// envelope for the destination.
-type LocalDelivery interface {
-	HasAgent(aid string) bool
-	Enqueue(toAID string, envelope []byte) (int64, error)
-}
-
-// ErrMailboxFull reports a destination mailbox at its quota, on this hub
-// (from LocalDelivery.Enqueue, answered 507 MAILBOX_FULL) or at a peer
-// (from TryForward, after the peer answered 507).
-var ErrMailboxFull error = &seamError{msg: "federation: destination mailbox full", kind: seamMailboxFull}
-
-// seamError is a federation sentinel that the hub kernel also recognises
-// as the matching internal/seamerr sentinel, through errors.Is, without
-// referring to this package.
-//
-// The kernel tests the errors its federation hooks return in code that
-// every build links. When it named federation.ErrMailboxFull there, a hub
-// built with -tags no_federation still linked federation symbols, which
-// the subtractive-tag symbol check forbids (A2A-DESIGN §16). The value is
-// a pointer to a constant composite literal so that it is initialised
-// statically: an initialiser that read another package's variable would
-// be run by this package's init function, and a no_federation build would
-// then link that function because the kernel imports this package.
-type seamError struct {
-	msg  string
-	kind int
-}
-
-const (
-	seamMailboxFull = iota + 1
-	seamNoKeys
-)
-
-func (e *seamError) Error() string { return e.msg }
-
-// Is reports the kernel sentinel of the same meaning as equal.
-func (e *seamError) Is(target error) bool {
-	switch e.kind {
-	case seamMailboxFull:
-		return target == seamerr.ErrMailboxFull
-	case seamNoKeys:
-		return target == seamerr.ErrNoKeys
-	}
-	return false
-}
-
-// ErrBadEnvelope reports a payload that is not a sealed envelope for the
-// destination.
-var ErrBadEnvelope = errors.New("federation: payload is not a sealed envelope for the destination")
-
-// ForwardVersion is the /fed/v1/forward envelope version this build
-// speaks. Version 2 removed from_aid, kind and interaction_id from the
-// envelope and from its signature preimage. A version-1 envelope is
-// refused with VERSION_UNSUPPORTED; there is no fallback, because a v1
-// peer forwards plaintext payloads with sender metadata that this hub
-// must not store.
-const ForwardVersion = 2
-
-// Envelope is the K208 §4.2 ForwardEnvelope, version 2: the destination,
-// the sealed envelope and the routing fields that loop and hop checks
-// need. Nothing about the sender is in it.
-type Envelope struct {
-	V            uint64   `json:"v"`
-	OriginHubAID string   `json:"origin_hub_aid"`
-	DestAID      string   `json:"dest_aid"`
-	Payload      string   `json:"payload"` // base64 of the sealed envelope
-	PayloadCID   string   `json:"payload_cid"`
-	Hop          uint64   `json:"hop"`
-	SeenHubs     []string `json:"seen_hubs"`
-	TS           uint64   `json:"ts"`
-	KeyStateSeq  uint64   `json:"key_state_seq"`
-	Sig          string   `json:"sig"` // base64, origin hub KEL signature
-}
-
-// preimage is the CoreDet-CBOR canonical bytes the hub signature covers
-// (_CONVENTIONS §2/§4: int keys, sig outside, arrays author-ordered).
-// Keys 4, 5 and 6 (from_aid, kind, interaction_id in v1) are retired and
-// not reused.
-func (e *Envelope) preimage(payload []byte) ([]byte, error) {
-	seen := make([]any, 0, len(e.SeenHubs))
-	for _, h := range e.SeenHubs {
-		seen = append(seen, h)
-	}
-	m := map[uint64]any{
-		1: e.V, 2: e.OriginHubAID, 3: e.DestAID,
-		7: payload, 8: e.PayloadCID, 9: e.Hop, 11: e.TS,
-	}
-	if len(seen) > 0 {
-		m[10] = seen
-	}
-	return coredet.Marshal(m)
-}
-
 // Service is one hub's federation face.
 type Service struct {
 	cfg     Config
 	id      *hubid.Identity
-	local   LocalDelivery
 	dir     Directory
-	keys    KeySource
+	kernel  Kernel
 	db      *sql.DB
-	http    *http.Client
 	witness Witness
-	// maxEnvelope bounds a forwarded envelope; the forward body cap is
-	// derived from it. Set by SetMaxEnvelope to the kernel's limit.
-	maxEnvelope int64
-	// replay remembers accepted /fed/v2/keys request signatures.
-	replay *replayGuard
+	// http carries the requests to peers that are not signed (a peer's
+	// /hub/identity, its issuance head), each bounded by its
+	// Timeout; the signed ones go through signer, bounded by their
+	// contexts. Both check the wire every answer states (wire).
+	http *http.Client
+	wire *peerWire
+	// signer signs this hub's requests to its peers (signer.go).
+	signer *Signer
+	// now is the clock (time.Now; a test's).
+	now func() time.Time
 	// round counts sync passes, so a full re-read can be scheduled
 	// without a second timer. Touched only from the sync loop.
 	round int
-	// a2aStreamStatus is each peer's last HTTP status on /fed/v2/cards,
+	// a2aStreamStatus is each peer's last HTTP status on /fed/v3/cards,
 	// so that a peer not yet upgraded is logged once rather than every
 	// round. Touched only from the sync loop.
 	a2aStreamStatus map[string]int
-	// kelFetches is each peer's first fetch of its KEL (peerKEL), by
-	// peer AID, under kelFetchesMu.
+	// kelFetches is each peer's fetches of its KEL (peerKEL, the
+	// periodic and on-demand refreshes of peerkel.go), by peer AID, under
+	// kelFetchesMu.
 	kelFetchesMu sync.Mutex
 	kelFetches   map[string]*peerKELFetch
+	// forks are the peers whose /hub/identity served a key history that
+	// contradicts the pinned one (KEL H-15), with when it was first seen
+	// and what differed, under kelFetchesMu.
+	forks map[string]PeerKELFork
+	// bodies is what the /fed/v3 routes hold of request bodies at once
+	// (sealed-sender SSR-H16; authpeer.go).
+	bodies *bodyBudget
+
+	// clearing answers the settlement routes (settle.go).
+	clearing Clearing
+	// status answers the peers' status checks (relaystatus.go).
+	status DeliveryStatus
 }
 
 // peerKELFetch serializes the fetches of one peer's KEL and remembers how
@@ -237,6 +156,10 @@ type peerKELFetch struct {
 	ended   time.Time  // when the last fetch ended
 	err     error      // how it failed; nil when it pinned
 	refused time.Time  // zero, or when the peer last served a KEL that does not prove its AID
+	// asked is when a use last fetched the KEL again because the pinned one
+	// did not reach the key state it needed (RefreshPeerKEL): at most once
+	// per peerKELRetry.
+	asked time.Time
 }
 
 // testHookPeerKELAsked, when a test sets it, is called by each use of a
@@ -245,7 +168,9 @@ type peerKELFetch struct {
 var testHookPeerKELAsked func()
 
 // peerKELRetry is how long after the peer served a KEL that does not prove
-// its AID the next fetch waits.
+// its AID the next fetch waits, and how often at most a use fetches a
+// peer's KEL again because the pinned one does not reach the key state it
+// needs (KEL H-15, H-34: once a minute per hub).
 const peerKELRetry = time.Minute
 
 // errUnprovenPeerKEL is a fetched KEL that does not replay to the peer's
@@ -257,20 +182,17 @@ var errUnprovenPeerKEL = errors.New("does not prove the peer's AID")
 // should not have to supply a directory it will never serve.
 func (s *Service) SetDirectory(d Directory) { s.dir = d }
 
-func New(dir string, cfg Config, id *hubid.Identity, local LocalDelivery) (*Service, error) {
+// New opens the federation module of the hub id, whose data directory is
+// dir. The kernel is wired afterwards (SetKernel), as is the directory.
+func New(dir string, cfg Config, id *hubid.Identity) (*Service, error) {
 	db, err := sql.Open("sqlite", filepath.Join(dir, "federation.db")+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(15000)")
 	if err != nil {
 		return nil, err
 	}
 	if _, err := db.Exec(`
-CREATE TABLE IF NOT EXISTS fed_dedupe (payload_cid TEXT PRIMARY KEY, ts INTEGER NOT NULL);
--- Each accepted forward prunes entries older than DedupeWindow; without this
--- the DELETE reads a week of payload CIDs per message (ANet an internal note).
-CREATE INDEX IF NOT EXISTS idx_fed_dedupe_ts ON fed_dedupe(ts);
 CREATE TABLE IF NOT EXISTS fed_peer_kel (aid TEXT PRIMARY KEY, kel BLOB NOT NULL, fetched_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS fed_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS fed_review_cursor (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS fed_cursor_v2 (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS fed_cursor_v3 (peer_aid TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
 `); err != nil {
 		db.Close()
 		return nil, err
@@ -279,30 +201,20 @@ CREATE TABLE IF NOT EXISTS fed_cursor_v2 (peer_aid TEXT PRIMARY KEY, cursor INTE
 		db.Close()
 		return nil, err
 	}
-	return &Service{cfg: cfg, id: id, local: local, db: db,
-		http:        &http.Client{Timeout: 10 * time.Second},
-		maxEnvelope: defaultMaxEnvelope, replay: newReplayGuard(),
-		a2aStreamStatus: map[string]int{}, kelFetches: map[string]*peerKELFetch{}}, nil
+	s := &Service{cfg: cfg, id: id, db: db, now: time.Now,
+		a2aStreamStatus: map[string]int{}, kelFetches: map[string]*peerKELFetch{},
+		forks: map[string]PeerKELFork{}, bodies: newBodyBudget(fedBodyBudget)}
+	// Every request to a peer states the hub wire (core CORE-V1), and
+	// every answer of a peer is checked for it (peerwire.go).
+	s.wire = newPeerWire(wire3.Transport(nil), func() time.Time { return s.now() })
+	s.http = &http.Client{Timeout: 10 * time.Second, Transport: s.wire}
+	s.signer = NewSigner(id, &http.Client{Transport: s.wire})
+	return s, nil
 }
 
 // defaultMaxEnvelope matches the kernel's default envelope limit
-// (A2A-DESIGN §3.7).
+// (A2A-DESIGN §3.7); /fed/v3/forward uses the kernel's own (Kernel).
 const defaultMaxEnvelope = 96 << 20
-
-// SetMaxEnvelope aligns the forward body cap with the kernel's envelope
-// limit, so that an envelope this hub's own senders may send is not
-// refused by the peers it is forwarded to, or the reverse.
-func (s *Service) SetMaxEnvelope(n int64) {
-	if n > 0 {
-		s.maxEnvelope = n
-	}
-}
-
-// forwardBodyLimit is the largest forward request: the base64 of the
-// largest envelope plus room for the rest of the JSON.
-func (s *Service) forwardBodyLimit() int64 {
-	return (s.maxEnvelope+2)/3*4 + 64<<10
-}
 
 func (s *Service) Close() error { return s.db.Close() }
 
@@ -344,9 +256,74 @@ func (s *Service) peer(aid string) *Peer {
 	return nil
 }
 
+// ---- the peers of delivery, as the kernel asks for them ----
+
+// DeliveryPeers is the hubs this one forwards to and asks for buckets, in
+// the order of the peer table; none when delivery federation is off.
+func (s *Service) DeliveryPeers() []string {
+	if !s.Enabled() {
+		return nil
+	}
+	out := make([]string, 0, len(s.cfg.Peers))
+	for _, p := range s.cfg.Peers {
+		out = append(out, p.AID)
+	}
+	return out
+}
+
+// IsDeliveryPeer reports whether hubAID is a hub this one forwards to.
+func (s *Service) IsDeliveryPeer(hubAID string) bool { return s.deliveryPeer(hubAID) != nil }
+
+// deliveryPeer is the peer hubAID when delivery federation is on, or nil.
+func (s *Service) deliveryPeer(hubAID string) *Peer {
+	if !s.Enabled() {
+		return nil
+	}
+	return s.peer(hubAID)
+}
+
+// DeliveryPeerAt is the AID of the delivery peer whose endpoint is the hub
+// URL home (a federated card's home, sealed-sender SSR-H12 step 3), or ""
+// when no delivery peer is at that URL. Scheme and host compare without
+// case, and a trailing slash does not count.
+func (s *Service) DeliveryPeerAt(home string) string {
+	if !s.Enabled() || home == "" {
+		return ""
+	}
+	want := endpointKey(home)
+	for _, p := range s.cfg.Peers {
+		if endpointKey(p.Endpoint) == want {
+			return p.AID
+		}
+	}
+	return ""
+}
+
+// endpointKey normalises a hub URL for comparison.
+func endpointKey(u string) string {
+	u = strings.TrimRight(strings.TrimSpace(u), "/")
+	if i := strings.Index(u, "://"); i >= 0 {
+		rest := u[i+3:]
+		host, path, _ := strings.Cut(rest, "/")
+		u = strings.ToLower(u[:i]) + "://" + strings.ToLower(host)
+		if path != "" {
+			u += "/" + path
+		}
+	}
+	return u
+}
+
+// errNotADeliveryPeer is the error of a request to a hub that is not a
+// delivery peer, or while delivery federation is off.
+func errNotADeliveryPeer(aid string) error {
+	return fmt.Errorf("federation: %s is not a peer this hub delivers to", aid)
+}
+
 // peerKEL returns the pinned KEL for a peer, fetching it from the peer's
-// /hub/identity on first contact (pin-on-first-fetch; rotation re-fetch is a
-// registered follow-up).
+// /hub/identity on first contact (pin on first fetch). Afterwards the pin
+// only grows: the sync every peerKELSyncEvery and a use that needs a later
+// key state (RefreshPeerKEL) extend it, never replace it (KEL H-15,
+// pinPeerKEL in peerkel.go).
 //
 // A fetched KEL is pinned only when it replays to the configured peer AID
 // (provenPeerKEL). The "aid" the peer serves beside it is a claim; the
@@ -373,13 +350,7 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	if kel, err := s.pinnedPeerKEL(p.AID); err == nil || err != sql.ErrNoRows {
 		return kel, err
 	}
-	s.kelFetchesMu.Lock()
-	f := s.kelFetches[p.AID]
-	if f == nil {
-		f = &peerKELFetch{}
-		s.kelFetches[p.AID] = f
-	}
-	s.kelFetchesMu.Unlock()
+	f := s.peerKELFetchOf(p.AID)
 	asked := time.Now()
 	if testHookPeerKELAsked != nil {
 		testHookPeerKELAsked()
@@ -408,6 +379,18 @@ func (s *Service) peerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	return kel, err
 }
 
+// peerKELFetchOf is the fetch state of peer aid.
+func (s *Service) peerKELFetchOf(aid string) *peerKELFetch {
+	s.kelFetchesMu.Lock()
+	defer s.kelFetchesMu.Unlock()
+	f := s.kelFetches[aid]
+	if f == nil {
+		f = &peerKELFetch{}
+		s.kelFetches[aid] = f
+	}
+	return f
+}
+
 // pinnedPeerKEL is the KEL pinned for peer aid, or sql.ErrNoRows.
 func (s *Service) pinnedPeerKEL(aid string) ([]identity.SignedEvent, error) {
 	var blob []byte
@@ -417,8 +400,11 @@ func (s *Service) pinnedPeerKEL(aid string) ([]identity.SignedEvent, error) {
 	return identity.UnmarshalKEL(blob)
 }
 
-// fetchPeerKEL fetches p's KEL from its /hub/identity and pins it when it
-// replays to p.AID.
+// fetchPeerKEL fetches p's KEL from its /hub/identity and, when it replays
+// to p.AID as a hub's key history, pins it or extends the pin with it
+// (pinPeerKEL). It returns the KEL pinned afterwards, which is the one held
+// before when what the peer served does not extend it. The caller holds
+// the peer's fetch lock.
 func (s *Service) fetchPeerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	resp, err := s.http.Get(p.Endpoint + "/hub/identity")
 	if err != nil {
@@ -435,19 +421,15 @@ func (s *Service) fetchPeerKEL(p *Peer) ([]identity.SignedEvent, error) {
 	if out.AID != p.AID {
 		return nil, fmt.Errorf("peer identity mismatch: served %s, configured %s", out.AID, p.AID)
 	}
-	blob, err := base64.StdEncoding.DecodeString(out.KEL)
+	blob, err := wire3.DecodeB64URL("kel", out.KEL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("peer %s served a key history that is not base64url (hub wire 3): %w", p.AID, err)
 	}
 	kel, err := provenPeerKEL(blob, p.AID)
 	if err != nil {
 		return nil, fmt.Errorf("peer %s served a key history that %v; not pinned: %w", p.AID, err, errUnprovenPeerKEL)
 	}
-	if _, err := s.db.Exec(`INSERT OR REPLACE INTO fed_peer_kel (aid, kel, fetched_at) VALUES (?,?,?)`,
-		p.AID, blob, time.Now().UnixMilli()); err != nil {
-		return nil, err
-	}
-	return kel, nil
+	return s.pinPeerKEL(p.AID, kel, blob)
 }
 
 // peerIdentityLimit bounds a peer's /hub/identity answer, which is an AID
@@ -460,7 +442,10 @@ const peerIdentityLimit = 1 << 20
 // It is decoded under the caps every sender applies to a KEL
 // (seal.ParseKEL), and the AID is checked on the inception first: it is
 // the icp's, and costs one verification, where replaying all of a KEL that
-// is somebody else's costs one per event.
+// is somebody else's costs one per event. A key history whose icp is not a
+// hub's (toad 0) is refused whatever it replays to (KEL H-15): a hub's key
+// history names no witness, and an agent's would make every notice check
+// against it meaningless.
 func provenPeerKEL(blob []byte, aid string) ([]identity.SignedEvent, error) {
 	kel, err := seal.ParseKEL(blob)
 	if err != nil {
@@ -478,6 +463,9 @@ func provenPeerKEL(blob []byte, aid string) ([]identity.SignedEvent, error) {
 	}
 	if got := states[len(states)-1].AID; got != aid {
 		return nil, fmt.Errorf("replays to %s, not to %s", got, aid)
+	}
+	if t := states[len(states)-1].Toad; t != identity.ToadHub {
+		return nil, fmt.Errorf("is not a hub's key history (toad %d)", t)
 	}
 	return kel, nil
 }
@@ -518,236 +506,40 @@ func dropUnprovenPeerKELs(db *sql.DB) error {
 
 // ---- inbound ----
 
-// Handler serves the federation routes: /fed/v1/forward, /fed/v1/cards,
-// /fed/v1/reviews, /fed/v2/keys/{aid} and /fed/v2/cards.
+// Handler serves the federation routes, all under /fed/v3 (core G21) and
+// all signed by a peer hub (authPeer):
+//
+//	POST /fed/v3/forward            an envelope for an agent registered here (forward_v3.go)
+//	POST /fed/v3/directory:bucket   a bucket of this hub's directory (bucket.go)
+//	POST /fed/v3/relay-status       a sender's status check, asked by its hub (relaystatus.go)
+//	GET  /fed/v3/cards              the A2A card stream (a2acards.go)
+//	GET  /fed/v3/reviews            the review stream (below)
+//	POST /fed/v3/settle             a payment on this hub's ledger for a peer's payee (settle.go)
+//	POST /fed/v3/clear              a peer's discharge of what it owed (settle.go)
+//
+// The v0.2 routes (/fed/v1/forward, /fed/v1/reviews, /fed/v2/keys/{aid},
+// /fed/v2/cards) are gone and answer 404 with the rest of what no route
+// takes; so is the ADP card stream, /fed/v1/cards.
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /fed/v1/forward", s.hForward)
-	mux.HandleFunc("GET /fed/v1/cards", s.hCards)
-	mux.HandleFunc("GET /fed/v1/reviews", s.hFedReviewStream)
-	mux.HandleFunc("GET /fed/v2/keys/{aid}", s.hKeys)
-	// The A2A card stream (A2A-DESIGN §10.6). /fed/v1/cards stays until
-	// every peer reads v2.
-	mux.HandleFunc("GET /fed/v2/cards", s.hA2ACards)
-	return mux
+	mux.HandleFunc("POST /fed/v3/forward", s.hForward)
+	mux.HandleFunc("POST /fed/v3/directory:bucket", s.hBucket)
+	mux.HandleFunc("POST /fed/v3/relay-status", s.hRelayStatus)
+	mux.HandleFunc("GET /fed/v3/cards", s.hA2ACards)
+	mux.HandleFunc("GET /fed/v3/reviews", s.hFedReviewStream)
+	mux.HandleFunc("POST /fed/v3/settle", s.hSettle)
+	mux.HandleFunc("POST /fed/v3/clear", s.hClear)
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { wire3.Refuse(w, wire3.ReasonNotFound) })
+	return s.holdBodies(mux)
 }
-
-func fedErr(w http.ResponseWriter, code int, label string, detail string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": label, "detail": detail})
-}
-
-func (s *Service) hForward(w http.ResponseWriter, r *http.Request) {
-	if !s.Enabled() {
-		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "federation disabled")
-		return
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.forwardBodyLimit()))
-	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			fedErr(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
-				fmt.Sprintf("forward body exceeds %d bytes", s.forwardBodyLimit()))
-			return
-		}
-		fedErr(w, http.StatusBadRequest, "MALFORMED", err.Error())
-		return
-	}
-	var env Envelope
-	if err := json.Unmarshal(body, &env); err != nil {
-		fedErr(w, http.StatusBadRequest, "MALFORMED", err.Error())
-		return
-	}
-	if env.V != ForwardVersion {
-		fedErr(w, http.StatusBadRequest, "VERSION_UNSUPPORTED", fmt.Sprintf(
-			"this hub accepts forward envelope v%d only (anet-hub wire 2); the origin hub sent v%d "+
-				"and must be upgraded before it can forward here", ForwardVersion, env.V))
-		return
-	}
-	peer := s.peer(env.OriginHubAID)
-	if peer == nil {
-		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "origin hub not in peer table")
-		return
-	}
-	if env.Hop > MaxHop {
-		fedErr(w, http.StatusBadRequest, "HOP_EXCEEDED", "")
-		return
-	}
-	for _, h := range env.SeenHubs {
-		if h == s.id.AID {
-			fedErr(w, http.StatusBadRequest, "HOP_EXCEEDED", "loop: this hub already relayed the envelope")
-			return
-		}
-	}
-	payload, err := base64.StdEncoding.DecodeString(env.Payload)
-	if err != nil {
-		fedErr(w, http.StatusBadRequest, "MALFORMED", "payload not base64")
-		return
-	}
-	// The body cap above leaves room for the JSON around the payload, so
-	// the envelope itself is checked against the exact limit here, the
-	// same limit /relay/send applies to a local sender.
-	if int64(len(payload)) > s.maxEnvelope {
-		fedErr(w, http.StatusRequestEntityTooLarge, "TOO_LARGE",
-			fmt.Sprintf("envelope is %d bytes, this hub accepts at most %d", len(payload), s.maxEnvelope))
-		return
-	}
-	cid, err := anetcid.SumRaw(payload)
-	if err != nil || cid != env.PayloadCID {
-		fedErr(w, http.StatusBadRequest, "MALFORMED", "payload_cid mismatch")
-		return
-	}
-	kel, err := s.peerKEL(peer)
-	if err != nil {
-		fedErr(w, http.StatusBadGateway, "POLICY_REFUSED", "peer kel unavailable: "+err.Error())
-		return
-	}
-	pre, err := env.preimage(payload)
-	if err != nil {
-		fedErr(w, http.StatusBadRequest, "MALFORMED", err.Error())
-		return
-	}
-	sig, err := base64.StdEncoding.DecodeString(env.Sig)
-	if err != nil {
-		fedErr(w, http.StatusBadRequest, "MALFORMED", "sig not base64")
-		return
-	}
-	if err := identity.VerifyObject(kel, env.OriginHubAID, env.KeyStateSeq, env.TS, pre, sig); err != nil {
-		fedErr(w, http.StatusUnauthorized, "INVALID_SIGNATURE", err.Error())
-		return
-	}
-	// The destination check runs before anything is written to
-	// fed_dedupe. UNKNOWN_DESTINATION is a statement about this instant
-	// — the recipient is not registered here right now — not about the
-	// payload, and the recipient may register a moment later. Recording
-	// the CID for a refused forward would make the 7-day window swallow
-	// every subsequent legitimate redelivery of the same bytes as
-	// DUPLICATE, with both hubs seeing a 2xx and no message arriving.
-	if !s.local.HasAgent(env.DestAID) {
-		fedErr(w, http.StatusNotFound, "UNKNOWN_DESTINATION", env.DestAID)
-		return
-	}
-	// Idempotency: second delivery of the same payload is a success
-	// no-op. The claim is taken before the enqueue rather than after,
-	// because INSERT OR IGNORE on the primary key is the only mutual
-	// exclusion available here — two concurrent deliveries of one CID
-	// would otherwise both pass the check and both enqueue. The cost is
-	// that the claim and the enqueue cannot be one transaction (the
-	// mailbox is the hub kernel's store, reached through the
-	// LocalDelivery seam, not this database), so a failed enqueue has to
-	// release the claim explicitly below.
-	res, err := s.db.Exec(`INSERT OR IGNORE INTO fed_dedupe (payload_cid, ts) VALUES (?,?)`, env.PayloadCID, time.Now().UnixMilli())
-	if err != nil {
-		// Accepting without a durable claim would turn the peer's retry
-		// into a second delivery, so refuse and let it retry instead.
-		fedErr(w, http.StatusServiceUnavailable, "POLICY_REFUSED", "dedupe store unavailable: "+err.Error())
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "DUPLICATE"})
-		return
-	}
-	if _, err := s.local.Enqueue(env.DestAID, payload); err != nil {
-		// Nothing was delivered, so the claim must not outlive the
-		// attempt; otherwise the peer's retry is answered DUPLICATE and
-		// the payload is lost.
-		_, _ = s.db.Exec(`DELETE FROM fed_dedupe WHERE payload_cid=?`, env.PayloadCID)
-		switch {
-		case errors.Is(err, ErrMailboxFull):
-			fedErr(w, http.StatusInsufficientStorage, "MAILBOX_FULL", err.Error())
-		case errors.Is(err, ErrBadEnvelope):
-			fedErr(w, http.StatusBadRequest, "MALFORMED", err.Error())
-		default:
-			fedErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		}
-		return
-	}
-	_, _ = s.db.Exec(`DELETE FROM fed_dedupe WHERE ts < ?`, time.Now().Add(-DedupeWindow).UnixMilli())
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
-}
-
-// ---- egress ----
-
-// TryForward offers a locally-undeliverable sealed envelope to each peer
-// in order; the first 202 wins. 404 means "not my agent" and the walk
-// continues. A peer answering 507 ends the walk with an error wrapping
-// ErrMailboxFull: the destination lives there and its mailbox is full.
-func (s *Service) TryForward(destAID string, envelope []byte) (bool, string, error) {
-	if !s.Enabled() {
-		return false, "", nil
-	}
-	payload := envelope
-	cid, err := anetcid.SumRaw(payload)
-	if err != nil {
-		return false, "", err
-	}
-	env := Envelope{
-		V: ForwardVersion, OriginHubAID: s.id.AID, DestAID: destAID,
-		Payload:    base64.StdEncoding.EncodeToString(payload),
-		PayloadCID: cid, Hop: 1, SeenHubs: []string{s.id.AID}, TS: uint64(time.Now().UnixMilli()),
-	}
-	pre, err := env.preimage(payload)
-	if err != nil {
-		return false, "", err
-	}
-	sig, seq := s.id.Sign(pre)
-	env.Sig, env.KeyStateSeq = base64.StdEncoding.EncodeToString(sig), seq
-
-	body, _ := json.Marshal(env)
-	var lastErr error
-	for _, p := range s.cfg.Peers {
-		resp, err := s.http.Post(p.Endpoint+"/fed/v1/forward", "application/json", bytes.NewReader(body))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		code := resp.StatusCode
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		resp.Body.Close()
-		switch code {
-		case http.StatusAccepted, http.StatusOK: // queued or idempotent duplicate
-			return true, p.AID, nil
-		case http.StatusNotFound:
-			continue
-		case http.StatusInsufficientStorage:
-			return false, "", fmt.Errorf("%w at peer %s: %s", ErrMailboxFull, p.AID, strings.TrimSpace(string(detail)))
-		default:
-			// The peer's own explanation is kept: a VERSION_UNSUPPORTED
-			// from a peer that has not been upgraded to forward v2 is the
-			// case an operator most needs to read.
-			lastErr = fmt.Errorf("peer %s: HTTP %d: %s", p.AID, code, strings.TrimSpace(string(detail)))
-		}
-	}
-	return false, "", lastErr
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// test seams (kept in the main file so the preimage and CID rules stay in
-// one place; no behavioral surface).
-func sumRawForTest(b []byte) (string, error) { return anetcid.SumRaw(b) }
-func nowMillisForTest() uint64               { return uint64(time.Now().UnixMilli()) }
 
 // ---- sub-plane B: discovery federation (K208 §5) ----
 
 // Directory is what discovery federation needs from the hub kernel. Kept
-// separate from LocalDelivery because the two sub-planes switch
-// independently, and a hub running only one should not have to implement
-// the other's seam.
+// separate from Kernel because the two sub-planes switch independently,
+// and a hub running only one should not have to implement the other's
+// seam.
 type Directory interface {
-	// CardsSince serves this hub's own opted-in cards after a cursor.
-	CardsSince(cursor int64, limit int, home string) ([]FedCardView, int64, error)
-	// AdmitFedCard verifies and stores a card learned from a peer, with
-	// the encryption key set the entry carried (nil when none). An
-	// error wrapping ErrRefusedForNow means the refusal may stop
-	// applying, and the cursor must not advance past that card.
-	AdmitFedCard(peerAID string, card, kel, keys []byte, home string) error
 	// ReviewsSince serves this hub's own opted-in reviews after a cursor,
 	// as opaque JSON. Opaque because federation moves the bytes and the
 	// kernel decides what they mean — a module that understood the shape
@@ -755,7 +547,7 @@ type Directory interface {
 	ReviewsSince(cursor int64, limit int) ([]json.RawMessage, int64, error)
 	// AdmitFedReview verifies and stores a review learned from a peer.
 	AdmitFedReview(peerAID string, review json.RawMessage) error
-	// A2ACardsSince serves the A2A card stream (/fed/v2/cards, A2A-DESIGN
+	// A2ACardsSince serves the A2A card stream (/fed/v3/cards, A2A-DESIGN
 	// §10.6): the verified A2A cards of this hub's own agents that opted
 	// in, and the withdrawals of cards it stopped publishing, in fed_seq
 	// order after a cursor.
@@ -763,7 +555,8 @@ type Directory interface {
 	// AdmitFedA2ACard admits one A2A card stream entry learned from a
 	// peer, dispatching on its Format (FormatA2ACard or FormatWithdrawal;
 	// the sync loop skips any other). An error wrapping ErrRefusedForNow
-	// holds the cursor, as for AdmitFedCard.
+	// means the refusal may stop applying, and the cursor must not advance
+	// past that entry.
 	AdmitFedA2ACard(peerAID string, entry FedA2ACardView) error
 }
 
@@ -777,24 +570,6 @@ type Directory interface {
 // card the moment the fact changes.
 var ErrRefusedForNow = errors.New("federation: refused for now")
 
-// FedCardView is one entry of the sync stream, as the kernel hands it over.
-// Keys is the agent's seal.SignedEncKeySet encoding, or nil.
-type FedCardView struct {
-	Card   []byte
-	KEL    []byte
-	Keys   []byte
-	Home   string
-	FedSeq int64
-}
-
-type fedCardWire struct {
-	Card   json.RawMessage `json:"card"`
-	KEL    string          `json:"kel"`
-	Keys   string          `json:"keys,omitempty"` // base64 of the seal.SignedEncKeySet encoding
-	Home   string          `json:"home"`
-	FedSeq int64           `json:"fed_seq"`
-}
-
 // fullResyncEvery is how many sync rounds pass between full re-reads of
 // a peer's directory. At the steady two-minute cadence this is about
 // every half hour, so a directory that lost an entry heals well inside
@@ -806,61 +581,67 @@ func (s *Service) DiscoveryEnabled() bool {
 	return s.cfg.Discovery != "" && s.cfg.Discovery != "off" && len(s.cfg.Peers) > 0
 }
 
-// hCards serves GET /fed/v1/cards?cursor=<c>.
-//
-// Unauthenticated on purpose. Everything it serves is an agent's own
-// signed card, published by an agent that asked to be federated — there
-// is nothing here a caller could learn that the agent did not choose to
-// say, and requiring a signature to read public statements would only
-// stop the honest.
-func (s *Service) hCards(w http.ResponseWriter, r *http.Request) {
-	if !s.DiscoveryEnabled() || s.dir == nil {
-		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "discovery federation disabled")
-		return
-	}
-	cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
-	cards, next, err := s.dir.CardsSince(cursor, 200, s.cfg.Home)
-	if err != nil {
-		fedErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
-	}
-	out := make([]fedCardWire, 0, len(cards))
-	for _, c := range cards {
-		cw := fedCardWire{
-			Card: json.RawMessage(c.Card), KEL: base64.StdEncoding.EncodeToString(c.KEL),
-			Home: c.Home, FedSeq: c.FedSeq,
-		}
-		if len(c.Keys) > 0 {
-			cw.Keys = base64.StdEncoding.EncodeToString(c.Keys)
-		}
-		out = append(out, cw)
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"cursor": next, "cards": out})
-}
-
-// hFedReviewStream serves GET /fed/v1/reviews?cursor=<c>.
-//
-// Unauthenticated for the same reason as the card stream: every review
-// here is a signature the reviewer already published, over an interaction
-// the provider already receipted. There is nothing to withhold from a
-// reader that the parties did not choose to say.
+// hFedReviewStream serves GET /fed/v3/reviews?cursor=<c> (core §2.12.2,
+// relayauth fed_reviews), to the peers of the discovery sub-plane:
+// {cursor, reviews}, each entry review/2 as the kernel made it (receipt,
+// review, this hub's attestation, the provider's key history, fed_seq).
 func (s *Service) hFedReviewStream(w http.ResponseWriter, r *http.Request) {
-	if !s.DiscoveryEnabled() || s.dir == nil {
-		fedErr(w, http.StatusForbidden, "POLICY_REFUSED", "discovery federation disabled")
+	if _, _, ok := s.authPeer(w, r, relayauth.ActionFedReviews, s.DiscoveryEnabled() && s.dir != nil, 0, nil); !ok {
 		return
 	}
-	cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
+	cursor, ok := streamCursor(w, r)
+	if !ok {
+		return
+	}
 	revs, next, err := s.dir.ReviewsSince(cursor, 100)
 	if err != nil {
-		fedErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		wire3.Internal(w, err)
 		return
 	}
 	if revs == nil {
 		revs = []json.RawMessage{}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"cursor": next, "reviews": revs})
+	writeJSON(w, http.StatusOK, map[string]any{"cursor": next, "reviews": revs})
+}
+
+// streamCursor reads the cursor of a stream request: absent is 0, anything
+// else a non-negative integer in canonical decimal, or 400 bad_request.
+func streamCursor(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	q := r.URL.Query()
+	if _, ok := q["cursor"]; !ok {
+		return 0, true
+	}
+	v := q.Get("cursor")
+	c, err := strconv.ParseInt(v, 10, 64)
+	if len(q["cursor"]) != 1 || err != nil || c < 0 || strconv.FormatInt(c, 10) != v {
+		wire3.Write(w, wire3.Refusal{Reason: wire3.ReasonBadRequest,
+			Error: "The query member \"cursor\" is the cursor of the previous page, a non-negative integer; send it once, or not at all to start from the beginning."})
+		return 0, false
+	}
+	return c, true
+}
+
+// streamTimeout bounds one page of a stream a peer serves.
+const streamTimeout = 10 * time.Second
+
+// getStream asks the peer p for one page of the stream at path after
+// cursor, signed for action, and decodes the JSON answer into out. A peer
+// answering other than 200 is reported by its status, and the caller
+// decides whether to say so.
+func (s *Service) getStream(ctx context.Context, p *Peer, path, action string, cursor int64, out any, limit int64) (int, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, streamTimeout)
+	defer cancel()
+	resp, err := s.signer.Do(ctx, p.AID, action, Request{Method: http.MethodGet,
+		URL: fmt.Sprintf("%s%s?cursor=%d", strings.TrimSuffix(p.Endpoint, "/"), path, cursor)})
+	if err != nil {
+		return 0, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return resp.StatusCode, strings.TrimSpace(string(detail)), nil
+	}
+	return http.StatusOK, "", json.NewDecoder(io.LimitReader(resp.Body, limit)).Decode(out)
 }
 
 // syncReviews pulls each peer's reputation stream forward by one page.
@@ -875,39 +656,59 @@ func (s *Service) syncReviews(ctx context.Context) (admitted, refused int) {
 	for i := range s.cfg.Peers {
 		p := &s.cfg.Peers[i]
 		cursor := s.peerReviewCursor(p.AID)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/fed/v1/reviews?cursor=%d", strings.TrimSuffix(p.Endpoint, "/"), cursor), nil)
-		if err != nil {
-			continue
-		}
-		resp, err := s.http.Do(req)
-		if err != nil {
-			log.Printf("hub: reputation sync %s: %v", p.AID, err)
-			continue
-		}
 		var out struct {
 			Cursor  int64             `json:"cursor"`
 			Reviews []json.RawMessage `json:"reviews"`
 		}
-		derr := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&out)
-		resp.Body.Close()
-		if derr != nil {
-			log.Printf("hub: reputation sync %s: %v", p.AID, derr)
+		status, detail, err := s.getStream(ctx, p, "/fed/v3/reviews", relayauth.ActionFedReviews, cursor, &out, 16<<20)
+		if err != nil {
+			log.Printf("hub: reputation sync %s: %v", p.AID, err)
 			continue
 		}
+		if status != http.StatusOK {
+			log.Printf("hub: reputation sync %s: HTTP %d: %s", p.AID, status, detail)
+			continue
+		}
+		// An entry refused for now (the peer signed it under a key state
+		// this hub has not caught up with) holds the cursor just before
+		// it, so it is read again; one refused for good is passed, like a
+		// card (syncA2ACards).
+		stalled, stall := false, int64(0)
 		for _, rv := range out.Reviews {
 			if err := s.dir.AdmitFedReview(p.AID, rv); err != nil {
 				log.Printf("hub: federated review from %s refused: %v", p.AID, err)
 				refused++
+				if errors.Is(err, ErrRefusedForNow) {
+					stalled, stall = true, reviewFedSeq(rv)
+					break
+				}
 				continue
 			}
 			admitted++
 		}
-		if out.Cursor > cursor {
+		switch {
+		case stalled && stall > cursor:
+			s.setPeerReviewCursor(p.AID, stall-1)
+		case stalled:
+			// At or before the cursor, or of no readable place: the
+			// cursor stays.
+		case out.Cursor > cursor:
 			s.setPeerReviewCursor(p.AID, out.Cursor)
 		}
 	}
 	return admitted, refused
+}
+
+// reviewFedSeq is the fed_seq of a review stream entry, or 0 when it has
+// none the module can read. The module reads nothing else of an entry.
+func reviewFedSeq(raw json.RawMessage) int64 {
+	var e struct {
+		FedSeq int64 `json:"fed_seq"`
+	}
+	if json.Unmarshal(raw, &e) != nil || e.FedSeq < 0 {
+		return 0
+	}
+	return e.FedSeq
 }
 
 func (s *Service) peerReviewCursor(aid string) int64 {
@@ -922,13 +723,16 @@ func (s *Service) setPeerReviewCursor(aid string, c int64) {
 		 ON CONFLICT(peer_aid) DO UPDATE SET cursor=excluded.cursor`, aid, c)
 }
 
-// SyncOnce pulls each peer's directory forward by one page.
+// SyncOnce pulls each peer's directory forward by one page: its A2A card
+// stream (a2acards.go) and its reputation stream.
 //
 // Per peer, because a peer that is down or lying must not stop the
 // others: its cursor simply does not advance, and the next attempt asks
-// for the same page. A card that fails admission is dropped and the
-// cursor still advances past it — refusing to move would let one bad card
-// from one peer wedge that peer's stream forever.
+// for the same page. An entry that fails admission for good is dropped and
+// the cursor still advances past it — refusing to move would let one bad
+// card from one peer wedge that peer's stream forever; one refused for now
+// (ErrRefusedForNow) holds the cursor, so it is read again once the
+// refusal stops applying.
 func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 	if !s.DiscoveryEnabled() || s.dir == nil {
 		return 0, 0
@@ -949,96 +753,10 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 	// heals within the hour rather than at the next restart.
 	s.round++
 	full := s.round%fullResyncEvery == 0
-
-	for i := range s.cfg.Peers {
-		p := &s.cfg.Peers[i]
-		cursor := s.peerCursor(p.AID)
-		if full {
-			log.Printf("hub: federation full resync from %s", p.AID)
-			cursor = 0
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			fmt.Sprintf("%s/fed/v1/cards?cursor=%d", strings.TrimSuffix(p.Endpoint, "/"), cursor), nil)
-		if err != nil {
-			continue
-		}
-		resp, err := s.http.Do(req)
-		if err != nil {
-			log.Printf("hub: federation sync %s: %v", p.AID, err)
-			continue
-		}
-		var out struct {
-			Cursor int64         `json:"cursor"`
-			Cards  []fedCardWire `json:"cards"`
-		}
-		derr := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out)
-		resp.Body.Close()
-		if derr != nil {
-			log.Printf("hub: federation sync %s: %v", p.AID, derr)
-			continue
-		}
-		var stall int64
-		for _, c := range out.Cards {
-			kel, kerr := base64.StdEncoding.DecodeString(c.KEL)
-			if kerr != nil {
-				refused++
-				continue
-			}
-			home := c.Home
-			if home == "" {
-				// A peer that names no home still tells us who exists;
-				// its own endpoint is the honest fallback for where they
-				// are reachable.
-				home = p.Endpoint
-			}
-			// The key set is advisory: one that does not decode is passed
-			// as absent and the card is still admitted.
-			var keys []byte
-			if c.Keys != "" {
-				if k, kerr := base64.StdEncoding.DecodeString(c.Keys); kerr == nil {
-					keys = k
-				}
-			}
-			if err := s.dir.AdmitFedCard(p.AID, c.Card, kel, keys, home); err != nil {
-				log.Printf("hub: federation card from %s refused: %v", p.AID, err)
-				refused++
-				// A refusal that may stop applying must not be skipped
-				// past. Advancing over it loses the card for ever the
-				// moment the reason goes away — which is what happened
-				// in production: a peer's card was refused because that
-				// agent was registered here, the agent later moved, and
-				// the directory never learned it existed.
-				//
-				// Holding the cursor here means a peer that keeps
-				// sending such a card stalls its own stream. That is
-				// visible in the log every round, which is the right
-				// place for it: silently dropping an agent from the
-				// directory is the failure nobody notices.
-				if errors.Is(err, ErrRefusedForNow) {
-					stall = c.FedSeq
-					break
-				}
-				continue
-			}
-			admitted++
-		}
-		switch {
-		case stall > 0 && stall > cursor:
-			s.setPeerCursor(p.AID, stall-1)
-		case out.Cursor > cursor:
-			s.setPeerCursor(p.AID, out.Cursor)
-		}
-		if full && out.Cursor > 0 && stall == 0 {
-			// A full pass that admitted everything leaves the cursor
-			// where the peer says the end is, so the next ordinary round
-			// picks up from there rather than replaying the directory.
-			s.setPeerCursor(p.AID, out.Cursor)
-		}
+	if full {
+		log.Printf("hub: federation full resync from every peer")
 	}
-	// The A2A card stream rides the same tick and the same full-resync
-	// schedule, with its own cursor (a2acards.go).
-	aa, ar := s.syncA2ACards(ctx, full)
-	admitted, refused = admitted+aa, refused+ar
+	admitted, refused = s.syncA2ACards(ctx, full)
 	// Reputation rides the same tick. Cards say who exists; reviews say
 	// how they have done. Pulling one without the other gives a directory
 	// full of strangers with no standing, which is a directory nobody can
@@ -1047,61 +765,12 @@ func (s *Service) SyncOnce(ctx context.Context) (admitted, refused int) {
 	return admitted + ra, refused + rr
 }
 
-func (s *Service) peerCursor(aid string) int64 {
-	var c int64
-	_ = s.db.QueryRow(`SELECT cursor FROM fed_cursor WHERE peer_aid=?`, aid).Scan(&c)
-	return c
-}
+// ---- cross-hub settlement: settle.go ----
 
-func (s *Service) setPeerCursor(aid string, c int64) {
-	_, _ = s.db.Exec(
-		`INSERT INTO fed_cursor(peer_aid, cursor) VALUES(?,?)
-		 ON CONFLICT(peer_aid) DO UPDATE SET cursor=excluded.cursor`, aid, c)
-}
-
-// ---- cross-hub settlement (the clearing half of discovery federation) ----
-
-// SettleAtPeer asks the hub that owns a ledger to settle a payment on it.
-//
-// The provider's hub cannot settle a balance it does not keep, and
-// refusing would make a paid capability unusable across a federation. So
-// it forwards, and the answer comes back with the settling hub's signed
-// receipt — which is what lets the asking hub credit its own payee on
-// another hub's word and still be able to show what that word was.
-//
-// Only allowlisted peers, and only the peer whose AID the network names.
-// A settlement request routed by the caller would be a request to credit
-// whoever the caller chose.
-func (s *Service) SettleAtPeer(ctx context.Context, network string, body []byte) ([]byte, string, error) {
-	if !s.DiscoveryEnabled() && !s.Enabled() {
-		return nil, "", fmt.Errorf("federation disabled")
-	}
-	const prefix = "hub:"
-	if !strings.HasPrefix(network, prefix) {
-		return nil, "", fmt.Errorf("not a hub ledger: %q", network)
-	}
-	peerAID := strings.TrimPrefix(network, prefix)
-	p := s.peer(peerAID)
-	if p == nil {
-		return nil, "", fmt.Errorf("hub %s is not a peer of this one", peerAID)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimSuffix(p.Endpoint, "/")+"/x402/settle", bytes.NewReader(body))
-	if err != nil {
-		return nil, "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.http.Do(req)
-	if err != nil {
-		return nil, "", err
-	}
-	defer resp.Body.Close()
-	out, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	return out, peerAID, err
-}
-
-// PeerKEL exposes a peer's verified key history, so the kernel can check
-// a settlement receipt the peer signed.
+// PeerKEL exposes a peer's verified key history, as pinned, so the kernel
+// can check what the peer signed: a settlement receipt, a witness notice
+// (KEL H-34). When the object names a key state past it, the kernel asks
+// RefreshPeerKEL once.
 func (s *Service) PeerKEL(peerAID string) ([]identity.SignedEvent, error) {
 	p := s.peer(peerAID)
 	if p == nil {
@@ -1114,7 +783,7 @@ func (s *Service) PeerKEL(peerAID string) ([]identity.SignedEvent, error) {
 
 // Witness is what the kernel supplies so federation can pin peer heads.
 //
-// A seam rather than an import, like Directory and LocalDelivery: the
+// A seam rather than an import, like Directory and Kernel: the
 // kernel owns the chain and the signing key, federation owns the peers
 // and the polling. Neither needs to know how the other works.
 type Witness interface {
@@ -1126,11 +795,11 @@ type Witness interface {
 // SetWitness wires the witnessing seam.
 func (s *Service) SetWitness(w Witness) { s.witness = w }
 
-// WitnessOnce pins each peer's current issuance head.
+// WitnessOnce pins each peer's current supply epoch chain head.
 //
 // Per peer, and failures are logged rather than fatal: a peer that is
-// down, or running a build with no issuance chain, must not stop the
-// others being witnessed.
+// down, or that has published no epoch yet, must not stop the others being
+// witnessed.
 //
 // The attestation is stored locally first and sent to the peer second.
 // That order is the whole point — evidence about a party that only that
@@ -1153,10 +822,13 @@ func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
 			log.Printf("hub: witness %s: %v", p.AID, err)
 			continue
 		}
+		// The head of the peer's supply epoch chain: {seq, id}, or {}
+		// before its first epoch (hub-payment-privacy §2.3). It moves once
+		// per epoch. What this hub signs is what the peer served as its
+		// own head, so the attestation names the peer's AID as the chain.
 		var head struct {
-			ChainDID string `json:"chain_did"`
-			Seq      uint64 `json:"seq"`
-			HeadID   string `json:"head_id"`
+			Seq uint64 `json:"seq"`
+			ID  string `json:"id"`
 		}
 		derr := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&head)
 		resp.Body.Close()
@@ -1164,23 +836,15 @@ func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
 			log.Printf("hub: witness %s: %v", p.AID, derr)
 			continue
 		}
-		// HeadID alone says whether there is a head. Seq must not be part
+		// The id alone says whether there is a head. Seq must not be part
 		// of this test: an AEL's first record is seq 0, so a chain
-		// holding exactly one record — the opening entry every upgraded
-		// hub starts with — was skipped as though it had nothing to pin.
-		// On the live topology that meant one hub witnessed the other and
-		// was never witnessed back.
-		if head.HeadID == "" {
-			continue // nothing issued yet; there is no head to pin
+		// holding exactly one record was skipped as though it had nothing
+		// to pin. On the live topology that meant one hub witnessed the
+		// other and was never witnessed back.
+		if head.ID == "" {
+			continue // no epoch published yet; there is no head to pin
 		}
-		// The peer must be attesting to its own chain. A peer serving
-		// somebody else's chain_did would have this hub sign a statement
-		// about a third party it never looked at.
-		if head.ChainDID != p.AID {
-			log.Printf("hub: witness %s: served a head for %s, not itself", p.AID, head.ChainDID)
-			continue
-		}
-		raw, err := s.witness.Attest(p.AID, head.HeadID, head.Seq)
+		raw, err := s.witness.Attest(p.AID, head.ID, head.Seq)
 		if err != nil {
 			log.Printf("hub: witness %s: %v", p.AID, err)
 			continue
@@ -1195,7 +859,7 @@ func (s *Service) WitnessOnce(ctx context.Context) (pinned int) {
 // the copy that matters is already stored here.
 func (s *Service) sendAttestation(ctx context.Context, endpoint string, raw []byte) {
 	body, err := json.Marshal(map[string]string{
-		"attestation": base64.StdEncoding.EncodeToString(raw)})
+		"attestation": base64.RawURLEncoding.EncodeToString(raw)})
 	if err != nil {
 		return
 	}
@@ -1208,4 +872,10 @@ func (s *Service) sendAttestation(ctx context.Context, endpoint string, raw []by
 	if resp, err := s.http.Do(req); err == nil {
 		resp.Body.Close()
 	}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
 }

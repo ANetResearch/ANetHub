@@ -11,12 +11,12 @@ import (
 
 // The reverse proxy caps request bodies before the hub sees them, so its
 // client_max_body_size is the limit that actually applies to a daemon
-// sending a large envelope. It stood at 96m, the size of the largest
-// envelope, while the hub accepts that envelope's base64 plus its JSON
-// (about 128 MiB): envelopes above about 72 MiB were refused by nginx with
-// an HTML 413 the daemon cannot read, near 64 MiB attachments after Padmé
-// padding (05-hub H8). Nothing compared the two numbers, and the comment in
-// the vhost named a constant that no longer existed.
+// sending a large envelope. When a send carried the envelope in base64
+// inside JSON, the vhost stood at the envelope's own size while the hub
+// took its base64: envelopes above about 72 MiB were refused by nginx with
+// an HTML 413 the daemon cannot read (05-hub H8). Nothing compared the two
+// numbers. A wire-3 send carries the envelope itself, so the two are the
+// same number again, and this keeps them so.
 //
 // The production vhost must be at least the hub's own limit and, so that
 // "in step" means something, less than a MiB above it. The reference vhost

@@ -5,24 +5,27 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/relayauth"
 	_ "modernc.org/sqlite"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // Tests for A2A-DESIGN §9: the hub holds no interaction content. Reviews
 // carry no goal or deliverable, the review tables have no content columns,
 // guest mode and completed_task are gone, and a store from before the
-// change loses its content when it is opened.
+// change is refused, not converted.
 
 // hubInDir is a hub whose data directory the test can search.
 func hubInDir(t *testing.T) (*httptest.Server, *aghub.Store, *aghub.Server, string) {
@@ -32,10 +35,7 @@ func hubInDir(t *testing.T) (*httptest.Server, *aghub.Store, *aghub.Server, stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := aghub.HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
@@ -71,19 +71,16 @@ func filesContaining(t *testing.T, dir string, needle []byte) []string {
 	return hits
 }
 
-// A review is served with the receipt's anchors, a content binding stated
-// as UNVERIFIED, and no content fields at all.
+// A review is served with its receipt, its rating and comment and two days,
+// and nothing else: no content, no reviewer, no interaction id.
 func TestAReviewIsServedWithoutContent(t *testing.T) {
 	srv, store, _, _ := hubInDir(t)
 	prov, req := twoAgents(t)
 	register(t, srv, prov, "Provider", []string{"work.do"})
 	register(t, srv, req, "Requester", nil)
-	code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, "ix-nocontent-1", 4, ""))
+	code, b := uploadReview(t, srv, makeEvidence(t, prov, req, "ix-nocontent-1", 4, ""))
 	if code != 200 {
 		t.Fatalf("upload: %d %s", code, b)
-	}
-	if !strings.Contains(string(b), `"content_binding":"UNVERIFIED"`) {
-		t.Errorf("the upload answer does not state the content binding: %s", b)
 	}
 	code, body := getJSON(t, srv.URL+"/agents/"+prov.AID())
 	if code != 200 {
@@ -95,22 +92,18 @@ func TestAReviewIsServedWithoutContent(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil || len(got.Reviews) != 1 {
 		t.Fatalf("reviews: %v %s", err, body)
 	}
-	r := got.Reviews[0]
-	for _, k := range []string{"goal", "deliverable", "request_doc"} {
-		if _, ok := r[k]; ok {
-			t.Errorf("the review carries %q: %s", k, body)
-		}
+	var members []string
+	for k := range got.Reviews[0] {
+		members = append(members, k)
 	}
-	if r["content_binding"] != aghub.ContentBindingUnverified {
-		t.Errorf("content_binding = %v, want %q", r["content_binding"], aghub.ContentBindingUnverified)
-	}
-	if r["request_cid"] == "" || r["result_cid"] == "" {
-		t.Errorf("the receipt anchors are missing: %s", body)
+	sort.Strings(members)
+	if want := "completed_day,created_day,rating,receipt_cid,subject_aid"; strings.Join(members, ",") != want {
+		t.Errorf("a served review has the members %v, want %s", members, want)
 	}
 
-	// The federation stream carries the two signed objects and the KELs,
-	// nothing else. The provider is hub-local by default and is opted in
-	// so that its review is streamed.
+	// The federation stream carries the two signed objects, the
+	// attestation and the provider's KEL, nothing else. The provider is
+	// hub-local by default and is opted in so that its review is streamed.
 	setVisibility(t, srv, prov, aghub.VisibilityFederated)
 	revs, _, err := store.ReviewsSince(0, 0)
 	if err != nil || len(revs) != 1 {
@@ -124,92 +117,124 @@ func TestAReviewIsServedWithoutContent(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"request_doc", "deliverable"} {
-		if _, ok := fields[k]; ok {
-			t.Errorf("the federation stream carries %q: %s", k, raw)
-		}
+	members = members[:0]
+	for k := range fields {
+		members = append(members, k)
+	}
+	sort.Strings(members)
+	if want := "attestation,fed_seq,format,provider_kel,receipt,review"; strings.Join(members, ",") != want {
+		t.Errorf("a stream entry has the members %v, want %s", members, want)
 	}
 }
 
-// A client that still sends the content with its review is refused, and
-// nothing is stored for that review.
+// A client that still sends the content with its review is refused (the
+// body is decoded strictly), and nothing is stored for that review.
 func TestAReviewUploadCarryingContentIsRefused(t *testing.T) {
-	srv, _, _, dir := hubInDir(t)
+	srv, store, _, dir := hubInDir(t)
 	prov, req := twoAgents(t)
 	register(t, srv, prov, "Provider", []string{"work.do"})
 	register(t, srv, req, "Requester", nil)
 	canary := []byte("canary-review-content-7f3a9c")
 	for _, field := range []string{"request_doc", "deliverable"} {
-		body := makeEvidence(t, prov, req, "ix-carrying-"+field, 5, "")
-		body[field] = base64.StdEncoding.EncodeToString(canary)
-		code, b := post(t, srv.URL+"/reviews", body)
-		if code != http.StatusBadRequest || !strings.Contains(string(b), "does not accept interaction content") {
-			t.Errorf("a review carrying %s: %d %s, want 400 naming the refusal", field, code, b)
+		k := makeEvidence(t, prov, req, "ix-carrying-"+field, 5, "")
+		body := k.Body(t)
+		body[field] = base64.RawURLEncoding.EncodeToString(canary)
+		code, b := signedDo(t, srv, req, relayauth.ActionReview, http.MethodPost, "/reviews", body)
+		if code != http.StatusBadRequest || !strings.Contains(string(b), `"bad_request"`) ||
+			!strings.Contains(string(b), field) {
+			t.Errorf("a review carrying %s: %d %s, want 400 bad_request naming it", field, code, b)
 		}
-	}
-	code, body := getJSON(t, srv.URL+"/agents/"+prov.AID())
-	if code != 200 {
-		t.Fatalf("agent: %d %s", code, body)
-	}
-	if strings.Contains(string(body), `"interaction_id"`) {
-		t.Errorf("a refused review was stored: %s", body)
+		if reviewStored(t, store, k) {
+			t.Errorf("the review carrying %s was stored", field)
+		}
 	}
 	if hits := filesContaining(t, dir, canary); len(hits) > 0 {
 		t.Errorf("content sent with a refused review is on disk in %v", hits)
 	}
 }
 
-// A comment is at most MaxReviewCommentRunes code points, counted as
-// characters rather than bytes, on a local upload and on a federated
-// review alike.
+// reviewStored reports whether the hub holds a review of k's interaction.
+func reviewStored(t *testing.T, store *aghub.Store, k *aghub.ReviewKit) bool {
+	t.Helper()
+	var n int
+	if err := store.DBForTest().QueryRow(`SELECT COUNT(*) FROM review WHERE ix_commit=?`, k.IXCommit()).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n > 0
+}
+
+// A comment is at most 280 code points, counted as characters rather than
+// bytes, on a local upload and on a federated review alike.
 func TestAReviewCommentIsBounded(t *testing.T) {
 	srv, store, _, _ := hubInDir(t)
 	prov, req := twoAgents(t)
 	register(t, srv, prov, "Provider", []string{"work.do"})
 	register(t, srv, req, "Requester", nil)
-	setVisibility(t, srv, prov, aghub.VisibilityFederated)
 
 	// 280 three-byte characters: 840 bytes, 280 characters. Accepted.
-	atLimit := strings.Repeat("评", aghub.MaxReviewCommentRunes)
-	if code, b := post(t, srv.URL+"/reviews",
-		makeEvidenceWithComment(t, prov, req, "ix-comment-280", 5, "", atLimit)); code != 200 {
-		t.Fatalf("a %d-character comment was refused: %d %s", aghub.MaxReviewCommentRunes, code, b)
+	atLimit := strings.Repeat("评", evidence.MaxCommentChars)
+	if code, b := uploadReview(t, srv, makeEvidenceWithComment(t, prov, req, "ix-comment-280", 5, "", atLimit)); code != 200 {
+		t.Fatalf("a %d-character comment was refused: %d %s", evidence.MaxCommentChars, code, b)
 	}
-	over := atLimit + "x"
-	code, b := post(t, srv.URL+"/reviews", makeEvidenceWithComment(t, prov, req, "ix-comment-281", 5, "", over))
-	if code != http.StatusBadRequest || !strings.Contains(string(b), "at most 280") {
-		t.Errorf("a %d-character comment: %d %s, want 400", aghub.MaxReviewCommentRunes+1, code, b)
+	over := makeEvidenceWithComment(t, prov, req, "ix-comment-281", 5, "", atLimit+"x")
+	over.Unchecked = true
+	code, b := uploadReview(t, srv, over)
+	if code != http.StatusBadRequest || !strings.Contains(string(b), "longer than 280") {
+		t.Errorf("a %d-character comment: %d %s, want 400", evidence.MaxCommentChars+1, code, b)
+	}
+	if reviewStored(t, store, over) {
+		t.Error("the review with the over-long comment was stored")
 	}
 
-	// The federated path applies the same bound. A review with an
-	// over-long comment is built on a second hub, where uploads are bounded
-	// too, by admitting it directly into that hub's store.
-	revs, _, err := store.ReviewsSince(0, 0)
-	if err != nil || len(revs) != 1 {
-		t.Fatalf("stream: %v %d", err, len(revs))
+	// The federated path applies the same bound.
+	peer := aghub.HubIdentityForTest(t)
+	_, other, _, _ := hubInDir(t)
+	ok := makeEvidenceWithComment(t, prov, req, "ix-fed-comment-280", 5, "", atLimit)
+	if err := other.AdmitFedReview(peer.AID, peer.Ctrl.KEL(), aghub.FedEntryForTest(t, peer.Ctrl, ok, aghub.TodayForTest(), 1)); err != nil {
+		t.Fatalf("a federated review with a %d-character comment was refused: %v", evidence.MaxCommentChars, err)
 	}
-	_, peer, _, _ := hubInDir(t)
-	if err := peer.AdmitFedReview("did:anet:home", revs[0]); err != nil {
-		t.Fatalf("a federated review with a %d-character comment was refused: %v",
-			aghub.MaxReviewCommentRunes, err)
-	}
-	long := federatedReview(t, "ix-fed-comment-281", over)
-	if err := peer.AdmitFedReview("did:anet:home", long); err == nil ||
-		!strings.Contains(err.Error(), "at most 280") {
-		t.Errorf("a federated review with a %d-character comment: %v, want refused",
-			aghub.MaxReviewCommentRunes+1, err)
+	if err := other.AdmitFedReview(peer.AID, peer.Ctrl.KEL(), aghub.FedEntryForTest(t, peer.Ctrl, over, aghub.TodayForTest(), 2)); err == nil ||
+		!errors.Is(err, evidence.ErrComment) {
+		t.Errorf("a federated review with a %d-character comment: %v, want refused", evidence.MaxCommentChars+1, err)
 	}
 }
 
-// federatedReview is a genuine FedReview between two fresh identities,
-// as a peer hub would stream it, with the given comment.
-func federatedReview(t *testing.T, ix, comment string) aghub.FedReview {
-	t.Helper()
-	prov, req := twoAgents(t)
-	ev := makeEvidenceWithComment(t, prov, req, ix, 4, "", comment)
-	return aghub.FedReview{
-		Receipt: ev["receipt"], Review: ev["review"],
-		ProviderKEL: kelB64(t, prov), ReviewerKEL: kelB64(t, req), FedSeq: 1,
+// A peer may send members the review/2 entry does not have (an earlier
+// peer's request_doc, deliverable, reviewer_kel). They are not read and not
+// stored; the entry is checked and admitted on what it has to carry.
+func TestAFederatedReviewIsAdmittedWhateverContentFieldsItCarries(t *testing.T) {
+	_, other, _, dir := hubInDir(t)
+	peer := aghub.HubIdentityForTest(t)
+	dirSeam := aghub.FedDirectory{S: other, PeerKEL: func(string) ([]identity.SignedEvent, error) { return peer.Ctrl.KEL(), nil }}
+	canary := []byte("canary-federated-content-41b2")
+	for i, tc := range []struct {
+		name        string
+		requestDoc  string
+		deliverable string
+	}{
+		{"empty strings", "", ""},
+		{"content that matches no anchor", base64.RawURLEncoding.EncodeToString(canary),
+			base64.RawURLEncoding.EncodeToString(canary)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prov, req := twoAgents(t)
+			e := aghub.FedEntryForTest(t, peer.Ctrl, makeEvidence(t, prov, req, "ix-fed-legacy-"+string(rune('a'+i)), 4, ""),
+				aghub.TodayForTest(), uint64(i+1))
+			var m map[string]any
+			b, _ := json.Marshal(e)
+			_ = json.Unmarshal(b, &m)
+			m["request_doc"], m["deliverable"], m["reviewer_kel"] = tc.requestDoc, tc.deliverable, kelB64(t, req)
+			raw, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := dirSeam.AdmitFedReview(peer.AID, raw); err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+		})
+	}
+	if hits := filesContaining(t, dir, canary); len(hits) > 0 {
+		t.Errorf("content a peer sent with a review is on disk in %v", hits)
 	}
 }
 
@@ -219,49 +244,7 @@ func kelB64(t *testing.T, c *identity.Controller) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return base64.StdEncoding.EncodeToString(b)
-}
-
-// A peer on an earlier version still sends request_doc and deliverable in
-// its review stream. The receiving hub decodes into a FedReview that has no
-// such fields and verifies the interlock with nil content.
-//
-// Before this change the empty strings a transitional peer sends decoded to
-// non-nil empty byte slices, VerifyInterlock hashed them, the hash of zero
-// bytes matched no receipt, and every such review was refused (R09 §5 item
-// 9). A peer that sends real content has it ignored: not verified, not
-// stored.
-func TestAFederatedReviewIsAdmittedWhateverContentFieldsItCarries(t *testing.T) {
-	_, peer, _, dir := hubInDir(t)
-	dirSeam := aghub.FedDirectory{S: peer}
-	canary := []byte("canary-federated-content-41b2")
-	for i, tc := range []struct {
-		name        string
-		requestDoc  string
-		deliverable string
-	}{
-		{"empty strings", "", ""},
-		{"content that matches no anchor", base64.StdEncoding.EncodeToString(canary),
-			base64.StdEncoding.EncodeToString(canary)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			fr := federatedReview(t, "ix-fed-legacy-"+string(rune('a'+i)), "fine")
-			raw, err := json.Marshal(map[string]any{
-				"receipt": fr.Receipt, "review": fr.Review,
-				"request_doc": tc.requestDoc, "deliverable": tc.deliverable,
-				"provider_kel": fr.ProviderKEL, "reviewer_kel": fr.ReviewerKEL, "fed_seq": 1,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := dirSeam.AdmitFedReview("did:anet:old-peer", raw); err != nil {
-				t.Fatalf("refused: %v", err)
-			}
-		})
-	}
-	if hits := filesContaining(t, dir, canary); len(hits) > 0 {
-		t.Errorf("content a peer sent with a review is on disk in %v", hits)
-	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // tasks_completed counts distinct valid receipts published through
@@ -290,22 +273,22 @@ func TestStatsCountPublishedReceiptsAndNameModules(t *testing.T) {
 	register(t, srv, prov, "Provider", []string{"work.do"})
 	register(t, srv, req, "Requester", nil)
 	for _, ix := range []string{"ix-stat-1", "ix-stat-2"} {
-		if code, b := post(t, srv.URL+"/reviews", makeEvidence(t, prov, req, ix, 5, "")); code != 200 {
+		if code, b := uploadReview(t, srv, makeEvidence(t, prov, req, ix, 5, "")); code != 200 {
 			t.Fatalf("upload %s: %d %s", ix, code, b)
 		}
 	}
 	// A refused upload publishes no receipt.
-	bad := makeEvidence(t, prov, req, "ix-stat-bad", 5, "")
-	bad["deliverable"] = base64.StdEncoding.EncodeToString([]byte("x"))
-	if code, _ := post(t, srv.URL+"/reviews", bad); code == 200 {
+	bad := makeEvidence(t, prov, req, "ix-stat-bad", 5, "").Body(t)
+	bad["deliverable"] = base64.RawURLEncoding.EncodeToString([]byte("x"))
+	if code, _ := signedDo(t, srv, req, relayauth.ActionReview, http.MethodPost, "/reviews", bad); code == 200 {
 		t.Fatal("a review carrying content was accepted")
 	}
 	if st := stats(); st.TasksCompleted != 2 || st.Reviews != 2 {
 		t.Errorf("after two published receipts: tasks_completed=%d reviews=%d, want 2/2",
 			st.TasksCompleted, st.Reviews)
 	}
-	s.SetModules([]string{"federation", "taskboard"})
-	if st := stats(); strings.Join(st.Modules, ",") != "federation,taskboard" {
+	s.SetModules([]string{"federation", "example"})
+	if st := stats(); strings.Join(st.Modules, ",") != "federation,example" {
 		t.Errorf("modules = %v", st.Modules)
 	}
 }
@@ -366,19 +349,16 @@ var oldSchema = []string{
 	   requester_aid TEXT NOT NULL DEFAULT '', completed_at TEXT NOT NULL)`,
 }
 
-// Opening a store written before this change removes the content columns,
-// the completed_task table and the guest quota, keeps every review and
-// agent, and leaves none of the removed bytes in hub.db or hub.db-wal.
-// The search runs while the store is still open, because closing the last
-// connection checkpoints the WAL by itself and would hide a missing
-// checkpoint in the migration.
-func TestOpeningAnOldStoreRemovesItsContent(t *testing.T) {
+// A store written before this change, content and all, is not opened: 0.3.0
+// converts no hub.db (core CORE-V4), so it is refused as anet-hub 0.2's data
+// (hub_identity_v02) and the file is left byte for byte as it was. Nothing
+// of it is served. Removing the old content from disk is the operator's
+// step of moving the directory away, not something a start does.
+func TestAnOldStoreWithContentIsRefusedUntouched(t *testing.T) {
 	dir := t.TempDir()
 	goal := []byte("canary-old-goal-5d61e0")
-	deliv := []byte("canary-old-deliverable-a8c3f2")
-	doc := []byte("canary-old-request-doc-0b7e19")
 	func() {
-		db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db")+"?_pragma=journal_mode(WAL)")
+		db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -399,101 +379,23 @@ func TestOpeningAnOldStoreRemovesItsContent(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for i := 0; i < 50; i++ {
-			ix := "ix-old-" + string(rune('A'+i%26)) + string(rune('a'+i/26))
-			if _, err := db.Exec(`INSERT INTO review(interaction_id,subject_aid,reviewer_aid,rating,comment,
-			     receipt_cid,goal,deliverable,request_cid,result_cid,completed_at,created_at,stored_at)
-			     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-				ix, prov.AID(), req.AID(), 4, "ok", "bafy-receipt-"+ix, string(goal), string(deliv),
-				"bafy-req", "bafy-res", 1000, 2000+i, "2026-08-01T00:00:00Z"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec(`INSERT INTO review_blob VALUES(?,?,?,?,?)`,
-				ix, []byte("receipt"), []byte("review"), doc, deliv); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.Exec(`INSERT INTO completed_task VALUES(?,?,?,?)`,
-				ix, prov.AID(), req.AID(), "2026-08-01T00:00:00Z"); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}()
-	for _, c := range [][]byte{goal, deliv, doc} {
-		if len(filesContaining(t, dir, c)) == 0 {
-			t.Fatalf("the old store does not hold %q; the test would pass for the wrong reason", c)
-		}
-	}
-
-	store, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatalf("open an old store: %v", err)
-	}
-	defer store.Close()
-
-	for _, c := range [][]byte{goal, deliv, doc} {
-		if hits := filesContaining(t, dir, c); len(hits) > 0 {
-			t.Errorf("%q is still on disk after the migration, in %v", c, hits)
-		}
-	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	// VACUUM rebuilt the file: the pages the dropped tables occupied are
-	// not kept on the freelist. (secure_delete zeroes them either way; the
-	// design asks for the rebuild so the file does not keep their space.)
-	var free int
-	if err := db.QueryRow(`PRAGMA freelist_count`).Scan(&free); err != nil {
-		t.Fatal(err)
-	}
-	if free != 0 {
-		t.Errorf("hub.db has %d free pages after the migration; VACUUM did not run", free)
-	}
-	columns := func(table string) map[string]bool {
-		rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-		if err != nil {
+		if _, err := db.Exec(`INSERT INTO review(interaction_id,subject_aid,reviewer_aid,rating,comment,
+		     receipt_cid,goal,deliverable,request_cid,result_cid,completed_at,created_at,stored_at)
+		     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			"ix-old", prov.AID(), req.AID(), 4, "ok", "bafy-receipt", string(goal), "d",
+			"bafy-req", "bafy-res", 1000, 2000, "2026-08-01T00:00:00Z"); err != nil {
 			t.Fatal(err)
 		}
-		defer rows.Close()
-		out := map[string]bool{}
-		for rows.Next() {
-			var n string
-			if err := rows.Scan(&n); err != nil {
-				t.Fatal(err)
-			}
-			out[n] = true
+	}()
+	before := dirSnapshot(t, dir)
+	store, err := aghub.Open(dir)
+	if !errors.Is(err, aghub.ErrHubDataV02) {
+		if store != nil {
+			store.Close()
 		}
-		return out
+		t.Fatalf("open an old store: %v, want ErrHubDataV02", err)
 	}
-	for table, gone := range map[string][]string{
-		"review":      {"goal", "deliverable"},
-		"review_blob": {"request_doc_raw", "deliverable_raw"},
-		"agent":       {"guest_quota"},
-	} {
-		cols := columns(table)
-		for _, c := range gone {
-			if cols[c] {
-				t.Errorf("%s.%s survived the migration", table, c)
-			}
-		}
-	}
-	if len(columns("completed_task")) != 0 {
-		t.Error("completed_task survived the migration")
-	}
-	var reviews, blobs, agents int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM review`).Scan(&reviews)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM review_blob`).Scan(&blobs)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&agents)
-	if reviews != 50 || blobs != 50 || agents != 2 {
-		t.Errorf("rows lost: reviews=%d blobs=%d agents=%d, want 50/50/2", reviews, blobs, agents)
-	}
-	// The migrated store serves the old reviews through the new shape.
-	st, err := store.Stats()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Reviews != 50 || st.TasksCompleted != 50 {
-		t.Errorf("stats after migration: %+v", st)
+	if after := dirSnapshot(t, dir); after != before {
+		t.Errorf("refusing the old store changed the directory:\n%s\n%s", before, after)
 	}
 }

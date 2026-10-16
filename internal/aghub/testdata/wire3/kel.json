@@ -1,0 +1,193 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "The hub as a witness (KEL §2.7, H-1 to H-5, H-10 to H-13; core §2.12.2, CORE-K16). POST /agents/kel:push takes a key history the hub holds extended or the same (200 {aid, seq, head, unchanged}: the tip it now holds; the same history again is unchanged), and refuses an older one (409 kel_rollback), a fork (409 kel_fork), one that does not decode or is another AID's (400 kel_invalid), a new event more than 5 minutes ahead of its clock (400 kel_ts_out_of_window), an AID it holds nothing of (404 unknown_aid) and a body it does not take (400 bad_request); a pushed dip deregisters the agent. GET /agents/{aid}/kel is {aid, kel, registered}: false for the tombstone of an agent that left, 404 unknown_aid for an AID with no record here. /register takes a key history whose tip names this hub (else 400 witness_not_this_hub, which check_only does not ask), refuses a deactivated identity (410 aid_deactivated) and a new event dated more than 5 minutes from its clock (400 kel_ts_out_of_window), and carries the notice it signs; /relay/poll carries the caller's notice, or key_state_notice_error not_witness. A request signed with a key its signer rotated away from is 401 key_retired; an X-ANet-AID that is not an AID is 401 unauthorized. The cases run in order against one hub, whose clock stands still (the notices are fixed bytes).",
+  "setup": "kel",
+  "cases": [
+    {
+      "name": "the history held, pushed, is unchanged",
+      "cite": "KEL §2.7, H-4",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}"}},
+      "response": {"status": 200, "body_has": {"aid": "${alice}", "unchanged": true}}
+    },
+    {
+      "name": "an extension is taken and its tip answered",
+      "cite": "KEL §2.7, H-4",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${rotor}", "kel": "${rotor_kel2}"}},
+      "response": {"status": 200, "body": {"aid": "${rotor}", "seq": 2, "head": "${rotor_head2}", "unchanged": false}}
+    },
+    {
+      "name": "the extension pushed again is unchanged",
+      "cite": "KEL §2.7: a push repeated is idempotent",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${rotor}", "kel": "${rotor_kel2}"}},
+      "response": {"status": 200, "body": {"aid": "${rotor}", "seq": 2, "head": "${rotor_head2}", "unchanged": true}}
+    },
+    {
+      "name": "the held history extended is served",
+      "cite": "KEL §2.7, core §2.12.2",
+      "request": {"method": "GET", "path": "/agents/${rotor}/kel"},
+      "response": {"status": 200, "body": {"aid": "${rotor}", "kel": "${rotor_kel2}", "registered": true}}
+    },
+    {
+      "name": "an older history is kel_rollback",
+      "cite": "KEL §2.7, R-11",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${rotor}", "kel": "${rotor_kel}"}},
+      "response": {"status": 409, "body_has": {"reason": "kel_rollback"}}
+    },
+    {
+      "name": "a forked history is kel_fork",
+      "cite": "KEL §2.7, R-11",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${rotor}", "kel": "${rotor_fork_kel}"}},
+      "response": {"status": 409, "body_has": {"reason": "kel_fork"}}
+    },
+    {
+      "name": "an event 10 minutes ahead of the clock is kel_ts_out_of_window",
+      "cite": "KEL R-9, H-4",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${rotor}", "kel": "${rotor_ahead_kel}"}},
+      "response": {"status": 400, "body": {"reason": "kel_ts_out_of_window",
+        "error": "A new key event is dated more than 5 minutes after this hub's clock; correct the system clock and sign the event again."}}
+    },
+    {
+      "name": "another AID's history is kel_invalid",
+      "cite": "KEL §2.7",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${alice}", "kel": "${stranger_kel}"}},
+      "response": {"status": 400, "body_has": {"reason": "kel_invalid"}}
+    },
+    {
+      "name": "bytes that are no key history are kel_invalid",
+      "cite": "KEL §2.7",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${alice}", "kel": "bm8ga2Vs"}},
+      "response": {"status": 400, "body_has": {"reason": "kel_invalid"}}
+    },
+    {
+      "name": "an AID the hub holds nothing of is unknown_aid",
+      "cite": "KEL §2.7",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}"}},
+      "response": {"status": 404, "body": {"reason": "unknown_aid",
+        "error": "This hub holds no key history for this AID; push it to the hubs that witnessed it."}}
+    },
+    {
+      "name": "an unknown member is bad_request",
+      "cite": "CORE-E7",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${alice}", "kel": "${alice_kel}", "zz_unknown": 1}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "an aid that is not an AID is bad_request",
+      "cite": "KEL §2.7",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "bafy x", "kel": "${alice_kel}"}},
+      "response": {"status": 400, "body_has": {"reason": "bad_request"}}
+    },
+    {
+      "name": "a poll signed with the key rotated away from is key_retired",
+      "cite": "KEL H-3, core CORE-K16",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "rotor_old"},
+        "json": {}},
+      "response": {"status": 401, "body": {"reason": "key_retired",
+        "error": "The request is signed with a key the signer has since rotated away from; sign it again with the current key."}}
+    },
+    {
+      "name": "a pushed dip deregisters",
+      "cite": "KEL H-4",
+      "request": {"method": "POST", "path": "/agents/kel:push", "headers": {"X-ANet-Wire": "3"},
+        "json": {"aid": "${gone}", "kel": "${gone_dip_kel}"}},
+      "response": {"status": 200, "body_has": {"aid": "${gone}", "seq": 2, "unchanged": false}}
+    },
+    {
+      "name": "the tombstone is served as not registered",
+      "cite": "core §2.12.2, KEL D-27",
+      "request": {"method": "GET", "path": "/agents/${gone}/kel"},
+      "response": {"status": 200, "body": {"aid": "${gone}", "kel": "${gone_dip_kel}", "registered": false}}
+    },
+    {
+      "name": "a deactivated identity does not register",
+      "cite": "KEL H-1 2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "gone_signer"},
+        "json": {"aid": "${gone}", "kel": "${gone_dip_kel}"}},
+      "response": {"status": 410, "body_has": {"reason": "aid_deactivated"}}
+    },
+    {
+      "name": "the history of an AID with no record here is unknown_aid",
+      "cite": "core §2.12.2",
+      "request": {"method": "GET", "path": "/agents/${stranger}/kel"},
+      "response": {"status": 404, "body_has": {"reason": "unknown_aid"}}
+    },
+    {
+      "name": "the hub's own history is served",
+      "cite": "core §2.12.2",
+      "request": {"method": "GET", "path": "/agents/${hub}/kel"},
+      "response": {"status": 200, "body": {"aid": "${hub}", "kel": "${hub_kel}", "registered": true}}
+    },
+    {
+      "name": "a registration whose tip names this hub carries the notice",
+      "cite": "KEL H-1, H-5, H-11",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "newbie"},
+        "json": {"aid": "${newbie}", "kel": "${newbie_kel}"}},
+      "response": {"status": 200, "body_has": {"aid": "${newbie}", "status": "registered", "key_state_notice": "${newbie_notice}"}}
+    },
+    {
+      "name": "an identity that names no witness yet is witness_not_this_hub",
+      "cite": "KEL H-1 1",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "pending"},
+        "json": {"aid": "${pending}", "kel": "${pending_kel}"}},
+      "response": {"status": 400, "body": {"reason": "witness_not_this_hub",
+        "error": "The latest event in the key history does not name this hub as its witness; add a rotation that names this hub, then register again."}}
+    },
+    {
+      "name": "check_only does not ask for the witness",
+      "cite": "KEL H-1, core §2.12.2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "pending"},
+        "json": {"aid": "${pending}", "kel": "${pending_kel}", "check_only": true}},
+      "response": {"status": 200, "body": {"status": "admitted"}}
+    },
+    {
+      "name": "an identity that names another hub is witness_not_this_hub",
+      "cite": "KEL H-1 1",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "elsewhere"},
+        "json": {"aid": "${elsewhere}", "kel": "${elsewhere_kel}"}},
+      "response": {"status": 400, "body": {"reason": "witness_not_this_hub",
+        "error": "The latest event in the key history does not name this hub as its witness; add a rotation that names this hub, then register again."}}
+    },
+    {
+      "name": "naming this hub 10 minutes before its clock is kel_ts_out_of_window",
+      "cite": "KEL H-1 3, R-10",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "late"},
+        "json": {"aid": "${late}", "kel": "${late_kel}"}},
+      "response": {"status": 400, "body": {"reason": "kel_ts_out_of_window",
+        "error": "A new key event is dated more than 5 minutes before this hub's clock; correct the system clock and sign the event again."}}
+    },
+    {
+      "name": "a poll carries the caller's notice",
+      "cite": "KEL H-5, H-10, H-11",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "alice"},
+        "json": {}},
+      "response": {"status": 200, "body": {"messages": [], "more": false, "key_state_notice": "${alice_notice}"}}
+    },
+    {
+      "name": "a poll of an agent whose tip names another hub says not_witness",
+      "cite": "KEL H-4, H-10 3, H-13",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "poll", "as": "moved"},
+        "json": {}},
+      "response": {"status": 200, "body": {"messages": [], "more": false, "key_state_notice_error": "not_witness"}}
+    },
+    {
+      "name": "an X-ANet-AID that is not an AID is unauthorized",
+      "cite": "KEL R-3, hub-payment-privacy PAY-R3",
+      "request": {"method": "POST", "path": "/relay/poll", "headers": {"X-ANet-Wire": "3",
+        "X-ANet-AID": "x; echo", "X-ANet-TS": "1", "X-ANet-Seq": "0", "X-ANet-Sig": "AAAA"},
+        "json": {}},
+      "response": {"status": 401, "body": {"reason": "unauthorized",
+        "error": "X-ANet-AID is not an AID; sign the request as the agent's own AID, the one anet prints."}}
+    }
+  ]
+}

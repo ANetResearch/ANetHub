@@ -22,8 +22,8 @@
 --     users' — a redemption credits it, clearing a peer's receipt debits
 --     it — so it can legitimately be negative);
 --   * a ledger entry of 0 or stored as REAL;
---   * an issuance-chain record (credit_issuance) with an amount <= 0 or
---     stored as REAL.
+--   * supply totals (supply_totals) stored as REAL, negative, or with more
+--     redeemed than issued.
 --
 -- READ ONLY. Every statement is a SELECT, and the PRAGMA below makes this
 -- connection refuse writes even if one were added by mistake. Run it on a
@@ -39,8 +39,7 @@
 -- no findings prints only its heading. Section 0 is informational. On a
 -- clean hub, sections 1–9 are empty.
 --
--- Times: the credit_* tables and hub_cleared store RFC 3339 text in `at`;
--- credit_issuance stores unix milliseconds, shown here converted to UTC.
+-- Times: the credit_* tables and hub_cleared store RFC 3339 text in `at`.
 
 PRAGMA query_only = 1;
 .headers on
@@ -50,17 +49,16 @@ PRAGMA query_only = 1;
 -- ---------------------------------------------------------------------
 SELECT '== 0. the hub''s own row(s): may be negative legitimately, excluded from the negative-balance check ==' AS section;
 -- The hub's AID is the account every grant is issued from (credit_entry
--- reason 'issued:…') and the subject of the chain's opening record.
+-- reason 'issued:…').
 WITH hub(aid) AS (
   SELECT aid FROM credit_entry WHERE reason LIKE 'issued:%'
-  UNION SELECT aid FROM credit_issuance WHERE kind = 'anet.credit.opening'
 )
 SELECT h.aid AS hub_aid, b.credits AS hub_row_credits, typeof(b.credits) AS stored_as
 FROM hub h LEFT JOIN credit_balance b ON b.aid = h.aid;
 
 -- ---------------------------------------------------------------------
 SELECT '== 1. credit_settled: settlements with an amount outside 1..9223372036854775807 ==' AS section;
-SELECT auth_id, payer, pay_to, amount, typeof(amount) AS stored_as, interaction_id, at
+SELECT auth_id, payer, pay_to, amount, typeof(amount) AS stored_as, at
 FROM credit_settled
 WHERE typeof(amount) <> 'integer' OR amount <= 0 OR amount > 9223372036854775807
 ORDER BY at;
@@ -95,12 +93,14 @@ ORDER BY at;
 
 -- ---------------------------------------------------------------------
 SELECT '== 5. hub_owed / hub_due: inter-hub positions that are negative or not integers ==' AS section;
--- Zero is legitimate (a debt fully discharged); below zero is not.
-SELECT 'hub_owed' AS tbl, peer_aid AS counterparty, amount, typeof(amount) AS stored_as
+-- Zero is legitimate (a debt fully discharged); below zero is not. The
+-- counterparty is the table's key column, whatever the release named it
+-- (hub_due is keyed by payee before 0.3.0 and by peer hub since).
+SELECT 'hub_owed' AS tbl, *, typeof(amount) AS stored_as
 FROM hub_owed
 WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 9223372036854775807
 UNION ALL
-SELECT 'hub_due', payee_aid, amount, typeof(amount)
+SELECT 'hub_due', *, typeof(amount)
 FROM hub_due
 WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 9223372036854775807;
 
@@ -108,7 +108,6 @@ WHERE typeof(amount) <> 'integer' OR amount < 0 OR amount > 9223372036854775807;
 SELECT '== 6. credit_balance: balances stored as REAL, or negative on an account other than the hub''s ==' AS section;
 WITH hub(aid) AS (
   SELECT aid FROM credit_entry WHERE reason LIKE 'issued:%'
-  UNION SELECT aid FROM credit_issuance WHERE kind = 'anet.credit.opening'
 )
 SELECT b.aid, b.credits, typeof(b.credits) AS stored_as,
        (SELECT MIN(at) FROM credit_entry e WHERE e.aid = b.aid) AS first_entry_at,
@@ -126,15 +125,15 @@ WHERE typeof(delta) <> 'integer' OR delta = 0
 ORDER BY at;
 
 -- ---------------------------------------------------------------------
-SELECT '== 8. credit_issuance (the signed issuance chain): records with an amount <= 0 or stored as REAL ==' AS section;
--- The chain records are signed and are not to be edited; a hit here is a
--- statement the hub already made and must be answered with a new record,
--- not by changing this one.
-SELECT seq, kind, aid, amount, typeof(amount) AS stored_as, reason,
-       datetime(at / 1000, 'unixepoch') AS at_utc
-FROM credit_issuance
-WHERE typeof(amount) <> 'integer' OR amount <= 0 OR amount > 9223372036854775807
-ORDER BY seq;
+SELECT '== 8. supply_totals: totals stored as REAL, negative, or more redeemed than issued ==' AS section;
+-- The running totals every supply epoch is checked against. An epoch
+-- already published is signed and is not to be edited; a hit here is
+-- answered by the next epoch, not by changing a published one.
+SELECT 'supply_totals' AS tbl, issued, typeof(issued) AS issued_stored_as,
+       redeemed, typeof(redeemed) AS redeemed_stored_as, events_since_publish
+FROM supply_totals
+WHERE typeof(issued) <> 'integer' OR typeof(redeemed) <> 'integer'
+   OR issued < 0 OR redeemed < 0 OR redeemed > issued;
 
 -- ---------------------------------------------------------------------
 SELECT '== 9. affected AIDs, all sources above, with first and last time seen ==' AS section;
@@ -159,10 +158,6 @@ WITH hits(aid, role, source, at) AS (
   UNION ALL
   SELECT aid, 'account', 'credit_entry', at FROM credit_entry
    WHERE typeof(delta) <> 'integer' OR delta = 0
-  UNION ALL
-  SELECT aid, 'chain subject', 'credit_issuance',
-         strftime('%Y-%m-%dT%H:%M:%SZ', at / 1000, 'unixepoch') FROM credit_issuance
-   WHERE typeof(amount) <> 'integer' OR amount <= 0 OR amount > 9223372036854775807
 )
 SELECT aid, role, source, COUNT(*) AS rows, MIN(at) AS first_at, MAX(at) AS last_at
 FROM hits
@@ -170,19 +165,20 @@ GROUP BY aid, role, source
 ORDER BY first_at;
 
 -- ---------------------------------------------------------------------
-SELECT '== 10. supply totals (informational): outstanding must equal balances ==' AS section;
--- The same arithmetic /x402/supply publishes. The overflow bug keeps the
--- two sides equal (both were written with the same wrong sign), so a match
--- here does NOT clear the hub; a mismatch, or a REAL total, is a finding.
+SELECT '== 10. supply totals (informational): outstanding must equal balances and the hub row''s negative ==' AS section;
+-- The arithmetic every supply epoch is checked against before it is
+-- published. The overflow bug keeps the sides equal (all were written with
+-- the same wrong sign), so a match here does NOT clear the hub; a
+-- mismatch, or a REAL total, is a finding.
 WITH hub(aid) AS (
   SELECT aid FROM credit_entry WHERE reason LIKE 'issued:%'
-  UNION SELECT aid FROM credit_issuance WHERE kind = 'anet.credit.opening'
 )
 SELECT
-  (SELECT -COALESCE(SUM(delta), 0) FROM credit_entry WHERE aid IN (SELECT aid FROM hub) AND delta < 0) AS issued,
-  (SELECT COALESCE(SUM(delta), 0) FROM credit_entry WHERE aid IN (SELECT aid FROM hub) AND delta > 0) AS redeemed,
-  (SELECT -COALESCE(SUM(delta), 0) FROM credit_entry WHERE aid IN (SELECT aid FROM hub)) AS outstanding,
+  (SELECT issued FROM supply_totals WHERE id = 1) AS issued,
+  (SELECT redeemed FROM supply_totals WHERE id = 1) AS redeemed,
+  (SELECT issued - redeemed FROM supply_totals WHERE id = 1) AS outstanding,
   (SELECT COALESCE(SUM(credits), 0) FROM credit_balance WHERE aid NOT IN (SELECT aid FROM hub)) AS balances,
+  (SELECT COALESCE(SUM(credits), 0) FROM credit_balance WHERE aid IN (SELECT aid FROM hub)) AS hub_row,
   (SELECT typeof(COALESCE(SUM(credits), 0)) FROM credit_balance) AS balances_stored_as;
 
 -- ---------------------------------------------------------------------
@@ -193,7 +189,7 @@ SELECT '== 11. self-payments (informational): settlements whose payer is also th
 -- authorization, and "pay 1 credit to myself" was the cheapest one to sign. Vouchers are not stored
 -- on the hub, so this is the only trace such a purchase can leave here,
 -- and a self-payment is not proof of one.
-SELECT auth_id, payer, amount, interaction_id, at
+SELECT auth_id, payer, amount, at
 FROM credit_settled
 WHERE payer = pay_to
 ORDER BY at;

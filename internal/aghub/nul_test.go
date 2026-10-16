@@ -1,0 +1,84 @@
+package aghub_test
+
+import (
+	"bytes"
+	"errors"
+	"testing"
+
+	"github.com/ANetResearch/ANetCore/wire"
+
+	"github.com/ANetResearch/ANetHub/internal/aghub"
+)
+
+// TestPreimageRejectsNUL (core CORE-E9, ANetHub). The hub computes two inputs that separate
+// variable-length text fields with 0x00 (CORE-L1): the review tag (L31) and the settlement guard
+// (L33). A field holding U+0000 could move the boundary, so each function refuses one, as a second
+// line behind the decode points (wire3.CheckRequest, wire3.DecodeStrict, wire3.CheckText; their
+// cases are in testdata/wire3/nul.json).
+//
+// One row per registered guard of this repository (registry nul_guard). A row's function puts
+// field into each 0x00-separated text position it has and returns the function's error. The
+// work item that implements a function fills in its row and deletes the skip.
+func TestPreimageRejectsNUL(t *testing.T) {
+	rows := map[string]struct {
+		fn   func(field string) error
+		todo string
+	}{
+		"L31": {reviewTagRow, ""}, // review tag: reviewer_aid, subject_aid
+		"L33": {func(f string) error { // settlement guard: payer, pay_bind
+			if _, err := aghub.SettleGuardKeyForTest(f, "bind"); err != nil {
+				return err
+			}
+			_, err := aghub.SettleGuardKeyForTest("bafypayer", f)
+			return err
+		}, ""},
+	}
+	r, err := wire.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, g := range r.NUL {
+		if g.Repo != "ANetHub" {
+			continue
+		}
+		listed[g.Label] = true
+		row, ok := rows[g.Label]
+		if !ok {
+			t.Errorf("registry nul_guard %s (%s) has no row here", g.Label, g.What)
+			continue
+		}
+		t.Run(g.Label+" "+g.What, func(t *testing.T) {
+			if row.fn == nil {
+				t.Skip(row.todo)
+			}
+			for _, f := range []string{"\x00", "a\x00", "\x00b", "a\x00b"} {
+				if err := row.fn(f); err == nil {
+					t.Errorf("%q accepted", f)
+				}
+			}
+			if err := row.fn("ab"); err != nil {
+				t.Errorf("a field without U+0000 refused: %v", err)
+			}
+		})
+	}
+	for label := range rows {
+		if !listed[label] {
+			t.Errorf("row %s is not a registered ANetHub nul_guard", label)
+		}
+	}
+}
+
+// reviewTagRow is L31's row: the hub's review tag (the tag of every review it
+// stores, aghub reviews.go) with field as the reviewer and as the subject.
+// It is an error only when both positions refuse field, so a position that
+// takes U+0000 fails the row.
+func reviewTagRow(field string) error {
+	key := bytes.Repeat([]byte{1}, 32)
+	_, e1 := aghub.ReviewTagForTest(key, field, "ab")
+	_, e2 := aghub.ReviewTagForTest(key, "ab", field)
+	if e1 == nil || e2 == nil {
+		return nil
+	}
+	return errors.Join(e1, e2)
+}

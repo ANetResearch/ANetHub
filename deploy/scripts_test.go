@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -437,26 +438,17 @@ func assertUnchanged(t *testing.T, what string, before, after map[string]string)
 	}
 }
 
-// On a hub.db the wire-2 hub has migrated, the script reports the record
+// On a hub.db a 0.2 hub migrated to wire 2, the script reports the record
 // the migration left in hub_meta, and --relay-before cannot be used to
-// delete wire-2 envelopes (05-hub H5).
+// delete wire-2 envelopes (05-hub H5). The database is the one that
+// migration left (this release neither migrates nor opens it).
 func TestTheCleanupScriptReportsWhatTheMigrationDropped(t *testing.T) {
 	needSQLite3(t)
 	dir := t.TempDir()
-	execAll(t, filepath.Join(dir, "hub.db"), []string{
-		`CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
-		   from_aid TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, interaction_id TEXT NOT NULL DEFAULT '',
-		   payload BLOB NOT NULL, created_at TEXT NOT NULL, delivered_at TEXT)`,
-		`INSERT INTO relay_message(to_aid,kind,payload,created_at,delivered_at)
-		   VALUES('a','delegate',x'01','2026-09-01T10:00:00Z','2026-09-01T10:01:00Z'),
-		         ('a','message',x'02','2026-09-20T10:00:00Z',NULL),
-		         ('b','message',x'03','2026-09-21T10:00:00Z',NULL)`,
-	})
-	store, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Close()
+	execAll(t, filepath.Join(dir, "hub.db"), append(wire2RelayTables(),
+		`INSERT INTO hub_meta(key, value) VALUES('relay_v2_migrated_at', '1790000000000'),
+		   ('relay_v2_dropped_undelivered', '2'), ('relay_v2_dropped_delivered', '1')`,
+	))
 	out, code := runScript(t, nil, "cleanup-content-v0.2.sh", "--hub-data", dir, "--admin-data", t.TempDir(),
 		"--ssh-dir", t.TempDir(), "--systemd-dir", t.TempDir(),
 		"--relay-before", "9999999999999")
@@ -479,15 +471,10 @@ func TestTheCleanupScriptReportsWhatTheMigrationDropped(t *testing.T) {
 func TestTheCleanupScriptDeletesCopiedRowsOnlyBeforeTheGivenInstant(t *testing.T) {
 	needSQLite3(t)
 	dir := t.TempDir()
-	store, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Close()
 	copied, sealed := canary(t, "WIRE1"), canary(t, "SEALED")
-	execAll(t, filepath.Join(dir, "hub.db"), []string{
+	execAll(t, filepath.Join(dir, "hub.db"), append(wire2RelayTables(),
 		`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES('bafya', 1, 1000, ?), ('bafya', 1, 3000, ?)`,
-	}, []any{[]byte(copied), []byte(sealed)})
+	), nil, nil, []any{[]byte(copied), []byte(sealed)})
 	args := []string{"--hub-data", dir, "--admin-data", t.TempDir(), "--ssh-dir", t.TempDir(),
 		"--systemd-dir", t.TempDir(), "--apply", "--yes"}
 	hubdb := filepath.Join(dir, "hub.db")
@@ -539,7 +526,8 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 	if _, err := hub.Exec(`INSERT INTO agent(aid, kel, registered_at) VALUES('bafyagent', x'00', '2026-09-01')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hub.Exec(`INSERT INTO relay_message(to_aid, size, created_at, payload) VALUES('bafyagent', ?, 1, ?)`,
+	if _, err := hub.Exec(`INSERT INTO relay_message(rid, to_aid, env_digest, class, size, created_at, payload)
+	                       VALUES(x'01', 'bafyagent', x'02', 2, ?, 1, ?)`,
 		len(payload), []byte(payload)); err != nil {
 		t.Fatal(err)
 	}
@@ -550,11 +538,12 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 	// The temporary copy of a run killed before its EXIT trap: every relay
 	// row, under a name no backup rotation looks at.
 	writeFile(t, filepath.Join(dir, ".hub-backup-20200112.tmp.db"), "relay "+payload, 0o600)
-	// Two old backups; with today's the oldest must go.
-	for i, name := range []string{"hub-backup-20200105.db", "hub-backup-20200112.db"} {
-		p := filepath.Join(dir, name)
+	// Two earlier backups, both younger than 14 days; with today's the
+	// oldest must go (the newest 2 are kept).
+	for _, days := range []int{10, 7} {
+		p := filepath.Join(dir, "hub-backup-"+time.Now().AddDate(0, 0, -days).Format("20060102")+".db")
 		writeFile(t, p, "old backup", 0o600)
-		old := time.Now().Add(-time.Duration(30-i) * 24 * time.Hour)
+		old := time.Now().AddDate(0, 0, -days)
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
@@ -578,7 +567,8 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 		t.Errorf("hub.db-wal holds %d bytes after the run's checkpoint", st.Size())
 	}
 	left, _ := filepath.Glob(filepath.Join(dir, "hub-backup-*.db"))
-	if len(left) != 2 || !containsPath(left, backup) || !containsPath(left, filepath.Join(dir, "hub-backup-20200112.db")) {
+	newestOld := filepath.Join(dir, "hub-backup-"+time.Now().AddDate(0, 0, -7).Format("20060102")+".db")
+	if len(left) != 2 || !containsPath(left, backup) || !containsPath(left, newestOld) {
 		t.Errorf("backups after the run: %v, want today's and the newest old one", left)
 	}
 	if tmp, _ := filepath.Glob(filepath.Join(dir, ".hub-backup-*")); len(tmp) != 0 {
@@ -590,6 +580,259 @@ func TestTheWeeklyBackupHoldsNoRelayRows(t *testing.T) {
 		if !bytes.Contains(logb, []byte(want)) {
 			t.Errorf("roll.log lacks %q:\n%s", want, logb)
 		}
+	}
+}
+
+// hub-db-roll.sh's weekly backup keeps what a restored hub must still know
+// and leaves out what only matters while the hub runs (sealed-sender SSR-H1):
+// it holds the revoked delivery credentials (cap_revocation) and the quotas
+// the operator raised (quota_override), and no row of relay_message or
+// relay_redelivery; the log says what it kept.
+func TestTheWeeklyBackupKeepsRevocationsAndQuotas(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := "bafyowner-" + canary(t, "OWNER")
+	capID := bytes.Repeat([]byte{0xc5}, 16)
+	if _, _, err := store.RevokeCaps(owner, [][]byte{capID, bytes.Repeat([]byte{0xc6}, 16)}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := int64(900)
+	if _, err := store.SetQuota(owner, aghub.QuotaChange{NonContactMsgs: &msgs}); err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	payload := canary(t, "ENVELOPE")
+	digest := canary(t, "DIGEST")
+	execAll(t, filepath.Join(dir, "hub.db"), []string{
+		`INSERT INTO relay_message(rid, to_aid, env_digest, class, size, created_at, payload)
+		   VALUES(x'01', 'bafyagent', x'02', 2, 1, 1, ?)`,
+		`INSERT INTO relay_redelivery(env_digest, count, window_start) VALUES(?, 2, 1)`,
+	}, []any{[]byte(payload)}, []any{[]byte(digest)})
+
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	backup := filepath.Join(dir, "hub-backup-"+time.Now().Format("20060102")+".db")
+	for q, want := range map[string]int{
+		`SELECT COUNT(*) FROM cap_revocation`:                                                    2,
+		`SELECT COUNT(*) FROM cap_revocation WHERE cap_id = x'c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5'`: 1,
+		`SELECT COUNT(*) FROM quota_override WHERE non_contact_msgs = 900`:                       1,
+		`SELECT COUNT(*) FROM relay_message`:                                                     0,
+		`SELECT COUNT(*) FROM relay_redelivery`:                                                  0,
+	} {
+		if n := queryInt(t, backup, q); n != want {
+			t.Errorf("the backup: %s = %d, want %d", q, n, want)
+		}
+	}
+	for _, c := range []string{payload, digest} {
+		if hits := filesHolding(t, c, backup); len(hits) != 0 {
+			t.Errorf("the backup file holds an excluded row's bytes (%s)", c[:8])
+		}
+	}
+	logb, _ := os.ReadFile(filepath.Join(dir, "roll.log"))
+	for _, want := range []string{"rows of relay_message relay_redelivery dereg_event relay_dack notice_cache excluded", "kept 2 revocations, 1 raised quotas"} {
+		if !bytes.Contains(logb, []byte(want)) {
+			t.Errorf("roll.log lacks %q:\n%s", want, logb)
+		}
+	}
+}
+
+// hub-db-roll.sh's backup leaves out the tables that matter only to the
+// running hub — dereg_event (PAY-O2), relay_message and relay_dack (the
+// envelopes and the delivery confirmations waiting at the hub, p2p-receipts
+// DLV-ST-5: a hub restored from it answers a status check unknown, and the
+// sender sends again) and notice_cache (KEL) — and keeps the balance proofs
+// of the last 14 days, liab_leaf and liab_meta
+// (hub-payment-privacy §3.4: a restored hub still gives an account the
+// proof of an epoch it was on). The backup is hub.db alone: the review tag
+// key (keys/review_tag.key) is in no backup file (PAY-L1).
+func TestTheBackupKeepsTheProofsAndLeavesOutTheRunningHubsTables(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	dereg, notice, dack, env := canary(t, "DEREG"), canary(t, "NOTICE"), canary(t, "DACK"), canary(t, "ENVELOPE")
+	leaf, tagKey := canary(t, "LEAF"), canary(t, "TAGKEY")
+	execAll(t, filepath.Join(dir, "hub.db"), []string{
+		`INSERT INTO dereg_event(aid, at) VALUES(?, 1)`,
+		`INSERT INTO notice_cache(aid, seq, head, observed_at, blob) VALUES(?, 1, 'h', 1, x'00')`,
+		`INSERT INTO relay_dack(handle, dack, exp) VALUES(x'01', ?, 1)`,
+		`INSERT INTO relay_message(rid, to_aid, env_digest, class, size, created_at, payload)
+		   VALUES(x'02', 'bafyagent', x'03', 2, 1, 1, ?)`,
+		`INSERT INTO liab_leaf(to_day, pos, aid, balance, salt) VALUES(20454, 0, ?, 7919, x'00')`,
+		`INSERT INTO liab_meta(to_day, ledger_hw, leaves) VALUES(20454, 3, 16)`,
+	}, []any{dereg}, []any{notice}, []any{[]byte(dack)}, []any{[]byte(env)}, []any{leaf}, nil)
+	writeFile(t, filepath.Join(dir, "keys", "review_tag.key"), tagKey, 0o600)
+
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	backup := filepath.Join(dir, "hub-backup-"+time.Now().Format("20060102")+".db")
+	for q, want := range map[string]int{
+		`SELECT COUNT(*) FROM dereg_event`:                                       0,
+		`SELECT COUNT(*) FROM notice_cache`:                                      0,
+		`SELECT COUNT(*) FROM relay_dack`:                                        0,
+		`SELECT COUNT(*) FROM relay_message`:                                     0,
+		`SELECT COUNT(*) FROM liab_leaf WHERE to_day = 20454 AND balance = 7919`: 1,
+		`SELECT COUNT(*) FROM liab_meta WHERE to_day = 20454 AND leaves = 16`:    1,
+	} {
+		if n := queryInt(t, backup, q); n != want {
+			t.Errorf("the backup: %s = %d, want %d", q, n, want)
+		}
+	}
+	for _, c := range []string{dereg, notice, dack, env} {
+		if hits := filesHolding(t, c, backup); len(hits) != 0 {
+			t.Errorf("the backup holds an excluded row's bytes (%s)", c[:6])
+		}
+	}
+	if hits := filesHolding(t, leaf, backup); len(hits) != 1 {
+		t.Errorf("the backup does not hold the balance leaf")
+	}
+	// The tag key is in the data directory and in nothing the script wrote.
+	if hits := filesHolding(t, tagKey, dir); len(hits) != 1 || !strings.HasSuffix(hits[0], filepath.Join("keys", "review_tag.key")) {
+		t.Errorf("the review tag key's bytes are in %v; want them only in keys/review_tag.key", hits)
+	}
+	backups, _ := filepath.Glob(filepath.Join(dir, "*backup*"))
+	if len(backups) != 1 || backups[0] != backup {
+		t.Errorf("the run left %v; want only %s", backups, backup)
+	}
+}
+
+// TestBackupExcludesNoticeCache (KEL S-3, core §2.16): the weekly backup
+// holds no witness notice this hub signed (notice_cache) — a hub restored
+// from it signs afresh, once each agent is out of quarantine — and keeps the
+// tables a restored hub needs: the quarantine's (restore_state,
+// restore_released, kel_hwm) and the first verifications of payments
+// (x402_first_verify). The kel_hwm file beside hub.db is in no backup. And
+// the backup the script writes is one anet-hub restore takes: the hub opens
+// on it in quarantine, holding its agents.
+func TestBackupExcludesNoticeCache(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	notice := canary(t, "NOTICE")
+	execAll(t, filepath.Join(dir, "hub.db"), []string{
+		`INSERT INTO agent(aid, kel, registered_at) VALUES('bafyagent', x'00', '2026-09-01')`,
+		`INSERT INTO notice_cache(aid, seq, head, observed_at, blob) VALUES('bafyagent', 1, 'h', 1, ?)`,
+		`INSERT INTO x402_first_verify(auth_id, payer, key_state_seq, tip_at_first, first_verified_at, delete_after)
+		   VALUES('bafyauth', 'bafyagent', 1, 1, 1, 2)`,
+		`INSERT INTO restore_state(id, began_at, why, serving_since) VALUES(1, 1, 'restore', 2)`,
+		`INSERT INTO restore_released(aid, released_at, how) VALUES('bafyagent', 3, 'current_key')`,
+		`INSERT INTO kel_hwm(id, n) VALUES(1, 41) ON CONFLICT(id) DO UPDATE SET n = 41`,
+	}, nil, []any{[]byte(notice)}, nil, nil, nil, nil)
+	hwm, err := os.ReadFile(filepath.Join(dir, "kel_hwm"))
+	if err != nil {
+		t.Fatalf("no kel_hwm beside hub.db: %v", err)
+	}
+
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir, "FORCE_WEEKLY=1"}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	backup := filepath.Join(dir, "hub-backup-"+time.Now().Format("20060102")+".db")
+	for q, want := range map[string]int{
+		`SELECT COUNT(*) FROM notice_cache`:                                 0,
+		`SELECT COUNT(*) FROM x402_first_verify WHERE auth_id = 'bafyauth'`: 1,
+		`SELECT COUNT(*) FROM restore_state`:                                1,
+		`SELECT COUNT(*) FROM restore_released`:                             1,
+		`SELECT n FROM kel_hwm WHERE id = 1`:                                41,
+	} {
+		if n := queryInt(t, backup, q); n != want {
+			t.Errorf("the backup: %s = %d, want %d", q, n, want)
+		}
+	}
+	if hits := filesHolding(t, notice, backup); len(hits) != 0 {
+		t.Error("the backup holds the bytes of a witness notice")
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "kel_hwm")); !bytes.Equal(got, hwm) {
+		t.Errorf("the run changed kel_hwm: %q, then %q", hwm, got)
+	}
+
+	// The backup restores, in quarantine, with its agent.
+	restored := t.TempDir()
+	if _, err := aghub.Restore(restored, backup, time.Now()); err != nil {
+		t.Fatalf("anet-hub restore of the script's backup: %v", err)
+	}
+	st, err := aghub.Open(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if q, err := st.Quarantine(); err != nil || !q.Active || q.Held != 1 {
+		t.Errorf("the restored hub: %+v (%v), want a quarantine holding its agent", q, err)
+	}
+}
+
+// hub-db-roll.sh keeps a backup at most 14 days (hub-payment-privacy
+// PAY-L1): every run, whatever the day, deletes the backups whose date is
+// 14 days ago or earlier, and leaves younger ones and files whose name
+// carries no date.
+func TestABackupIsKeptAtMost14Days(t *testing.T) {
+	needSQLite3(t)
+	dir := t.TempDir()
+	store, err := aghub.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+	name := func(days int) string {
+		return filepath.Join(dir, "hub-backup-"+time.Now().AddDate(0, 0, -days).Format("20060102")+".db")
+	}
+	// The ones that must stay are the newest by time, so a Sunday's
+	// rotation (keep the newest 2) does not take them either.
+	for i, f := range []struct {
+		path  string
+		mtime time.Duration
+	}{
+		{name(30), -30 * 24 * time.Hour}, {name(14), -14 * 24 * time.Hour},
+		{name(13), 2 * time.Hour}, {filepath.Join(dir, "hub-backup-manual.db"), 3 * time.Hour},
+	} {
+		writeFile(t, f.path, "backup "+strconv.Itoa(i), 0o600)
+		at := time.Now().Add(f.mtime)
+		if err := os.Chtimes(f.path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, code := runScript(t, []string{"HUB_DATA_DIR=" + dir}, "hub-db-roll.sh")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	for _, gone := range []string{name(30), name(14)} {
+		if _, err := os.Stat(gone); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s is still there", filepath.Base(gone))
+		}
+	}
+	for _, kept := range []string{name(13), filepath.Join(dir, "hub-backup-manual.db")} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s: %v", filepath.Base(kept), err)
+		}
+	}
+	logb, _ := os.ReadFile(filepath.Join(dir, "roll.log"))
+	if n := bytes.Count(logb, []byte("pruned a backup 14 days old or older")); n != 2 {
+		t.Errorf("roll.log names %d backups pruned for their age, want 2:\n%s", n, logb)
+	}
+}
+
+// wire2RelayTables are the relay table and hub_meta of a 0.2 hub.db, for the
+// tests of the 0.2 content cleanup.
+func wire2RelayTables() []string {
+	return []string{
+		`CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
+		   size INTEGER NOT NULL, created_at INTEGER NOT NULL, payload BLOB NOT NULL)`,
+		`CREATE TABLE hub_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	}
 }
 

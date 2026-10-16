@@ -1,0 +1,51 @@
+{
+  "format": "wire3-fixture/1",
+  "about": "POST /register on an open hub (hub-payment-privacy PAY-A1 step 4b, §2.2, §0.4): a newcomer without a proof of work, or with one for no current seed, is 403 pow_required with a new challenge of 22 bits; check_only answers open without one; with a 22-bit proof of work for this hour's seed it registers on probation, its trial credit pending.",
+  "setup": "register_open",
+  "cases": [
+    {
+      "name": "no proof of work is pow_required with a challenge",
+      "cite": "PAY-A1 step 4b, §2.2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}"}},
+      "response": {"status": 403, "headers": {"X-ANet-Wire": "3"},
+        "body_has": {"reason": "pow_required", "error": "Registration here needs a proof of work; solve the challenge in this response and register again.",
+          "challenge": {"seed": "${pow_seed}", "bits": 22}}}
+    },
+    {
+      "name": "a proof of work for no current seed is pow_required",
+      "cite": "PAY-A1 step 4b, §2.2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "pow": {"seed": "${bogus_seed}", "nonce": "${stranger_nonce}"}}},
+      "response": {"status": 403, "body_has": {"reason": "pow_required", "challenge": {"bits": 22}}}
+    },
+    {
+      "name": "another agent's proof of work is pow_required",
+      "cite": "PAY-A1 step 4b, core L23",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger2"},
+        "json": {"aid": "${stranger2}", "kel": "${stranger2_kel}", "pow": {"seed": "${pow_seed}", "nonce": "${stranger_nonce}"}}},
+      "response": {"status": 403, "body_has": {"reason": "pow_required"}}
+    },
+    {
+      "name": "check_only needs no proof of work and answers open",
+      "cite": "§2.2, PAY-A1 step 4b",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "check_only": true}},
+      "response": {"status": 200, "body": {"status": "open"}}
+    },
+    {
+      "name": "a good proof of work registers on probation",
+      "cite": "PAY-A1 step 4b, step 10",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}", "pow": {"seed": "${pow_seed}", "nonce": "${stranger_nonce}"}}},
+      "response": {"status": 200, "headers": {"X-ANet-Wire": "3"}, "body_has": {"aid": "${stranger}", "status": "registered", "trial": "pending"}}
+    },
+    {
+      "name": "registered, it re-registers without a proof of work",
+      "cite": "PAY-A2",
+      "request": {"method": "POST", "path": "/register", "headers": {"X-ANet-Wire": "3"}, "sign": {"action": "register", "as": "stranger"},
+        "json": {"aid": "${stranger}", "kel": "${stranger_kel}"}},
+      "response": {"status": 200, "body_has": {"status": "registered", "trial": "pending"}}
+    }
+  ]
+}

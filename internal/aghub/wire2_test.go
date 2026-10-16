@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,11 +20,11 @@ import (
 
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
 	"github.com/ANetResearch/ANetHub/internal/aghub"
-	"github.com/ANetResearch/ANetHub/internal/hubid"
 )
 
 // newHubAt is newHubWithStore with a data directory the test can inspect.
@@ -33,10 +34,7 @@ func newHubAt(t *testing.T, dir string) (*httptest.Server, *aghub.Store, *aghub.
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := aghub.HubIdentityForTest(t)
 	store.SetHubKey(id.Ctrl)
 	s := aghub.NewServer(store)
 	s.SetHubAID(id.AID)
@@ -61,15 +59,15 @@ func openDB(t *testing.T, dir string) *sql.DB {
 	return db
 }
 
-// ---- 426 for wire-1 relay callers ----
+// ---- 426 for older relay callers ----
 
-// A daemon that does not declare wire 2 is refused on /relay/* with 426
+// A daemon that does not declare wire 3 is refused on /relay/* with 426
 // and told which anet release it needs; other routes stay readable.
 func TestTheRelayRefusesAnOlderWireWith426(t *testing.T) {
 	srv := newHub(t)
 	for _, tc := range []struct {
 		name, wire string
-	}{{"absent", ""}, {"wire 1", "1"}, {"garbage", "two"}} {
+	}{{"absent", ""}, {"wire 1", "1"}, {"wire 2", "2"}, {"garbage", "two"}} {
 		for _, path := range []string{"/relay/send", "/relay/poll", "/relay/ack"} {
 			req, _ := http.NewRequest(http.MethodPost, srv.URL+path, strings.NewReader(`{}`))
 			if tc.wire != "" {
@@ -81,13 +79,15 @@ func TestTheRelayRefusesAnOlderWireWith426(t *testing.T) {
 				continue
 			}
 			var out struct {
-				Error string `json:"error"`
+				Reason       string `json:"reason"`
+				RequiredWire int    `json:"required_wire"`
+				RequiredAnet string `json:"required_anet"`
 			}
 			_ = json.Unmarshal(body, &out)
-			if !strings.Contains(out.Error, "anet >= 0.2.0") {
-				t.Errorf("%s %s: the refusal does not name the required release: %s", tc.name, path, body)
+			if out.Reason != "wire_too_old" || out.RequiredWire != 3 || out.RequiredAnet != "0.3.0" {
+				t.Errorf("%s %s: the refusal does not name the required wire and release: %s", tc.name, path, body)
 			}
-			if hdr.Get("X-ANet-Wire") != "2" {
+			if hdr.Get("X-ANet-Wire") != "3" {
 				t.Errorf("%s %s: the 426 does not state the hub's wire version", tc.name, path)
 			}
 		}
@@ -113,22 +113,30 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	recip, sender := twoAgents(t)
 	register(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
-	stranger, _ := identity.Incept() // never registered
+	stranger, _ := aghub.NewAgentForTest() // never registered
 	hubAID := hubAIDOf(t, srv)
-	env := testEnvelope(t, recip.AID(), nil)
-	body := rawBody(t, map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(env)})
+	// The signed relay request is the opening of a first-contact session.
+	epkBody := func() []byte {
+		_, epk, err := relayauth.NewSessionKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rawBody(t, map[string]any{"epk": base64.RawURLEncoding.EncodeToString(epk)})
+	}
+	body := epkBody()
+	const actionSession = relayauth.ActionSession
 
 	sendReq := func(sign func(req *http.Request)) int {
-		req := newRequest(t, srv, http.MethodPost, "/relay/send", body)
+		req := newRequest(t, srv, http.MethodPost, "/relay/session", body)
 		sign(req)
 		code, _, _ := send(t, req)
 		return code
 	}
 
 	if code := sendReq(func(req *http.Request) {
-		signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
+		signV2(t, req, sender, actionSession, hubAID, body, signingNow())
 	}); code != http.StatusOK {
-		t.Fatalf("control: a correctly signed send was refused: %d", code)
+		t.Fatalf("control: a correctly signed session request was refused: %d", code)
 	}
 
 	cases := []struct {
@@ -137,7 +145,7 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	}{
 		{"no headers", func(req *http.Request) {}},
 		{"bad signature", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
+			signV2(t, req, sender, actionSession, hubAID, body, signingNow())
 			junk := make([]byte, 64)
 			_, _ = rand.Read(junk)
 			req.Header.Set(relayauth.HeaderSig, relayauth.EncodeSig(junk))
@@ -146,27 +154,23 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 			signV2(t, req, sender, relayauth.ActionPoll, hubAID, body, signingNow())
 		}},
 		{"too old", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, time.Now().Add(-6*time.Minute))
+			signV2(t, req, sender, actionSession, hubAID, body, time.Now().Add(-6*time.Minute))
 		}},
 		{"from the future", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, time.Now().Add(6*time.Minute))
+			signV2(t, req, sender, actionSession, hubAID, body, time.Now().Add(6*time.Minute))
 		}},
 		{"body tampered", func(req *http.Request) {
-			other := rawBody(t, map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(testEnvelope(t, recip.AID(), []byte("other")))})
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, other, signingNow())
+			signV2(t, req, sender, actionSession, hubAID, epkBody(), signingNow())
 		}},
 		{"signed for another hub", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, "bafyreianotherhub", body, signingNow())
-		}},
-		{"signer not registered", func(req *http.Request) {
-			signV2(t, req, stranger, relayauth.ActionSend, hubAID, body, signingNow())
+			signV2(t, req, sender, actionSession, "bafyreianotherhub", body, signingNow())
 		}},
 		{"claims another AID", func(req *http.Request) {
-			signV2(t, req, stranger, relayauth.ActionSend, hubAID, body, signingNow())
+			signV2(t, req, stranger, actionSession, hubAID, body, signingNow())
 			req.Header.Set(relayauth.HeaderAID, sender.AID())
 		}},
 		{"non-canonical ts", func(req *http.Request) {
-			signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
+			signV2(t, req, sender, actionSession, hubAID, body, signingNow())
 			req.Header.Set(relayauth.HeaderTS, "0"+req.Header.Get(relayauth.HeaderTS))
 		}},
 	}
@@ -175,15 +179,23 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 			t.Errorf("%s: got %d, want 401", tc.name, code)
 		}
 	}
+	// A signer that is not registered here is not admitted to open a
+	// session: 403 admission_required, whatever it signed (SSR-H6).
+	if code := sendReq(func(req *http.Request) {
+		signV2(t, req, stranger, actionSession, hubAID, body, signingNow())
+	}); code != http.StatusForbidden {
+		t.Errorf("signer not registered: got %d, want 403", code)
+	}
 
 	// Replay: the same signed request twice.
-	req := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-	signV2(t, req, sender, relayauth.ActionSend, hubAID, body, signingNow())
+	body = epkBody()
+	req := newRequest(t, srv, http.MethodPost, "/relay/session", body)
+	signV2(t, req, sender, actionSession, hubAID, body, signingNow())
 	hdr := req.Header.Clone()
 	if code, b, _ := send(t, req); code != http.StatusOK {
 		t.Fatalf("first use: %d %s", code, b)
 	}
-	again := newRequest(t, srv, http.MethodPost, "/relay/send", body)
+	again := newRequest(t, srv, http.MethodPost, "/relay/session", body)
 	again.Header = hdr
 	if code, b, _ := send(t, again); code != http.StatusUnauthorized || !strings.Contains(string(b), "already used") {
 		t.Errorf("replayed request: %d %s, want 401 already used", code, b)
@@ -206,10 +218,10 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 	// Path tampered: signed for one request target, sent with another
 	// spelling that routes to the same handler and the same agent. The
 	// signature covers the target as sent, so it no longer verifies.
-	pb := rawBody(t, map[string]any{"addr": "tcp://10.0.0.1:1"})
-	p := newRequest(t, srv, http.MethodPost, "/agents/"+sender.AID()+"/p2p", pb)
-	signV2(t, p, sender, relayauth.ActionP2P, hubAID, pb, signingNow())
-	p.URL.RawPath = "/agents/%" + strconv.FormatInt(int64(sender.AID()[0]), 16) + sender.AID()[1:] + "/p2p"
+	pb := rawBody(t, map[string]any{"visibility": aghub.VisibilityFederated})
+	p := newRequest(t, srv, http.MethodPost, "/agents/"+sender.AID()+"/visibility", pb)
+	signV2(t, p, sender, relayauth.ActionVisibility, hubAID, pb, signingNow())
+	p.URL.RawPath = "/agents/%" + strconv.FormatInt(int64(sender.AID()[0]), 16) + sender.AID()[1:] + "/visibility"
 	if code, b, _ := send(t, p); code != http.StatusUnauthorized {
 		t.Errorf("path tampered: %d %s, want 401", code, b)
 	}
@@ -221,12 +233,13 @@ func TestRelayAuthV2RefusesEveryBrokenSignature(t *testing.T) {
 func TestTheRelayRefusesAnythingButASealedEnvelopeForTheRecipient(t *testing.T) {
 	srv := newHub(t)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 
 	outer := func(mut func(m map[uint64]any)) []byte {
-		m := map[uint64]any{1: uint64(1), 2: recip.AID(), 3: uint64(1),
-			4: bytes.Repeat([]byte{7}, 16), 5: bytes.Repeat([]byte{9}, 32), 6: []byte("ct")}
+		m := map[uint64]any{1: uint64(2), 2: recip.AID(), 3: uint64(1),
+			4: bytes.Repeat([]byte{7}, 16), 5: bytes.Repeat([]byte{9}, 32), 6: []byte("ct"),
+			7: map[uint64]any{1: uint64(0)}}
 		mut(m)
 		b, err := coredet.Marshal(m)
 		if err != nil {
@@ -239,12 +252,12 @@ func TestTheRelayRefusesAnythingButASealedEnvelopeForTheRecipient(t *testing.T) 
 		env  []byte
 	}{
 		{"plaintext payload", []byte("a plaintext delegation")},
-		{"addressed to someone else", testEnvelope(t, sender.AID(), nil)},
-		{"version 2", outer(func(m map[uint64]any) { m[1] = uint64(2) })},
+		{"version 1", outer(func(m map[uint64]any) { m[1] = uint64(1) })},
 		{"unknown suite", outer(func(m map[uint64]any) { m[3] = uint64(2) })},
 		{"enc of the wrong length", outer(func(m map[uint64]any) { m[5] = bytes.Repeat([]byte{9}, 31) })},
 		{"empty ciphertext", outer(func(m map[uint64]any) { m[6] = []byte{} })},
-		{"unknown critical key", outer(func(m map[uint64]any) { m[7] = []byte("access") })},
+		{"no access", outer(func(m map[uint64]any) { delete(m, 7) })},
+		{"unknown critical key", outer(func(m map[uint64]any) { m[9] = []byte("key nine") })},
 	} {
 		code, b, _ := relaySend(t, srv, sender, recip.AID(), tc.env)
 		if code != http.StatusBadRequest {
@@ -270,34 +283,40 @@ func TestSendingToAnUnknownRecipientIs404(t *testing.T) {
 	}
 }
 
-// One sender cannot exceed its bucket; another sender is unaffected.
-func TestThePerSenderBucketAnswers429WithRetryAfter(t *testing.T) {
+// A recipient takes first contacts at its bucket's rate (30 a minute, 60
+// at once): past it a first contact is answered 429 strangers_busy with a
+// Retry-After, and another recipient is unaffected (sealed-sender §4.2.1
+// step 8).
+func TestTheFirstContactBucketAnswers429WithRetryAfter(t *testing.T) {
 	srv := newHub(t)
-	l := aghub.DefaultLimits()
-	l.SendRate, l.SendBurst = 0.5, 2
-	if err := serverOf(t, srv).SetLimits(l); err != nil {
-		t.Fatal(err)
-	}
 	recip, sender := twoAgents(t)
 	other, _ := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
-	register(t, srv, other, "Other", nil)
-	env := func(i int) []byte { return testEnvelope(t, recip.AID(), []byte{byte(i)}) }
-	for i := 0; i < 2; i++ {
-		if code, b, _ := relaySend(t, srv, sender, recip.AID(), env(i)); code != http.StatusOK {
-			t.Fatalf("send %d within the burst: %d %s", i, code, b)
+	registerWithKeys(t, srv, other, "Other", nil)
+	env := func(to string, i int) []byte { return testEnvelope(t, to, []byte(strconv.Itoa(i))) }
+	busy := -1
+	for i := 0; i < 80 && busy < 0; i++ {
+		code, b, hdr := relaySend(t, srv, sender, recip.AID(), env(recip.AID(), i))
+		switch code {
+		case http.StatusOK:
+		case http.StatusTooManyRequests:
+			if !strings.Contains(string(b), `"strangers_busy"`) {
+				t.Fatalf("send %d: %s, want strangers_busy", i, b)
+			}
+			if ra, err := strconv.Atoi(hdr.Get("Retry-After")); err != nil || ra < 1 {
+				t.Errorf("Retry-After = %q, want a positive number of seconds", hdr.Get("Retry-After"))
+			}
+			busy = i
+		default:
+			t.Fatalf("send %d: %d %s", i, code, b)
 		}
 	}
-	code, b, hdr := relaySend(t, srv, sender, recip.AID(), env(3))
-	if code != http.StatusTooManyRequests {
-		t.Fatalf("send past the burst: %d %s, want 429", code, b)
+	if busy < 60 {
+		t.Fatalf("the first contacts were refused after %d, want at least the burst of 60", busy)
 	}
-	if ra, err := strconv.Atoi(hdr.Get("Retry-After")); err != nil || ra < 1 {
-		t.Errorf("Retry-After = %q, want a positive number of seconds", hdr.Get("Retry-After"))
-	}
-	if code, b, _ := relaySend(t, srv, other, recip.AID(), env(4)); code != http.StatusOK {
-		t.Errorf("another sender was limited by the first one's bucket: %d %s", code, b)
+	if code, b, _ := relaySend(t, srv, sender, other.AID(), env(other.AID(), 0)); code != http.StatusOK {
+		t.Errorf("another recipient was limited by the first one's bucket: %d %s", code, b)
 	}
 }
 
@@ -311,7 +330,7 @@ func TestAFullMailboxAnswers507(t *testing.T) {
 		t.Fatal(err)
 	}
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	for i := 0; i < 2; i++ {
 		if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), []byte{byte(i)})); code != 200 {
@@ -347,9 +366,10 @@ func TestAnOversizedEnvelopeIs413(t *testing.T) {
 		t.Fatal(err)
 	}
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
-	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), bytes.Repeat([]byte("x"), 900))); code != 200 {
+	// 880 bytes of ct leave room for the outer header with its access (key 7) under 1024.
+	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), bytes.Repeat([]byte("x"), 880))); code != 200 {
 		t.Fatalf("an envelope under the limit: %d %s", code, b)
 	}
 	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), bytes.Repeat([]byte("x"), 1100))); code != http.StatusRequestEntityTooLarge {
@@ -359,13 +379,14 @@ func TestAnOversizedEnvelopeIs413(t *testing.T) {
 
 // ---- storage: what a relay row holds, and for how long ----
 
-// The relay table holds the recipient, the size, the time and the
-// envelope, and nothing that names the sender (SI-2).
+// The relay table holds the recipient, the envelope's digest, the class and
+// id of the credential, the size, the time, the expiry and the envelope,
+// and nothing that names the sender (SI-2, core §2.16).
 func TestTheRelayDoesNotStoreTheSender(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newHubAt(t, dir)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), nil)); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
@@ -383,7 +404,7 @@ func TestTheRelayDoesNotStoreTheSender(t *testing.T) {
 	}
 	rows.Close()
 	sort.Strings(cols)
-	if want := []string{"created_at", "id", "payload", "size", "to_aid"}; strings.Join(cols, ",") != strings.Join(want, ",") {
+	if want := []string{"cap_id", "class", "created_at", "env_digest", "exp", "id", "payload", "rid", "size", "to_aid"}; strings.Join(cols, ",") != strings.Join(want, ",") {
 		t.Fatalf("relay_message columns = %v, want %v", cols, want)
 	}
 	var n int
@@ -406,7 +427,7 @@ func TestAnAckDeletesTheRow(t *testing.T) {
 	dir := t.TempDir()
 	srv, _, _ := newHubAt(t, dir)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	for i := 0; i < 2; i++ {
 		if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), []byte{byte(i)})); code != 200 {
@@ -446,7 +467,7 @@ func TestAnAckDeletesTheRow(t *testing.T) {
 func TestUndeliveredEnvelopesExpire(t *testing.T) {
 	srv, store := newHubWithStore(t)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	if code, b, _ := relaySend(t, srv, sender, recip.AID(), testEnvelope(t, recip.AID(), nil)); code != 200 {
 		t.Fatalf("send: %d %s", code, b)
@@ -479,18 +500,14 @@ func TestAnAckedEnvelopeLeavesNoBytesOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recip, _ := twoAgents(t)
-	kel, _ := identity.MarshalKEL(recip.KEL())
-	if err := store.PutAgent(recip.AID(), "Recipient", nil, kel); err != nil {
-		t.Fatal(err)
-	}
+	recip := storeAgentWithKeys(t, store, "Recipient")
 	canary := []byte("CANARY-" + strings.Repeat("7f3a", 64))
-	id, err := store.RelayEnqueue(recip.AID(), testEnvelope(t, recip.AID(), canary))
+	q, err := store.QueueEnvelope(recip.AID(), testEnvelope(t, recip.AID(), canary))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n, err := store.RelayAck(recip.AID(), []int64{id}); err != nil || n != 1 {
-		t.Fatalf("ack: %d %v", n, err)
+	if n, err := store.RelayAck(recip.AID(), []int64{q.ID}); err != nil || len(n) != 1 {
+		t.Fatalf("ack: %v %v", n, err)
 	}
 	// While the hub is running, after the WAL checkpoint that
 	// deploy/hub-db-roll.sh runs. Until that checkpoint the WAL still holds
@@ -522,120 +539,42 @@ func TestAnAckedEnvelopeLeavesNoBytesOnDisk(t *testing.T) {
 	}
 }
 
-// A wire-1 relay table is rebuilt empty: no wire-1 row survives, delivered
-// or not, because each is a plaintext payload no wire-2 daemon can open
-// (SI-1; 05-hub H5). The migration records what it dropped in hub_meta,
-// neither payload is left in the files, and new ids continue above the
-// old ones.
-func TestAWire1RelayTableIsMigrated(t *testing.T) {
-	dir := t.TempDir()
-	old, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	recip, sender := twoAgents(t)
-	delivered := []byte("DELIVERED-CANARY-" + strings.Repeat("9c", 128))
-	waiting := []byte("UNDELIVERED-CANARY-" + strings.Repeat("7e", 128))
-	for _, q := range []string{
-		`CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
+// A relay table written by an earlier release is not converted (core
+// CORE-V4): the hub refuses to open the data directory (a database without
+// the 0.3.0 version is anet-hub 0.2's, hub_identity_v02), and the file is
+// left as it was.
+func TestAnEarlierRelayTableIsRefused(t *testing.T) {
+	for name, table := range map[string]string{
+		"wire 1": `CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
 		   from_aid TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, interaction_id TEXT NOT NULL DEFAULT '',
 		   payload BLOB NOT NULL, created_at TEXT NOT NULL, delivered_at TEXT)`,
-		`CREATE INDEX idx_relay_mailbox ON relay_message(to_aid, delivered_at, id)`,
+		"wire 2": `CREATE TABLE relay_message (id INTEGER PRIMARY KEY AUTOINCREMENT, to_aid TEXT NOT NULL,
+		   size INTEGER NOT NULL, created_at INTEGER NOT NULL, payload BLOB NOT NULL)`,
 	} {
-		if _, err := old.Exec(q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	ins := `INSERT INTO relay_message(id,to_aid,from_aid,kind,interaction_id,payload,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`
-	if _, err := old.Exec(ins, 12, recip.AID(), sender.AID(), "delegate", "ix-old", delivered,
-		"2026-09-01T10:00:00.123456789Z", "2026-09-01T10:01:00Z"); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []int64{9, 10} {
-		if _, err := old.Exec(ins, id, recip.AID(), sender.AID(), "message", "ix-old", waiting,
-			"2026-09-20T08:00:00.5Z", nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	old.Close()
-
-	before := time.Now().UnixMilli()
-	store, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatalf("open migrates: %v", err)
-	}
-	// While the hub is running: the migration checkpointed the WAL into
-	// the main file, whose freed pages secure_delete zeroed.
-	if b, err := os.ReadFile(filepath.Join(dir, "hub.db")); err != nil || bytes.Contains(b, delivered) || bytes.Contains(b, waiting) {
-		t.Errorf("hub.db still holds a wire-1 payload while the migrated hub runs (%v)", err)
-	}
-	db := openDB(t, dir)
-	var cols []string
-	rows, _ := db.Query(`SELECT name FROM pragma_table_info('relay_message')`)
-	for rows.Next() {
-		var c string
-		_ = rows.Scan(&c)
-		cols = append(cols, c)
-	}
-	rows.Close()
-	sort.Strings(cols)
-	if strings.Join(cols, ",") != "created_at,id,payload,size,to_aid" {
-		t.Fatalf("columns after migration: %v", cols)
-	}
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM relay_message`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("rows after migration: %d %v, want none: an undelivered wire-1 row is plaintext", n, err)
-	}
-	// The record the operator reads afterwards.
-	for key, want := range map[string]string{
-		aghub.MetaRelayV2DroppedUndelivered: "2",
-		aghub.MetaRelayV2DroppedDelivered:   "1",
-	} {
-		if v, ok, err := store.Meta(key); err != nil || !ok || v != want {
-			t.Errorf("hub_meta %s = %q (set %v, %v), want %q", key, v, ok, err, want)
-		}
-	}
-	at, ok, err := store.Meta(aghub.MetaRelayV2MigratedAt)
-	if ms, perr := strconv.ParseInt(at, 10, 64); err != nil || !ok || perr != nil || ms < before || ms > time.Now().UnixMilli() {
-		t.Errorf("hub_meta %s = %q (set %v, %v), want the migration instant in unix ms",
-			aghub.MetaRelayV2MigratedAt, at, ok, err)
-	}
-	kel, _ := identity.MarshalKEL(recip.KEL())
-	if err := store.PutAgent(recip.AID(), "Recipient", nil, kel); err != nil {
-		t.Fatal(err)
-	}
-	next, err := store.RelayEnqueue(recip.AID(), testEnvelope(t, recip.AID(), nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if next <= 12 {
-		t.Fatalf("a new envelope got id %d, reusing the pre-migration id space (highest was 12)", next)
-	}
-	store.Close()
-	db.Close()
-	// A second open finds nothing to migrate and leaves the record as it is.
-	again, err := aghub.Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v, _, _ := again.Meta(aghub.MetaRelayV2MigratedAt); v != at {
-		t.Errorf("reopening rewrote %s: %q, was %q", aghub.MetaRelayV2MigratedAt, v, at)
-	}
-	again.Close()
-	for _, f := range []string{"hub.db", "hub.db-wal"} {
-		b, err := os.ReadFile(filepath.Join(dir, f))
-		if err != nil {
-			continue
-		}
-		if bytes.Contains(b, delivered) {
-			t.Errorf("%s still holds a delivered wire-1 payload after migration", f)
-		}
-		if bytes.Contains(b, waiting) {
-			t.Errorf("%s still holds an undelivered wire-1 payload after migration", f)
-		}
-		if bytes.Contains(b, []byte("ix-old")) {
-			t.Errorf("%s still holds a wire-1 interaction id after migration", f)
-		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			old, err := sql.Open("sqlite", filepath.Join(dir, "hub.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := old.Exec(table); err != nil {
+				t.Fatal(err)
+			}
+			old.Close()
+			store, err := aghub.Open(dir)
+			if !errors.Is(err, aghub.ErrHubDataV02) {
+				if store != nil {
+					store.Close()
+				}
+				t.Fatalf("opening a %s relay table: %v, want ErrHubDataV02", name, err)
+			}
+			// Nothing was created beside the old table.
+			db := openDB(t, dir)
+			var n int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&n); err != nil || n != 1 {
+				t.Errorf("the refused database holds %d tables (%v), want the old one only", n, err)
+			}
+		})
 	}
 }
 
@@ -646,7 +585,7 @@ func TestAWire1RelayTableIsMigrated(t *testing.T) {
 // accepted.
 func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 	srv := newHub(t)
-	c, err := identity.Incept()
+	c, err := aghub.NewAgentForTest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,25 +602,25 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	register(t, srv, c, "Agent", nil)
-	if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+	if err := identitytest.Rotate(c, uint64(time.Now().UnixMilli())); err != nil {
 		t.Fatal(err)
 	}
-	if code, b := registerWithCard(t, srv, c, "Agent", nil, nil); code != 200 {
+	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
 		t.Fatalf("a longer KEL was refused: %d %s", code, b)
 	}
-	if code, b := registerWithCard(t, srv, c, "Agent", nil, nil); code != 200 {
+	if code, b := registerCode(t, srv, c, "Agent", nil); code != 200 {
 		t.Fatalf("the same KEL again was refused: %d %s", code, b)
 	}
 	// Rollback: the pre-rotation KEL, signed by the pre-rotation key.
-	code, b := registerWithCard(t, srv, before, "Agent", nil, nil)
+	code, b := registerCode(t, srv, before, "Agent", nil)
 	if code != http.StatusConflict || !strings.Contains(string(b), "rollback") {
 		t.Errorf("a rolled-back KEL: %d %s, want 409 naming the rollback", code, b)
 	}
 	// Fork: the same pre-rotation state rotated differently.
-	if err := forked.Rotate(uint64(time.Now().UnixMilli()) + 1); err != nil {
+	if err := identitytest.Rotate(forked, uint64(time.Now().UnixMilli())+1); err != nil {
 		t.Fatal(err)
 	}
-	code, b = registerWithCard(t, srv, forked, "Agent", nil, nil)
+	code, b = registerCode(t, srv, forked, "Agent", nil)
 	if code != http.StatusConflict || !strings.Contains(string(b), "fork") {
 		t.Errorf("a forked KEL: %d %s, want 409 naming the fork", code, b)
 	}
@@ -692,7 +631,7 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 		if code, b := leave(t, srv, c); code != 200 {
 			t.Fatalf("leave: %d %s", code, b)
 		}
-		if code, b := registerWithCard(t, srv, before, "Agent", nil, nil); code != http.StatusConflict {
+		if code, b := registerCode(t, srv, before, "Agent", nil); code != http.StatusConflict {
 			t.Errorf("re-registering after leaving with a rolled-back KEL: %d %s, want 409", code, b)
 		}
 	}()
@@ -705,18 +644,18 @@ func TestRegistrationRefusesAKELThatDoesNotExtendTheStoredOne(t *testing.T) {
 		KEL string `json:"kel"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&out)
-	raw, _ := base64.StdEncoding.DecodeString(out.KEL)
+	raw, _ := base64.RawURLEncoding.DecodeString(out.KEL)
 	events, _ := identity.UnmarshalKEL(raw)
-	if len(events) != 2 {
-		t.Errorf("stored KEL has %d events, want the rotated 2", len(events))
+	if len(events) != len(c.KEL()) {
+		t.Errorf("stored KEL has %d events, want the rotated %d", len(events), len(c.KEL()))
 	}
 }
 
 // ---- encryption keys ----
 
 // The publisher rule: strictly greater seq stores, the same set again is
-// a 200 no-op, anything else is 409; a set that does not verify for the
-// agent is 400.
+// a 200 no-op, anything else is 409 keys_rollback; a set that does not
+// verify for the agent is 400.
 func TestKeyPublisherRules(t *testing.T) {
 	srv := newHub(t)
 	c, other := twoAgents(t)
@@ -738,12 +677,12 @@ func TestKeyPublisherRules(t *testing.T) {
 		t.Fatalf("the same set again: %s, want 200 unchanged", got)
 	}
 	k9, _ := mintKeySet(t, c, 9)
-	if code, b := publishKeys(t, srv, c, k9); code != http.StatusConflict {
-		t.Errorf("a lower seq: %d %s, want 409", code, b)
+	if code, b := publishKeys(t, srv, c, k9); code != http.StatusConflict || !strings.Contains(string(b), `"keys_rollback"`) {
+		t.Errorf("a lower seq: %d %s, want 409 keys_rollback", code, b)
 	}
 	k10b, _ := mintKeySet(t, c, 10)
-	if code, b := publishKeys(t, srv, c, k10b); code != http.StatusConflict {
-		t.Errorf("the stored seq with other content: %d %s, want 409", code, b)
+	if code, b := publishKeys(t, srv, c, k10b); code != http.StatusConflict || !strings.Contains(string(b), `"stored_seq":10`) {
+		t.Errorf("the stored seq with other content: %d %s, want 409 with stored_seq 10", code, b)
 	}
 	// A set for another AID, and a set signed by another key, are refused
 	// even when their seq would advance.
@@ -760,7 +699,7 @@ func TestKeyPublisherRules(t *testing.T) {
 	}
 	// The agent cannot publish for somebody else.
 	if code, b := signedDo(t, srv, c, relayauth.ActionKeys, http.MethodPost, "/agents/"+other.AID()+"/keys",
-		map[string]any{"keyset": base64.StdEncoding.EncodeToString(k11)}); code != http.StatusUnauthorized {
+		map[string]any{"keys": base64.RawURLEncoding.EncodeToString(k11), "prev_seq": 0}); code != http.StatusUnauthorized {
 		t.Errorf("publishing on another agent's path: %d %s, want 401", code, b)
 	}
 	// GET returns the stored set with the KEL it verifies against.
@@ -772,11 +711,11 @@ func TestKeyPublisherRules(t *testing.T) {
 	if err := json.Unmarshal(b, &view); err != nil {
 		t.Fatal(err)
 	}
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
+	raw, _ := base64.RawURLEncoding.DecodeString(view.Keys)
 	if !bytes.Equal(raw, k11) {
 		t.Error("GET does not return the newest set")
 	}
-	kelRaw, _ := base64.StdEncoding.DecodeString(view.KEL)
+	kelRaw, _ := base64.RawURLEncoding.DecodeString(view.KEL)
 	events, err := identity.UnmarshalKEL(kelRaw)
 	if err != nil {
 		t.Fatal(err)
@@ -788,16 +727,21 @@ func TestKeyPublisherRules(t *testing.T) {
 }
 
 // /register carries the key set and the A2A card as optional fields
-// whose problems are reported, not fatal.
+// whose problems are reported, not fatal; a key set that does not follow
+// the stored one is 409 keys_rollback (FS-H4).
 func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 	srv := newHub(t)
 	c, other := twoAgents(t)
 	regWith := func(extra map[string]any) (int, aghub.RegisterResponse) {
 		body := registerBody(t, c, "Agent", nil)
 		for k, v := range extra {
+			if k == "enc_keys" {
+				withEncKeys(t, srv, body, c.AID(), v.([]byte))
+				continue
+			}
 			body[k] = v
 		}
-		code, b := signedDo(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register", body)
+		code, b := registerFunded(t, srv, c, body)
 		var out aghub.RegisterResponse
 		_ = json.Unmarshal(b, &out)
 		return code, out
@@ -807,21 +751,21 @@ func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 	// registration or the key set beside it (registry_test.go covers
 	// admission itself).
 	card := json.RawMessage(`{"name":"Agent","signatures":[{"protected":"x","signature":"y"}]}`)
-	code, out := regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(k5), "a2a_card": card})
+	code, out := regWith(map[string]any{"enc_keys": k5, "a2a_card": card})
 	if code != 200 || out.KeysStatus != aghub.KeysStatusOK || out.CardStatus != aghub.CardStatusInvalid || out.CardError == "" {
 		t.Fatalf("first registration: %d %+v", code, out)
 	}
 	// A restarted daemon re-registers with the same set.
-	if code, out = regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(k5)}); code != 200 || out.KeysStatus != aghub.KeysStatusUnchanged {
+	if code, out = regWith(map[string]any{"enc_keys": k5}); code != 200 || out.KeysStatus != aghub.KeysStatusUnchanged {
 		t.Fatalf("re-registration with the same set: %d %+v", code, out)
 	}
-	// A stale set does not fail the registration.
+	// A stale set is refused with what the hub holds.
 	k4, _ := mintKeySet(t, c, 4)
-	if code, out = regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(k4)}); code != 200 || out.KeysStatus != aghub.KeysStatusConflict || out.KeysError == "" {
-		t.Fatalf("stale set: %d %+v", code, out)
+	if code, _ = regWith(map[string]any{"enc_keys": k4}); code != http.StatusConflict {
+		t.Fatalf("stale set: %d, want 409 keys_rollback", code)
 	}
 	foreign, _ := mintKeySet(t, other, 50)
-	if code, out = regWith(map[string]any{"enc_keys": base64.StdEncoding.EncodeToString(foreign), "a2a_card": json.RawMessage(`"not an object"`)}); code != 200 ||
+	if code, out = regWith(map[string]any{"enc_keys": foreign, "a2a_card": json.RawMessage(`"not an object"`)}); code != 200 ||
 		out.KeysStatus != aghub.KeysStatusInvalid || out.CardStatus != aghub.CardStatusInvalid {
 		t.Fatalf("foreign set and a non-object card: %d %+v", code, out)
 	}
@@ -832,7 +776,7 @@ func TestRegisterReportsKeysAndCardPerField(t *testing.T) {
 	_, b := getJSON(t, srv.URL+"/agents/"+c.AID()+"/keys")
 	var view aghub.KeysView
 	_ = json.Unmarshal(b, &view)
-	if raw, _ := base64.StdEncoding.DecodeString(view.KeySet); !bytes.Equal(raw, k5) {
+	if raw, _ := base64.RawURLEncoding.DecodeString(view.Keys); !bytes.Equal(raw, k5) {
 		t.Error("a refused set replaced the stored one")
 	}
 }
@@ -893,8 +837,8 @@ func TestARealSealedMessageCrossesTheRelay(t *testing.T) {
 	_, b := getJSON(t, srv.URL+"/agents/"+recip.AID()+"/keys")
 	var view aghub.KeysView
 	_ = json.Unmarshal(b, &view)
-	raw, _ := base64.StdEncoding.DecodeString(view.KeySet)
-	kelRaw, _ := base64.StdEncoding.DecodeString(view.KEL)
+	raw, _ := base64.RawURLEncoding.DecodeString(view.Keys)
+	kelRaw, _ := base64.RawURLEncoding.DecodeString(view.KEL)
 	events, _ := identity.UnmarshalKEL(kelRaw)
 	signed, _ := seal.UnmarshalSignedEncKeySet(raw)
 	set, err := seal.VerifyEncKeySet(signed, recip.AID(), events, uint64(time.Now().UnixMilli()))
@@ -910,8 +854,8 @@ func TestARealSealedMessageCrossesTheRelay(t *testing.T) {
 		t.Fatalf("send: %d %s", code, b)
 	}
 	p := relayPoll(t, srv, recip)
-	got, _ := base64.StdEncoding.DecodeString(p.Messages[0].Envelope)
-	opened, err := seal.Open(got, recip.AID(), seal.StaticKeyRing{kp})
+	got, _ := base64.RawURLEncoding.DecodeString(p.Messages[0].Envelope)
+	opened, err := seal.Open(got, recip.AID(), seal.StaticKeyRing{kp}, nil)
 	if err != nil {
 		t.Fatalf("the recipient cannot open what the relay delivered: %v", err)
 	}
@@ -931,7 +875,8 @@ func TestRegistrationIsRateLimitedPerClientIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := func(ip string) (int, http.Header) {
-		c, _ := identity.Incept()
+		c, _ := aghub.NewAgentForTest()
+		admitForTest(t, srv, c.AID())
 		req := signedRequest(t, srv, c, relayauth.ActionRegister, http.MethodPost, "/register",
 			registerBody(t, c, "Fresh", nil))
 		req.Header.Set("X-Real-IP", ip)
@@ -955,44 +900,6 @@ func TestRegistrationIsRateLimitedPerClientIP(t *testing.T) {
 	}
 }
 
-// Naming another sender in the header does not spend that sender's
-// tokens: an unauthenticated request takes nothing from the bucket.
-func TestAForgedSenderHeaderDoesNotDrainTheBucket(t *testing.T) {
-	srv := newHub(t)
-	l := aghub.DefaultLimits()
-	l.SendRate, l.SendBurst = 0.01, 2
-	if err := serverOf(t, srv).SetLimits(l); err != nil {
-		t.Fatal(err)
-	}
-	recip, victim := twoAgents(t)
-	attacker, _ := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
-	register(t, srv, victim, "Victim", nil)
-	// The victim spends one of its two tokens, so its bucket exists and
-	// holds one.
-	if code, b, _ := relaySend(t, srv, victim, recip.AID(), testEnvelope(t, recip.AID(), []byte("first"))); code != 200 {
-		t.Fatalf("the victim's first send: %d %s", code, b)
-	}
-	for i := 0; i < 3; i++ {
-		env := testEnvelope(t, recip.AID(), []byte{byte(i)})
-		body := rawBody(t, map[string]any{"to_aid": recip.AID(), "envelope": base64.StdEncoding.EncodeToString(env)})
-		req := newRequest(t, srv, http.MethodPost, "/relay/send", body)
-		signV2(t, req, attacker, relayauth.ActionSend, hubAIDOf(t, srv), body, signingNow())
-		req.Header.Set(relayauth.HeaderAID, victim.AID())
-		if code, _, _ := send(t, req); code != http.StatusUnauthorized {
-			t.Fatalf("forged send %d: %d, want 401", i, code)
-		}
-	}
-	if code, b, _ := relaySend(t, srv, victim, recip.AID(), testEnvelope(t, recip.AID(), []byte("mine"))); code != 200 {
-		t.Fatalf("the victim's own send after forged ones: %d %s", code, b)
-	}
-	// And its bucket is now empty: the next one is refused before the body
-	// is read.
-	if code, _, _ := relaySend(t, srv, victim, recip.AID(), testEnvelope(t, recip.AID(), []byte("again"))); code != http.StatusTooManyRequests {
-		t.Fatalf("third send with a two-token bucket: %d, want 429", code)
-	}
-}
-
 // /relay/poll with after_id (A2A-DESIGN §3.7, decision Q1): only envelopes
 // queued after the cursor, oldest first, under the same limit and byte
 // budget; no after_id is the whole mailbox, as before. The cursor is what
@@ -1001,7 +908,7 @@ func TestAForgedSenderHeaderDoesNotDrainTheBucket(t *testing.T) {
 func TestAPollAfterACursorReturnsOnlyLaterEnvelopes(t *testing.T) {
 	srv := newHub(t)
 	recip, sender := twoAgents(t)
-	register(t, srv, recip, "Recipient", nil)
+	registerWithKeys(t, srv, recip, "Recipient", nil)
 	register(t, srv, sender, "Sender", nil)
 	for i := 0; i < 5; i++ {
 		env := testEnvelope(t, recip.AID(), []byte{byte('a' + i)})
@@ -1083,25 +990,22 @@ func TestAPollAfterACursorReturnsOnlyLaterEnvelopes(t *testing.T) {
 
 	// The byte budget counts from the cursor too, and the first envelope
 	// after it is returned even when it alone is over the budget.
-	l := aghub.DefaultLimits()
-	l.PollBudget = 1000
-	if err := serverOf(t, srv).SetLimits(l); err != nil {
-		t.Fatal(err)
-	}
-	var big []int64
 	for i, n := range []int{1500, 300} {
 		env := testEnvelope(t, recip.AID(), bytes.Repeat([]byte{byte('p' + i)}, n))
 		code, b, _ := relaySend(t, srv, sender, recip.AID(), env)
 		if code != 200 {
 			t.Fatalf("send big %d: %d %s", i, code, b)
 		}
-		var out struct {
-			ID int64 `json:"id"`
-		}
-		if err := json.Unmarshal(b, &out); err != nil {
-			t.Fatal(err)
-		}
-		big = append(big, out.ID)
+	}
+	_, after := poll(map[string]any{"after_id": all[4]})
+	big := idsOf(after)
+	if len(big) != 2 {
+		t.Fatalf("after_id %d returned %v, want the two new envelopes", all[4], big)
+	}
+	l := aghub.DefaultLimits()
+	l.PollBudget = 1000
+	if err := serverOf(t, srv).SetLimits(l); err != nil {
+		t.Fatal(err)
 	}
 	if _, p := poll(map[string]any{"after_id": all[4]}); !equal(idsOf(p), big[:1]) {
 		t.Fatalf("after_id %d under a 1000-byte budget returned %v, want only %v", all[4], idsOf(p), big[:1])

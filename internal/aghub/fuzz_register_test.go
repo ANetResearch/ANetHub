@@ -16,6 +16,7 @@ import (
 	"github.com/ANetResearch/ANetCore/a2acard"
 	"github.com/ANetResearch/ANetCore/coredet"
 	"github.com/ANetResearch/ANetCore/identity"
+	"github.com/ANetResearch/ANetCore/identity/identitytest"
 	"github.com/ANetResearch/ANetCore/relayauth"
 	"github.com/ANetResearch/ANetCore/seal"
 
@@ -82,34 +83,39 @@ func indexInvariants(t *testing.T, h *fz, aid string) {
 }
 
 // FuzzHubRegister fuzzes a registration: profile text, capability list,
-// ADP card, A2A card, encryption key set and KEL, each either valid,
-// another agent's, mutated, or raw fuzz bytes. The request is always
-// signed by the registrant. Properties:
+// A2A card, encryption key set and KEL, each either valid, another
+// agent's, mutated, or raw fuzz bytes, and sometimes one of the removed
+// members pricing and card. The request is always signed by the
+// registrant. Properties:
 //
-//   - the answer is 200, 400, 401, 409 or 413, never a 5xx;
+//   - the answer is 200, 400, 401, 403, 409 or 413, never a 5xx;
+//   - a body with pricing or card is 400 (or 413);
 //   - 200 only for a KEL that replays to the AID claimed, and the hub
 //     then holds exactly that KEL;
-//   - an A2A card is listed only if it verifies against that KEL, and the
-//     skill and tag indexes hold nothing for an agent without one;
+//   - an A2A card is listed only if it verifies against that KEL and
+//     carries no price extension, and the skill and tag indexes hold
+//     nothing for an agent without one;
 //   - a key set is stored only if it verifies for the agent;
 //   - a refused first registration leaves no agent, card or balance
-//     behind, and a first registration is granted exactly once;
+//     behind, and a registration pays no credit;
 //   - the ledger invariants hold.
 func FuzzHubRegister(f *testing.F) {
 	h := newFZ(f)
 	regular, _ := h.agent(f, "fuzz-regular", []string{"fuzz.reg"}, true)
-	stranger, err := identity.Incept()
+	stranger, err := aghub.NewAgentForTest()
 	if err != nil {
 		f.Fatal(err)
 	}
 	// A KEL past seal.MaxKELEvents, built once: no sender accepts it, and
 	// neither may /register [redteam:F36].
-	big, err := identity.Incept()
+	big, err := aghub.NewAgentForTest()
 	if err != nil {
 		f.Fatal(err)
 	}
+	start := big.KEL()[len(big.KEL())-1].Event.Timestamp + 1
 	for i := 0; i <= seal.MaxKELEvents; i++ {
-		if err := big.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+		// Each event's ts is after the previous one's (KEL v2).
+		if err := identitytest.Rotate(big, start+uint64(i)); err != nil {
 			f.Fatal(err)
 		}
 	}
@@ -138,12 +144,13 @@ func FuzzHubRegister(f *testing.F) {
 		// (re-registration), or a new identity rotated a few times.
 		c := regular
 		if who%4 != 1 {
-			if c, err = identity.Incept(); err != nil {
+			if c, err = aghub.NewAgentForTest(); err != nil {
 				t.Fatal(err)
 			}
 			if who%4 == 2 {
+				last := c.KEL()[len(c.KEL())-1].Event.Timestamp
 				for i := 0; i < int(seq%3)+1; i++ {
-					if err := c.Rotate(uint64(time.Now().UnixMilli())); err != nil {
+					if err := identitytest.Rotate(c, last+1+uint64(i)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -175,26 +182,22 @@ func FuzzHubRegister(f *testing.F) {
 		}
 		body := map[string]any{
 			"aid": c.AID(), "name": name, "caps": caps,
-			"summary": summary, "readme": readme, "pricing": pricing,
-			"kel": base64.StdEncoding.EncodeToString(kel),
+			"summary": summary, "readme": readme,
+			"kel": base64.RawURLEncoding.EncodeToString(kel),
 		}
-		switch cardMode % 5 {
+		// The members that carried the public prices and the ADP card are
+		// gone: a body with either is refused like any member /register
+		// does not take.
+		removed := false
+		switch cardMode % 4 {
 		case 1:
-			body["card"] = fzADPCard(t, c, name, caps)
+			body["pricing"], removed = pricing, true
 		case 2:
 			if json.Valid(cardRaw) {
-				body["card"] = json.RawMessage(cardRaw)
+				body["card"], removed = json.RawMessage(cardRaw), true
 			}
 		case 3:
-			body["card"] = fzADPCard(t, stranger, name, caps)
-		case 4:
-			card := []byte(fzADPCard(t, c, name, caps))
-			if len(cardRaw) > 0 {
-				card[int(cardRaw[0])%len(card)] ^= 1
-			}
-			if json.Valid(card) {
-				body["card"] = json.RawMessage(card)
-			}
+			body["card"], removed = map[string]any{"subject_did": c.AID(), "name": name, "capabilities": caps}, true
 		}
 		skills := func(card map[string]any) {
 			if capsRaw == "" {
@@ -210,7 +213,7 @@ func FuzzHubRegister(f *testing.F) {
 			}
 			card["skills"] = out
 		}
-		switch a2aMode % 7 {
+		switch a2aMode % 8 {
 		case 1:
 			body["a2a_card"] = fzA2ACardOrRaw(t, c, seq, skills)
 		case 2:
@@ -231,31 +234,51 @@ func FuzzHubRegister(f *testing.F) {
 			body["a2a_card"] = fzA2ACard(t, stranger, seq)
 		case 6:
 			body["a2a_card"] = json.RawMessage(golden)
+		case 7:
+			// A public card with prices is never listed.
+			body["a2a_card"] = fzA2ACardOrRaw(t, c, seq, skills, withExtension(priceExtension(priceV1URI)))
+		}
+		// The key set, base64url, with a prev_seq that follows the stored
+		// set, is 0, or is missing (FS-H4).
+		storedSeq := uint64(0)
+		if ks, _, _, _ := h.store.LocalKeys(c.AID()); ks != nil {
+			if p := decodeSetSeq(ks); p != nil {
+				storedSeq = *p
+			}
+		}
+		withKeys := func(raw []byte) {
+			body["enc_keys"] = base64.RawURLEncoding.EncodeToString(raw)
+			switch keysMode / 7 % 3 {
+			case 0:
+				body["prev_seq"] = storedSeq
+			case 1:
+				body["prev_seq"] = 0
+			}
 		}
 		switch keysMode % 7 {
 		case 1:
 			raw, _ := fzKeySet(t, c, seq|1, 0)
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		case 2:
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(keysRaw)
+			withKeys(keysRaw)
 		case 3:
-			body["enc_keys"] = string(keysRaw)
+			body["enc_keys"], body["prev_seq"] = string(keysRaw), storedSeq
 		case 4:
 			raw, _ := fzKeySet(t, stranger, seq|1, 0)
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		case 5:
 			var shift int64
 			if len(keysRaw) > 0 {
 				shift = int64(int8(keysRaw[0])) * 86_400_000 / 8
 			}
 			raw, _ := fzKeySet(t, c, seq, shift)
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		case 6:
 			raw, _ := fzKeySet(t, c, seq|1, 0)
 			if len(keysRaw) > 0 {
 				raw[int(keysRaw[0])%len(raw)] ^= 1
 			}
-			body["enc_keys"] = base64.StdEncoding.EncodeToString(raw)
+			withKeys(raw)
 		}
 		raw := fzJSON(t, body)
 		if who%4 == 3 {
@@ -264,8 +287,11 @@ func FuzzHubRegister(f *testing.F) {
 
 		balBefore := h.balance(t, c.AID())
 		rec := h.register(c, raw)
-		if !allowed(rec.Code, 200, 400, 401, 409, 413) {
+		if !allowed(rec.Code, 200, 400, 401, 403, 409, 413) {
 			t.Fatalf("register: unexpected %d %s", rec.Code, rec.Body.Bytes())
+		}
+		if removed && who%4 != 3 && rec.Code != http.StatusBadRequest && rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("a body with pricing or card was answered %d %s", rec.Code, rec.Body.Bytes())
 		}
 		defer indexInvariants(t, h, c.AID())
 		defer h.ledgerInvariants(t)
@@ -288,7 +314,7 @@ func FuzzHubRegister(f *testing.F) {
 		if err := json.Unmarshal(raw, &sent); err != nil {
 			t.Fatalf("a body that does not decode was registered: %v", err)
 		}
-		sentKEL, err := base64.StdEncoding.DecodeString(sent.KEL)
+		sentKEL, err := base64.RawURLEncoding.DecodeString(sent.KEL)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -304,8 +330,9 @@ func FuzzHubRegister(f *testing.F) {
 		if err != nil || !bytes.Equal(stored, sentKEL) {
 			t.Fatalf("the hub holds another KEL than the one registered: %v", err)
 		}
-		if fresh && h.balance(t, c.AID())-balBefore != aghub.RegistrationGrant {
-			t.Fatalf("first registration granted %d", h.balance(t, c.AID())-balBefore)
+		// Registration pays nothing (hub-payment-privacy PAY-A5).
+		if fresh && h.balance(t, c.AID()) != balBefore {
+			t.Fatalf("first registration paid %d credits", h.balance(t, c.AID())-balBefore)
 		}
 		if !fresh && h.balance(t, c.AID()) != balBefore {
 			t.Fatalf("re-registration moved the balance %d -> %d", balBefore, h.balance(t, c.AID()))
@@ -327,6 +354,9 @@ func FuzzHubRegister(f *testing.F) {
 				t.Fatalf("keys_status %s for a key set that does not verify: %v", out.KeysStatus, err)
 			}
 		}
+		if a2aMode%8 == 7 && (out.CardStatus == aghub.CardStatusOK || out.CardStatus == aghub.CardStatusUnchanged) {
+			t.Fatalf("a public card with prices was admitted: %+v", out)
+		}
 		if fresh && out.CardStatus != aghub.CardStatusOK && out.CardStatus != aghub.CardStatusUnchanged {
 			if card, _ := h.store.VerifiedA2ACard(c.AID(), false); card != nil {
 				t.Fatalf("card_status %s, yet a card is listed", out.CardStatus)
@@ -336,13 +366,15 @@ func FuzzHubRegister(f *testing.F) {
 }
 
 // FuzzHubKeys publishes key sets (valid with fuzzed terms, another
-// agent's, mutated, or raw bytes) and looks up keys, KELs and cards with
-// fuzzed bodies and paths. Properties:
+// agent's, mutated, or raw bytes) with a prev_seq that follows the stored
+// set, is 0, is the set's own seq or is missing, and looks up keys, KELs
+// and cards with fuzzed bodies and paths. Properties:
 //
 //   - POST /agents/{aid}/keys answers 200, 400 or 409; 200 "ok" only for
-//     a set whose seq is above the stored one, "unchanged" only for the
-//     stored seq; after any answer the stored set verifies for the agent,
-//     and a refusal leaves it as it was;
+//     a set whose seq is above the stored one and a prev_seq no lower than
+//     it (FS-H4), "unchanged" only for the stored seq; 409 only as
+//     keys_rollback naming the stored seq; after any answer the stored set
+//     verifies for the agent, and a refusal leaves it as it was;
 //   - the lookups answer 200, 400, 404 or 413 and never serve a key set,
 //     KEL or card that does not verify for the AID that was asked for.
 func FuzzHubKeys(f *testing.F) {
@@ -357,14 +389,17 @@ func FuzzHubKeys(f *testing.F) {
 	}())); rec.Code != http.StatusOK {
 		f.Fatalf("register with card: %d %s", rec.Code, rec.Body.Bytes())
 	}
-	stranger, _ := identity.Incept()
+	stranger, _ := aghub.NewAgentForTest()
 
 	f.Add(uint8(0), uint64(2), int64(0), []byte(nil), []byte(`{"aid":"`+k.AID()+`"}`), k.AID())
 	f.Add(uint8(0), uint64(1), int64(0), []byte(nil), []byte(`{"aid":"`+other.AID()+`"}`), other.AID())
 	f.Add(uint8(1), uint64(0), int64(0), []byte{1, 2}, []byte(`{"aid":"`+withCard.AID()+`"}`), withCard.AID())
 	f.Add(uint8(2), uint64(9), int64(0), []byte{40}, []byte(`{"aid":""}`), "")
 	f.Add(uint8(3), uint64(10), int64(0), []byte(nil), []byte(`{"aid":"`+h.hubAID+`"}`), h.hubAID)
-	f.Add(uint8(4), uint64(0), int64(0), []byte(`{"keyset":"!!"}`), []byte(`{}`), "x/y")
+	f.Add(uint8(4), uint64(0), int64(0), []byte(`{"keys":"!!","prev_seq":0}`), []byte(`{}`), "x/y")
+	f.Add(uint8(5), uint64(3), int64(0), []byte(nil), []byte(`{}`), k.AID())  // prev_seq 0
+	f.Add(uint8(10), uint64(4), int64(0), []byte(nil), []byte(`{}`), k.AID()) // prev_seq the set's own seq
+	f.Add(uint8(15), uint64(5), int64(0), []byte(nil), []byte(`{}`), k.AID()) // no prev_seq
 	f.Add(uint8(0), uint64(1<<63), int64(-86_400_000*30), []byte(nil), []byte(`null`), "%zz")
 	// Go's fuzzer changes an integer by at most 100 per mutation, so the
 	// int64 boundary has to come from a seed.
@@ -374,40 +409,72 @@ func FuzzHubKeys(f *testing.F) {
 		raw, lookup, getAID = clipB(raw, 8<<10), clipB(lookup, 8<<10), clip(getAID, 512)
 		shift %= 60 * 86_400_000
 		before, _, _, _ := h.store.LocalKeys(k.AID())
+		var priorSeq uint64
+		if p := decodeSetSeq(before); p != nil {
+			priorSeq = *p
+		}
+		// prev_seq: what the hub holds, 0, the published set's own seq, or
+		// none.
+		prevMode := mode / 5 % 4
+		publish := func(ks []byte) []byte {
+			b := map[string]any{"keys": base64.RawURLEncoding.EncodeToString(ks)}
+			switch prevMode {
+			case 0:
+				b["prev_seq"] = priorSeq
+			case 1:
+				b["prev_seq"] = 0
+			case 2:
+				b["prev_seq"] = seq
+			}
+			return fzJSON(t, b)
+		}
 		var body []byte
 		switch mode % 5 {
 		case 0:
 			ks, _ := fzKeySet(t, k, seq, shift)
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(ks)})
+			body = publish(ks)
 		case 1:
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(raw)})
+			body = publish(raw)
 		case 2:
 			ks, _ := fzKeySet(t, k, seq, shift)
 			if len(raw) > 0 {
 				ks[int(raw[0])%len(ks)] ^= 1 << (raw[0] % 8)
 			}
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(ks)})
+			body = publish(ks)
 		case 3:
 			// Named for k, signed by somebody else.
 			now := uint64(time.Now().UnixMilli())
-			kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now+seal.KeyLifetimeMS)
+			kp, err := seal.GenerateKeyPair(seal.SuiteX25519, now-60_000, now-60_000+seal.MaxKeyValidityMS)
 			if err != nil {
 				t.Fatal(err)
 			}
 			set := &seal.EncKeySet{Type: seal.EncKeySetType, AID: k.AID(), Seq: seq,
-				Keys: []seal.EncKey{kp.Public}, IssuedAt: now}
+				Keys: []seal.EncKey{kp.Public}, IssuedAt: now, Mbox: testMbox(t)}
 			signed, err := seal.SignEncKeySet(set, stranger.Sign)
 			if err != nil {
 				t.Fatal(err)
 			}
 			ks, _ := signed.Marshal()
-			body = fzJSON(t, map[string]any{"keyset": base64.StdEncoding.EncodeToString(ks)})
+			body = publish(ks)
 		case 4:
 			body = raw
 		}
 		rec := h.signedDo(k, relayauth.ActionKeys, http.MethodPost, "/agents/"+k.AID()+"/keys", "", body)
 		if !allowed(rec.Code, 200, 400, 409) {
 			t.Fatalf("publish: unexpected %d %s", rec.Code, rec.Body.Bytes())
+		}
+		if mode%5 != 4 && prevMode == 3 && rec.Code != http.StatusBadRequest {
+			t.Fatalf("a publication without prev_seq was answered %d %s", rec.Code, rec.Body.Bytes())
+		}
+		if rec.Code == http.StatusConflict {
+			var refusal struct {
+				Reason    string  `json:"reason"`
+				StoredSeq *uint64 `json:"stored_seq"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil || refusal.Reason != "keys_rollback" ||
+				refusal.StoredSeq == nil || *refusal.StoredSeq != priorSeq || before == nil {
+				t.Fatalf("409 is keys_rollback naming the stored seq %d: %s", priorSeq, rec.Body.Bytes())
+			}
 		}
 		after, kelBytes, _, _ := h.store.LocalKeys(k.AID())
 		afterSet, err := seal.UnmarshalSignedEncKeySet(after)
@@ -427,14 +494,17 @@ func FuzzHubKeys(f *testing.F) {
 			if err != nil {
 				t.Fatalf("keys_status %s for a set that does not verify: %v", out.KeysStatus, err)
 			}
-			var priorSeq uint64
-			if p := decodeSetSeq(before); p != nil {
-				priorSeq = *p
-			}
 			switch out.KeysStatus {
 			case aghub.KeysStatusOK:
-				if set.Seq <= priorSeq {
+				if set.Seq <= priorSeq && before != nil {
 					t.Fatalf("keys_status ok for seq %d over the stored %d", set.Seq, priorSeq)
+				}
+				var sent struct {
+					PrevSeq uint64 `json:"prev_seq"`
+				}
+				_ = json.Unmarshal(body, &sent)
+				if before != nil && sent.PrevSeq < priorSeq {
+					t.Fatalf("keys_status ok for prev_seq %d under the stored seq %d (FS-H4)", sent.PrevSeq, priorSeq)
 				}
 			case aghub.KeysStatusUnchanged:
 				if set.Seq != priorSeq {
@@ -445,27 +515,26 @@ func FuzzHubKeys(f *testing.F) {
 			}
 		}
 
-		// The lookups, with the fuzzed body and path.
-		var lreq aghub.KeysLookupRequest
-		lerr := json.Unmarshal(lookup, &lreq)
-		for _, path := range []string{aghub.KeysLookupPath, aghub.KELLookupPath, aghub.CardLookupPath} {
+		// The lookups by AID in the body are gone (sealed-sender §2.7):
+		// whatever the body, they are 404.
+		for _, path := range []string{"/agents/keys:lookup", "/agents/kel:lookup", "/a2a/v1/agents/card:lookup"} {
 			rec := h.serve(h.request(http.MethodPost, path, "", lookup))
-			if !allowed(rec.Code, 200, 400, 404, 413) {
-				t.Fatalf("%s %q: unexpected %d %s", path, lookup, rec.Code, rec.Body.Bytes())
-			}
-			if rec.Code == http.StatusOK && (lerr != nil || lreq.AID == "") {
-				t.Fatalf("%s answered 200 for a body naming no AID: %q", path, lookup)
-			}
-			if rec.Code == http.StatusOK {
-				checkLookup(t, h, path, lreq.AID, rec.Body.Bytes())
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s %q: %d %s, want 404", path, lookup, rec.Code, rec.Body.Bytes())
 			}
 		}
-		for _, path := range []string{"/agents/" + url.PathEscape(getAID) + "/keys",
-			"/agents/" + url.PathEscape(getAID) + "/kel", "/a2a/v1/agents/" + url.PathEscape(getAID) + "/card",
-			"/agents/" + url.PathEscape(getAID) + "/jwks.json"} {
-			rec := h.serve(h.request(http.MethodGet, path, "", nil))
+		for _, r := range []struct{ kind, path string }{
+			{"keys", "/agents/" + url.PathEscape(getAID) + "/keys"},
+			{"kel", "/agents/" + url.PathEscape(getAID) + "/kel"},
+			{"card", "/a2a/v1/agents/" + url.PathEscape(getAID) + "/card"},
+			{"jwks", "/agents/" + url.PathEscape(getAID) + "/jwks.json"},
+		} {
+			rec := h.serve(h.request(http.MethodGet, r.path, "", nil))
 			if !allowed(rec.Code, 200, 301, 307, 400, 404) {
-				t.Fatalf("GET %s: unexpected %d %s", path, rec.Code, rec.Body.Bytes())
+				t.Fatalf("GET %s: unexpected %d %s", r.path, rec.Code, rec.Body.Bytes())
+			}
+			if rec.Code == http.StatusOK {
+				checkLookup(t, h, r.kind, getAID, rec.Body.Bytes())
 			}
 		}
 	})
@@ -484,17 +553,24 @@ func decodeSetSeq(raw []byte) *uint64 {
 	return &set.Seq
 }
 
-// checkLookup verifies a 200 lookup answer for aid.
-func checkLookup(t *testing.T, h *fz, path, aid string, body []byte) {
+// checkLookup verifies a 200 answer of a GET of aid's keys, kel or card
+// (kind; a JWKS is not checked here).
+func checkLookup(t *testing.T, h *fz, kind, aid string, body []byte) {
 	t.Helper()
-	switch path {
-	case aghub.KeysLookupPath:
+	switch kind {
+	case "keys":
 		var v aghub.KeysView
 		if err := json.Unmarshal(body, &v); err != nil || v.AID != aid {
 			t.Fatalf("keys lookup for %s answered %s", aid, body)
 		}
-		ks, _ := base64.StdEncoding.DecodeString(v.KeySet)
-		kl, _ := base64.StdEncoding.DecodeString(v.KEL)
+		ks, err := base64.RawURLEncoding.DecodeString(v.Keys)
+		if err != nil {
+			t.Fatalf("keys lookup served keys that are not base64url: %v", err)
+		}
+		kl, err := base64.RawURLEncoding.DecodeString(v.KEL)
+		if err != nil {
+			t.Fatalf("keys lookup served a KEL that is not base64url: %v", err)
+		}
 		signed, err := seal.UnmarshalSignedEncKeySet(ks)
 		if err != nil {
 			t.Fatalf("keys lookup served an undecodable set: %v", err)
@@ -506,7 +582,7 @@ func checkLookup(t *testing.T, h *fz, path, aid string, body []byte) {
 		if _, err := seal.VerifyEncKeySet(signed, aid, kel, uint64(time.Now().UnixMilli())); err != nil {
 			t.Fatalf("keys lookup for %s served a set that does not verify for it: %v", aid, err)
 		}
-	case aghub.KELLookupPath:
+	case "kel":
 		var v struct {
 			AID string `json:"aid"`
 			KEL string `json:"kel"`
@@ -514,7 +590,7 @@ func checkLookup(t *testing.T, h *fz, path, aid string, body []byte) {
 		if err := json.Unmarshal(body, &v); err != nil || v.AID != aid {
 			t.Fatalf("kel lookup for %s answered %s", aid, body)
 		}
-		kl, _ := base64.StdEncoding.DecodeString(v.KEL)
+		kl, _ := base64.RawURLEncoding.DecodeString(v.KEL)
 		kel, err := identity.UnmarshalKEL(kl)
 		if err != nil {
 			t.Fatal(err)
@@ -523,7 +599,7 @@ func checkLookup(t *testing.T, h *fz, path, aid string, body []byte) {
 		if err != nil || states[len(states)-1].AID != aid {
 			t.Fatalf("kel lookup for %s served a KEL that is not its own: %v", aid, err)
 		}
-	case aghub.CardLookupPath:
+	case "card":
 		kelBytes, err := h.store.AgentKEL(aid)
 		if err != nil {
 			t.Fatalf("card lookup served a card for %s, which is not registered", aid)
