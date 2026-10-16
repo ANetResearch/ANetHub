@@ -60,9 +60,9 @@ func TestTheManualInstallsSafelyAndOffersNoGuestMode(t *testing.T) {
 	}
 	// The hub's view of content is stated for anet >= 0.2.0 (this hub
 	// speaks wire 2 only) together with what it still sees, not as an
-	// unconditional claim (ANet an internal note §4.1 A1).
+	// unconditional claim (the known-limitations page).
 	if !strings.Contains(page, "end to end (anet >= 0.2.0)") || !strings.Contains(page, "who sends to whom") ||
-		!strings.Contains(page, "KNOWN-LIMITATIONS") {
+		!strings.Contains(page, "reference/known-limitations.html") {
 		t.Error("the manual does not state what the hub can see for anet >= 0.2.0 with its limits")
 	}
 	if strings.Contains(page, "target of anet 0.2.0") {
