@@ -207,6 +207,47 @@ func (s *Server) RunRelayJanitor(ctx context.Context, every time.Duration) {
 	}
 }
 
+// RunExpirySweep deletes the envelopes whose outer exp has passed, once at
+// start and then every interval (60 seconds in the hub), until ctx ends. It
+// counts what it deleted (relay_exp_dropped) and logs nothing about them.
+func (s *Server) RunExpirySweep(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		if n, err := s.store.PurgeExpiredByExp(s.store.now()); err != nil {
+			log.Printf("hub: relay expiry sweep: %v", err)
+		} else if n > 0 {
+			s.relay.expDropped.Add(int64(n))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// RelayExpDropped is the number of envelopes the expiry sweep has deleted
+// since the process started (relay_exp_dropped). It names no recipient.
+func (s *Server) RelayExpDropped() int64 { return s.relay.expDropped.Load() }
+
+// outerExpReason is the refusal for an envelope's outer exp, or "" when the
+// envelope has none or it is in range: exp <= now is expired, and exp more
+// than 15 days ahead (or beyond what the table stores) is bad_exp.
+func outerExpReason(outer *seal.SealedEnvelope, now time.Time) wire3.Reason {
+	if outer.Exp == nil {
+		return ""
+	}
+	nowMS := uint64(now.UnixMilli())
+	switch exp := *outer.Exp; {
+	case exp <= nowMS:
+		return wire3.ReasonExpired
+	case exp-nowMS > seal.MaxMessageLifetimeMS:
+		return wire3.ReasonBadExp
+	}
+	return ""
+}
+
 // limitBody caps every request body at the largest body any route
 // accepts, which is a /relay/send carrying the largest envelope. Routes
 // with smaller bodies apply their own, lower caps. Keep the reverse
@@ -1270,7 +1311,9 @@ type RelayAckResponse struct {
 // relayState is what /relay/session and /relay/send keep in this process's
 // memory only (sealed-sender §3.1): the sessions and the buckets of §2.12.
 type relayState struct {
-	sessions *sessionTable
+	// expDropped counts envelopes the expiry sweep deleted (relay_exp_dropped).
+	expDropped atomic.Int64
+	sessions   *sessionTable
 	// sessionSend is each session holder's send bucket, by AID.
 	sessionSend *bucketSet
 	// caps is each delivery credential's bucket, by owner and cap_id.
@@ -1435,8 +1478,12 @@ func (s *Server) hRelaySend(w http.ResponseWriter, r *http.Request) {
 		wire3.RefuseDecode(w, err)
 		return
 	}
-	// v030-todo(UX-7): outer key 8 (CUX-H1, core G23): 400 expired and
-	// bad_exp, here, before any token is taken.
+	// Outer key 8 (CUX-H1, core G23), before any token is taken and before
+	// the recipient is looked at: the answer is the same for every recipient.
+	if reason := outerExpReason(outer, now); reason != "" {
+		wire3.Refuse(w, reason)
+		return
+	}
 	digest, err := seal.EnvDigest(body)
 	if err != nil {
 		wire3.Refuse(w, wire3.ReasonBadEnvelope)
