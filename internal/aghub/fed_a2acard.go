@@ -336,11 +336,12 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 	var (
 		storedSeq                         uint64
 		storedHash, storedKEL, storedKeys []byte
+		storedCard                        []byte
 		storedPeer                        string
 		storedVerified                    sql.NullString
 	)
-	err = tx.QueryRow(`SELECT seq, payload_hash, kel, keys, peer_aid, verified_at FROM fed_a2a_card WHERE aid=?`, aid).
-		Scan(&storedSeq, &storedHash, &storedKEL, &storedKeys, &storedPeer, &storedVerified)
+	err = tx.QueryRow(`SELECT seq, payload_hash, kel, keys, peer_aid, verified_at, card FROM fed_a2a_card WHERE aid=?`, aid).
+		Scan(&storedSeq, &storedHash, &storedKEL, &storedKeys, &storedPeer, &storedVerified, &storedCard)
 	found := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -357,6 +358,7 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 		if len(storedHash) == 32 {
 			mark = &a2acard.Mark{Seq: storedSeq}
 			copy(mark.PayloadHash[:], storedHash)
+			mark = markUnlessRetired(mark, storedCard, aid, kel, now)
 		}
 	}
 	decision, err := a2acard.CheckHighWater(mark, v.Mark())
