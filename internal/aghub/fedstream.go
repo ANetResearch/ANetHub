@@ -177,12 +177,14 @@ func fedKeysToStore(aid string, incoming, stored []byte, kel []identity.SignedEv
 				seen = &seal.Seen{Seq: set.Seq, Set: prev.Set}
 			}
 			// A stored set signed under a key state the entry's KEL has since retired
-			// binds nothing and can never be used again: its seq is no floor. Kept as
+			// binds nothing and can never be used again: its seq is no floor against a lower one. Kept as
 			// one, whoever held the old key could pin the floor out of the owner's
 			// reach (T-1 RT-F1c).
-			if _, verr := seal.VerifyEncKeySet(prev, aid, kel, uint64(time.Now().UnixMilli())); verr != nil &&
-				seal.ReasonOf(verr) == seal.ReasonBadKeyState {
-				seen = nil
+			if offered, oerr := decodeEncKeySet(signed.Set); seen != nil && oerr == nil && seen.Seq > offered.Seq {
+				if _, verr := seal.VerifyEncKeySet(prev, aid, kel, uint64(time.Now().UnixMilli())); verr != nil &&
+					seal.ReasonOf(verr) == seal.ReasonBadKeyState {
+					seen = nil
+				}
 			}
 		}
 	}

@@ -358,7 +358,7 @@ func (s *Store) AdmitFedA2ACard(peerAID string, e FedA2ACard) error {
 		if len(storedHash) == 32 {
 			mark = &a2acard.Mark{Seq: storedSeq}
 			copy(mark.PayloadHash[:], storedHash)
-			mark = markUnlessRetired(mark, storedCard, aid, kel, now)
+			mark = markUnlessRetired(mark, v.Seq, storedCard, aid, kel, now)
 		}
 	}
 	decision, err := a2acard.CheckHighWater(mark, v.Mark())
