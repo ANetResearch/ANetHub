@@ -572,7 +572,7 @@ func TestTheReviewFieldNamesArePinned(t *testing.T) {
 			"comment", "completed_day", "created_day", "rating", "receipt_cid", "subject_aid"}},
 		{"FedReviewEntry", aghub.FedReviewEntry{}, []string{"attestation", "fed_seq", "format", "provider_kel", "receipt", "review"}},
 		{"HubStats", aghub.HubStats{}, []string{
-			"agents", "avg_rating", "federated_agents", "modules", "reviews", "tasks_completed"}},
+			"agents", "avg_rating", "federated_agents", "modules", "online_nodes", "reviews", "tasks_completed", "version"}},
 	} {
 		got := goJSONFields(t, tc.value)
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {

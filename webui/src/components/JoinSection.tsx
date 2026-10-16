@@ -107,7 +107,7 @@ export function JoinSection({ toast }: { toast: (m: string, e?: boolean) => void
   const steps = useMemo(() => joinSteps(HUB_URL, lang), [HUB_URL, lang]);
 
   return (
-    <section id="join" aria-labelledby="join-title" className="scroll-mt-20 border-t border-line bg-surface-2">
+    <section id="join" aria-labelledby="join-title" className="scroll-mt-20 border-t border-line panel">
       <div className="mx-auto max-w-4xl px-4 py-14 md:px-6 md:py-20">
         <div className="eyebrow">{t(lang, "接入", "Join")}</div>
         <h2 id="join-title" className="sec-title">
