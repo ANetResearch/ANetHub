@@ -40,6 +40,8 @@ type Server struct {
 
 	harvestMu sync.Mutex // one harvest at a time (ticker + manual button may race)
 
+	denials *denialGate // bounds what denied requests write to the log and audit_log
+
 	delLimiter *destructiveLimiter // caps registry deletes so a scripted loop can't wipe it
 }
 
@@ -52,6 +54,7 @@ func NewServer(store *Store, hub *HubDB, hv *Harvester, vec *VecClient, token, b
 		store: store, hub: hub, harvest: hv, vec: vec,
 		token: token, base: strings.TrimRight(basePath, "/"),
 		authFails: newAuthLimiter(authMaxFailures, authWindow),
+		denials:   newDenialGate(),
 		// At most 5 registry deletes per minute — a legitimate operator never bulk-deletes; a scripted
 		// loop against the (weak-token, public) admin API is stopped before it can wipe the registry.
 		delLimiter: newDestructiveLimiter(5, time.Minute),
@@ -152,15 +155,37 @@ func (s *Server) Handler() http.Handler {
 // --- auth ---
 
 func remoteIP(r *http.Request) string {
-	// Behind our own nginx only — trust X-Real-IP when present, else the socket peer.
-	if ip := r.Header.Get("X-Real-Ip"); ip != "" {
-		return ip
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(host)
+	// X-Real-Ip is trusted only from a loopback peer, which is where our own
+	// nginx connects from (the service binds loopback). From any other peer the
+	// header is attacker-chosen: rotating it gave every request a fresh
+	// failure budget and defeated the guess limiter. A value that is not an IP
+	// address is ignored as well.
+	if peer != nil && peer.IsLoopback() {
+		if v := strings.TrimSpace(r.Header.Get("X-Real-Ip")); v != "" {
+			if ip := net.ParseIP(v); ip != nil {
+				return limiterKey(ip)
+			}
+		}
+	}
+	if peer != nil {
+		return limiterKey(peer)
 	}
 	return host
+}
+
+// limiterKey is the key an address is counted under. An IPv6 client controls
+// its whole /64, so every address of one /64 shares one budget; otherwise each
+// of the 2^64 addresses would get a fresh set of guesses.
+func limiterKey(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return (&net.IPNet{IP: ip.Mask(net.CIDRMask(64, 128)), Mask: net.CIDRMask(64, 128)}).String()
 }
 
 const (
@@ -298,8 +323,68 @@ func bearerToken(h string) (string, bool) {
 // carried no valid credential; the source IP is the target so an operator can
 // group by it.
 func (s *Server) noteAuthDenial(r *http.Request, ip, action string) {
-	log.Printf("admin: %s ip=%s method=%s path=%s", action, ip, r.Method, r.URL.Path)
-	s.store.Audit("anonymous", action, ip, r.Method+" "+r.URL.Path)
+	if !s.denials.allow(ip, action) {
+		return
+	}
+	// The path is attacker-controlled. Written raw, a %0A in it forged a log
+	// line of its own; it is logged in its escaped form, quoted, and bounded.
+	path := r.URL.EscapedPath()
+	if len(path) > 200 {
+		path = path[:200]
+	}
+	log.Printf("admin: %s ip=%s method=%s path=%q", action, ip, r.Method, path)
+	s.store.Audit("anonymous", action, ip, r.Method+" "+path)
+}
+
+const (
+	denialGlobalPerMin = 60 // audit rows + log lines for denials, all sources together
+)
+
+// denialGate bounds what unauthenticated traffic may write to the process log
+// and to audit_log. Anyone can send a request with no credential, so without a
+// bound 2000 requests were 2000 rows: admin.db grew without limit and real
+// operator actions were pushed out of the recent-actions panel. A request
+// without a credential is recorded at most once per minute per source, and all
+// denials together at most denialGlobalPerMin per minute; the rest are counted
+// and reported in one line when the minute ends.
+type denialGate struct {
+	mu         sync.Mutex
+	winStart   time.Time
+	global     int
+	suppressed int
+	missing    map[string]time.Time
+}
+
+func newDenialGate() *denialGate { return &denialGate{missing: map[string]time.Time{}} }
+
+func (g *denialGate) allow(ip, action string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	if now.Sub(g.winStart) >= time.Minute {
+		if g.suppressed > 0 {
+			log.Printf("admin: %d authentication denials not recorded in the last minute", g.suppressed)
+		}
+		g.winStart, g.global, g.suppressed = now, 0, 0
+		for k, t := range g.missing {
+			if now.Sub(t) >= time.Minute {
+				delete(g.missing, k)
+			}
+		}
+	}
+	if action == "auth.missing" {
+		if _, seen := g.missing[ip]; seen || len(g.missing) >= maxTrackedIPs {
+			g.suppressed++
+			return false
+		}
+		g.missing[ip] = now
+	}
+	if g.global >= denialGlobalPerMin {
+		g.suppressed++
+		return false
+	}
+	g.global++
+	return true
 }
 
 func (s *Server) hLogin(w http.ResponseWriter, r *http.Request) {

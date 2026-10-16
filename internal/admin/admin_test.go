@@ -290,6 +290,7 @@ func doReqFrom(t *testing.T, h http.Handler, method, path, token string, body an
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
 	if ip != "" {
+		r.RemoteAddr = "127.0.0.1:40000" // the proxy
 		r.Header.Set("X-Real-Ip", ip)
 	}
 	w := httptest.NewRecorder()

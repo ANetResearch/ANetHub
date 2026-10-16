@@ -175,8 +175,18 @@ func tokenRefusal(token string) string {
 		return "ADMIN_TOKEN is a placeholder (for example CHANGE_ME from the unit template): " +
 			"refusing to start the admin surface. Set a random token in the unit's environment and restart."
 	}
+	// A published default only warns (see main). Any other token must be long
+	// enough that guessing it is not a plausible attack.
+	if !admin.WeakToken(token) && len(token) < minTokenLen {
+		return fmt.Sprintf("ADMIN_TOKEN is too short (%d characters, at least %d required): "+
+			"refusing to start the admin surface. Generate one with: openssl rand -hex 24", len(token), minTokenLen)
+	}
 	return ""
 }
+
+// minTokenLen is the shortest ADMIN_TOKEN accepted. The token is the only credential of a
+// surface that can deregister agents.
+const minTokenLen = 16
 
 // versionLine is what --version prints.
 //

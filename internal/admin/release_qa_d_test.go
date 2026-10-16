@@ -210,6 +210,7 @@ func TestAuthorizationHeaderIsParsedNotTrimmed(t *testing.T) {
 	for i, c := range e2e {
 		r := httptest.NewRequest("GET", "/admin/api/agents", nil)
 		r.Header.Set("Authorization", c.header)
+		r.RemoteAddr = "127.0.0.1:40000"
 		r.Header.Set("X-Real-Ip", "198.18.1."+string(rune('1'+i)))
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)

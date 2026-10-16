@@ -41,6 +41,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/ANetResearch/ANetHub/internal/hubid"
+	"github.com/ANetResearch/ANetHub/internal/private"
 	"github.com/ANetResearch/ANetHub/internal/wire3"
 )
 
@@ -185,6 +186,9 @@ func (s *Service) SetDirectory(d Directory) { s.dir = d }
 // New opens the federation module of the hub id, whose data directory is
 // dir. The kernel is wired afterwards (SetKernel), as is the directory.
 func New(dir string, cfg Config, id *hubid.Identity) (*Service, error) {
+	if err := private.File(filepath.Join(dir, "federation.db")); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dir, "federation.db")+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(15000)")
 	if err != nil {
 		return nil, err
