@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ANetResearch/ANetCore/evidence"
 	"github.com/ANetResearch/ANetCore/identity"
@@ -397,5 +398,39 @@ func TestAnOldStoreWithContentIsRefusedUntouched(t *testing.T) {
 	}
 	if after := dirSnapshot(t, dir); after != before {
 		t.Errorf("refusing the old store changed the directory:\n%s\n%s", before, after)
+	}
+}
+
+// The landing page shows online nodes and the Hub version. A node is online
+// when it collected its mail within the last hour; one with no recorded poll
+// or an older poll is not counted.
+func TestStatsReportOnlineNodesAndVersion(t *testing.T) {
+	srv, store, _, _ := hubInDir(t)
+	prov, req := twoAgents(t)
+	register(t, srv, prov, "Provider", []string{"work.do"})
+	register(t, srv, req, "Requester", nil)
+	get := func() aghub.HubStats {
+		t.Helper()
+		code, b := getJSON(t, srv.URL+"/stats")
+		if code != 200 {
+			t.Fatalf("stats: %d %s", code, b)
+		}
+		var st aghub.HubStats
+		if err := json.Unmarshal(b, &st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	if st := get(); st.OnlineNodes != 0 || st.Version == "" {
+		t.Fatalf("no poll recorded: online=%d version=%q", st.OnlineNodes, st.Version)
+	}
+	if err := store.SetLastSeenForTest(prov.AID(), time.Now().Add(-10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetLastSeenForTest(req.AID(), time.Now().Add(-3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if st := get(); st.OnlineNodes != 1 {
+		t.Errorf("online = %d, want 1 (one recent poll, one quiet)", st.OnlineNodes)
 	}
 }

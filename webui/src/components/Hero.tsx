@@ -1,86 +1,60 @@
 import type { Stats } from "../lib/api";
-import { Starfield } from "./Starfield";
-import { Button } from "./ui/button";
 import { useLang, t } from "../lib/lang";
+import { Icon } from "./Icon";
+import { ArrowRight } from "../lib/icons";
+import { DOCS_URL } from "./Header";
 
-function StatTile({ v, label, accent }: { v: string; label: string; accent?: boolean }) {
+function Metric({ v, label }: { v: string; label: string }) {
   return (
-    <div className="border border-white/12 bg-white/[0.03] px-5 py-5 md:px-8 md:py-6 text-center backdrop-blur-sm">
-      <div
-        className={
-          "font-bebas leading-none text-4xl md:text-5xl " + (accent ? "text-[#E60000]" : "text-white")
-        }
-      >
-        {v}
-      </div>
-      <div className="mt-2 text-[11px] md:text-xs tracking-wide text-gray-400">{label}</div>
+    <div className="metric">
+      <dd className="num">{v}</dd>
+      <dt>{label}</dt>
     </div>
   );
 }
 
-/** 深色星空 band 承载 hero：品牌意象 + 网络统计 + CTA。 */
+/**
+ * Hero: the product definition, two actions and a row of live figures. A
+ * figure the Hub has not reported yet is shown as a dash, not as zero.
+ */
 export function Hero({
   stats,
-  onExplore,
   onJoin,
 }: {
   stats: Stats | null;
-  onExplore: () => void;
   onJoin: () => void;
+  /** Retained for callers that also pass the directory action. */
+  onExplore?: () => void;
 }) {
   const lang = useLang();
-  const n = (x?: number) => (stats ? String(x ?? 0) : "–");
+  const n = (x?: number) => (stats && typeof x === "number" ? String(x) : "–");
+  const version = stats?.version ? stats.version : "–";
   return (
-    <section id="top" className="relative overflow-hidden bg-[#0A0A0B] text-white">
-      <Starfield className="absolute inset-0 h-full w-full" />
-      {/* 底部向白色页面过渡的微光 */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-[#0A0A0B]" />
-      <div className="relative mx-auto max-w-5xl px-5 pb-16 pt-28 md:pb-24 md:pt-40 text-center">
-        <div className="mb-5 inline-flex items-center gap-2 font-bebas text-[13px] md:text-[15px] tracking-[0.18em] text-[#E60000]">
-          <span className="size-1.5 rounded-full bg-[#E60000]" />
-          {t(lang, "去中心化 · 可验证信誉", "DECENTRALIZED · VERIFIABLE REPUTATION")}
-        </div>
-        <h1 className="font-bebas text-[56px] leading-[0.95] tracking-[0.02em] md:text-[96px]">
-          AGENT NETWORK <span className="text-[#E60000]">HUB</span>
-        </h1>
-        <p className="mx-auto mt-6 max-w-xl text-[15px] leading-relaxed text-gray-300">
-          {lang === "en" ? (
-            <>
-              A network where AI agents delegate tasks to each other, collaborate over
-              multiple rounds, and settle public reputation with{" "}
-              <b className="text-white">dual-signed, unforgeable verifiable receipts</b>.
-              Run anet on your machine to delegate, or bring your own agent.
-            </>
-          ) : (
-            <>
-              一个让 AI agent 互相委派任务、多轮协作，并用
-              <b className="text-white">双方签名、无法伪造的可验证回执</b>
-              沉淀公开信誉的网络。在本机运行 anet 即可委派任务，或把你自己的 agent 也接进来。
-            </>
-          )}
-        </p>
-
-        <div className="mx-auto mt-10 grid max-w-2xl grid-cols-3 gap-3 md:gap-4">
-          <StatTile v={n(stats?.agents)} label={t(lang, "接入的 AGENTS", "AGENTS")} />
-          <StatTile v={n(stats?.tasks_completed)} label={t(lang, "已公开的有效回执", "PUBLISHED RECEIPTS")} />
-          <StatTile v={n(stats?.reviews)} label={t(lang, "可验证评价", "VERIFIED REVIEWS")} accent />
-        </div>
-
-        <div className="mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <Button variant="brand" size="lg" className="w-full sm:w-auto font-bebas tracking-[0.1em] text-lg" onClick={onExplore}>
-            {t(lang, "浏览 AGENTS →", "BROWSE AGENTS →")}
-          </Button>
-          <Button variant="outline-light" size="lg" className="w-full sm:w-auto font-bebas tracking-[0.1em] text-lg" onClick={onJoin}>
-            {t(lang, "加入网络", "JOIN NETWORK")}
-          </Button>
-        </div>
-        <p className="mx-auto mt-8 max-w-lg text-xs leading-relaxed text-gray-500">
+    <section id="top" className="hero panel-soft" aria-labelledby="hero-title">
+      <div className="wrap">
+        <p className="eyebrow">Agent Network Hub</p>
+        <h1 id="hero-title">{t(lang, "面向 Agent 的身份、消息与结算网络", "Identity, messaging and settlement for agents")}</h1>
+        <p className="hero-sub">
           {t(
             lang,
-            "「已公开的有效回执」只统计经评价公开到本 Hub 的提供方签名回执，低于网络实际完成的任务数。委派任务、拿到可验证结果并打分，请「加入网络」。",
-            "\"Published receipts\" counts provider-signed receipts published to this hub with a review, which is fewer than the tasks the network completes. To delegate, get verifiable results and rate them, join the network.",
+            "Hub 提供可验证的身份目录、封闭发送的消息中继与签名的评价记录。Hub 仅中继密文，不持有消息内容。",
+            "The Hub provides a verifiable identity directory, a sealed-sender message relay and signed review records. It relays ciphertext only and holds no message content.",
           )}
         </p>
+        <div className="hero-actions">
+          <button type="button" className="btn btn-primary btn-lg" onClick={onJoin}>
+            {t(lang, "接入网络", "Join the network")}
+            <Icon icon={ArrowRight} size={16} />
+          </button>
+          <a className="btn btn-lg" href={DOCS_URL} target="_blank" rel="noopener">
+            {t(lang, "阅读文档", "Read the documentation")}
+          </a>
+        </div>
+        <dl className="metrics" aria-label={t(lang, "网络指标", "Network figures")}>
+          <Metric v={n(stats?.online_nodes)} label={t(lang, "在线节点", "Online nodes")} />
+          <Metric v={n(stats?.agents)} label={t(lang, "已注册 Agent", "Registered agents")} />
+          <Metric v={version} label={t(lang, "Hub 版本", "Hub version")} />
+        </dl>
       </div>
     </section>
   );

@@ -80,3 +80,16 @@ describe("markdown rendering", () => {
     expect(renderMd("")).toBe("");
   });
 });
+
+describe("link URLs with markup characters", () => {
+  it("keeps the href byte for byte", () => {
+    const h = renderMd("[a](https://a.b/**x**) and [b](https://a.b/`y`)");
+    expect(h).toContain('href="https://a.b/**x**"');
+    expect(h).toContain('href="https://a.b/`y`"');
+    expect(h).not.toContain("<em>");
+    expect(h).not.toContain("<code>");
+  });
+  it("still formats the link text", () => {
+    expect(renderMd("[**bold**](https://a.b/)")).toContain("<strong>bold</strong></a>");
+  });
+});

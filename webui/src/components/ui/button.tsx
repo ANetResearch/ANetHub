@@ -6,17 +6,17 @@ type Size = "default" | "sm" | "lg" | "icon";
 
 const base =
   "inline-flex items-center justify-center gap-2 whitespace-nowrap text-sm font-medium transition-all cursor-pointer select-none " +
-  "disabled:pointer-events-none disabled:opacity-50 outline-none focus-visible:ring-2 focus-visible:ring-[#E60000]/40 " +
+  "disabled:pointer-events-none disabled:opacity-50 outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]/40 " +
   "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4";
 
 const variants: Record<Variant, string> = {
-  default: "bg-black text-white hover:bg-[#E60000]",
-  brand: "bg-[#E60000] text-white hover:bg-[#c50000]",
+  default: "bg-black text-white hover:bg-[var(--accent)]",
+  brand: "bg-[var(--accent)] text-white hover:bg-[#c9281d]",
   outline:
-    "border border-gray-300 bg-white text-black hover:border-[#E60000] hover:text-[#E60000]",
-  ghost: "text-gray-600 hover:text-[#E60000] hover:bg-gray-100",
+    "border border-gray-300 bg-white text-black hover:border-[var(--accent)] hover:text-[var(--accent)]",
+  ghost: "text-gray-600 hover:text-[var(--accent)] hover:bg-gray-100",
   "outline-light":
-    "border border-white/40 bg-transparent text-white hover:border-[#E60000] hover:bg-[#E60000] hover:text-white",
+    "border border-white/40 bg-transparent text-white hover:border-[var(--accent)] hover:bg-[var(--accent)] hover:text-white",
 };
 
 const sizes: Record<Size, string> = {

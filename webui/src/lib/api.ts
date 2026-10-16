@@ -61,6 +61,10 @@ export interface Stats {
   // 本 hub 编入并启用的可选模块,例如 "federation"、"taskboard"。任务板只在
   // 含 "taskboard" 时显示。旧 hub 不发这个字段。
   modules?: string[];
+  // Registered agents that collected their mail within the last hour.
+  online_nodes?: number;
+  // Release of the Hub binary.
+  version?: string;
 }
 
 async function j<T>(r: Response): Promise<T> {

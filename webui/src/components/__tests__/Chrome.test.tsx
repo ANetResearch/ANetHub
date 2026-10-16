@@ -21,9 +21,11 @@ describe("Toast", () => {
     expect(ok).toContain("已复制");
     expect(bad).toContain("复制失败");
     expect(ok).not.toBe(bad);
-    // The error carries the alert colour; the confirmation does not.
-    expect(bad).toContain("E60000");
-    expect(ok).not.toContain("bg-[#E60000]");
+    // The error carries the accent border and role alert; the confirmation does not.
+    expect(bad).toContain("border-accent");
+    expect(bad).toContain('role="alert"');
+    expect(ok).not.toContain("border-accent");
+    expect(ok).toContain('role="status"');
   });
 
   // Hidden is hidden. A toast left interactive while invisible swallows
@@ -38,49 +40,36 @@ describe("Toast", () => {
 describe("Hero", () => {
   const noop = () => {};
 
-  // Unknown is not zero.
-  //
-  // Before the stats arrive the hub has told us nothing, and printing 0
-  // says something false and discouraging about a network that may be
-  // busy. This is the same distinction the effect statuses draw between
-  // UNVERIFIED and FAILED, on the front page.
+  // Unknown is not zero. Before the stats arrive the Hub has reported
+  // nothing, and a printed 0 would state something false.
   it("shows a dash rather than zero before the stats arrive", () => {
-    const html = renderToStaticMarkup(
-      <Hero stats={null} onExplore={noop} onJoin={noop} />,
-    );
-    expect(html).toContain("–");
+    const html = renderToStaticMarkup(<Hero stats={null} onJoin={noop} />);
+    expect(html.match(/–/g)?.length).toBe(3);
   });
 
-  it("shows the numbers once they arrive", () => {
-    const stats: Stats = { agents: 7, tasks_completed: 320, reviews: 38, avg_rating: 5 };
-    const html = renderToStaticMarkup(
-      <Hero stats={stats} onExplore={noop} onJoin={noop} />,
-    );
-    expect(html).toContain("320");
-    expect(html).toContain("7");
+  it("shows the online nodes, registered agents and Hub version", () => {
+    const stats: Stats = { agents: 7, tasks_completed: 320, reviews: 38, avg_rating: 5, online_nodes: 4, version: "0.3.0" };
+    const html = renderToStaticMarkup(<Hero stats={stats} onJoin={noop} />);
+    expect(html).toContain(">4<");
+    expect(html).toContain(">7<");
+    expect(html).toContain("0.3.0");
+    expect(html).toContain("在线节点");
+    expect(html).toContain("已注册 Agent");
   });
 
-  // The figure is receipts published through reviews, not every task the
-  // network completed, and the label has to say so; the hero must also no
-  // longer offer a guest chat, which the hub removed.
-  it("labels the receipt count for what it is and offers no guest chat", () => {
-    const stats: Stats = { agents: 1, tasks_completed: 2, reviews: 2, avg_rating: 5 };
-    const html = renderToStaticMarkup(<Hero stats={stats} onExplore={noop} onJoin={noop} />);
-    expect(html).toContain("已公开的有效回执");
-    expect(html).not.toContain("完成的协同任务");
-    expect(html).not.toContain("访客");
-    expect(html).not.toContain("试聊");
-  });
-
-  // A real zero is a zero. Collapsing it back to a dash would hide a hub
-  // that genuinely has nothing on it, which is a fact a visitor should
-  // see.
+  // A real zero is a zero; a hub that reports no version yet is a dash.
   it("shows a real zero as zero", () => {
-    const stats: Stats = { agents: 0, tasks_completed: 0, reviews: 0, avg_rating: 0 };
-    const html = renderToStaticMarkup(
-      <Hero stats={stats} onExplore={noop} onJoin={noop} />,
-    );
-    expect(html).toContain("0");
+    const stats: Stats = { agents: 0, tasks_completed: 0, reviews: 0, avg_rating: 0, online_nodes: 0 };
+    const html = renderToStaticMarkup(<Hero stats={stats} onJoin={noop} />);
+    expect(html.match(/>0</g)?.length).toBe(2);
+    expect(html.match(/–/g)?.length).toBe(1);
+  });
+
+  it("offers the two actions and no colloquial wording", () => {
+    const html = renderToStaticMarkup(<Hero stats={null} onJoin={noop} />);
+    expect(html).toContain("接入网络");
+    expect(html).toContain("阅读文档");
+    expect(html).not.toMatch(/[!！]/);
   });
 });
 

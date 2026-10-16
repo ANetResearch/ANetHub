@@ -392,8 +392,11 @@ func (s *Server) ServeForward(w http.ResponseWriter, r *http.Request, peer strin
 		wire3.RefuseDecode(w, err)
 		return
 	}
-	// v030-todo(UX-7): outer key 8 (CUX-H1, core G23): 400 expired and
-	// bad_exp, here, as at the origin.
+	// Outer key 8 (CUX-H1, core G23), as at the origin.
+	if reason := outerExpReason(outer, now); reason != "" {
+		wire3.Refuse(w, reason)
+		return
+	}
 	digest, err := seal.EnvDigest(body)
 	if err != nil {
 		wire3.Refuse(w, wire3.ReasonBadEnvelope)

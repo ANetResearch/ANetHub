@@ -409,6 +409,20 @@ func (b *bucketSet) take(key string, r relayRate) (bool, time.Duration) {
 	return true, 0
 }
 
+// takeN takes n tokens (at most the burst) from key's bucket at rate r, or
+// nothing and the wait when it holds fewer.
+func (b *bucketSet) takeN(key string, r relayRate, n float64) (bool, time.Duration) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n = math.Min(n, r.burst)
+	x := b.level(key, r, b.now())
+	if x.tokens < n {
+		return false, time.Duration((n - x.tokens) / r.perSec * float64(time.Second))
+	}
+	x.tokens -= n
+	return true, 0
+}
+
 // refund gives back the token take took from key's bucket.
 func (b *bucketSet) refund(key string, r relayRate) {
 	b.mu.Lock()

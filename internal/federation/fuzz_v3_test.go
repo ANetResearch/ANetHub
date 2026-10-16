@@ -164,7 +164,11 @@ func FuzzFedCardsPage(f *testing.F) {
 		b.setPeerA2ACursor(peer.id.AID, 3)
 		admitted, refused := b.SyncOnce(context.Background())
 		var wire FedA2ACardPage
-		_ = json.Unmarshal(page, &wire)
+		// Read the page as the client does (getStream: json.Decoder.Decode); a page
+		// it cannot decode is skipped whole, so nothing of it is expected.
+		if err := json.NewDecoder(bytes.NewReader(page)).Decode(&wire); err != nil {
+			wire = FedA2ACardPage{}
+		}
 		if admitted+refused > len(wire.Cards) || admitted != len(sink.gotA2A) {
 			t.Fatalf("admitted %d refused %d of %d entries; the kernel got %d", admitted, refused, len(wire.Cards), len(sink.gotA2A))
 		}

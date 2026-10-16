@@ -16,15 +16,19 @@ export function useToast() {
   return { toast, toastState: state };
 }
 
+/** Status message. An error carries the accent border and a text prefix, so colour is never the only signal. */
 export function Toast({ state }: { state: { msg: string; err: boolean; show: boolean } }) {
   return (
     <div
+      role={state.err ? "alert" : "status"}
+      aria-live={state.err ? "assertive" : "polite"}
       className={cn(
-        "fixed bottom-7 left-1/2 z-[60] max-w-[80vw] -translate-x-1/2 border px-4 py-2.5 text-sm shadow-lg transition-all duration-200",
-        state.err ? "border-[#E60000] bg-[#E60000] text-white" : "border-gray-800 bg-black text-white",
+        "fixed bottom-6 left-1/2 z-[60] max-w-[calc(100vw-32px)] -translate-x-1/2 rounded-md border bg-surface px-4 py-2.5 text-sm text-fg transition-all duration-200",
+        state.err ? "border-accent" : "border-line",
         state.show ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0",
       )}
     >
+      {state.err && <span className="mr-2 font-semibold text-accent-text">!</span>}
       {state.msg}
     </div>
   );

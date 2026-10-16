@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ANetResearch/ANetHub/internal/private"
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
 
@@ -49,6 +50,9 @@ func OpenStore(dir string) (*Store, error) {
 	// for writing, and left as it was (ErrAdminDBTooOld).
 	if err := checkAdminDB(filepath.Join(dir, "admin.db")); err != nil {
 		return nil, err
+	}
+	if err := private.File(filepath.Join(dir, "admin.db")); err != nil {
+		return nil, fmt.Errorf("admin: create db: %w", err)
 	}
 	db, err := sql.Open("sqlite", filepath.Join(dir, "admin.db")+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)")
 	if err != nil {

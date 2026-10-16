@@ -240,6 +240,23 @@ func (s *Store) RegisterA2ACard(aid string, raw json.RawMessage, kel []identity.
 	return status, detail
 }
 
+// markUnlessRetired is the high-water mark of a stored card, except that a mark above the seq of the
+// card now offered is dropped (nil) when the stored card no longer verifies because the key state that
+// signed it has been retired by a rotation (a2acard.CodeKeyNotCurrent). Such a card can never be
+// replayed (cards verify only under the current state), so its seq protects nothing as a floor; kept,
+// it would let whoever held the old key before the rotation lock the owner out of every seq the owner
+// can sign (T-1 RT-F1b). An equal or lower mark still decides same-card and fork as before.
+func markUnlessRetired(stored *a2acard.Mark, offeredSeq uint64, storedRaw []byte, aid string, kel []identity.SignedEvent, now time.Time) *a2acard.Mark {
+	if stored == nil || len(storedRaw) == 0 || stored.Seq <= offeredSeq {
+		return stored
+	}
+	_, err := a2acard.Verify(storedRaw, registrantResolver(aid, kel), uint64(now.UnixMilli()))
+	if a2acard.IsCode(err, a2acard.CodeKeyNotCurrent) {
+		return nil
+	}
+	return stored
+}
+
 // AdmitA2ACard verifies an A2A card for aid against kel and applies the
 // params.seq high-water rule (A2A-DESIGN §10.3). It returns CardStatusOK
 // (stored), CardStatusUnchanged (the stored card again), CardStatusInvalid
@@ -269,6 +286,7 @@ func (s *Store) AdmitA2ACard(aid string, raw []byte, kel []identity.SignedEvent,
 	if err != nil {
 		return CardStatusInvalid, "not stored: " + err.Error()
 	}
+	stored = markUnlessRetired(stored, v.Seq, storedRaw, aid, kel, now)
 	decision, err := a2acard.CheckHighWater(stored, v.Mark())
 	if err != nil {
 		if a2acard.IsCode(err, a2acard.CodeSeqRollback) || a2acard.IsCode(err, a2acard.CodeSeqFork) {

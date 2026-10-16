@@ -1108,3 +1108,30 @@ func (s *Store) isAdmitted(aid string) (bool, error) {
 	}
 	return err == nil, err
 }
+
+// NetLimitView is one level of a per-network daily limit, as the operator
+// console states it.
+type NetLimitView struct {
+	IPv6 bool `json:"ipv6"`
+	Bits int  `json:"prefix"`
+	Max  int  `json:"max"`
+}
+
+// SignupQuotaTable is the daily number of open registrations per network
+// level (§0.4), for display only.
+func SignupQuotaTable() []NetLimitView { return viewLimits(signupQuota) }
+
+// TrialBudgetTable is the daily number of trial grants per network level,
+// for display only. The whole hub pays at most TrialBudgetHub.
+func TrialBudgetTable() []NetLimitView { return viewLimits(trialBudget) }
+
+// TrialBudgetHub is the daily number of trial grants the whole hub pays.
+const TrialBudgetHub = trialBudgetHub
+
+func viewLimits(l []netLimit) []NetLimitView {
+	out := make([]NetLimitView, 0, len(l))
+	for _, n := range l {
+		out = append(out, NetLimitView{IPv6: n.v6, Bits: n.bits, Max: n.max})
+	}
+	return out
+}

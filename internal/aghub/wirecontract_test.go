@@ -326,28 +326,14 @@ func TestTheJoinPageNamesAgentsThatExist(t *testing.T) {
 	}
 	page := string(raw)
 
-	// The agent ids ANet accepts for --agent. Kept as a literal list
-	// rather than imported: ANetHub does not depend on ANet, and this is
-	// exactly the boundary the check is about. When ANet adds one, this
-	// list and the page are updated together or this fails.
-	for _, agent := range []string{"cursor", "claude", "codex", "openclaw", "hermes"} {
-		if !strings.Contains(page, "anet agents wire ${agent}") &&
-			!strings.Contains(page, `"`+agent+`"`) {
-			t.Errorf("the join page does not offer %q", agent)
-		}
-	}
-	// And the command names themselves.
+	// The command names of the five join steps.
 	for _, cmd := range []string{
 		"anet update",
 		"anet init",
 		"anet doctor",
 		"anet agents wire",
 		"anet peers allow",
-		"anet peers trust",
-		"anet autoreply set --backend exec --agent",
-		"anet autoreply set --backend openai",
-		"anet autoreply test",
-		"anet autoreply off",
+		"anet hub-register",
 	} {
 		if !strings.Contains(page, cmd) {
 			t.Errorf("the join page no longer names %q — if the CLI changed, "+
@@ -586,7 +572,7 @@ func TestTheReviewFieldNamesArePinned(t *testing.T) {
 			"comment", "completed_day", "created_day", "rating", "receipt_cid", "subject_aid"}},
 		{"FedReviewEntry", aghub.FedReviewEntry{}, []string{"attestation", "fed_seq", "format", "provider_kel", "receipt", "review"}},
 		{"HubStats", aghub.HubStats{}, []string{
-			"agents", "avg_rating", "federated_agents", "modules", "reviews", "tasks_completed"}},
+			"agents", "avg_rating", "federated_agents", "modules", "online_nodes", "reviews", "tasks_completed", "version"}},
 	} {
 		got := goJSONFields(t, tc.value)
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {

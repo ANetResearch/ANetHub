@@ -7,16 +7,28 @@ export function esc(s: unknown): string {
   );
 }
 
-function mdInline(s: string): string {
-  let h = esc(s);
+function mdFormat(h: string): string {
   h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
   h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  h = h.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener">$1</a>',
-  );
   return h;
+}
+
+// Links are cut out first and put back last: the emphasis and code rules would otherwise rewrite
+// a URL that contains * or ` and leave an href such as https://a.b/<em>x</em>.
+function mdInline(s: string): string {
+  let h = esc(s).replace(/\u0000/g, "");
+  const links: Array<[string, string]> = [];
+  h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, text: string, url: string) => {
+    links.push([text, url]);
+    return `\u0000${links.length - 1}\u0000`;
+  });
+  h = mdFormat(h);
+  return h.replace(
+    /\u0000(\d+)\u0000/g,
+    (_m, i: string) =>
+      `<a href="${links[Number(i)][1]}" target="_blank" rel="noopener">${mdFormat(links[Number(i)][0])}</a>`,
+  );
 }
 
 export function renderMd(src: string): string {

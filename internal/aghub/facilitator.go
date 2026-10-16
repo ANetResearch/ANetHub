@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -455,6 +456,7 @@ func firstVerifySchema() []string {
 		   delete_after INTEGER NOT NULL
 		 )`,
 		`CREATE INDEX IF NOT EXISTS idx_first_verify_delete ON x402_first_verify(delete_after)`,
+		`CREATE INDEX IF NOT EXISTS idx_first_verify_payer ON x402_first_verify(payer)`,
 	}
 }
 
@@ -522,6 +524,24 @@ func (s *Store) recordFirstVerify(auth *payment.Authorization, id string, now in
 	if seq > math.MaxInt64 {
 		return false, fmt.Errorf("key state %d is beyond what this hub stores", seq)
 	}
+	// An unauthenticated caller can present any number of valid signatures
+	// of an account it holds, so the records are bounded per payer: any
+	// payer keeps a few (a payment refused for want of credit still has its
+	// first verification, H-40), one whose balance covers the amount keeps
+	// up to maxFirstVerifyPerPayer, and past that nothing is written. Without
+	// a record the key must be current now (keyAtFirstVerify).
+	amt, ok := amountInt64(auth.Amount)
+	if !ok {
+		return tip, nil
+	}
+	var bal, n int64
+	if err := tx.QueryRow(`SELECT COALESCE((SELECT credits FROM credit_balance WHERE aid=?),0),
+	    (SELECT COUNT(*) FROM x402_first_verify WHERE payer=?)`, auth.Payer, auth.Payer).Scan(&bal, &n); err != nil {
+		return false, err
+	}
+	if (bal < amt && n >= maxFirstVerifyUnfunded) || n >= maxFirstVerifyPerPayer {
+		return tip, nil
+	}
 	if _, err := tx.Exec(`INSERT INTO x402_first_verify(auth_id, payer, key_state_seq, tip_at_first, first_verified_at, delete_after)
 	    VALUES(?,?,?,?,?,?)`, id, auth.Payer, int64(seq), tip, now, firstVerifyDeleteAfter(auth.NotAfter)); err != nil {
 		return false, err
@@ -531,6 +551,14 @@ func (s *Store) recordFirstVerify(auth *payment.Authorization, id string, now in
 	}
 	return tip, nil
 }
+
+// maxFirstVerifyPerPayer bounds the first-verification records one payer's
+// authorizations can hold at once (they live until a week after NotAfter).
+const maxFirstVerifyPerPayer = 5000
+
+// maxFirstVerifyUnfunded is how many of them a payer whose balance does not
+// cover the payment may hold.
+const maxFirstVerifyUnfunded = 20
 
 // firstVerifyOf reads the first verification recorded for the authorization
 // id, through q: found when there is one, and tip when it says the key state
@@ -894,7 +922,7 @@ func (s *Store) settleAuth(hubAID string, auth *payment.Authorization, id, via s
 		return fail(refuse(payment.ReasonSettlementFailed, "%v", err))
 	}
 	if bal < amt {
-		return fail(refuse(payment.ReasonInsufficientFunds, "has %d, needs %d", bal, auth.Amount))
+		return fail(refuse(payment.ReasonInsufficientFunds, "the payer's balance does not cover the amount"))
 	}
 	// Every balance below moves through addToRow, which refuses a sum
 	// the column cannot hold rather than letting SQLite store it as a
@@ -1228,7 +1256,7 @@ func (s *Store) VerifyWithRequirements(hubAID string, p *payment.PaymentPayload,
 		return invalid(refuse(payment.ReasonSettlementFailed, "%v", err), auth)
 	}
 	if bal < amt {
-		return invalid(refuse(payment.ReasonInsufficientFunds, "has %d, needs %d", bal, auth.Amount), auth)
+		return invalid(refuse(payment.ReasonInsufficientFunds, "the payer's balance does not cover the amount"), auth)
 	}
 	return payment.VerifyResponse{IsValid: true, Payer: auth.Payer}
 }
@@ -1668,7 +1696,32 @@ func readFacilitatorRequest(w http.ResponseWriter, r *http.Request) (payment.Fac
 	return req, nil
 }
 
+// The per-address rates of the unauthenticated payment routes: code
+// constants, well above what a merchant serving paid tasks makes.
+const (
+	PayPerMinute     = 1200
+	PayBurst         = 300
+	WitnessPerMinute = 30
+	WitnessBurst     = 10
+)
+
+// rateLimited answers 429 with Retry-After when the client address has used
+// up its bucket on lim, and says whether it did.
+func rateLimited(w http.ResponseWriter, r *http.Request, lim *rateLimiter) bool {
+	ok, wait := lim.allow(clientIP(r))
+	if ok {
+		return false
+	}
+	secs := int(wait/time.Second) + 1
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate_limited", "retry_after": secs})
+	return true
+}
+
 func (s *Server) hX402Verify(w http.ResponseWriter, r *http.Request) {
+	if rateLimited(w, r, s.payLimiter) {
+		return
+	}
 	req, rf := readFacilitatorRequest(w, r)
 	if rf != nil {
 		writeJSON(w, http.StatusBadRequest, payment.VerifyResponse{IsValid: false, InvalidReason: rf.Reason})
@@ -1678,6 +1731,9 @@ func (s *Server) hX402Verify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hX402Settle(w http.ResponseWriter, r *http.Request) {
+	if rateLimited(w, r, s.payLimiter) {
+		return
+	}
 	req, rf := readFacilitatorRequest(w, r)
 	if rf != nil {
 		writeJSON(w, http.StatusBadRequest, refusedSettlement(rf, nil, payment.CreditNetwork(s.hubAID)))

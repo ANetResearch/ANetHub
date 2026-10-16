@@ -6,8 +6,11 @@ import { AgentsSection } from "./components/AgentsSection";
 import { AgentDetailDialog } from "./components/AgentDetailDialog";
 import { JoinSection } from "./components/JoinSection";
 import { TasksSection } from "./components/TasksSection";
+import { CapabilitiesSection } from "./components/Capabilities";
+import { VoxelBackground } from "./voxel/VoxelBackground";
 import { Footer } from "./components/Footer";
 import { Toast, useToast } from "./components/Toast";
+import { useLang, t } from "./lib/lang";
 
 // 没有访客模式(A2A-DESIGN §9):页面不再经 hub 代浏览器与 agent 对话。要委派
 // 任务,需在本机运行 anet(见"加入网络")。
@@ -17,6 +20,7 @@ export default function App() {
   const [q, setQ] = useState("");
   const [detailAid, setDetailAid] = useState<string | null>(null);
   const { toast, toastState } = useToast();
+  const lang = useLang();
 
   // /stats：首屏 + 周期刷新
   useEffect(() => {
@@ -43,21 +47,42 @@ export default function App() {
     };
   }, [q]);
 
+  // A link of the form /#agent/<aid> (the researcher directory uses it) opens that agent's profile.
+  useEffect(() => {
+    const open = () => {
+      const m = /^#agent\/(.+)$/.exec(location.hash);
+      if (m) setDetailAid(decodeURIComponent(m[1]));
+    };
+    open();
+    window.addEventListener("hashchange", open);
+    return () => window.removeEventListener("hashchange", open);
+  }, []);
+
   const scrollTo = (id: string) => {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth" });
   };
 
   return (
-    <div className="min-h-screen bg-white text-black">
+    <div className="min-h-screen text-fg">
+      <VoxelBackground />
+      <a href="#main" className="skip-link">{t(lang, "跳到正文", "Skip to content")}</a>
       <Header onJoin={() => scrollTo("join")} showTasks={hasTaskboard(stats)} />
-      <Hero stats={stats} onExplore={() => scrollTo("agents")} onJoin={() => scrollTo("join")} />
-      <AgentsSection agents={agents} q={q} onQ={setQ} onOpen={setDetailAid} />
-      {/* 任务板只在 hub 编入了 taskboard 模块时出现(加法编译,默认不含) */}
-      {hasTaskboard(stats) && <TasksSection />}
-      <JoinSection toast={toast} />
+      <main id="main">
+        <Hero stats={stats} onJoin={() => scrollTo("join")} />
+        <CapabilitiesSection />
+        <div className="panel">
+          <AgentsSection agents={agents} q={q} onQ={setQ} onOpen={setDetailAid} />
+        </div>
+        {/* The task board appears only when the Hub was built with the taskboard module. */}
+        {hasTaskboard(stats) && <div className="panel"><TasksSection /></div>}
+        <JoinSection toast={toast} />
+      </main>
       <Footer />
 
-      <AgentDetailDialog aid={detailAid} onClose={() => setDetailAid(null)} toast={toast} />
+      <AgentDetailDialog aid={detailAid} onClose={() => {
+          setDetailAid(null);
+          if (location.hash.startsWith("#agent/")) history.replaceState(null, "", location.pathname + location.search);
+        }} toast={toast} />
       <Toast state={toastState} />
     </div>
   );

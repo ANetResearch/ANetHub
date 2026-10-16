@@ -153,6 +153,7 @@ func (h *testHub) signed(signer *identity.Controller, action, method, path strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-ANet-Wire", strconv.Itoa(aghub.WireVersion))
+	req.RemoteAddr = "127.0.0.1:40000"
 	req.Header.Set("X-Real-IP", "203.0.113.9")
 	ts := signingNow()
 	sig, seq := signer.Sign(relayauth.PreimageV2(action, signer.AID(), h.hubAID, ts, method, req.URL.RequestURI(), body))

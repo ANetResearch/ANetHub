@@ -343,3 +343,35 @@ func TestCapRevokedFollowsRevocationsAndDeregistration(t *testing.T) {
 		t.Errorf("a deregistered owner still has %d revocations", n)
 	}
 }
+
+// RT-SSRC-3: /mailbox/revoke is metered per agent by the ids it carries, so
+// one registered agent cannot keep the store's write lock busy for everyone.
+// The agent over its budget is told rate_limited with a wait; another agent
+// is not touched by it.
+func TestMailboxRevokeIsRateLimitedPerAgent(t *testing.T) {
+	srv, _ := newHubWithStore(t)
+	c, other := twoAgents(t)
+	register(t, srv, c, "Owner", nil)
+	register(t, srv, other, "Other", nil)
+	limited := false
+	for n := 0; n < 20 && !limited; n++ {
+		ids := make([][]byte, aghub.MaxRevokeBatch)
+		for i := range ids {
+			ids[i] = capIDFor(byte(0x80+n), i)
+		}
+		code, b, h := revoke(t, srv, c, map[string]any{"cap_ids": b64ids(ids...)})
+		if code == http.StatusTooManyRequests {
+			refusedWith(t, code, b, http.StatusTooManyRequests, "rate_limited")
+			if h.Get("Retry-After") == "" {
+				t.Error("rate_limited without Retry-After")
+			}
+			limited = true
+		} else if code != http.StatusOK {
+			t.Fatalf("revoke: %d %s", code, b)
+		}
+	}
+	if !limited {
+		t.Fatal("20 full batches in a row were all taken")
+	}
+	revoked(t, srv, other, b64ids(capIDFor(1, 1)), 1, 1)
+}

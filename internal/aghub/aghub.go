@@ -33,10 +33,13 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
 	"github.com/ANetResearch/ANetCore/seal"
+	"github.com/ANetResearch/ANetHub/internal/private"
+	"github.com/ANetResearch/ANetHub/internal/version"
 	_ "modernc.org/sqlite" // pure-Go driver (K207 A3: no cgo in distributed runtime)
 )
 
@@ -141,6 +144,10 @@ type Store struct {
 	// liabTrees caches the liability trees of the epochs whose proofs
 	// are still served (supply.go).
 	liabTrees liabTreeCache
+	// liabBuildMu lets one rebuild of a liability tree run at a time, and
+	// liabBuilds counts the rebuilds (a test reads it).
+	liabBuildMu sync.Mutex
+	liabBuilds  atomic.Int64
 	// quota bounds each recipient's undelivered messages (relay.go).
 	quota relayQuota
 	db    *sql.DB
@@ -242,6 +249,9 @@ func Open(dir string) (*Store, error) {
 	// busy_timeout (waiting could deadlock). The send failed with "database
 	// is locked" (ANet an internal note F2). A lock taken at BEGIN waits
 	// under busy_timeout like any single statement.
+	if err := private.File(filepath.Join(dir, dataFile)); err != nil {
+		return nil, fmt.Errorf("hub: create db: %w", err)
+	}
 	db, err := sql.Open("sqlite", filepath.Join(dir, dataFile)+
 		"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(15000)&_pragma=secure_delete(ON)"+
 		"&_txlock=immediate")
@@ -1274,11 +1284,17 @@ type HubStats struct {
 	// build lacks from one that is present and empty by it. Empty when the
 	// kernel was started without the module wiring, as in unit tests.
 	Modules []string `json:"modules"`
+	// OnlineNodes is how many registered agents collected their mail within
+	// QuietAfter. Like every listing it rests on the hour-resolution
+	// liveness only; agents with no recorded poll are not counted.
+	OnlineNodes int `json:"online_nodes"`
+	// Version is the release of this hub, shown on the landing page.
+	Version string `json:"version"`
 }
 
 // Stats computes the landing metrics in one pass.
 func (s *Store) Stats() (HubStats, error) {
-	out := HubStats{Modules: []string{}}
+	out := HubStats{Modules: []string{}, Version: version.V}
 	agents, err := s.ListAgents("")
 	if err != nil {
 		return out, err
@@ -1287,6 +1303,26 @@ func (s *Store) Stats() (HubStats, error) {
 		if a.Listed {
 			out.Agents++
 		}
+	}
+	// Online nodes are counted from the agent table, not from the listing:
+	// a requester has no public profile and is no less online for it.
+	seen, err := s.db.Query(`SELECT last_seen_at FROM agent WHERE last_seen_at IS NOT NULL`)
+	if err != nil {
+		return out, err
+	}
+	now := time.Now()
+	for seen.Next() {
+		var ts string
+		if err := seen.Scan(&ts); err != nil {
+			seen.Close()
+			return out, err
+		}
+		if l := livenessFrom(ts, now); l.LastSeen != "" && !l.Quiet {
+			out.OnlineNodes++
+		}
+	}
+	if err := seen.Close(); err != nil {
+		return out, err
 	}
 	if err := s.db.QueryRow(
 		`SELECT COUNT(DISTINCT receipt_cid) FROM review WHERE receipt_cid != ''`).

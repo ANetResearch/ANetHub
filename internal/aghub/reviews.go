@@ -53,6 +53,12 @@ const maxReviewUploadBody = 16 << 10
 // (PAY-V1 step 7).
 const ReviewWindowDays = 30
 
+// ReviewUploadDays is how long after its interaction ended a review is still
+// taken at all: the 30-day window plus the 7 days a daemon keeps trying to
+// upload (PAY-V1 step 7). Without it a requester could fill created_day in
+// early and upload long after the interaction.
+const ReviewUploadDays = ReviewWindowDays + 7
+
 // reviewSchema is the review tables of hub.db (hub-payment-privacy §3.2).
 func reviewSchema() []string {
 	return []string{
@@ -159,8 +165,8 @@ type reviewUpload struct {
 //     this receipt and its provider: 400 receipt_not_reviewable;
 //  6. requester_commit is the signer's with this rsalt: 400
 //     requester_commit_mismatch;
-//  7. created_day within 30 days from completed_day, and not after
-//     tomorrow: 400 review_window_closed;
+//  7. created_day within 30 days from completed_day, not after tomorrow,
+//     and today not later than completed_day + 37: 400 review_window_closed;
 //  8. (merged into 3);
 //  9. the interaction has no review here, local or from a peer: 409
 //     review_exists.
@@ -334,9 +340,10 @@ func receiptPlausible(rw *evidence.ReceiptWire, kel []identity.SignedEvent) bool
 }
 
 // inReviewWindow is PAY-V1 step 7: created is completed up to completed + 30
-// (UTC days), and not after today + 1.
+// (UTC days), not after today + 1, and today is not later than completed + 37.
 func inReviewWindow(completed, created, today uint64) bool {
-	return created >= completed && created-completed <= ReviewWindowDays && created <= today+1
+	return created >= completed && created-completed <= ReviewWindowDays && created <= today+1 &&
+		today <= completed+ReviewUploadDays
 }
 
 // subjectKEL is the key history this hub holds for aid: registered here,

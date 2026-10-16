@@ -1,52 +1,48 @@
 import { useEffect, useState } from "react";
-import { BadgeCheck, Copy, Check } from "lucide-react";
 import { fetchAgent, type AgentView, type ReviewView } from "../lib/api";
 import { renderMd } from "../lib/markdown";
 import { shortAid, copyText } from "../lib/utils";
+import { useLang, t } from "../lib/lang";
 import { Dialog } from "./ui/dialog";
-import { Badge } from "./ui/badge";
 import { Avatar } from "./ui/avatar";
+import { Icon } from "./Icon";
+import { BadgeCheck, Check, Copy } from "../lib/icons";
 import { Stars } from "./AgentsSection";
 
-/** 一个 UTC 日序号（自 1970-01-01 起的天数）显示为 YYYY-MM-DD。评价只保存到日。 */
+/** A UTC day number (days since 1970-01-01) as YYYY-MM-DD. Reviews are kept to the day only. */
 export function fmtDay(day?: number): string {
   return day ? new Date(day * 86400000).toISOString().slice(0, 10) : "";
 }
 
-// Exported for tests. What a review looks like on screen is where the
-// evidence surface either reaches a person or does not.
-//
-// A review carries the rating, the comment, the receipt it is anchored on
-// and the days of the receipt and of the review. It names no reviewer and
-// no interaction: the hub keeps neither (evidence v2), and it never
-// receives the request or the deliverable (A2A-DESIGN §9). The provider's
-// signature on the receipt and the review's, by the one-time key the
-// receipt names, are what the hub verified, and that is what the line in
-// red says.
+// Exported for tests. A review carries the rating, the comment, the receipt
+// it is anchored on and the days of the receipt and of the review. It names no
+// reviewer and no interaction: the hub keeps neither (evidence v2) and never
+// receives the request or the deliverable (A2A-DESIGN §9). The hub verified
+// the provider's signature on the receipt and the review's signature by the
+// one-time key the receipt names; the verification line states exactly that.
 export function Review({ r }: { r: ReviewView }) {
+  const lang = useLang();
   return (
-    <div className="border border-gray-200 bg-white p-4">
+    <div className="card p-4">
       <div className="flex items-center justify-between gap-2">
         <Stars avg={r.rating} />
-        {r.created_day ? <span className="font-mono text-[11px] text-gray-400">{fmtDay(r.created_day)}</span> : null}
+        {r.created_day ? <span className="num text-[12px] text-muted">{fmtDay(r.created_day)}</span> : null}
       </div>
-      {r.comment && <p className="mt-2 text-[13px] italic leading-relaxed text-gray-800">“{r.comment}”</p>}
-      <div className="mt-3 space-y-0.5 border-t border-dashed border-gray-200 pt-3 font-mono text-[10px] leading-relaxed text-gray-400">
-        {r.completed_day ? (
-          <div>
-            <b className="text-gray-500">completed</b> {fmtDay(r.completed_day)}
-          </div>
-        ) : null}
-      </div>
-      <div className="mt-3 flex items-center gap-1.5 text-[11px] text-[#E60000]">
-        <BadgeCheck className="size-3.5" />
-        双方签名已验证 · 回执 {shortAid(r.receipt_cid)}
+      {r.comment && <p className="mt-2 text-[13px] leading-relaxed">{r.comment}</p>}
+      {r.completed_day ? (
+        <div className="num mt-3 border-t border-line pt-3 text-[12px] text-muted">
+          {t(lang, "完成日期", "Completed")} {fmtDay(r.completed_day)}
+        </div>
+      ) : null}
+      <div className="mt-3 flex items-center gap-1.5 text-[12px] text-accent-text">
+        <Icon icon={BadgeCheck} size={14} />
+        {t(lang, "双方签名已验证 · 回执", "Both signatures verified · receipt")} <span className="num">{shortAid(r.receipt_cid)}</span>
       </div>
     </div>
   );
 }
 
-/** Agent 详情弹窗：GET /agents/{aid} —— 资料 + 可验证评价列表。 */
+/** Agent detail dialog: GET /agents/{aid} — profile and verifiable reviews. */
 export function AgentDetailDialog({
   aid,
   onClose,
@@ -56,6 +52,7 @@ export function AgentDetailDialog({
   onClose: () => void;
   toast: (msg: string, isErr?: boolean) => void;
 }) {
+  const lang = useLang();
   const [data, setData] = useState<{ agent: AgentView; reviews: ReviewView[] } | null>(null);
   const [err, setErr] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -76,51 +73,48 @@ export function AgentDetailDialog({
 
   const a = data?.agent;
   return (
-    <Dialog open={!!aid} onClose={onClose} className="max-w-2xl">
-      {!data && !err && (
-        <div className="p-10 text-center text-sm text-gray-400">加载中…</div>
-      )}
-      {err && <div className="p-10 text-center text-sm text-gray-400">加载失败，请稍后再试。</div>}
+    <Dialog open={!!aid} onClose={onClose} label={t(lang, "Agent 详情", "Agent details")} closeLabel={t(lang, "关闭", "Close")} className="max-w-2xl">
+      {!data && !err && <div className="p-10 text-center text-sm text-muted">{t(lang, "正在加载。", "Loading.")}</div>}
+      {err && <div className="p-10 text-center text-sm text-muted">{t(lang, "加载失败。稍后重试。", "Loading failed. Try again later.")}</div>}
       {a && (
         <>
-          <div className="border-b border-gray-200 p-6 pr-14">
+          <div className="border-b border-line p-5 pr-14 md:p-6 md:pr-14">
             <div className="flex items-start gap-4">
               <Avatar name={a.name} className="size-12 text-xl" />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-xl font-bold leading-tight">{a.name || shortAid(a.aid)}</h3>
+                  <h3 className="text-xl font-semibold leading-tight">{a.name || shortAid(a.aid)}</h3>
                   <button
-                    className="inline-flex cursor-pointer items-center gap-1 border border-gray-300 px-2 py-0.5 text-[11px] text-gray-500 transition-colors hover:border-[#E60000] hover:text-[#E60000]"
+                    type="button"
+                    className="btn min-h-[32px] px-2 text-[12px]"
                     onClick={async () => {
                       const ok = await copyText(a.aid);
                       setCopied(ok);
-                      toast(ok ? "已复制 AID" : "复制失败", !ok);
+                      toast(ok ? t(lang, "已复制 AID。", "AID copied.") : t(lang, "复制失败。", "Copy failed."), !ok);
                       setTimeout(() => setCopied(false), 1600);
                     }}
                   >
-                    {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
-                    {copied ? "已复制" : "复制 AID"}
+                    <Icon icon={copied ? Check : Copy} size={14} />
+                    {copied ? t(lang, "已复制", "Copied") : t(lang, "复制 AID", "Copy AID")}
                   </button>
                 </div>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                <div className="mt-2 flex flex-wrap gap-1.5">
                   {(a.caps || []).map((c) => (
-                    <Badge key={c} variant="outline">
+                    <span key={c} className="tag">
                       {c}
-                    </Badge>
+                    </span>
                   ))}
                 </div>
                 <div className="mt-3 flex items-baseline gap-2.5">
-                  <span className="font-bebas text-4xl leading-none text-[#E60000]">
-                    {a.review_count ? a.avg_rating.toFixed(1) : "—"}
-                  </span>
-                  <span className="text-xs text-gray-500">
+                  <span className="num text-3xl font-semibold leading-none">{a.review_count ? a.avg_rating.toFixed(1) : "–"}</span>
+                  <span className="text-xs text-muted">
                     {a.review_count ? (
                       <>
                         <Stars avg={a.avg_rating} className="mr-1 align-middle" />
-                        {a.review_count} 条可验证评价
+                        {t(lang, `${a.review_count} 条可核验评价`, `${a.review_count} verifiable reviews`)}
                       </>
                     ) : (
-                      "还没有评价"
+                      t(lang, "暂无评价", "No reviews")
                     )}
                   </span>
                 </div>
@@ -128,19 +122,19 @@ export function AgentDetailDialog({
             </div>
           </div>
 
-          <div className="thin-scroll flex-1 overflow-y-auto p-6">
-            {a.summary && <p className="mb-3 text-[14px] leading-relaxed text-gray-800">{a.summary}</p>}
+          <div className="thin-scroll flex-1 overflow-y-auto p-5 md:p-6">
+            {a.summary && <p className="mb-3 text-[14px] leading-relaxed">{a.summary}</p>}
             {a.readme && (
               <div
-                className="md mb-3 border border-gray-200 bg-gray-50/60 p-4 text-[13px] leading-relaxed text-gray-800"
+                className="md mb-3 rounded-md border border-line bg-surface-2 p-4 text-[13px] leading-relaxed"
                 dangerouslySetInnerHTML={{ __html: renderMd(a.readme) }}
               />
             )}
 
-            <h4 className="mb-3 mt-6 font-bebas text-lg tracking-[0.08em]">
-              VERIFIED REVIEWS <span className="text-[#E60000]">·</span>{" "}
-              <span className="text-gray-400 text-sm tracking-normal font-body">签名与回执已验证，不含交互内容与评价人</span>
-            </h4>
+            <h4 className="mb-1 mt-6 text-[15px] font-semibold">{t(lang, "可核验评价", "Verifiable reviews")}</h4>
+            <p className="mb-3 text-[12px] text-muted">
+              {t(lang, "评价的签名与回执已验证，不含交互内容与评价人。", "Signatures and receipts are verified. Reviews contain no interaction content and no reviewer identity.")}
+            </p>
             {data!.reviews.length ? (
               <div className="space-y-3">
                 {data!.reviews.map((r, i) => (
@@ -148,8 +142,8 @@ export function AgentDetailDialog({
                 ))}
               </div>
             ) : (
-              <p className="py-4 text-[13px] leading-relaxed text-gray-500">
-                还没有可信评价。评价必须锚定一次双方签名的交互回执，Hub 验签通过后才会显示。
+              <p className="py-2 text-[13px] leading-relaxed text-muted">
+                {t(lang, "暂无可信评价。评价须锚定一次双方签名的交互回执，Hub 验签通过后方可显示。", "No verified reviews. A review must be anchored on a receipt signed by both parties and is shown after the Hub verifies it.")}
               </p>
             )}
           </div>

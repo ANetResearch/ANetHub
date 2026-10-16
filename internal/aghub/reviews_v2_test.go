@@ -283,6 +283,21 @@ func TestReviewUploadFollowsPAYV1(t *testing.T) {
 		}
 	})
 
+	// A requester can fill created_day in early; the upload is refused all the same once the
+	// 30 days and the 7 days of retrying are over (PAY-V1 step 7, the second condition).
+	t.Run("TestAReviewUploadedTooLateIsRefused", func(t *testing.T) {
+		k := kit("late38", 5)
+		k.Receipt.CompletedDay, k.Review.CreatedDay = today-aghub.ReviewUploadDays-1, today-aghub.ReviewUploadDays-1
+		if code, b := upload(k, nil, nil); code != 400 || !strings.Contains(string(b), `"review_window_closed"`) {
+			t.Fatalf("created on the day it ended, uploaded 38 days later: %d %s", code, b)
+		}
+		k = kit("late37", 5)
+		k.Receipt.CompletedDay, k.Review.CreatedDay = today-aghub.ReviewUploadDays, today-aghub.ReviewUploadDays
+		if code, b := upload(k, nil, nil); code != 200 {
+			t.Fatalf("uploaded 37 days later: %d %s", code, b)
+		}
+	})
+
 	t.Run("an interaction is reviewed once (9)", func(t *testing.T) {
 		k := kit("once", 4)
 		if code, b := upload(k, nil, nil); code != 200 {
