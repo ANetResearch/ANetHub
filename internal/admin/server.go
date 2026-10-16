@@ -126,6 +126,9 @@ func (s *Server) Handler() http.Handler {
 	api("POST "+b+"/api/harvest", s.hHarvest)
 	api("GET "+b+"/api/reviews", s.hReviews)
 	api("GET "+b+"/api/audit", s.hAudit)
+	api("GET "+b+"/api/admission", s.hAdmission)
+	api("GET "+b+"/api/delivery", s.hDelivery)
+	api("GET "+b+"/api/federation", s.hFederation)
 	// Who was deleted, when and by whom; ?format=admit is the same list as
 	// the input of anet-hub admit --file, which is how a batch of deletes is
 	// undone. There is no restore route: it wrote an old key history back
@@ -507,7 +510,7 @@ func (s *Server) hDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// scripted loop (like the 2026-07-20 incident) from wiping the registry.
 	if !s.delLimiter.allow() {
 		s.store.Audit("admin", "agent.delete.throttled", aid, "destructive-op rate limit hit")
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "删除过于频繁，已限流（防批量误删/攻击）。稍后重试。"})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "删除请求过于频繁，已被限流。稍后重试。"})
 		return
 	}
 	del, err := s.hub.DeleteAgent(aid)

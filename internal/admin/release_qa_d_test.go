@@ -372,17 +372,18 @@ func TestNoProductionHostIsCompiledIn(t *testing.T) {
 func TestTheConsoleShowsTheWayBackFromADelete(t *testing.T) {
 	page := string(AdminHTML())
 	for _, want := range []string{
-		"api('/deleted')",                // the listing
-		"/deleted?format=admit",          // the batch undo
-		"anet-hub admit",                 // the undo, in words
-		"'operations/recycle': vRecycle", // routed
-		"id:'recycle'",                   // and reachable from the sidebar
+		"'/deleted'",            // the listing
+		"/deleted?format=admit", // the batch undo
+		"anet-hub admit",        // the undo, in words
+		"VIEWS.registry",        // routed
+		"{ id: 'registry',",     // and reachable from the navigation
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the console does not contain %q", want)
 		}
 	}
-	for _, gone := range []string{"/restore", "restoreAgent", "reviews_written", "mailbox_backlog", "reviewer_aid"} {
+	for _, gone := range []string{"/restore", "restoreAgent", "reviews_written", "mailbox_backlog", "reviewer_aid",
+		"publish_prices", "/gateway", "credential", "pricing", "/harvest", "sessions"} {
 		if strings.Contains(page, gone) {
 			t.Errorf("the console still uses %q, which the admin API no longer has", gone)
 		}
