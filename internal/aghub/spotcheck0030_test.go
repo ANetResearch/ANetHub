@@ -96,7 +96,7 @@ func TestSpotARedemptionThatWouldOverflowTheHubsOwnRowMovesNothing(t *testing.T)
 		opt := payment.PaymentOption{Scheme: payment.SchemeCredit, Network: own, Amount: payment.Amount(amt),
 			Asset: payment.AssetCredit, PayTo: w.hubAID}
 		return post(t, w.srv.URL+"/x402/redeem", map[string]any{
-			"x402Version": payment.Version, "paymentPayload": json.RawMessage(mustPayload(t, c, opt, ref)),
+			"x402Version": payment.Version, "paymentPayload": json.RawMessage(mustPayload(t, c, opt, "redeem:"+ref)),
 			"reference": ref})
 	}
 	if code, b := redeem(w.victim, 5000, "spot-first"); code != 200 {
