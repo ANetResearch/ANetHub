@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -277,7 +278,9 @@ func supplyOf(t *testing.T, srv *httptest.Server) aghub.Supply {
 func signedPayment(t *testing.T, payer *identity.Controller, opt payment.PaymentOption,
 	interactionID string) string {
 	t.Helper()
-	amount, err := payment.ParseAmount(opt.Amount)
+	// strconv, not payment.ParseAmount: a hostile signer is not held to the ledger range, and
+	// the over-range amounts of the overflow tests must reach the hub.
+	amount, err := strconv.ParseUint(opt.Amount, 10, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
