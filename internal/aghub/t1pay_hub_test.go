@@ -169,3 +169,34 @@ func TestSettleDoesNotTellThePayeeTheBalance(t *testing.T) {
 		t.Errorf("answer: %s", b)
 	}
 }
+
+// Concurrent first requests for an epoch whose tree is not cached rebuild it once.
+func TestAColdLiabilityTreeIsRebuiltOnceForConcurrentRequests(t *testing.T) {
+	srv, store := newHubWithStore(t)
+	var agents []*identity.Controller
+	for i := 0; i < 4; i++ {
+		c, err := aghub.NewAgentForTest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		register(t, srv, c, "Agent", nil)
+		agents = append(agents, c)
+	}
+	publishEpoch(t, store)
+	store.DropLiabTreesForTest()
+	before := store.LiabBuildsForTest()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(c *identity.Controller) {
+			defer wg.Done()
+			if code, _, body := liabilityProof(t, srv, c, c, ""); code != http.StatusOK {
+				t.Errorf("proof: %d %s", code, body)
+			}
+		}(agents[i%len(agents)])
+	}
+	wg.Wait()
+	if n := store.LiabBuildsForTest() - before; n != 1 {
+		t.Errorf("%d rebuilds of one cold tree, want 1", n)
+	}
+}

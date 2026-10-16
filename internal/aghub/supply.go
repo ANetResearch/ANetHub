@@ -608,6 +608,15 @@ func (s *Store) liabTree(e SupplyEpochEntry) (*liabtree.Tree, uint64, error) {
 	if t := s.liabTrees.get(e.ToDay); t != nil && liabtree.Hex(t.Root()) == e.Root {
 		return t, ledgerHW, nil
 	}
+	// One rebuild at a time: concurrent first requests for a cold epoch would
+	// each read every leaf and build the whole tree, at a cost that grows with
+	// the accounts. The ones that waited find the tree in the cache.
+	s.liabBuildMu.Lock()
+	defer s.liabBuildMu.Unlock()
+	if t := s.liabTrees.get(e.ToDay); t != nil && liabtree.Hex(t.Root()) == e.Root {
+		return t, ledgerHW, nil
+	}
+	s.liabBuilds.Add(1)
 	rows, err := s.db.Query(`SELECT pos, aid, balance, salt FROM liab_leaf WHERE to_day = ? ORDER BY pos`, e.ToDay)
 	if err != nil {
 		return nil, 0, err

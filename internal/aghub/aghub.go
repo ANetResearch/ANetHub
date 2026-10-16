@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ANetResearch/ANetCore/identity"
@@ -142,6 +143,10 @@ type Store struct {
 	// liabTrees caches the liability trees of the epochs whose proofs
 	// are still served (supply.go).
 	liabTrees liabTreeCache
+	// liabBuildMu lets one rebuild of a liability tree run at a time, and
+	// liabBuilds counts the rebuilds (a test reads it).
+	liabBuildMu sync.Mutex
+	liabBuilds  atomic.Int64
 	// quota bounds each recipient's undelivered messages (relay.go).
 	quota relayQuota
 	db    *sql.DB
