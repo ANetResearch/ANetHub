@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ANetResearch/ANetCore/relayauth"
 
@@ -73,7 +74,9 @@ func TestFedCardsV3(t *testing.T) {
 		t.Errorf("an entry without keys carries keys: %v", page.Cards[1])
 	}
 
-	// The pulling hub.
+	// The pulling hub. The requests above were signed by hand for b's identity; RC1 takes each of a
+	// signer's times once, so let the clock pass the last of them before b signs its own.
+	time.Sleep(2 * time.Millisecond)
 	if admitted, refused := b.SyncOnce(context.Background()); admitted != 2 || refused != 0 {
 		t.Fatalf("admitted %d refused %d", admitted, refused)
 	}

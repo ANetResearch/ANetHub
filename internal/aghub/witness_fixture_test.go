@@ -49,6 +49,10 @@ func NewAgentWitnessedBy(hubAID string, at time.Time) (*identity.Controller, err
 	if err := identitytest.SwitchWitness(c, hubAID, uint64(at.UnixMilli())); err != nil {
 		return nil, err
 	}
+	// A KEL takes each event time once (identity: event ts must be greater than the previous event's),
+	// and a test that rotates the new agent next takes its time from the wall clock: on a fast machine
+	// that is the same millisecond. Let the clock pass it.
+	time.Sleep(2 * time.Millisecond)
 	return c, nil
 }
 
