@@ -301,8 +301,21 @@ func (s *Store) PublishKeys(aid string, raw []byte, prevSeq uint64, kel []identi
 	if err := s.refreshDirTx(tx, aid); err != nil {
 		return "", err
 	}
+	// A higher mailbox epoch voids every capability the old key signed
+	// (capPrecheck compares the epoch first), so their revocations are of no
+	// use any more: drop them, or the owner's list stays full after the
+	// daemon made a new key because it was full (RT-SSRC-14).
+	epochRose := prev != nil && set.Mbox.Epoch > prev.Epoch
+	if epochRose {
+		if _, err := tx.Exec(`DELETE FROM cap_revocation WHERE owner=?`, aid); err != nil {
+			return "", err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return "", err
+	}
+	if epochRose {
+		s.revoked.forget()
 	}
 	return KeysStatusOK, nil
 }

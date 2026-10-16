@@ -260,7 +260,12 @@ type StatusResult struct {
 // same transaction. The answer depends on nothing else (P4): not on who
 // asks, not on the recipient of the row.
 func (s *Store) RelayStatus(items []StatusItem) ([]StatusResult, error) {
-	tx, err := s.db.Begin()
+	// Anonymous and unmetered per request, so the lookups run in a read
+	// transaction: a write transaction here would take the database write
+	// lock on every call and starve the relay (RT-SSRC-2). The cut of the
+	// time left is a short write afterwards, only for the rows that still
+	// have more time than the cut leaves.
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +273,7 @@ func (s *Store) RelayStatus(items []StatusItem) ([]StatusResult, error) {
 	nowMS := s.now().UnixMilli()
 	fetched := nowMS + DAckFetchedTTL.Milliseconds()
 	out := make([]StatusResult, len(items))
+	var cut [][]byte
 	for i, it := range items {
 		var one int
 		switch err := tx.QueryRow(`SELECT 1 FROM relay_message WHERE rid=?`, it.RID).Scan(&one); {
@@ -278,19 +284,38 @@ func (s *Store) RelayStatus(items []StatusItem) ([]StatusResult, error) {
 			return nil, err
 		}
 		var dack []byte
-		switch err := tx.QueryRow(`SELECT dack FROM relay_dack WHERE handle=? AND exp>?`, it.Handle, nowMS).Scan(&dack); {
+		var exp int64
+		switch err := tx.QueryRow(`SELECT dack, exp FROM relay_dack WHERE handle=? AND exp>?`, it.Handle, nowMS).Scan(&dack, &exp); {
 		case errors.Is(err, sql.ErrNoRows):
 			out[i] = StatusResult{State: RelayStatusUnknown}
 			continue
 		case err != nil:
 			return nil, err
 		}
-		if _, err := tx.Exec(`UPDATE relay_dack SET exp=MIN(exp, ?) WHERE handle=?`, fetched, it.Handle); err != nil {
-			return nil, err
+		if exp > fetched {
+			cut = append(cut, it.Handle)
 		}
 		out[i] = StatusResult{State: RelayStatusDone, DAck: dack}
 	}
-	return out, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if len(cut) == 0 {
+		return out, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wtx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer wtx.Rollback()
+	for _, h := range cut {
+		if _, err := wtx.Exec(`UPDATE relay_dack SET exp=MIN(exp, ?) WHERE handle=?`, fetched, h); err != nil {
+			return nil, err
+		}
+	}
+	return out, wtx.Commit()
 }
 
 // ---- the wire (core §2.12.2) ----
@@ -459,11 +484,13 @@ type deliveryState struct {
 	// byAddr is each client address's bucket of /relay/status, byPeer
 	// each peer hub's of /fed/v3/relay-status.
 	byAddr, byPeer *bucketSet
-	counters       deliveryCounters
+	// revoke is each agent's bucket of /mailbox/revoke.
+	revoke   *bucketSet
+	counters deliveryCounters
 }
 
 func newDeliveryState(now func() time.Time) *deliveryState {
-	return &deliveryState{byAddr: newBucketSet(now), byPeer: newBucketSet(now)}
+	return &deliveryState{byAddr: newBucketSet(now), byPeer: newBucketSet(now), revoke: newBucketSet(now)}
 }
 
 // deliveryCounters are the hub's delivery confirmation counters (DLV
