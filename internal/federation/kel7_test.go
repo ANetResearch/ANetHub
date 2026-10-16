@@ -495,11 +495,11 @@ func TestFedBodyBudget(t *testing.T) {
 // two events. Properties: nothing panics, and what is pinned afterwards is
 // the pin or a history that extends it (never shorter, never another).
 func FuzzPinPeerKEL(f *testing.F) {
-	self, err := hubid.LoadOrIncept(f.TempDir())
+	self, err := incept(f.TempDir())
 	if err != nil {
 		f.Fatal(err)
 	}
-	peer, err := hubid.LoadOrIncept(f.TempDir())
+	peer, err := incept(f.TempDir())
 	if err != nil {
 		f.Fatal(err)
 	}

@@ -52,7 +52,7 @@ type testHub struct {
 func newTestHub(t testing.TB) *testHub {
 	t.Helper()
 	dir := t.TempDir()
-	id, err := hubid.LoadOrIncept(dir)
+	id, err := incept(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func newDiscoveryService(t *testing.T, dir string, cfg Config, d Directory) *Ser
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	id, err := hubid.LoadOrIncept(dir)
+	id, err := incept(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,4 +389,13 @@ var _ = context.Background
 func tick(ctx context.Context) context.Context {
 	time.Sleep(2 * time.Millisecond)
 	return ctx
+}
+
+// incept is hubid.LoadOrIncept, and lets the wall clock pass the millisecond of the inception: a test
+// that rotates the new identity at the time it takes from the wall clock needs that time to be later (a
+// key event time must be greater than the previous one).
+func incept(dir string) (*hubid.Identity, error) {
+	id, err := hubid.LoadOrIncept(dir)
+	time.Sleep(2 * time.Millisecond)
+	return id, err
 }

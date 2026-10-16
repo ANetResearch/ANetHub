@@ -42,7 +42,7 @@ func threeHubIdentities(t *testing.T) (self, peer, stranger *hubid.Identity) {
 	t.Helper()
 	var ids [3]*hubid.Identity
 	for i := range ids {
-		id, err := hubid.LoadOrIncept(t.TempDir())
+		id, err := incept(t.TempDir())
 		if err != nil {
 			t.Fatal(err)
 		}

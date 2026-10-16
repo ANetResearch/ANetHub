@@ -35,7 +35,7 @@ type fakePeer struct {
 
 func newFakePeer(t *testing.T, signer *hubid.Identity) *fakePeer {
 	t.Helper()
-	self, err := hubid.LoadOrIncept(t.TempDir())
+	self, err := incept(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func (p *fakePeer) ask(t *testing.T, s *Signer) (int, error) {
 
 func newTestSigner(t *testing.T) (*hubid.Identity, *Signer) {
 	t.Helper()
-	id, err := hubid.LoadOrIncept(t.TempDir())
+	id, err := incept(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
