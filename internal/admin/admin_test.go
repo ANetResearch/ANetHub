@@ -137,7 +137,7 @@ func sealedForTest(t *testing.T, to string, kid []byte, ct string) []byte {
 }
 
 // RunAll touches no source and writes nothing under the datasets root
-// (A2A-DESIGN §9 row admin 采集, [C39]).
+// (A2A-DESIGN §9 row admin harvest, [C39]).
 //
 // Independent checks, each of which a re-added source trips: the returned
 // list must be empty, so a source that ran and reported fails; and the

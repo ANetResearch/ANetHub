@@ -6,7 +6,7 @@ import "context"
 // no sources.
 //
 // Earlier versions had two sources, both removed (A2A-DESIGN §9 row admin
-// 采集, [C39]):
+// harvest, [C39]):
 //
 //	hub-relay  decoded every relay payload in hub.db (the delegation goal,
 //	           chat bodies and the deliverable) into JSONL files under

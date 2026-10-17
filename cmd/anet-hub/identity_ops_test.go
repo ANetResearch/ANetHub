@@ -76,9 +76,7 @@ func idCLI(t *testing.T, lang string, term terminal, args ...string) cliResult {
 	if lang == "zh" {
 		l = "zh_CN.UTF-8"
 	}
-	t.Setenv("LC_ALL", "")
-	t.Setenv("LC_MESSAGES", "")
-	t.Setenv("LANG", l)
+	t.Setenv("ANET_LANG", l)
 	fs := flag.NewFlagSet("anet-hub", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	f := defineFlags(fs)
@@ -173,9 +171,7 @@ func TestHubRefusesToStartWithV1IdentityFile(t *testing.T) {
 			before := snapshotDir(t, dir)
 			for _, lang := range []string{"en", "zh"} {
 				want := sentenceOf(lang, "hub_identity_v02", nil)
-				t.Setenv("LC_ALL", "")
-				t.Setenv("LC_MESSAGES", "")
-				t.Setenv("LANG", map[string]string{"en": "C", "zh": "zh_CN.UTF-8"}[lang])
+				t.Setenv("ANET_LANG", map[string]string{"en": "C", "zh": "zh_CN.UTF-8"}[lang])
 				var out, errw bytes.Buffer
 				store, code := openStore(newConsole(&out, &errw), dir)
 				if store != nil {
@@ -660,7 +656,7 @@ func TestHubStartSaysRecoverySetupRequired(t *testing.T) {
 		lock.Release()
 		return logged.String()
 	}
-	t.Setenv("LANG", "C")
+	t.Setenv("ANET_LANG", "C")
 	if got := start(); !strings.Contains(got, render("hub_recovery_setup_required", langEN, nil)) {
 		t.Errorf("start before setup-recovery logged %q", got)
 	}

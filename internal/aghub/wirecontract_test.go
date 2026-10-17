@@ -492,7 +492,7 @@ func TestTheWire2RoutesAreServed(t *testing.T) {
 	}
 }
 
-// The facilitator contract (A2A-DESIGN §8.5, §17 契约 row).
+// The facilitator contract (A2A-DESIGN §8.5, §17 contract row).
 //
 // /x402/verify and /x402/settle take x402 v2's {x402Version,
 // paymentPayload, paymentRequirements}, and paymentRequirements is
@@ -550,8 +550,8 @@ func TestTheFacilitatorContractIsPinned(t *testing.T) {
 	}
 }
 
-// Review and stats field names, pinned (A2A-DESIGN §9 rows 评价 and
-// completed_task, §17 contract row "评价无内容字段"; hub-payment-privacy §2.5,
+// Review and stats field names, pinned (A2A-DESIGN §9 rows review and
+// completed_task, §17 contract row "review has no content field"; hub-payment-privacy §2.5,
 // SI-48 for evidence v2).
 //
 // The daemon in ANet declares the upload body and the review view in

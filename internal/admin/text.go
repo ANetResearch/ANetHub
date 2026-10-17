@@ -19,8 +19,8 @@ package admin
 // directory this release does not open with the sentence the hub itself
 // gives, word for word, and the lint test holds the two copies equal.
 //
-// The language follows core G13: LC_ALL, then LC_MESSAGES, then LANG, the
-// first one set; Chinese when it starts with "zh", English otherwise.
+// The language is English unless ANET_LANG begins with "zh" (case-insensitive);
+// LC_ALL, LC_MESSAGES and LANG are not consulted.
 
 import (
 	"fmt"
@@ -102,15 +102,12 @@ const (
 	langZH
 )
 
-// adminLanguage picks the language by core G13.
+// adminLanguage picks the language: Chinese only when ANET_LANG begins with "zh"
+// (case-insensitive), English otherwise. LC_ALL, LC_MESSAGES and LANG are
+// not consulted.
 func adminLanguage() textLang {
-	for _, k := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
-		if v := os.Getenv(k); v != "" {
-			if strings.HasPrefix(v, "zh") {
-				return langZH
-			}
-			return langEN
-		}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(os.Getenv("ANET_LANG"))), "zh") {
+		return langZH
 	}
 	return langEN
 }
@@ -160,7 +157,7 @@ func fill(t string, args map[string]string) string {
 	}
 }
 
-// Sentence is the sentence of key in the operator's language (core G13),
+// Sentence is the sentence of key in the operator's language,
 // with args put into its placeholders.
 func Sentence(key string, args map[string]string) string {
 	return render(key, adminLanguage(), args)

@@ -7,7 +7,7 @@ import (
 )
 
 // The hub kernel and the admin plane must not be able to decode task
-// content (A2A-DESIGN §9 row 静态护栏).
+// content (A2A-DESIGN §9 row static guard).
 //
 // ANetCore/delegation holds the DelegateReq, ChatMsg and ResultResp
 // codecs, and ANetCore/tsir the TaskDoc codec. Every place the hub ever
