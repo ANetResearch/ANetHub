@@ -1,0 +1,76 @@
+# Reason codes of the anet hub: the register of every code ever published.
+#
+# A reason code is a stable public interface. Nodes match on the code, never
+# on the sentence, so the meaning of a code never changes, a code is never
+# renamed, and a code that has been published is never used again for another
+# meaning. This file is edited by hand and deliberately; there is no
+# regeneration. internal/wire3/codes_registry_test.go holds it against the
+# reason table in reasons.go, and the documentation renders it as the Since
+# column of the hub reason table.
+#
+# One line per code, sorted by code, fields separated by a tab:
+#
+#     code   since   status   [retired   [replacement]]
+#
+#   code         a hub reason code of the table in reasons.go.
+#   since        the first hub version that emitted the code, in the form
+#                major.minor.patch.
+#   status       active: the table has an entry for the code.
+#                retired: the table has no entry for it any more. The line
+#                stays, so the name is never reused.
+#   retired      for a retired code, the version that removed the entry.
+#   replacement  for a retired code, optionally the code that took its place.
+#
+# A code that a node also emits under the same name and meaning is mirrored
+# on purpose; the exceptions are listed in the documentation tool
+# docs/_tools/check_code_collisions.py of the ANet repository.
+access_invalid	0.3.0	active
+admission_required	0.3.0	active
+aid_deactivated	0.3.0	active
+bad_ack_item	0.3.0	active
+bad_envelope	0.3.0	active
+bad_exp	0.3.0	active
+bad_request	0.3.0	active
+bad_status_query	0.3.0	active
+bucket_too_narrow	0.3.0	active
+expired	0.3.0	active
+gateway_removed	0.3.0	active
+home_unreachable	0.3.0	active
+identity_headers_not_allowed	0.3.0	active
+internal	0.3.0	active
+invite_removed	0.3.0	active
+kel_fork	0.3.0	active
+kel_invalid	0.3.0	active
+kel_rollback	0.3.0	active
+kel_ts_out_of_window	0.3.0	active
+key_retired	0.3.0	active
+keys_rollback	0.3.0	active
+kid_stale	0.3.0	active
+mailbox_full	0.3.0	active
+not_found	0.3.0	active
+not_peer	0.3.0	active
+pow_required	0.3.0	active
+probation	0.3.0	active
+proof_unavailable	0.3.0	active
+rate_limited	0.3.0	active
+receipt_not_reviewable	0.3.0	active
+recipient_unknown	0.3.0	active
+redelivery_limited	0.3.0	active
+registration_quota	0.3.0	active
+replayed	0.3.0	active
+requester_commit_mismatch	0.3.0	active
+review_exists	0.3.0	active
+review_window_closed	0.3.0	active
+revocation_list_full	0.3.0	active
+session_invalid	0.3.0	active
+source_rate	0.3.0	active
+strangers_busy	0.3.0	active
+too_large	0.3.0	active
+too_large_for_stranger	0.3.0	active
+ts_stale	0.3.0	active
+unauthorized	0.3.0	active
+unknown_aid	0.3.0	active
+unknown_destination	0.3.0	active
+wire_too_new	0.3.0	active
+wire_too_old	0.3.0	active
+witness_not_this_hub	0.3.0	active
