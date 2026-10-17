@@ -199,6 +199,14 @@ var hubText = []textRow{
 		Zh: "{path} 里没有 hub 数据，什么都没有改；请用 --data 指向 anet-hub 运行时用的目录后重试。",
 		En: "There is no hub data in {path}, so nothing was changed; point --data at the directory anet-hub runs with and try again."},
 
+	// anet-hub admission: no hub data yet, and what sets the mode before the first start.
+	{Key: "admission.no_data", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 里没有 hub 数据，什么都没有改；请用 --data 指向 anet-hub 运行时用的目录；若要在 hub 首次启动前设置准入方式，请加 --init。",
+		En: "There is no hub data in {path}, so nothing was changed; point --data at the directory anet-hub runs with, or add --init to set the admission mode before the hub's first start."},
+	{Key: "admission.init_not_empty", Class: classC, Exit: 1, NextKind: nextChangeInput,
+		Zh: "{path} 不存在或不是空目录，什么都没有改；--init 只在已存在的空数据目录里创建 hub 数据，请用 --data 指向这样的目录后重试。",
+		En: "{path} does not exist or is not empty, so nothing was changed; --init creates hub data only in an existing, empty data directory, so point --data at one and try again."},
+
 	// The hub and every subcommand: a data directory this release does not
 	// open (core CORE-V4). Data of 0.2 is moved away; data a newer anet-hub
 	// wrote is valid, so the next step is to upgrade and nothing is deleted.
