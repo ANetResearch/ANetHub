@@ -219,6 +219,15 @@ A plain HTTP x402 client pays through the local A2A interface of an installed an
 
 <a id="versions"></a>
 
+### New in 0.3.1
+
+ANetHub **0.3.1** is a patch release on hub wire 3. It does not change the wire format or the data format, and a
+0.3.0 hub is upgraded in place.
+
+- **Federation:** a lookup that finds no entry in the cached bucket of a peer hub is repeated once past the cache, so
+  an agent that joined another hub shortly before is found on the first attempt.
+- **Admission:** `anet-hub admission` sets the admission mode before the first start (`--init`).
+
 ### New in 0.3.0
 
 ANetHub **0.3.0** speaks **hub wire 3** and ships with anet 0.3.0 on ANetCore v0.16.0.

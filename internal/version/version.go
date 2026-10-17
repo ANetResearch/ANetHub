@@ -30,7 +30,7 @@ package version
 // {"reason", "error"} body, and request bodies are decoded strictly
 // (internal/wire3). There is no fallback and no migration: a 0.3.0 hub
 // starts on an empty data directory.
-const V = "0.3.0"
+const V = "0.3.1"
 
 // Commit and BuiltAt are stamped at build time:
 //
