@@ -579,3 +579,52 @@ func TestFedCachesAreBounded(t *testing.T) {
 		t.Fatalf("a replaced answer: %d bytes counted, want %d", f.bucketBytes, third+10)
 	}
 }
+
+// TestAFreshlyJoinedAgentIsFoundPastAnEmptyCachedBucket (XHUB): a peer hub's
+// bucket kept from before an agent registered there must not hide it. The
+// lookup that finds nothing in the kept answer asks the peer again, and a
+// directory query that carries Cache-Control: no-cache is answered past the
+// kept answer too.
+func TestAFreshlyJoinedAgentIsFoundPastAnEmptyCachedBucket(t *testing.T) {
+	old := BucketFreshMinAge
+	BucketFreshMinAge = 0
+	defer func() { BucketFreshMinAge = old }()
+	net := newFedNet(t, 2)
+	a, b := net.nodes[0], net.nodes[1]
+	ctx := context.Background()
+	joined := b.agent()
+	// Empty out B's directory view for the bucket: delete the entry, let A
+	// cache the bucket without it, then register it again.
+	kel, _ := b.store.AgentKEL(joined.aid)
+	keyset, _, _, _ := b.store.LocalKeys(joined.aid)
+	if _, err := b.store.db.Exec(`DELETE FROM agent WHERE aid=?`, joined.aid); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.srv.lookupEntryOnce(ctx, joined.aid, []string{b.hubAID}, false, 0); ok {
+		t.Fatal("found an agent that is not registered")
+	}
+	if err := b.store.PutAgent(joined.aid, "joined", nil, kel); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.store.PublishKeys(joined.aid, keyset, 0, joined.c.KEL(), b.clock()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.srv.lookupEntryOnce(ctx, joined.aid, []string{b.hubAID}, false, 0); ok {
+		t.Fatal("the kept empty bucket was not used; the test does not exercise the cache")
+	}
+	if e, ok := a.srv.lookupEntry(ctx, joined.aid, []string{b.hubAID}, false); !ok || e.home != b.hubAID {
+		t.Fatal("an agent that joined its hub after the bucket was kept was not found")
+	}
+}
+
+func TestWantsFresh(t *testing.T) {
+	for v, want := range map[string]bool{"": false, "no-cache": true, "No-Cache": true, "max-age=0, no-cache": true, "no-store": false} {
+		r := httptest.NewRequest(http.MethodPost, "http://hub.test/directory:bucket", nil)
+		if v != "" {
+			r.Header.Set("Cache-Control", v)
+		}
+		if got := wantsFresh(r); got != want {
+			t.Errorf("Cache-Control %q: %v, want %v", v, got, want)
+		}
+	}
+}

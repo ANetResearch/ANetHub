@@ -377,6 +377,12 @@ func (f *fedState) setBits(peer string, bits int) {
 // peer did not answer (a timeout, a refusal, a failure, an answer too
 // large) and nothing is cached.
 func (s *Server) peerBucket(ctx context.Context, peer string, prefix []byte, bits int, fresh bool) ([]peerEntry, bool) {
+	return s.peerBucketAge(ctx, peer, prefix, bits, fresh, 0)
+}
+
+// peerBucketAge is peerBucket where a fresh query is still answered from an
+// answer younger than minAge.
+func (s *Server) peerBucketAge(ctx context.Context, peer string, prefix []byte, bits int, fresh bool, minAge time.Duration) ([]peerEntry, bool) {
 	asked := bits
 	if pb := s.fedState.bitsOf(peer); pb >= 0 && pb < asked {
 		asked = pb
@@ -385,11 +391,9 @@ func (s *Server) peerBucket(ctx context.Context, peer string, prefix []byte, bit
 	for attempt := 0; ; attempt++ {
 		p := truncatePrefix(prefix, asked)
 		key := bucketKey{peer: peer, prefix: string(p), bits: asked}
-		if !fresh {
-			if c, ok := s.fedState.bucket(key, s.store.now()); ok {
-				a = c
-				break
-			}
+		if c, ok := s.fedState.bucket(key, s.store.now()); ok && (!fresh || s.store.now().Sub(c.at) < minAge) {
+			a = c
+			break
 		}
 		got, narrower, err := s.askPeerBucket(ctx, peer, p, asked)
 		if narrower >= 0 && narrower < asked && attempt == 0 {
@@ -564,7 +568,19 @@ type resolvedEntry struct {
 // the newer key set, then by the order of the peer table. fresh asks the
 // peers again instead of using what they answered in the last
 // BucketCacheTTL.
+//
+// An answer from the cache that holds no entry for aid is not trusted: the
+// agent may have joined its hub since, so the peers are asked once more,
+// bypassing the cache (bounded per bucket by BucketFreshMinAge).
 func (s *Server) lookupEntry(ctx context.Context, aid string, peers []string, fresh bool) (*resolvedEntry, bool) {
+	e, ok := s.lookupEntryOnce(ctx, aid, peers, fresh, 0)
+	if !ok && !fresh {
+		e, ok = s.lookupEntryOnce(ctx, aid, peers, true, BucketFreshMinAge)
+	}
+	return e, ok
+}
+
+func (s *Server) lookupEntryOnce(ctx context.Context, aid string, peers []string, fresh bool, minAge time.Duration) (*resolvedEntry, bool) {
 	h, err := dirbox.Hash(aid)
 	if err != nil || len(peers) == 0 {
 		return nil, false
@@ -585,7 +601,7 @@ func (s *Server) lookupEntry(ctx context.Context, aid string, peers []string, fr
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			es, _ := s.peerBucket(ctx, peer, prefix, FedLookupMaxBits, fresh)
+			es, _ := s.peerBucketAge(ctx, peer, prefix, FedLookupMaxBits, fresh, minAge)
 			results[i] = found{peer, es}
 		}()
 	}
@@ -802,7 +818,7 @@ func (s *Server) resolveOwner(ctx context.Context, owner, hint string, capEpoch 
 // nothing it answered is cached. next is the hash the next page starts
 // after, nil at the end. Entries of one hash (an agent the directory of two
 // hubs holds) are never split across pages.
-func (s *Server) mergedBucket(ctx context.Context, prefix []byte, bits int, after []byte) (entries []DirBucketEntry, next []byte, partial bool, err error) {
+func (s *Server) mergedBucket(ctx context.Context, prefix []byte, bits int, after []byte, fresh bool) (entries []DirBucketEntry, next []byte, partial bool, err error) {
 	local, localNext, err := s.store.DirBucket(prefix, bits, after)
 	if err != nil {
 		return nil, nil, false, err
@@ -820,7 +836,7 @@ func (s *Server) mergedBucket(ctx context.Context, prefix []byte, bits int, afte
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			es, ok := s.peerBucket(ctx, peer, prefix, bits, false)
+			es, ok := s.peerBucketAge(ctx, peer, prefix, bits, fresh, BucketFreshMinAge)
 			got[i], failed[i] = es, !ok
 		}()
 	}
@@ -871,3 +887,9 @@ func (s *Server) mergedBucket(ctx context.Context, prefix []byte, bits int, afte
 	}
 	return entries, localNext, partial, nil
 }
+
+// BucketFreshMinAge is the youngest a peer's cached answer may be for a
+// query that asks to bypass the cache (Cache-Control: no-cache) to be
+// answered from it: a bypass asks the peer again at most this often per
+// bucket.
+var BucketFreshMinAge = 5 * time.Second
