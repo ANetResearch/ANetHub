@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -401,6 +402,20 @@ func hasIdentityHeaders(r *http.Request) bool {
 	return false
 }
 
+// wantsFresh reports whether the querier asked for an answer that does not
+// come from a cache (Cache-Control: no-cache). A hub that does not know the
+// header answers as before, so the request stays valid at every wire 3 hub.
+func wantsFresh(r *http.Request) bool {
+	for _, v := range r.Header.Values("Cache-Control") {
+		for _, d := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(d), "no-cache") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // hDirectoryBucket serves POST /directory:bucket (core §2.12.2; sealed-
 // sender §2.9, §4.2.8), in this order:
 //
@@ -436,7 +451,7 @@ func (s *Server) hDirectoryBucket(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	entries, next, partial, err := s.mergedBucket(r.Context(), q.prefix, q.bits, q.after)
+	entries, next, partial, err := s.mergedBucket(r.Context(), q.prefix, q.bits, q.after, q.after == nil && wantsFresh(r))
 	if err != nil {
 		wire3.Internal(w, err)
 		return
