@@ -16,8 +16,8 @@ package main
 //   - class T, a terminal prompt: written to the terminal the passphrase is
 //     typed in, never to stdout (anet-hub identity, identity_ops.go).
 //
-// The language follows core G13: LC_ALL, then LC_MESSAGES, then LANG, the
-// first one set; Chinese when it starts with "zh", English otherwise.
+// The language is English unless ANET_LANG begins with "zh" (case-insensitive);
+// LC_ALL, LC_MESSAGES and LANG are not consulted.
 
 import (
 	"fmt"
@@ -298,15 +298,12 @@ const (
 	langZH
 )
 
-// hubLanguage picks the language by core G13.
+// hubLanguage picks the language: Chinese only when ANET_LANG begins with "zh"
+// (case-insensitive), English otherwise. LC_ALL, LC_MESSAGES and LANG are
+// not consulted.
 func hubLanguage() textLang {
-	for _, k := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
-		if v := os.Getenv(k); v != "" {
-			if strings.HasPrefix(v, "zh") {
-				return langZH
-			}
-			return langEN
-		}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(os.Getenv("ANET_LANG"))), "zh") {
+		return langZH
 	}
 	return langEN
 }

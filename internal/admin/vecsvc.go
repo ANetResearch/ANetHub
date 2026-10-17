@@ -11,9 +11,11 @@ import (
 	"time"
 )
 
-// vecsvc —— 语义向量服务客户端（anet-vec：fastembed 多语小模型 + ChromaDB，跑在 host-e 本地 docker
-// 127.0.0.1:8600）。它把「任务→能力发现」从词法匹配升级为语义检索（愿景 leap 2）。服务不可用时
-// 调用方回退到 capsules.go 的词法匹配，功能不中断。
+// VecClient is the client of the semantic vector service (anet-vec: a small
+// multilingual fastembed model with ChromaDB, in a local docker container at
+// 127.0.0.1:8600). It upgrades task-to-capability discovery from lexical
+// matching to semantic retrieval. When the service is unavailable the caller
+// falls back to the lexical matching in capsules.go and nothing stops working.
 type VecClient struct {
 	base string
 	hc   *http.Client

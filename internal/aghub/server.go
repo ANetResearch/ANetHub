@@ -394,7 +394,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /relay/status", s.hRelayStatus)
 	// A mailbox owner revokes delivery credentials it issued (revoke.go).
 	mux.HandleFunc("POST /mailbox/revoke", s.hMailboxRevoke)
-	// There is no guest mode (A2A-DESIGN §9 row 访客模式). The hub used to
+	// There is no guest mode (A2A-DESIGN §9 row guest mode). The hub used to
 	// relay a browser visitor's messages under a hub-held identity, which
 	// made it a plaintext endpoint of the conversation; /guest/* is not
 	// routed and answers 404.

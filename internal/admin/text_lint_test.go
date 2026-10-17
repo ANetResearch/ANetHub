@@ -295,24 +295,31 @@ func TestAdminTextPlaceholders(t *testing.T) {
 	}
 }
 
-// core G13: LC_ALL, then LC_MESSAGES, then LANG; zh… is Chinese.
+// The language is English unless ANET_LANG begins with "zh"; the locale
+// variables are not consulted.
 func TestAdminLanguage(t *testing.T) {
 	for _, c := range []struct {
-		all, msgs, lang string
-		want            textLang
+		anet, all, msgs, lang string
+		want                  textLang
 	}{
-		{"", "", "", langEN},
-		{"", "", "zh_CN.UTF-8", langZH},
-		{"C", "", "zh_CN.UTF-8", langEN},
-		{"zh_TW.UTF-8", "", "C", langZH},
-		{"", "zh_CN.UTF-8", "en_US.UTF-8", langZH},
-		{"", "en_US.UTF-8", "zh_CN.UTF-8", langEN},
+		{"", "", "", "", langEN},
+		{"", "", "", "zh_CN.UTF-8", langEN},
+		{"", "zh_CN.UTF-8", "", "", langEN},
+		{"", "", "zh_CN.UTF-8", "", langEN},
+		{"zh", "", "", "", langZH},
+		{"zh-CN", "", "", "", langZH},
+		{"zh_CN.UTF-8", "", "", "", langZH},
+		{"ZH", "", "", "", langZH},
+		{"en", "zh_CN.UTF-8", "zh_CN.UTF-8", "zh_CN.UTF-8", langEN},
+		{"C", "", "", "zh_CN.UTF-8", langEN},
+		{"en_ZH", "", "", "", langEN},
 	} {
+		t.Setenv("ANET_LANG", c.anet)
 		t.Setenv("LC_ALL", c.all)
 		t.Setenv("LC_MESSAGES", c.msgs)
 		t.Setenv("LANG", c.lang)
 		if got := adminLanguage(); got != c.want {
-			t.Errorf("LC_ALL=%q LC_MESSAGES=%q LANG=%q: %v, want %v", c.all, c.msgs, c.lang, got, c.want)
+			t.Errorf("ANET_LANG=%q LC_ALL=%q LC_MESSAGES=%q LANG=%q: %v, want %v", c.anet, c.all, c.msgs, c.lang, got, c.want)
 		}
 	}
 }

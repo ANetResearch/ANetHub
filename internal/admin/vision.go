@@ -2,20 +2,24 @@ package admin
 
 import "context"
 
-// vision —— 把平台实况映射到《智能体互联网建设标志性产出》的六大能力跃升，让愿景可度量。
-// 每个跃升给：它是什么、ANetHub 用什么组件承载、当前实况指标。这既是对外叙事，也是运营自检。
+// vision maps the live state of the platform onto the six capability leaps of
+// the agent-internet roadmap, so that the roadmap can be measured. Each leap
+// gives what it is, which ANetHub component carries it and its current
+// metrics. It serves both as external narrative and as an operator self-check.
+// The text is English; the JSON field names and the metric keys (snake_case)
+// are stable.
 
-// VisionLeap 是一个能力跃升条目。
+// VisionLeap is one capability leap.
 type VisionLeap struct {
 	Key       string         `json:"key"`
-	Title     string         `json:"title"`     // 愿景标志性产出
-	Leap      string         `json:"leap"`      // 能力跃升一句话
-	Component string         `json:"component"` // ANetHub 承载组件
-	Metrics   map[string]any `json:"metrics"`   // 当前实况
+	Title     string         `json:"title"`     // the roadmap deliverable
+	Leap      string         `json:"leap"`      // the leap in one sentence
+	Component string         `json:"component"` // the ANetHub component that carries it
+	Metrics   map[string]any `json:"metrics"`   // current metrics
 	Status    string         `json:"status"`    // live | partial | planned
 }
 
-// VisionMap 是完整六跃升 + 总览。
+// VisionMap is the six leaps and an overview.
 type VisionMap struct {
 	Headline string       `json:"headline"`
 	Leaps    []VisionLeap `json:"leaps"`
@@ -46,42 +50,42 @@ func (s *Server) buildVisionMap(ctx context.Context) VisionMap {
 	}
 
 	return VisionMap{
-		Headline: "互联网传输信息，物联网连接设备，智能体互联网传输能力并组织行动 —— ANetHub 是这张主干网的可运营底座。",
+		Headline: "The internet carries information, the Internet of Things connects devices, and the agent internet carries capability and organises action; ANetHub is the operable foundation of that backbone.",
 		Leaps: []VisionLeap{
 			{
-				Key: "backbone", Title: "一张智能体互联主干网", Component: "Hub relay + delegation（任务传递/交付核验）",
-				Leap:    "从连接信息和设备，跃升为连接能力、生成组织",
-				Metrics: map[string]any{"注册智能体": totals.Agents, "已公开回执": totals.TasksCompleted, "可信评价": totals.Reviews, "在途积压": totals.RelayBacklog},
+				Key: "backbone", Title: "One agent-internet backbone", Component: "Hub relay and delegation (task passing and delivery verification)",
+				Leap:    "From connecting information and devices to connecting capability and forming organisations",
+				Metrics: map[string]any{"registered_agents": totals.Agents, "published_receipts": totals.TasksCompleted, "verified_reviews": totals.Reviews, "relay_backlog": totals.RelayBacklog},
 				Status:  "live",
 			},
 			{
-				Key: "discovery", Title: "智能体身份与能力发现网络", Component: "KEL 自证身份 + 能力包仓库 + 任务→能力发现",
-				Leap:    "从人找工具、人工编排，跃升为任务自动找到并生成执行组织",
-				Metrics: map[string]any{"能力包总数": len(caps), "官方登记能力": official, "社区能力": community, "上架提供方": totals.Listed},
+				Key: "discovery", Title: "Agent identity and capability discovery network", Component: "Self-certifying KEL identity, capability package registry and task-to-capability discovery",
+				Leap:    "From people finding tools and orchestrating by hand to tasks finding capability and forming an executing organisation automatically",
+				Metrics: map[string]any{"capability_packages": len(caps), "official_capabilities": official, "community_capabilities": community, "listed_providers": totals.Listed},
 				Status:  "partial",
 			},
 			{
-				Key: "access", Title: "数字与物理资源接入底座", Component: "ANetOS AI Studio（数字资源统一接入网关，Gravitex+百炼全量）",
-				Leap:    "从逐个系统定制集成，跃升为全网统一调用数字与物理资源",
-				Metrics: map[string]any{"官方接入网关": len(officials), "AI Studio 模型": 108, "通用能力": 9, "具身接入": "ANetScreen/ANetOS（路线图）"},
+				Key: "access", Title: "Access layer for digital and physical resources", Component: "ANetOS AI Studio (unified access gateway for digital resources)",
+				Leap:    "From custom integration of each system to one network-wide call surface for digital and physical resources",
+				Metrics: map[string]any{"official_gateways": len(officials), "ai_studio_models": 108, "general_capabilities": 9, "embodied_access": "ANetScreen/ANetOS (roadmap)"},
 				Status:  "partial",
 			},
 			{
-				Key: "regulation", Title: "可信执行与安全监管体系", Component: "Admin 监管面（注册表监管/上下线/审计）",
-				Leap:    "从管单体输出，跃升为管组织行动：可授权、可阻断、可审计、可追责",
-				Metrics: map[string]any{"登记官方 agent": len(officials), "审计留痕": "全量 mutating 操作", "熔断": "注册表下架 + 恢复", "内容": "hub 与 admin 不持有任务内容"},
+				Key: "regulation", Title: "Trusted execution and security oversight", Component: "Admin oversight plane (registry oversight, listing and delisting, audit)",
+				Leap:    "From governing single outputs to governing organised action: authorisable, interruptible, auditable and accountable",
+				Metrics: map[string]any{"registered_official_agents": len(officials), "audit_trail": "every mutating operation", "circuit_breaker": "registry delisting and restoration", "task_content": "neither the hub nor admin holds task content"},
 				Status:  "live",
 			},
 			{
-				Key: "evolution", Title: "全球能力仓库与进化网络", Component: "能力包目录（采收已删除：hub 不持有任务内容）",
-				Leap:    "从一地一项目重复建设，跃升为一次验证、全网复用、持续进化",
-				Metrics: map[string]any{"历史会话（待清理）": sessions, "历史交互记录（待清理）": records, "采收源": 0, "历史采收游标": len(states)},
+				Key: "evolution", Title: "Global capability repository and evolution network", Component: "Capability package catalogue (harvesting is removed: the hub holds no task content)",
+				Leap:    "From rebuilding the same thing per site and project to verifying once, reusing everywhere and evolving continuously",
+				Metrics: map[string]any{"legacy_sessions_pending_cleanup": sessions, "legacy_records_pending_cleanup": records, "harvest_sources": 0, "legacy_harvest_cursors": len(states)},
 				Status:  "planned",
 			},
 			{
-				Key: "demonstration", Title: "重大示范工程", Component: "跨产品线 agent 组织（ANetScreen/ANetOS/ANetPIN/ANetCraft）",
-				Leap:    "从封闭系统单场景自动化，跃升为跨行业、跨区域、跨主体的社会级组织智能",
-				Metrics: map[string]any{"产品线": "ANetOS 智能相框 · ANetCraft 竞技场（在运行）", "代表工程": "全球具身智能能力共享与迁移网络（愿景）"},
+				Key: "demonstration", Title: "Flagship demonstration projects", Component: "Agent organisations across product lines (ANetScreen, ANetOS, ANetPIN, ANetCraft)",
+				Leap:    "From single-scenario automation in closed systems to society-scale organisational intelligence across industries, regions and parties",
+				Metrics: map[string]any{"product_lines": "ANetOS smart frame; ANetCraft arena (running)", "flagship_project": "Global embodied-intelligence capability sharing and transfer network (vision)"},
 				Status:  "planned",
 			},
 		},

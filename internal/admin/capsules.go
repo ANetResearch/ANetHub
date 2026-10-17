@@ -6,28 +6,30 @@ import (
 	"strings"
 )
 
-// --- capability packages (能力包) ---
+// --- capability packages ---
 //
-// 愿景「全球能力仓库」的第一步：把每个官方 agent 的服务目录抽象为可发现、可调用、带来源与
-// 认证档位的「能力包」。community agent 的 caps 也纳入（作为未认证能力）。这给能力发现与经验
-// 沉淀一个统一对象模型。
+// The first step of the global capability repository: the service catalogue
+// of each official agent is abstracted into a capability package that can be
+// discovered and called and that carries its source and certification tier.
+// The caps of community agents are included too, as uncertified capabilities.
+// This gives capability discovery and accumulated experience one object model.
 
-// Capsule 是一个能力包（capability package）。
+// Capsule is one capability package.
 type Capsule struct {
-	Key         string   `json:"key"` // 稳定标识：<provider_id>/<service_id> 或 cap 名
+	Key         string   `json:"key"` // stable identifier: <provider_id>/<service_id> or the cap name
 	Name        string   `json:"name"`
-	ProviderID  string   `json:"provider_id"` // 官方 agent id（community 为空）
+	ProviderID  string   `json:"provider_id"` // official agent id (empty for community)
 	ProviderAID string   `json:"provider_aid"`
 	Tier        string   `json:"tier"`     // official | community
-	Line        string   `json:"line"`     // 产品线
+	Line        string   `json:"line"`     // product line
 	Modality    string   `json:"modality"` // text|image|video|audio|mixed
 	Inputs      []string `json:"inputs,omitempty"`
 	Outputs     []string `json:"outputs,omitempty"`
 	Models      []string `json:"models,omitempty"`
 	Desc        string   `json:"desc,omitempty"`
-	Cert        string   `json:"cert"`            // 认证档位：listed(官方 manifest 登记) | community；certified(官方实测)已不再产生
-	Calls       int      `json:"calls"`           // 近窗调用次数；来源(官方 agent monitor)已删除，恒为 0
-	Score       float64  `json:"score,omitempty"` // 语义检索相似度（discover 时填充）
+	Cert        string   `json:"cert"`            // certification tier: listed (in the official manifest) | community; certified (tested by the operator) is no longer produced
+	Calls       int      `json:"calls"`           // calls in the recent window; the source (the official agent monitor) is removed, so always 0
+	Score       float64  `json:"score,omitempty"` // semantic similarity (filled by discover)
 }
 
 // buildCapsules assembles the capability-package catalog from the registry: official agents
@@ -35,7 +37,7 @@ type Capsule struct {
 // capability they registered.
 //
 // The official branch used to read each agent's service catalog and call counts through the
-// agent's monitor. That channel is removed (A2A-DESIGN §9 row admin 官方 agent): the admin plane
+// agent's monitor. That channel is removed (A2A-DESIGN §9 row admin official agent): the admin plane
 // registers official agents by id, AID, hub and capabilities only, and reaches no host. An
 // official capsule is therefore "listed" (declared in the manifest), not "certified" (measured),
 // and carries no call count.
@@ -85,7 +87,7 @@ func modalityOfCap(cap string) string {
 }
 
 // discoverCapsules ranks capsules against a free-text task (lexical match with CJK-aware tokenization —
-// the vision's "任务自动找到能做的能力" first cut; a semantic embedder is the upgrade path). Chinese has
+// the first cut of tasks finding the capability that can do them; a semantic embedder is the upgrade path). Chinese has
 // no word spaces, so we also index/query character bigrams, and map a few intent keywords to modalities.
 func discoverCapsules(caps []Capsule, task string, limit int) []Capsule {
 	if limit <= 0 {

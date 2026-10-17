@@ -113,7 +113,7 @@ func (s *Server) Handler() http.Handler {
 	api("POST "+b+"/api/agents/{aid}/moderate", s.hModerate)
 	api("DELETE "+b+"/api/agents/{aid}", s.hDeleteAgent)
 	// Official agents are registered here and nothing more: id, aid, hub,
-	// caps (A2A-DESIGN §9 row admin 官方 agent). The routes that ran ops
+	// caps (A2A-DESIGN §9 row admin official agent). The routes that ran ops
 	// commands over ssh (/ops), proxied the agent's monitor (/monitor/*,
 	// /insights) and changed its ACL (/acl) are removed; a request to one
 	// of them answers 404 from the mux.
@@ -191,7 +191,7 @@ func limiterKey(ip net.IP) string {
 const (
 	authWindow      = time.Minute
 	authMaxFailures = 20
-	throttleMsg     = "尝试过于频繁，请稍后再试"
+	throttleMsg     = "too many attempts; try again later"
 )
 
 // authLimiter counts FAILED credential checks per source IP in a rolling window.
@@ -406,7 +406,7 @@ func (s *Server) hLogin(w http.ResponseWriter, r *http.Request) {
 	if subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.token)) != 1 {
 		s.authFails.record(ip)
 		s.noteAuthDenial(r, ip, "auth.failed")
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "token 不正确"})
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "the token is not correct"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -595,7 +595,7 @@ func (s *Server) hDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	// scripted loop (like the 2026-07-20 incident) from wiping the registry.
 	if !s.delLimiter.allow() {
 		s.store.Audit("admin", "agent.delete.throttled", aid, "destructive-op rate limit hit")
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "删除请求过于频繁，已被限流。稍后重试。"})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many delete requests; the request was rate-limited, try again later"})
 		return
 	}
 	del, err := s.hub.DeleteAgent(aid)

@@ -52,9 +52,7 @@ func cli(t *testing.T, lang string, args ...string) cliResult {
 	if lang == "zh" {
 		l = "zh_CN.UTF-8"
 	}
-	t.Setenv("LC_ALL", "")
-	t.Setenv("LC_MESSAGES", "")
-	t.Setenv("LANG", l)
+	t.Setenv("ANET_LANG", l)
 	fs := flag.NewFlagSet("anet-hub", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	f := defineFlags(fs)

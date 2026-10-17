@@ -18,7 +18,7 @@ import (
 // monitor (a URL and the agent's console token) and ops (lifecycle commands to run over ssh), and
 // datasets (whether to harvest the agent's job history, prompts included). With those the admin
 // plane on the hub host could read an official agent's task content and operate it as root. They
-// are removed (A2A-DESIGN §9 row admin 官方 agent, §15, [C39]); operating an official agent is done
+// are removed (A2A-DESIGN §9 row admin official agent, §15, [C39]); operating an official agent is done
 // with a separate tool that does not run on the hub host.
 //
 // ParseManifest refuses a document that still carries any of the four removed keys, so that an

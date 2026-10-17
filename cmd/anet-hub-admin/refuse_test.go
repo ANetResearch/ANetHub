@@ -34,7 +34,7 @@ func runAdminLang(t *testing.T, lang string, args ...string) (int, string, strin
 		l = "zh_CN.UTF-8"
 	}
 	cmd := exec.Command(os.Args[0], args...)
-	cmd.Env = append(os.Environ(), runMainEnv+"=1", "ADMIN_TOKEN="+realToken, "LC_ALL=", "LC_MESSAGES=", "LANG="+l)
+	cmd.Env = append(os.Environ(), runMainEnv+"=1", "ADMIN_TOKEN="+realToken, "LC_ALL=", "LC_MESSAGES=", "LANG=", "ANET_LANG="+l)
 	var out, errw strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &errw
 	err := cmd.Run()
@@ -54,9 +54,7 @@ func sentenceIn(t *testing.T, lang, key string) string {
 	if lang == "zh" {
 		l = "zh_CN.UTF-8"
 	}
-	t.Setenv("LC_ALL", "")
-	t.Setenv("LC_MESSAGES", "")
-	t.Setenv("LANG", l)
+	t.Setenv("ANET_LANG", l)
 	return admin.Sentence(key, nil) + "\n"
 }
 

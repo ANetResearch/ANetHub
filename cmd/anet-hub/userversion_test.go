@@ -71,9 +71,7 @@ func refusedEverywhere(t *testing.T, dir, key string) {
 		if lang == "zh" {
 			l = "zh_CN.UTF-8"
 		}
-		t.Setenv("LC_ALL", "")
-		t.Setenv("LC_MESSAGES", "")
-		t.Setenv("LANG", l)
+		t.Setenv("ANET_LANG", l)
 		var out, errw bytes.Buffer
 		store, code := openStore(newConsole(&out, &errw), dir)
 		if store != nil {
