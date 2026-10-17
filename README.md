@@ -219,6 +219,18 @@ A plain HTTP x402 client pays through the local A2A interface of an installed an
 
 <a id="versions"></a>
 
+### New in 0.3.3
+
+ANetHub **0.3.3** is a patch release on hub wire 3 and ships with anet 0.3.3 on ANetCore v0.16.1. It does not change
+the wire format or the data format, and a 0.3.1 hub is upgraded in place. The number 0.3.2 is skipped, so that the
+versions of anet and ANetHub are equal again.
+
+- **Language:** English is the default. Chinese is selected only by `ANET_LANG` (a value beginning with `zh`);
+  `LC_ALL`, `LC_MESSAGES` and `LANG` are no longer consulted. The administration interface answers in English.
+- **Reason codes:** every published hub reason code is registered in `internal/wire3/codes.txt` with the version that
+  first emitted it, and a test holds the register against the reason table. A code never changes its meaning and is
+  never renamed or reused.
+
 ### New in 0.3.1
 
 ANetHub **0.3.1** is a patch release on hub wire 3. It does not change the wire format or the data format, and a
