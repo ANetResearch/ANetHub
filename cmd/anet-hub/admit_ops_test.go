@@ -263,6 +263,34 @@ func TestAdmissionMode(t *testing.T) {
 	}
 }
 
+// admission open --init sets the mode before the hub's first start, and only
+// in an existing, empty directory.
+func TestAdmissionInitBeforeTheFirstStart(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	expectErr(t, cli(t, "en", "-data", missing, "admission", "open", "--init"), 1,
+		sentenceOf("en", "admission.init_not_empty", map[string]string{"path": missing}))
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("--init created %s", missing)
+	}
+	busy := t.TempDir()
+	if err := os.WriteFile(filepath.Join(busy, "other"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectErr(t, cli(t, "en", "-data", busy, "admission", "open", "--init"), 1,
+		sentenceOf("en", "admission.init_not_empty", map[string]string{"path": busy}))
+	if _, err := os.Stat(filepath.Join(busy, "hub.db")); !os.IsNotExist(err) {
+		t.Error("--init wrote hub data beside another file")
+	}
+	if r := cli(t, "en", "-data", busy, "admission", "--init"); r.code != 2 {
+		t.Errorf("--init without a mode: %+v", r)
+	}
+	empty := t.TempDir()
+	expectOut(t, cli(t, "en", "-data", empty, "admission", "open", "--init"), sentenceOf("en", "admission.open", nil))
+	expectOut(t, cli(t, "en", "-data", empty, "admission"), sentenceOf("en", "admission.open", nil))
+	// Once the data exists --init changes nothing about how it is opened.
+	expectOut(t, cli(t, "en", "-data", empty, "admission", "closed", "--init"), sentenceOf("en", "admission.closed", nil))
+}
+
 func TestGrantTheSubcommand(t *testing.T) {
 	dir := hubDir(t)
 	c, aid := newAID(t)
@@ -286,10 +314,13 @@ func TestGrantTheSubcommand(t *testing.T) {
 func TestASubcommandNeedsTheHubsData(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "elsewhere")
 	_, aid := newAID(t)
-	for _, args := range [][]string{{"admit", aid}, {"admissions"}, {"admission", "open"}, {"grant", aid, "--amount", "1"}} {
+	for _, args := range [][]string{{"admit", aid}, {"admissions"}, {"grant", aid, "--amount", "1"}} {
 		expectErr(t, cli(t, "en", append([]string{"-data", dir}, args...)...), 1,
 			sentenceOf("en", "data.missing", map[string]string{"path": dir}))
 	}
+	// admission names --init, the way to set the mode before the first start.
+	expectErr(t, cli(t, "en", "-data", dir, "admission", "open"), 1,
+		sentenceOf("en", "admission.no_data", map[string]string{"path": dir}))
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("the subcommands created %s", dir)
 	}

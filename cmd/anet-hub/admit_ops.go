@@ -349,18 +349,34 @@ func admissionsRevoke(c *console, dir, aid string) int {
 // ---- admission ----
 
 func runAdmission(c *console, data string, args []string) int {
-	const use = "anet-hub admission [open|closed]"
+	const use = "anet-hub admission [open|closed] [--init]"
 	fs, dataDir := newSubFlags("admission", data)
+	initData := fs.Bool("init", false, "create the hub data in an existing, empty data directory first, so the mode is set before the hub's first start")
 	pos, err := parseArgs(fs, args)
-	if err != nil || len(pos) > 1 {
+	if err != nil || len(pos) > 1 || (*initData && len(pos) != 1) {
 		return c.usage(use)
 	}
 	if len(pos) == 1 && pos[0] != aghub.AdmissionOpen && pos[0] != aghub.AdmissionClosed {
 		return c.usage(use)
 	}
-	store, code := openHub(c, *dataDir)
-	if store == nil {
-		return code
+	var store *aghub.Store
+	if _, err := os.Stat(filepath.Join(*dataDir, "hub.db")); err != nil && *initData {
+		// Only a directory that exists and holds nothing: --init must not
+		// start a second hub beside a mistyped path or another one's files.
+		if ents, rerr := os.ReadDir(*dataDir); rerr != nil || len(ents) != 0 {
+			return c.say("admission.init_not_empty", map[string]string{"path": *dataDir})
+		}
+		if store, err = aghub.Open(*dataDir); err != nil {
+			return c.refuseData(err)
+		}
+	} else {
+		if err != nil {
+			return c.say("admission.no_data", map[string]string{"path": *dataDir})
+		}
+		var code int
+		if store, code = openHub(c, *dataDir); store == nil {
+			return code
+		}
 	}
 	defer store.Close()
 	if len(pos) == 1 {
