@@ -1,5 +1,5 @@
 [Unit]
-Description=AgentNetwork Hub (anet-hub 0.2.0, hub wire 2)
+Description=AgentNetwork Hub (anet-hub, hub wire 3)
 Documentation=https://agentnetwork.org.cn
 # Production (host-e, hub.agentnetwork.org.cn). Another host changes only --public-url.
 After=network-online.target

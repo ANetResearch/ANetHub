@@ -1,5 +1,5 @@
 [Unit]
-Description=AgentNetwork Hub operator plane (anet-hub-admin 0.2.0)
+Description=AgentNetwork Hub operator plane (anet-hub-admin)
 After=network-online.target anet-hub.service
 Wants=network-online.target
 
